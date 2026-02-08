@@ -40,33 +40,33 @@ export function MasterSchedulePage() {
       <div className="mx-auto max-w-6xl px-6 py-6">
         <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
-            <h1 className="font-heading text-2xl font-semibold text-slate-50">
+            <h1 className="font-heading text-2xl font-semibold text-slate-900">
               Master recording schedule
             </h1>
-            <p className="mt-1 text-sm text-slate-400">
+            <p className="mt-1 text-sm text-slate-600">
               Upcoming class recordings across the school with one-click join.
             </p>
           </div>
-          <label className="flex items-center gap-2 text-xs text-slate-300">
+          <label className="flex items-center gap-2 text-xs text-slate-600">
             <input
               type="checkbox"
               checked={showPast}
               onChange={(e) => setShowPast(e.target.checked)}
-              className="h-3 w-3 rounded border-slate-700 bg-slate-900 text-primary"
+              className="h-3 w-3 rounded border-slate-300 bg-white text-primary"
             />
             Show past sessions
           </label>
         </div>
 
-        <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-5 text-sm">
+        <div className="rounded-xl border border-slate-200 bg-white p-5 text-sm">
           {upcoming.length === 0 ? (
             <div className="text-xs text-slate-500">
               No scheduled recordings yet.
             </div>
           ) : (
-            <div className="overflow-hidden rounded-lg border border-slate-800 bg-slate-950/80">
+            <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
               <table className="min-w-full text-left text-xs">
-                <thead className="bg-slate-900/80 text-[11px] uppercase tracking-wide text-slate-400">
+                <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
                   <tr>
                     <th className="px-3 py-2">Time</th>
                     <th className="px-3 py-2">Teacher / Course</th>
@@ -82,23 +82,23 @@ export function MasterSchedulePage() {
                     return (
                       <tr
                         key={s.id}
-                        className="border-t border-slate-800 hover:bg-slate-900/60"
+                        className="border-t border-slate-200 hover:bg-slate-50"
                       >
-                        <td className="px-3 py-2 text-[11px] text-slate-300">
+                        <td className="px-3 py-2 text-[11px] text-slate-600">
                           {startStr}
                         </td>
                         <td className="px-3 py-2">
-                          <div className="text-xs font-medium text-slate-100">
+                          <div className="text-xs font-medium text-slate-900">
                             {teacher?.name || "Unknown teacher"}
                           </div>
-                          <div className="text-[11px] text-slate-400">
+                          <div className="text-[11px] text-slate-500">
                             {s.course_name}
                           </div>
                         </td>
-                        <td className="px-3 py-2 text-[11px] text-slate-300">
+                        <td className="px-3 py-2 text-[11px] text-slate-600">
                           {s.location || "—"}
                         </td>
-                        <td className="px-3 py-2 text-[11px] text-slate-300">
+                        <td className="px-3 py-2 text-[11px] text-slate-600">
                           {s.recording_status}
                         </td>
                         <td className="px-3 py-2 text-[11px]">

@@ -1,5 +1,6 @@
 // craco.config.js
 const path = require("path");
+const fs = require("fs");
 require("dotenv").config();
 
 // Check if we're in development/preview mode (not production build)
@@ -17,8 +18,18 @@ let setupDevServer;
 let babelMetadataPlugin;
 
 if (config.enableVisualEdits) {
-  setupDevServer = require("./plugins/visual-edits/dev-server-setup");
-  babelMetadataPlugin = require("./plugins/visual-edits/babel-metadata-plugin");
+  const visualEditsPath = path.resolve(__dirname, "plugins", "visual-edits");
+  const devServerPath = path.join(visualEditsPath, "dev-server-setup.js");
+  const babelPluginPath = path.join(visualEditsPath, "babel-metadata-plugin.js");
+  const hasVisualEdits =
+    fs.existsSync(devServerPath) && fs.existsSync(babelPluginPath);
+
+  if (hasVisualEdits) {
+    setupDevServer = require("./plugins/visual-edits/dev-server-setup");
+    babelMetadataPlugin = require("./plugins/visual-edits/babel-metadata-plugin");
+  } else {
+    config.enableVisualEdits = false;
+  }
 }
 
 // Conditionally load health check modules only if enabled

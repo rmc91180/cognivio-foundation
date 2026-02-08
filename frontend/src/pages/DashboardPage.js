@@ -12,14 +12,50 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { TrendIndicator } from "@/components/TrendIndicator";
 import { toast } from "sonner";
+import { subDays, format } from "date-fns";
 
 export function DashboardPage() {
   const queryClient = useQueryClient();
-  const { data, isLoading } = useQuery({
-    queryKey: ["roster"],
-    queryFn: () => assessmentApi.roster().then((res) => res.data),
+  const now = useMemo(() => new Date(), []);
+  const currentRange = useMemo(
+    () => ({ start: subDays(now, 30), end: now }),
+    [now]
+  );
+  const previousRange = useMemo(
+    () => ({ start: subDays(now, 60), end: subDays(now, 30) }),
+    [now]
+  );
+
+  const { data: currentData, isLoading } = useQuery({
+    queryKey: [
+      "roster",
+      "current",
+      currentRange.start.toISOString(),
+      currentRange.end.toISOString(),
+    ],
+    queryFn: () =>
+      assessmentApi
+        .roster({
+          start_date: currentRange.start.toISOString(),
+          end_date: currentRange.end.toISOString(),
+        })
+        .then((res) => res.data),
+  });
+  const { data: previousData } = useQuery({
+    queryKey: [
+      "roster",
+      "previous",
+      previousRange.start.toISOString(),
+      previousRange.end.toISOString(),
+    ],
+    queryFn: () =>
+      assessmentApi
+        .roster({
+          start_date: previousRange.start.toISOString(),
+          end_date: previousRange.end.toISOString(),
+        })
+        .then((res) => res.data),
   });
   const { data: frameworkSelectionRes } = useQuery({
     queryKey: ["framework-selection"],
@@ -31,10 +67,17 @@ export function DashboardPage() {
     queryFn: () => frameworkApi.get(frameworkType).then((res) => res.data),
   });
 
-  const roster = useMemo(() => data?.roster ?? [], [data]);
-  const selectedElements = useMemo(() => data?.selected_elements ?? [], [data]);
+  const roster = useMemo(() => currentData?.roster ?? [], [currentData]);
+  const previousRoster = useMemo(
+    () => previousData?.roster ?? [],
+    [previousData]
+  );
+  const selectedElements = useMemo(
+    () => currentData?.selected_elements ?? [],
+    [currentData]
+  );
   const [selectedElementsState, setSelectedElementsState] = useState([]);
-  const [selectedDomains, setSelectedDomains] = useState([]);
+  const [showFocusDomains, setShowFocusDomains] = useState(true);
 
   // Focus areas are driven by framework selection
   const seedDemoMutation = useMutation({
@@ -73,10 +116,6 @@ export function DashboardPage() {
     () => frameworkDetailRes?.domains || [],
     [frameworkDetailRes]
   );
-  const focusSelectableElements = useMemo(
-    () => (selectedElementsState.length ? selectedElementsState : selectedElements),
-    [selectedElementsState, selectedElements]
-  );
 
   useEffect(() => {
     if (selectedElements.length) {
@@ -85,21 +124,6 @@ export function DashboardPage() {
       setSelectedElementsState(frameworkSelectionRes.selected_elements);
     }
   }, [selectedElements, frameworkSelectionRes]);
-
-  useEffect(() => {
-    if (!frameworkDomains.length) {
-      setSelectedDomains([]);
-      return;
-    }
-    const domainIds = frameworkDomains
-      .filter((domain) =>
-        (domain.elements || []).some((el) =>
-          selectedElementsState.includes(el.id)
-        )
-      )
-      .map((domain) => domain.id);
-    setSelectedDomains(domainIds);
-  }, [frameworkDomains, selectedElementsState]);
 
   const toggleDomainSelection = (domain) => {
     const elementIds = (domain.elements || []).map((el) => el.id);
@@ -112,13 +136,7 @@ export function DashboardPage() {
     const nextSelected = allSelected
       ? selectedElementsState.filter((id) => !elementIds.includes(id))
       : Array.from(new Set([...selectedElementsState, ...elementIds]));
-    const nextDomainIds = frameworkDomains
-      .filter((d) =>
-        (d.elements || []).some((el) => nextSelected.includes(el.id))
-      )
-      .map((d) => d.id);
     setSelectedElementsState(nextSelected);
-    setSelectedDomains(nextDomainIds);
   };
 
   const focusDomainStats = useMemo(() => {
@@ -131,6 +149,16 @@ export function DashboardPage() {
     });
   }, [frameworkDomains, selectedElementsState]);
 
+  const elementNameById = useMemo(() => {
+    const map = {};
+    frameworkDomains.forEach((domain) => {
+      (domain.elements || []).forEach((el) => {
+        map[el.id] = el.name;
+      });
+    });
+    return map;
+  }, [frameworkDomains]);
+
   const focusAreaData = useMemo(() => {
     if (!roster.length || !focusElementIds.length) return [];
     return focusElementIds.map((id) => {
@@ -138,6 +166,13 @@ export function DashboardPage() {
       const scores = roster
         .map((t) => t.element_scores?.[id]?.score)
         .filter((s) => typeof s === "number");
+      const teachersWithScore = roster.filter(
+        (t) => typeof t.element_scores?.[id]?.score === "number"
+      );
+      const assessmentCount = teachersWithScore.reduce(
+        (acc, t) => acc + (t.assessment_count || 0),
+        0
+      );
       const avg = scores.length
         ? Number((scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(2))
         : null;
@@ -145,38 +180,93 @@ export function DashboardPage() {
         elementId: id,
         label,
         averageScore: avg,
+        teacherCount: teachersWithScore.length,
+        assessmentCount,
+        elementName: elementNameById[id] || id,
       };
     });
-  }, [roster, focusElementIds]);
+  }, [roster, focusElementIds, elementNameById]);
+
+  const focusSummary = useMemo(() => {
+    const teacherCount = roster.length;
+    const assessmentCount = roster.reduce(
+      (acc, t) => acc + (t.assessment_count || 0),
+      0
+    );
+    const deptCount = new Set(
+      roster.map((t) => t.department || "Unassigned")
+    ).size;
+    return { teacherCount, assessmentCount, deptCount };
+  }, [roster]);
 
   const departmentData = useMemo(() => {
-    if (!roster.length) return [];
-    const buckets = {};
-    roster.forEach((t) => {
-      const dept = t.department || "Unassigned";
-      const bucket = buckets[dept] || { department: dept, total: 0, count: 0 };
-      if (typeof t.overall_score === "number") {
-        bucket.total += t.overall_score;
-        bucket.count += 1;
-      }
-      buckets[dept] = bucket;
+    if (!roster.length && !previousRoster.length) return [];
+    const buildBuckets = (rows) => {
+      const buckets = {};
+      rows.forEach((t) => {
+        const dept = t.department || "Unassigned";
+        const bucket = buckets[dept] || { department: dept, total: 0, count: 0 };
+        if (typeof t.overall_score === "number") {
+          bucket.total += t.overall_score;
+          bucket.count += 1;
+        }
+        buckets[dept] = bucket;
+      });
+      return buckets;
+    };
+
+    const currentBuckets = buildBuckets(roster);
+    const previousBuckets = buildBuckets(previousRoster);
+    const departments = new Set([
+      ...Object.keys(currentBuckets),
+      ...Object.keys(previousBuckets),
+    ]);
+    return Array.from(departments).map((dept) => {
+      const current = currentBuckets[dept];
+      const previous = previousBuckets[dept];
+      const currentAvg =
+        current && current.count > 0
+          ? Number((current.total / current.count).toFixed(2))
+          : null;
+      const previousAvg =
+        previous && previous.count > 0
+          ? Number((previous.total / previous.count).toFixed(2))
+          : null;
+      const delta =
+        currentAvg != null && previousAvg != null
+          ? Number((currentAvg - previousAvg).toFixed(2))
+          : null;
+      return {
+        department: dept,
+        averageScore: currentAvg,
+        previousAverage: previousAvg,
+        delta,
+      };
     });
-    return Object.values(buckets).map((b) => ({
-      department: b.department,
-      averageScore:
-        b.count > 0 ? Number((b.total / b.count).toFixed(2)) : null,
-    }));
-  }, [roster]);
+  }, [roster, previousRoster]);
+
+  const achievements = useMemo(() => {
+    if (!focusAreaData.length) return [];
+    const sorted = [...focusAreaData]
+      .filter((f) => typeof f.averageScore === "number")
+      .sort((a, b) => (b.averageScore || 0) - (a.averageScore || 0));
+    const top = sorted.slice(0, 3);
+    return top.map((item) => {
+      const count = item.teacherCount;
+      const label = item.elementName || item.elementId;
+      return `${count} teacher${count === 1 ? "" : "s"} observed demonstrating ${label.toLowerCase()}`;
+    });
+  }, [focusAreaData]);
 
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
         <header className="mb-6 flex items-center justify-between gap-4">
           <div>
-            <h1 className="font-heading text-2xl font-semibold text-slate-50">
+            <h1 className="font-heading text-2xl font-semibold text-slate-900">
               Teacher Performance Overview
             </h1>
-            <p className="mt-1 text-sm text-slate-400">
+            <p className="mt-1 text-sm text-slate-600">
               Macro-level view of growth across priority focus areas and
               departments.
             </p>
@@ -186,7 +276,7 @@ export function DashboardPage() {
               type="button"
               onClick={() => seedDemoMutation.mutate()}
               disabled={seedDemoMutation.isPending}
-              className="inline-flex items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-60"
+              className="inline-flex items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-50 px-3 py-2 text-xs text-emerald-700 hover:bg-emerald-100 disabled:opacity-60"
             >
               {seedDemoMutation.isPending ? "Seeding data..." : "Seed demo data"}
             </button>
@@ -194,41 +284,50 @@ export function DashboardPage() {
         </header>
 
         {isLoading ? (
-          <div className="mt-8 text-sm text-slate-400">Loading roster...</div>
+          <div className="mt-8 text-sm text-slate-500">Loading roster...</div>
         ) : roster.length === 0 ? (
-          <div className="mt-8 rounded-lg border border-dashed border-slate-800 bg-slate-950/60 p-6 text-sm text-slate-400">
+          <div className="mt-8 rounded-lg border border-dashed border-slate-200 bg-white p-6 text-sm text-slate-500">
             No teachers found yet. Start by adding teachers and uploading
             classroom videos.
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
-            <section className="md:col-span-12 rounded-xl border border-slate-800 bg-slate-950/70 p-5">
+            <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h2 className="text-sm font-semibold text-slate-200">
+                  <h2 className="text-sm font-semibold text-slate-900">
                     Focus domains
                   </h2>
-                  <p className="text-xs text-slate-400">
+                  <p className="text-xs text-slate-500">
                     Selected domains power roster scoring and dashboard focus
                     areas.
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => saveDomainSelectionMutation.mutate()}
-                  disabled={saveDomainSelectionMutation.isPending}
-                  className="rounded-md bg-primary px-3 py-2 text-xs font-semibold text-white hover:bg-primary/90 disabled:opacity-60"
-                >
-                  {saveDomainSelectionMutation.isPending
-                    ? "Saving..."
-                    : "Save focus domains"}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowFocusDomains((prev) => !prev)}
+                    className="rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                  >
+                    {showFocusDomains ? "Collapse" : "Show selections"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => saveDomainSelectionMutation.mutate()}
+                    disabled={saveDomainSelectionMutation.isPending}
+                    className="rounded-md bg-primary px-3 py-2 text-xs font-semibold text-white hover:bg-primary/90 disabled:opacity-60"
+                  >
+                    {saveDomainSelectionMutation.isPending
+                      ? "Saving..."
+                      : "Save focus domains"}
+                  </button>
+                </div>
               </div>
               {frameworkLoading ? (
-                <div className="text-xs text-slate-400">
+                <div className="text-xs text-slate-500">
                   Loading framework domains...
                 </div>
-              ) : (
+              ) : showFocusDomains ? (
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   {frameworkDomains.map((domain) => {
                     const stats = focusDomainStats.find((d) => d.id === domain.id);
@@ -241,60 +340,95 @@ export function DashboardPage() {
                         className={[
                           "rounded-lg border px-4 py-3 text-left transition-colors",
                           allSelected
-                            ? "border-primary/70 bg-primary/10 text-primary"
-                            : "border-slate-800 bg-slate-900 text-slate-200 hover:bg-slate-800",
+                            ? "border-primary/40 bg-primary/5 text-primary"
+                            : "border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100",
                         ].join(" ")}
                       >
                         <div className="text-sm font-semibold">{domain.name}</div>
-                        <div className="mt-1 text-[11px] text-slate-400">
+                        <div className="mt-1 text-[11px] text-slate-500">
                           {stats?.selected || 0} of {stats?.total || 0} elements selected
                         </div>
                       </button>
                     );
                   })}
                 </div>
+              ) : (
+                <div className="text-xs text-slate-500">
+                  Focus domain selections are collapsed to save space. Expand to review or edit.
+                </div>
               )}
             </section>
-            <section className="md:col-span-7 rounded-xl border border-slate-800 bg-slate-950/70 p-5">
-              <h2 className="mb-2 text-sm font-semibold text-slate-200">
+            <section className="md:col-span-7 rounded-xl border border-slate-200 bg-white p-5">
+              <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 School focus areas
               </h2>
-              <p className="mb-4 text-xs text-slate-400">
+              <p className="mb-2 text-xs text-slate-500">
                 Aggregate performance on your top three priority rubric
                 elements.
               </p>
+              <div className="mb-4 flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
+                <span>{focusSummary.teacherCount} teachers included</span>
+                <span>•</span>
+                <span>{focusSummary.assessmentCount} observations analyzed</span>
+                <span>•</span>
+                <span>{focusSummary.deptCount} departments represented</span>
+              </div>
               {focusAreaData.length === 0 ? (
                 <div className="text-xs text-slate-500">
                   No focus area data yet.
                 </div>
               ) : (
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={focusAreaData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-                      <XAxis dataKey="label" stroke="#94a3b8" />
-                      <YAxis stroke="#94a3b8" domain={[0, 10]} />
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: "#020617",
-                          borderColor: "#1e293b",
-                          fontSize: 12,
-                        }}
-                      />
-                      <Bar dataKey="averageScore" fill="#4f46e5" />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
+                <>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                    {focusAreaData.map((item) => (
+                      <div
+                        key={item.elementId}
+                        className="rounded-lg border border-slate-200 bg-slate-50 p-3"
+                      >
+                        <div className="text-xs font-semibold text-slate-700">
+                          {item.elementName}
+                        </div>
+                        <div className="mt-2 text-2xl font-semibold text-slate-900">
+                          {item.averageScore != null ? item.averageScore.toFixed(1) : "—"}
+                        </div>
+                        <div className="mt-1 text-[11px] text-slate-500">
+                          {item.teacherCount} teachers • {item.assessmentCount} observations
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-4 h-56">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={focusAreaData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis dataKey="label" stroke="#64748b" />
+                        <YAxis stroke="#64748b" domain={[0, 10]} />
+                        <Tooltip
+                          contentStyle={{
+                            backgroundColor: "#ffffff",
+                            borderColor: "#e2e8f0",
+                            fontSize: 12,
+                          }}
+                        />
+                        <Bar dataKey="averageScore" fill="#4f46e5" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </>
               )}
             </section>
 
-            <section className="md:col-span-5 rounded-xl border border-slate-800 bg-slate-950/70 p-5">
-              <h2 className="mb-2 text-sm font-semibold text-slate-200">
+            <section className="md:col-span-5 rounded-xl border border-slate-200 bg-white p-5">
+              <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 Departmental progress
               </h2>
-              <p className="mb-4 text-xs text-slate-400">
+              <p className="mb-2 text-xs text-slate-500">
                 Compare average performance across departments to identify
                 pockets of strength and support needs.
+              </p>
+              <p className="mb-4 text-[11px] text-slate-500">
+                Showing {format(previousRange.start, "MMM d")}–{format(previousRange.end, "MMM d")} vs{" "}
+                {format(currentRange.start, "MMM d")}–{format(currentRange.end, "MMM d")}.
               </p>
               {departmentData.length === 0 ? (
                 <div className="text-xs text-slate-500">
@@ -304,30 +438,59 @@ export function DashboardPage() {
                 <div className="h-64">
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={departmentData} layout="vertical">
-                      <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-                      <XAxis type="number" stroke="#94a3b8" domain={[0, 10]} />
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis type="number" stroke="#64748b" domain={[0, 10]} />
                       <YAxis
                         dataKey="department"
                         type="category"
-                        stroke="#94a3b8"
+                        stroke="#64748b"
                         width={90}
                       />
                       <Tooltip
                         contentStyle={{
-                          backgroundColor: "#020617",
-                          borderColor: "#1e293b",
+                          backgroundColor: "#ffffff",
+                          borderColor: "#e2e8f0",
                           fontSize: 12,
                         }}
                       />
                       <Legend />
-                      <Bar
-                        dataKey="averageScore"
-                        name="Avg score"
-                        fill="#22c55e"
-                      />
+                      <Bar dataKey="averageScore" name="Current" fill="#22c55e" />
+                      <Bar dataKey="previousAverage" name="Month ago" fill="#94a3b8" />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
+              )}
+              {departmentData.length > 0 && (
+                <div className="mt-4 space-y-2 text-[11px] text-slate-600">
+                  {departmentData.slice(0, 4).map((dept) => (
+                    <div key={dept.department} className="flex items-center justify-between">
+                      <span>{dept.department}</span>
+                      <span>
+                        {dept.delta == null ? "—" : `${dept.delta > 0 ? "+" : ""}${dept.delta}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
+              <h2 className="mb-2 text-sm font-semibold text-slate-900">
+                Key achievements
+              </h2>
+              <p className="mb-3 text-xs text-slate-500">
+                Highlights pulled from recent observations and strongest focus areas.
+              </p>
+              {achievements.length === 0 ? (
+                <div className="text-xs text-slate-500">
+                  No achievement highlights yet.
+                </div>
+              ) : (
+                <ul className="list-disc space-y-1 pl-5 text-xs text-slate-700">
+                  {achievements.map((item, idx) => (
+                    <li key={idx}>{item}</li>
+                  ))}
+                </ul>
               )}
             </section>
           </div>
