@@ -54,6 +54,21 @@ JWT_SECRET = _get_required_env("JWT_SECRET")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24
 
+# Demo mode (fixed demo users, registration disabled)
+DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
+DEMO_USERS = [
+    {
+        "email": "principal@demo.cognivio.app",
+        "name": "Demo Principal",
+        "password": "DemoAccess2026!",
+    },
+    {
+        "email": "teacher@demo.cognivio.app",
+        "name": "Demo Teacher",
+        "password": "DemoAccess2026!",
+    },
+]
+
 # Create uploads directory
 UPLOAD_DIR = ROOT_DIR / 'uploads'
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -422,6 +437,8 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 # ==================== AUTH ENDPOINTS ====================
 @api_router.post("/auth/register", response_model=TokenResponse)
 async def register(user: UserCreate):
+    if DEMO_MODE:
+        raise HTTPException(status_code=403, detail="Registration is disabled for demo mode")
     existing = await db.users.find_one({"email": user.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -1696,6 +1713,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def ensure_demo_users():
+    if not DEMO_MODE:
+        return
+    for demo in DEMO_USERS:
+        existing = await db.users.find_one({"email": demo["email"]})
+        if existing:
+            continue
+        user_id = str(uuid.uuid4())
+        user_doc = {
+            "id": user_id,
+            "email": demo["email"],
+            "name": demo["name"],
+            "password": hash_password(demo["password"]),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "is_demo": True,
+        }
+        await db.users.insert_one(user_doc)
 
 
 @app.on_event("shutdown")

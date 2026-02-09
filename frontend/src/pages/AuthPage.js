@@ -5,6 +5,7 @@ import { useAuth } from "@/hooks/useAuth";
 export function AuthPage() {
   const navigate = useNavigate();
   const { login, register, loggingIn, registering } = useAuth();
+  const isDemo = process.env.REACT_APP_DEMO_MODE === "true";
   const [mode, setMode] = useState("login");
   const [form, setForm] = useState({ email: "", password: "", name: "" });
 
@@ -57,21 +58,33 @@ export function AuthPage() {
           >
             Login
           </button>
-          <button
-            type="button"
-            onClick={() => setMode("register")}
-            className={`flex-1 rounded px-3 py-2 ${
-              mode === "register"
-                ? "bg-white text-slate-900 shadow-sm"
-                : "text-slate-500 hover:text-slate-700"
-            }`}
-          >
-            Register
-          </button>
+          {!isDemo && (
+            <button
+              type="button"
+              onClick={() => setMode("register")}
+              className={`flex-1 rounded px-3 py-2 ${
+                mode === "register"
+                  ? "bg-white text-slate-900 shadow-sm"
+                  : "text-slate-500 hover:text-slate-700"
+              }`}
+            >
+              Register
+            </button>
+          )}
         </div>
 
+        {isDemo && (
+          <div className="mb-4 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+            <div className="font-semibold text-slate-700">Demo logins</div>
+            <div className="mt-1">
+              Principal: principal@demo.cognivio.app / DemoAccess2026!
+            </div>
+            <div>Teacher: teacher@demo.cognivio.app / DemoAccess2026!</div>
+          </div>
+        )}
+
         <form onSubmit={onSubmit} className="space-y-4">
-          {mode === "register" && (
+          {mode === "register" && !isDemo && (
             <div>
               <label className="block text-xs font-medium text-slate-600">
                 Name
