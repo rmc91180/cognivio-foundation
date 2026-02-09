@@ -232,17 +232,6 @@ export function TeacherProfilePage() {
     return map;
   }, [observations]);
 
-  const evidenceByElement = useMemo(() => {
-    const map = {};
-    const items = evidenceRes?.evidence || [];
-    items.forEach((ev) => {
-      if (!ev.element_id) return;
-      if (!map[ev.element_id]) map[ev.element_id] = [];
-      map[ev.element_id].push(ev);
-    });
-    return map;
-  }, [evidenceRes]);
-
   const latestAssessmentId = useMemo(() => {
     if (!dashboardRes?.assessments?.length) return null;
     return dashboardRes.assessments[dashboardRes.assessments.length - 1].id;
@@ -266,6 +255,17 @@ export function TeacherProfilePage() {
   });
 
   const [selectedEvidenceElement, setSelectedEvidenceElement] = useState(null);
+
+  const evidenceByElement = useMemo(() => {
+    const map = {};
+    const items = evidenceRes?.evidence || [];
+    items.forEach((ev) => {
+      if (!ev.element_id) return;
+      if (!map[ev.element_id]) map[ev.element_id] = [];
+      map[ev.element_id].push(ev);
+    });
+    return map;
+  }, [evidenceRes]);
 
   const nextStepsItems = useMemo(() => {
     const items = [];
