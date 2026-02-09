@@ -23,6 +23,7 @@ export function LayoutShell({ children }) {
           <NavItem to="/dashboard" icon={LayoutDashboard} label="Dashboard" />
           <NavItem to="/teachers" icon={Users} label="Teachers" />
           <NavItem to="/videos" icon={PlayCircle} label="Videos & Assessments" />
+          <NavItem to="/videos/record" icon={PlayCircle} label="Record Video" />
           <NavItem to="/frameworks" icon={Layers} label="Frameworks" />
         </nav>
         <div className="mt-auto border-t border-slate-200 px-4 py-3 text-xs text-slate-500">

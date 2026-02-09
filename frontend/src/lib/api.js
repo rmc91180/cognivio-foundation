@@ -40,9 +40,10 @@ export const schoolApi = {
 };
 
 export const videoApi = {
-  upload: (formData) =>
+  upload: (formData, config = {}) =>
     api.post("/api/videos/upload", formData, {
       headers: { "Content-Type": "multipart/form-data" },
+      ...config,
     }),
   list: (params) => api.get("/api/videos", { params }),
   status: (videoId) => api.get(`/api/videos/${videoId}/status`),

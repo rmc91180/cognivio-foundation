@@ -477,6 +477,9 @@ class VideoUploadResponse(BaseModel):
     teacher_id: str
     status: str
     upload_date: str
+    subject: Optional[str] = None
+    recorded_at: Optional[str] = None
+    file_path: Optional[str] = None
 
 
 class CurriculumUploadResponse(BaseModel):
@@ -1003,6 +1006,8 @@ async def upload_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     teacher_id: str = Form(...),
+    subject: Optional[str] = Form(None),
+    recorded_at: Optional[str] = Form(None),
     current_user: dict = Depends(get_current_user)
 ):
     # Validate file type and basic content-type
@@ -1020,10 +1025,13 @@ async def upload_video(
     
     video_id = str(uuid.uuid4())
     filename = f"{video_id}{file_ext}"
-    file_path = UPLOAD_DIR / filename
+    teacher_dir = UPLOAD_DIR / "videos" / teacher_id
+    teacher_dir.mkdir(parents=True, exist_ok=True)
+    file_path = teacher_dir / filename
     
-    # Save file with basic size limit check (~500 MB)
-    MAX_BYTES = 500 * 1024 * 1024
+    # Save file (optional size guard via env)
+    MAX_BYTES = os.getenv("MAX_VIDEO_BYTES")
+    max_bytes_value = int(MAX_BYTES) if MAX_BYTES and MAX_BYTES.isdigit() else None
     size = 0
     async with aiofiles.open(file_path, "wb") as f:
         while True:
@@ -1031,10 +1039,10 @@ async def upload_video(
             if not chunk:
                 break
             size += len(chunk)
-            if size > MAX_BYTES:
+            if max_bytes_value and size > max_bytes_value:
                 await f.close()
                 os.remove(file_path)
-                raise HTTPException(status_code=400, detail="File too large (max 500MB)")
+                raise HTTPException(status_code=400, detail="File too large")
             await f.write(chunk)
     
     s3_key = None
@@ -1055,12 +1063,28 @@ async def upload_video(
         "stored_filename": filename,
         "s3_key": s3_key,
         "file_url": file_url,
+        "file_path": str(file_path),
         "teacher_id": teacher_id,
         "uploaded_by": current_user["id"],
         "status": "processing",
+        "analysis_status": "processing",
+        "subject": subject,
+        "recorded_at": recorded_at,
         "upload_date": datetime.now(timezone.utc).isoformat()
     }
     await db.videos.insert_one(video_doc)
+
+    await db.video_evidence.insert_one({
+        "id": str(uuid.uuid4()),
+        "video_id": video_id,
+        "teacher_id": teacher_id,
+        "file_path": str(file_path),
+        "subject": subject,
+        "recorded_at": recorded_at,
+        "analysis_status": "processing",
+        "uploaded_by": current_user["id"],
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+    })
     
     # Queue video analysis in background
     background_tasks.add_task(analyze_video, video_id, str(file_path), teacher_id, current_user["id"])
@@ -1070,7 +1094,10 @@ async def upload_video(
         filename=file.filename,
         teacher_id=teacher_id,
         status="processing",
-        upload_date=video_doc["upload_date"]
+        upload_date=video_doc["upload_date"],
+        subject=subject,
+        recorded_at=recorded_at,
+        file_path=str(file_path),
     )
 
 @api_router.get("/videos")
@@ -2916,7 +2943,11 @@ async def analyze_video(video_id: str, file_path: str, teacher_id: str, user_id:
         # Update video status
         await db.videos.update_one(
             {"id": video_id},
-            {"$set": {"status": "completed", "assessment_id": assessment_doc["id"]}}
+            {"$set": {"status": "completed", "analysis_status": "completed", "assessment_id": assessment_doc["id"]}}
+        )
+        await db.video_evidence.update_one(
+            {"video_id": video_id, "uploaded_by": user_id},
+            {"$set": {"analysis_status": "completed"}},
         )
         
         logger.info(f"Completed analysis for video {video_id}")
@@ -2925,7 +2956,11 @@ async def analyze_video(video_id: str, file_path: str, teacher_id: str, user_id:
         logger.error(f"Error analyzing video {video_id}: {str(e)}")
         await db.videos.update_one(
             {"id": video_id},
-            {"$set": {"status": "error", "error_message": str(e)}}
+            {"$set": {"status": "error", "analysis_status": "error", "error_message": str(e)}}
+        )
+        await db.video_evidence.update_one(
+            {"video_id": video_id, "uploaded_by": user_id},
+            {"$set": {"analysis_status": "error", "error_message": str(e)}},
         )
     finally:
         # Clean up video file (run in thread to avoid blocking event loop)
