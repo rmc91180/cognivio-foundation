@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks, Depends, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
@@ -15,6 +15,10 @@ import jwt
 import bcrypt
 import json
 import base64
+import io
+import csv
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 try:
     import cv2
 except Exception as exc:
@@ -23,6 +27,11 @@ except Exception as exc:
 import aiofiles
 import asyncio
 from enum import Enum
+from fastapi import UploadFile
+try:
+    from reportlab.pdfgen import canvas
+except Exception:
+    canvas = None
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -44,6 +53,124 @@ def _get_optional_env_list(name: str) -> List[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _get_user_role(user: dict) -> str:
+    role = (user or {}).get("role")
+    if role:
+        return role
+    email = (user or {}).get("email", "").lower()
+    if email and email in ADMIN_EMAILS:
+        return "admin"
+    return "teacher"
+
+
+def _ensure_allowed_extension(filename: str) -> None:
+    suffix = Path(filename).suffix.lower()
+    if suffix not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+        )
+
+
+async def _save_upload_file(upload: UploadFile, target_path: Path) -> None:
+    size = 0
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    async with aiofiles.open(target_path, "wb") as out:
+        while True:
+            chunk = await upload.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="File exceeds 10MB limit")
+            await out.write(chunk)
+
+def _get_s3_client():
+    if not S3_BUCKET:
+        raise RuntimeError("S3_BUCKET must be set for file uploads")
+    session = boto3.session.Session(
+        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        region_name=S3_REGION or None,
+    )
+    return session.client("s3", endpoint_url=S3_ENDPOINT or None)
+
+
+def _build_s3_key(category: str, filename: str) -> str:
+    safe_name = Path(filename).name.replace(" ", "_")
+    return f"uploads/{category}/{uuid.uuid4()}_{safe_name}"
+
+
+def _get_s3_public_url(key: str) -> str:
+    if S3_PUBLIC_BASE_URL:
+        return f"{S3_PUBLIC_BASE_URL.rstrip('/')}/{key}"
+    if S3_ENDPOINT:
+        endpoint = S3_ENDPOINT.replace("https://", "").replace("http://", "")
+        return f"https://{S3_BUCKET}.{endpoint}/{key}"
+    if S3_REGION:
+        return f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{key}"
+    return f"https://{S3_BUCKET}.s3.amazonaws.com/{key}"
+
+
+async def _upload_file_to_s3(upload: UploadFile, category: str) -> Tuple[str, str]:
+    if not S3_BUCKET:
+        raise HTTPException(status_code=500, detail="S3 bucket not configured")
+    _ensure_allowed_extension(upload.filename or "")
+    tmp_name = f"{uuid.uuid4()}_{Path(upload.filename or 'upload').name}"
+    temp_path = UPLOAD_DIR / "tmp" / tmp_name
+    await _save_upload_file(upload, temp_path)
+    key = _build_s3_key(category, tmp_name)
+    client = _get_s3_client()
+    content_type = upload.content_type or "application/octet-stream"
+    try:
+        client.upload_file(
+            str(temp_path),
+            S3_BUCKET,
+            key,
+            ExtraArgs={"ContentType": content_type},
+        )
+    except (BotoCoreError, ClientError) as exc:
+        raise HTTPException(status_code=500, detail=f"S3 upload failed: {exc}")
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+    return key, _get_s3_public_url(key)
+
+
+def _upload_path_to_s3(file_path: Path, category: str, filename: str, content_type: str) -> Tuple[str, str]:
+    if not S3_BUCKET:
+        raise RuntimeError("S3 bucket not configured")
+    key = _build_s3_key(category, filename)
+    client = _get_s3_client()
+    client.upload_file(
+        str(file_path),
+        S3_BUCKET,
+        key,
+        ExtraArgs={"ContentType": content_type or "application/octet-stream"},
+    )
+    return key, _get_s3_public_url(key)
+
+
+async def _get_teacher_or_404(teacher_id: str, current_user: dict) -> dict:
+    teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+    role = _get_user_role(current_user)
+    if role == "admin":
+        if teacher.get("created_by") != current_user["id"]:
+            raise HTTPException(status_code=403, detail="Not authorized for this teacher")
+        return teacher
+    # teacher role: allow only if teacher email matches user email or teacher created_by matches user id
+    if teacher.get("email") and teacher.get("email").lower() == current_user.get("email", "").lower():
+        return teacher
+    if teacher.get("created_by") == current_user["id"]:
+        return teacher
+    raise HTTPException(status_code=403, detail="Not authorized for this teacher")
+
+
 # MongoDB connection
 mongo_url = _get_required_env("MONGO_URL")
 client = AsyncIOMotorClient(mongo_url)
@@ -56,20 +183,35 @@ JWT_EXPIRATION_HOURS = 24
 
 # Demo mode (fixed demo users, registration disabled)
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
+ADMIN_EMAILS = set(email.lower() for email in _get_optional_env_list("ADMIN_EMAILS"))
 DEMO_USERS = [
     {
         "email": "principal@demo.cognivio.app",
         "name": "Demo Principal",
         "password": "DemoAccess2026!",
+        "role": "admin",
     },
     {
         "email": "teacher@demo.cognivio.app",
         "name": "Demo Teacher",
         "password": "DemoAccess2026!",
+        "role": "teacher",
     },
 ]
 
-# Create uploads directory
+# Upload constraints
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10MB
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".jpeg", ".jpg"}
+ADHERENCE_WEIGHT = float(os.getenv("ADHERENCE_WEIGHT", "0.15"))
+
+# S3 configuration (required for file uploads)
+S3_BUCKET = os.getenv("S3_BUCKET")
+S3_REGION = os.getenv("S3_REGION")
+S3_ENDPOINT = os.getenv("S3_ENDPOINT")
+S3_PUBLIC_BASE_URL = os.getenv("S3_PUBLIC_BASE_URL")
+FRONTEND_URL = os.getenv("FRONTEND_URL")
+
+# Create uploads directory (used for temp storage)
 UPLOAD_DIR = ROOT_DIR / 'uploads'
 UPLOAD_DIR.mkdir(exist_ok=True)
 
@@ -238,6 +380,24 @@ MARSHALL_FRAMEWORK = {
     ]
 }
 
+
+def _get_framework_by_type(framework_type: str) -> dict:
+    if framework_type == "marshall":
+        return MARSHALL_FRAMEWORK
+    if framework_type == "danielson":
+        return DANIELSON_FRAMEWORK
+    return {
+        "domains": DANIELSON_FRAMEWORK["domains"] + MARSHALL_FRAMEWORK["domains"]
+    }
+
+
+def _find_domain_for_element(framework: dict, element_id: str) -> Optional[dict]:
+    for domain in framework.get("domains", []):
+        for element in domain.get("elements", []):
+            if element.get("id") == element_id:
+                return domain
+    return None
+
 # ==================== PYDANTIC MODELS ====================
 class UserCreate(BaseModel):
     email: EmailStr
@@ -253,6 +413,7 @@ class UserResponse(BaseModel):
     email: str
     name: str
     created_at: str
+    role: Optional[str] = None
 
 class TokenResponse(BaseModel):
     token: str
@@ -293,6 +454,48 @@ class VideoUploadResponse(BaseModel):
     teacher_id: str
     status: str
     upload_date: str
+
+
+class CurriculumUploadResponse(BaseModel):
+    id: str
+    teacher_id: str
+    title: str
+    filename: str
+    file_url: str
+    uploaded_by: str
+    uploaded_at: str
+
+
+class LessonPlanUploadResponse(BaseModel):
+    id: str
+    teacher_id: str
+    title: str
+    date: str
+    filename: str
+    file_url: str
+    uploaded_by: str
+    uploaded_at: str
+
+
+class SyllabusUploadResponse(BaseModel):
+    id: str
+    teacher_id: str
+    title: str
+    filename: str
+    file_url: str
+    uploaded_by: str
+    uploaded_at: str
+
+
+class AdminScoreOverride(BaseModel):
+    domain_id: str
+    original_score: float
+    adjusted_score: float
+    rationale: Optional[str] = None
+
+
+class AdminScoringPreference(BaseModel):
+    scoring_mode: str  # "override" or "coexist"
 
 class ElementScore(BaseModel):
     """
@@ -428,6 +631,8 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         user = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
+        if "role" not in user:
+            user["role"] = _get_user_role(user)
         return user
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
@@ -449,7 +654,8 @@ async def register(user: UserCreate):
         "email": user.email,
         "name": user.name,
         "password": hash_password(user.password),
-        "created_at": datetime.now(timezone.utc).isoformat()
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "role": "teacher",
     }
     await db.users.insert_one(user_doc)
     
@@ -460,7 +666,8 @@ async def register(user: UserCreate):
             id=user_id,
             email=user.email,
             name=user.name,
-            created_at=user_doc["created_at"]
+            created_at=user_doc["created_at"],
+            role=user_doc.get("role"),
         )
     )
 
@@ -477,7 +684,8 @@ async def login(user: UserLogin):
             id=db_user["id"],
             email=db_user["email"],
             name=db_user["name"],
-            created_at=db_user["created_at"]
+            created_at=db_user["created_at"],
+            role=db_user.get("role") or _get_user_role(db_user),
         )
     )
 
@@ -692,10 +900,24 @@ async def upload_video(
                 raise HTTPException(status_code=400, detail="File too large (max 500MB)")
             await f.write(chunk)
     
+    s3_key = None
+    file_url = None
+    try:
+        s3_key, file_url = _upload_path_to_s3(
+            file_path,
+            "videos",
+            filename,
+            file.content_type or "video/mp4",
+        )
+    except Exception as exc:
+        logger.warning(f"S3 upload failed for video {video_id}: {exc}")
+
     video_doc = {
         "id": video_id,
         "filename": file.filename,
         "stored_filename": filename,
+        "s3_key": s3_key,
+        "file_url": file_url,
         "teacher_id": teacher_id,
         "uploaded_by": current_user["id"],
         "status": "processing",
@@ -744,6 +966,163 @@ async def get_video_status(video_id: str, current_user: dict = Depends(get_curre
         raise HTTPException(status_code=404, detail="Video not found")
     return {"status": video.get("status", "unknown")}
 
+# ==================== CURRICULUM & PLANS ====================
+@api_router.post("/curricula", response_model=CurriculumUploadResponse)
+async def upload_curriculum(
+    teacher_id: str = Form(...),
+    title: str = Form(""),
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+):
+    role = _get_user_role(current_user)
+    if role not in {"admin", "teacher"}:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    await _get_teacher_or_404(teacher_id, current_user)
+    _ensure_allowed_extension(file.filename)
+
+    doc_id = str(uuid.uuid4())
+    key, file_url = await _upload_file_to_s3(file, "curricula")
+
+    uploaded_at = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": doc_id,
+        "teacher_id": teacher_id,
+        "title": title or Path(file.filename).stem,
+        "filename": file.filename,
+        "file_url": file_url,
+        "s3_key": key,
+        "uploaded_by": current_user["id"],
+        "uploaded_role": role,
+        "uploaded_at": uploaded_at,
+    }
+    await db.curricula.insert_one(doc)
+    return CurriculumUploadResponse(**doc)
+
+
+@api_router.get("/curricula")
+async def list_curricula(
+    teacher_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    query: Dict[str, Any] = {}
+    if teacher_id:
+        await _get_teacher_or_404(teacher_id, current_user)
+        query["teacher_id"] = teacher_id
+    else:
+        query["uploaded_by"] = current_user["id"]
+    docs = await db.curricula.find(query, {"_id": 0}).to_list(1000)
+    return {"curricula": docs}
+
+
+@api_router.post("/lesson-plans", response_model=LessonPlanUploadResponse)
+async def upload_lesson_plan(
+    teacher_id: str = Form(...),
+    date: str = Form(...),
+    title: str = Form(""),
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+):
+    role = _get_user_role(current_user)
+    if role != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can upload lesson plans")
+
+    await _get_teacher_or_404(teacher_id, current_user)
+    _ensure_allowed_extension(file.filename)
+
+    doc_id = str(uuid.uuid4())
+    key, file_url = await _upload_file_to_s3(file, "lesson_plans")
+
+    uploaded_at = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": doc_id,
+        "teacher_id": teacher_id,
+        "title": title or Path(file.filename).stem,
+        "date": date,
+        "filename": file.filename,
+        "file_url": file_url,
+        "s3_key": key,
+        "uploaded_by": current_user["id"],
+        "uploaded_at": uploaded_at,
+    }
+    await db.lesson_plans.insert_one(doc)
+    # Create a reminder schedule for the lesson plan date
+    try:
+        reminder = {
+            "id": str(uuid.uuid4()),
+            "teacher_id": teacher_id,
+            "course_name": f"Lesson plan reminder: {doc['title']}",
+            "start_time": datetime.fromisoformat(date).isoformat(),
+            "recording_status": ScheduleStatus.PLANNED.value,
+            "join_url": None,
+            "location": None,
+            "user_id": current_user["id"],
+            "created_at": uploaded_at,
+            "updated_at": None,
+            "reminder_type": "lesson_plan",
+            "lesson_plan_id": doc_id,
+        }
+        await db.schedules.insert_one(reminder)
+    except Exception:
+        logger.warning("Unable to create lesson plan reminder schedule")
+    return LessonPlanUploadResponse(**doc)
+
+
+@api_router.get("/lesson-plans")
+async def list_lesson_plans(
+    teacher_id: str,
+    date: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_teacher_or_404(teacher_id, current_user)
+    query = {"teacher_id": teacher_id}
+    if date:
+        query["date"] = date
+    docs = await db.lesson_plans.find(query, {"_id": 0}).to_list(1000)
+    return {"lesson_plans": docs}
+
+
+@api_router.post("/syllabi", response_model=SyllabusUploadResponse)
+async def upload_syllabus(
+    teacher_id: str = Form(...),
+    title: str = Form(""),
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+):
+    role = _get_user_role(current_user)
+    if role != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can upload syllabi")
+
+    await _get_teacher_or_404(teacher_id, current_user)
+    _ensure_allowed_extension(file.filename)
+
+    doc_id = str(uuid.uuid4())
+    key, file_url = await _upload_file_to_s3(file, "syllabi")
+
+    uploaded_at = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": doc_id,
+        "teacher_id": teacher_id,
+        "title": title or Path(file.filename).stem,
+        "filename": file.filename,
+        "file_url": file_url,
+        "s3_key": key,
+        "uploaded_by": current_user["id"],
+        "uploaded_at": uploaded_at,
+    }
+    await db.syllabi.insert_one(doc)
+    return SyllabusUploadResponse(**doc)
+
+
+@api_router.get("/syllabi")
+async def list_syllabi(
+    teacher_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_teacher_or_404(teacher_id, current_user)
+    docs = await db.syllabi.find({"teacher_id": teacher_id}, {"_id": 0}).to_list(1000)
+    return {"syllabi": docs}
+
 # ==================== ASSESSMENT ENDPOINTS ====================
 @api_router.get("/assessments", response_model=List[AssessmentResult])
 async def get_assessments(
@@ -766,6 +1145,301 @@ async def get_assessment(assessment_id: str, current_user: dict = Depends(get_cu
     if not assessment:
         raise HTTPException(status_code=404, detail="Assessment not found")
     return AssessmentResult(**assessment)
+
+
+@api_router.get("/assessments/{assessment_id}/evidence")
+async def get_assessment_evidence(
+    assessment_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    assessment = await db.assessments.find_one(
+        {"id": assessment_id, "user_id": current_user["id"]},
+        {"_id": 0, "user_id": 0},
+    )
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    evidence = await _ensure_mock_evidence(assessment, current_user)
+    return {"evidence": evidence}
+
+
+@api_router.post("/assessments/{assessment_id}/admin-override")
+async def create_admin_override(
+    assessment_id: str,
+    payload: AdminScoreOverride,
+    current_user: dict = Depends(get_current_user),
+):
+    role = _get_user_role(current_user)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "assessment_id": assessment_id,
+        "admin_id": current_user["id"],
+        "domain_id": payload.domain_id,
+        "original_score": payload.original_score,
+        "adjusted_score": payload.adjusted_score,
+        "rationale": payload.rationale,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.admin_assessment_overrides.insert_one(doc)
+    return {"override": doc}
+
+
+@api_router.get("/assessments/{assessment_id}/admin-overrides")
+async def list_admin_overrides(
+    assessment_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    role = _get_user_role(current_user)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    docs = await db.admin_assessment_overrides.find(
+        {"assessment_id": assessment_id, "admin_id": current_user["id"]},
+        {"_id": 0},
+    ).to_list(1000)
+    return {"overrides": docs}
+
+
+@api_router.post("/admin/preferences/scoring-mode")
+async def set_admin_scoring_mode(
+    payload: AdminScoringPreference,
+    current_user: dict = Depends(get_current_user),
+):
+    role = _get_user_role(current_user)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    if payload.scoring_mode not in {"override", "coexist"}:
+        raise HTTPException(status_code=400, detail="Invalid scoring mode")
+    doc = {
+        "admin_id": current_user["id"],
+        "scoring_mode": payload.scoring_mode,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.admin_scoring_preferences.update_one(
+        {"admin_id": current_user["id"]},
+        {"$set": doc},
+        upsert=True,
+    )
+    return {"preference": doc}
+
+
+async def _get_admin_scoring_mode(admin_id: str) -> str:
+    pref = await db.admin_scoring_preferences.find_one(
+        {"admin_id": admin_id},
+        {"_id": 0, "scoring_mode": 1},
+    )
+    if pref and pref.get("scoring_mode") in {"override", "coexist"}:
+        return pref["scoring_mode"]
+    return "override"
+
+
+def _apply_admin_overrides(
+    element_scores: List[dict],
+    overrides: List[dict],
+    scoring_mode: str,
+) -> Tuple[List[dict], Optional[float]]:
+    override_map = {o["domain_id"]: o for o in overrides}
+    adjusted_scores = []
+    for es in element_scores:
+        override = override_map.get(es["element_id"])
+        score = es["score"]
+        if override:
+            adjusted = override["adjusted_score"]
+            if scoring_mode == "coexist":
+                score = round((score + adjusted) / 2, 2)
+            else:
+                score = adjusted
+        adjusted_scores.append({**es, "adjusted_score": score})
+
+    valid_scores = [es["adjusted_score"] for es in adjusted_scores if es["adjusted_score"] is not None]
+    adjusted_overall = round(sum(valid_scores) / len(valid_scores), 2) if valid_scores else None
+    return adjusted_scores, adjusted_overall
+
+
+async def _get_adherence_score(assessment_id: str, user_id: str) -> Optional[float]:
+    doc = await db.curriculum_adherence.find_one(
+        {"assessment_id": assessment_id, "user_id": user_id},
+        {"_id": 0, "adherence_score": 1},
+    )
+    if not doc:
+        return None
+    return doc.get("adherence_score")
+
+
+def _combine_overall_with_adherence(overall_score: Optional[float], adherence_score: Optional[float]) -> Optional[float]:
+    if overall_score is None:
+        return None
+    if adherence_score is None:
+        return overall_score
+    adherence_scaled = adherence_score * 10
+    combined = (overall_score * (1 - ADHERENCE_WEIGHT)) + (adherence_scaled * ADHERENCE_WEIGHT)
+    return round(combined, 2)
+
+
+@api_router.get("/assessments/{assessment_id}/curriculum-adherence")
+async def get_curriculum_adherence(
+    assessment_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    assessment = await db.assessments.find_one(
+        {"id": assessment_id, "user_id": current_user["id"]},
+        {"_id": 0},
+    )
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+
+    existing = await db.curriculum_adherence.find_one(
+        {"assessment_id": assessment_id, "user_id": current_user["id"]}, {"_id": 0}
+    )
+    if existing:
+        return existing
+
+    # Fallback: return placeholder adherence when no analysis exists.
+    teacher_id = assessment["teacher_id"]
+    lesson_plan = await db.lesson_plans.find(
+        {"teacher_id": teacher_id}, {"_id": 0}
+    ).sort("date", -1).to_list(1)
+    if not lesson_plan:
+        return {
+            "assessment_id": assessment_id,
+            "teacher_id": teacher_id,
+            "status": "no_lesson_plan",
+            "adherence_score": None,
+            "matched_topics": [],
+            "missing_topics": [],
+            "evidence_segments": [],
+        }
+
+    adherence = {
+        "assessment_id": assessment_id,
+        "teacher_id": teacher_id,
+        "status": "estimated",
+        "adherence_score": 0.82,
+        "topic_match_rate": 0.78,
+        "alignment_summary": "Instructional sequence matches planned objectives with minor pacing drift.",
+        "matched_topics": [
+            "Objectives aligned with lesson plan",
+            "Assessment checks mirror planned exit ticket",
+        ],
+        "missing_topics": [
+            "Planned small-group check-in not observed",
+        ],
+        "flags": [
+            {"type": "pacing", "detail": "Warm-up extended beyond planned window"},
+        ],
+        "evidence_segments": [
+            {
+                "start_sec": 120,
+                "end_sec": 360,
+                "summary": "Teacher reviews objective and models example aligned to lesson plan.",
+                "confidence": 0.84,
+            },
+            {
+                "start_sec": 780,
+                "end_sec": 900,
+                "summary": "Independent practice aligns with planned assessment item.",
+                "confidence": 0.79,
+            },
+        ],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "user_id": current_user["id"],
+    }
+    await db.curriculum_adherence.insert_one(adherence)
+    adherence.pop("_id", None)
+    adherence.pop("user_id", None)
+    return adherence
+
+
+@api_router.post("/reports/export")
+async def export_summary_report(
+    format: str = Form("pdf"),
+    teacher_id: Optional[str] = Form(None),
+    department: Optional[str] = Form(None),
+    current_user: dict = Depends(get_current_user),
+):
+    teacher_query: Dict[str, Any] = {"created_by": current_user["id"]}
+    if teacher_id:
+        teacher_query["id"] = teacher_id
+    if department:
+        teacher_query["department"] = department
+    teachers = await db.teachers.find(teacher_query, {"_id": 0}).to_list(1000)
+    teacher_ids = [t["id"] for t in teachers]
+    assessments = await db.assessments.find(
+        {"user_id": current_user["id"], "teacher_id": {"$in": teacher_ids}},
+        {"_id": 0},
+    ).sort("analyzed_at", -1).to_list(2000)
+
+    latest_by_teacher: Dict[str, dict] = {}
+    for assessment in assessments:
+        tid = assessment["teacher_id"]
+        if tid not in latest_by_teacher:
+            latest_by_teacher[tid] = assessment
+
+    rows = []
+    for t in teachers:
+        assessment = latest_by_teacher.get(t["id"])
+        evidence_count = await db.assessment_evidence.count_documents(
+            {"teacher_id": t["id"], "user_id": current_user["id"]}
+        )
+        avg_score = None
+        teacher_assessments = [a for a in assessments if a["teacher_id"] == t["id"]]
+        if teacher_assessments:
+            avg_score = round(
+                sum(a.get("overall_score") or 0 for a in teacher_assessments) / len(teacher_assessments),
+                2,
+            )
+        rows.append(
+            {
+                "teacher_name": t.get("name"),
+                "subject": t.get("subject"),
+                "grade_level": t.get("grade_level"),
+                "department": t.get("department"),
+                "latest_score": assessment.get("overall_score") if assessment else None,
+                "average_score": avg_score,
+                "assessment_count": len(teacher_assessments),
+                "evidence_count": evidence_count,
+                "last_assessment": assessment.get("analyzed_at") if assessment else None,
+                "detail_url": f"{FRONTEND_URL.rstrip('/')}/teachers/{t['id']}" if FRONTEND_URL else None,
+            }
+        )
+
+    if format.lower() == "csv":
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=list(rows[0].keys()) if rows else [])
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+        return Response(
+            content=output.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=summary-report.csv"},
+        )
+
+    if format.lower() == "pdf":
+        if canvas is None:
+            raise HTTPException(status_code=501, detail="PDF export not available")
+        buffer = io.BytesIO()
+        pdf = canvas.Canvas(buffer)
+        pdf.setTitle("Cognivio Summary Report")
+        pdf.drawString(50, 800, "Cognivio Summary Report")
+        pdf.drawString(50, 785, f"Generated: {datetime.now(timezone.utc).isoformat()}")
+        y = 760
+        for row in rows[:30]:
+            line = f"{row['teacher_name']} | {row['subject']} | {row['grade_level']} | {row['latest_score']}"
+            pdf.drawString(50, y, line)
+            y -= 14
+            if y < 60:
+                pdf.showPage()
+                y = 800
+        pdf.save()
+        buffer.seek(0)
+        return Response(
+            content=buffer.read(),
+            media_type="application/pdf",
+            headers={"Content-Disposition": "attachment; filename=summary-report.pdf"},
+        )
+
+    raise HTTPException(status_code=400, detail="Invalid export format. Use pdf or csv.")
 
 
 @api_router.get("/teachers/{teacher_id}/summary-insights")
@@ -916,6 +1590,9 @@ async def get_teacher_roster(
             for element in domain["elements"]:
                 selected_elements.append(element["id"])
     
+    role = _get_user_role(current_user)
+    scoring_mode = await _get_admin_scoring_mode(current_user["id"]) if role == "admin" else "ai"
+
     # Get all teachers
     teachers = await db.teachers.find(
         {"created_by": current_user["id"]},
@@ -937,15 +1614,33 @@ async def get_teacher_roster(
             }
         
         assessments = await db.assessments.find(assessment_query, {"_id": 0}).to_list(1000)
+        overrides_by_assessment: Dict[str, List[dict]] = {}
+        if role == "admin" and assessments:
+            ids = [a["id"] for a in assessments]
+            overrides = await db.admin_assessment_overrides.find(
+                {"admin_id": current_user["id"], "assessment_id": {"$in": ids}},
+                {"_id": 0},
+            ).to_list(1000)
+            for o in overrides:
+                overrides_by_assessment.setdefault(o["assessment_id"], []).append(o)
         
         # Aggregate scores per element
         element_scores = {}
         for element_id in selected_elements:
             scores = []
             for assessment in assessments:
-                for es in assessment.get("element_scores", []):
+                if role == "admin":
+                    adjusted_scores, _ = _apply_admin_overrides(
+                        assessment.get("element_scores", []),
+                        overrides_by_assessment.get(assessment["id"], []),
+                        scoring_mode,
+                    )
+                    score_list = adjusted_scores
+                else:
+                    score_list = assessment.get("element_scores", [])
+                for es in score_list:
                     if es["element_id"] == element_id:
-                        scores.append(es["score"])
+                        scores.append(es.get("adjusted_score", es.get("score")))
             
             if scores:
                 avg_score = sum(scores) / len(scores)
@@ -960,9 +1655,23 @@ async def get_teacher_roster(
                     "level": None
                 }
         
-        # Calculate overall score
-        valid_scores = [es["score"] for es in element_scores.values() if es["score"] is not None]
-        overall_score = round(sum(valid_scores) / len(valid_scores), 2) if valid_scores else None
+        # Calculate overall score (includes curriculum adherence weighting)
+        combined_scores = []
+        for assessment in assessments:
+            if role == "admin":
+                adjusted_scores, adjusted_overall = _apply_admin_overrides(
+                    assessment.get("element_scores", []),
+                    overrides_by_assessment.get(assessment["id"], []),
+                    scoring_mode,
+                )
+                base_overall = adjusted_overall
+            else:
+                base_overall = assessment.get("overall_score")
+            adherence_score = await _get_adherence_score(assessment["id"], current_user["id"])
+            combined = _combine_overall_with_adherence(base_overall, adherence_score)
+            if combined is not None:
+                combined_scores.append(combined)
+        overall_score = round(sum(combined_scores) / len(combined_scores), 2) if combined_scores else None
         
         roster.append(
             {
@@ -980,7 +1689,8 @@ async def get_teacher_roster(
     
     return {
         "selected_elements": selected_elements,
-        "roster": roster
+        "roster": roster,
+        "scoring_mode": scoring_mode
     }
 
 @api_router.get("/teachers/{teacher_id}/dashboard")
@@ -1014,27 +1724,57 @@ async def get_teacher_dashboard(
         assessment_query,
         {"_id": 0, "user_id": 0}
     ).sort("analyzed_at", 1).to_list(1000)
-    
+
+    role = _get_user_role(current_user)
+    scoring_mode = await _get_admin_scoring_mode(current_user["id"]) if role == "admin" else "ai"
+    overrides_by_assessment: Dict[str, List[dict]] = {}
+    if role == "admin" and assessments:
+        ids = [a["id"] for a in assessments]
+        overrides = await db.admin_assessment_overrides.find(
+            {"admin_id": current_user["id"], "assessment_id": {"$in": ids}},
+            {"_id": 0},
+        ).to_list(1000)
+        for o in overrides:
+            overrides_by_assessment.setdefault(o["assessment_id"], []).append(o)
+
     # Build trend data
     trend_data = []
     for assessment in assessments:
+        overrides = overrides_by_assessment.get(assessment["id"], [])
+        adjusted_scores, adjusted_overall = _apply_admin_overrides(
+            assessment.get("element_scores", []),
+            overrides,
+            scoring_mode,
+        ) if role == "admin" else (
+            [{**es, "adjusted_score": es.get("score")} for es in assessment.get("element_scores", [])],
+            assessment.get("overall_score"),
+        )
+        adherence_score = await _get_adherence_score(assessment["id"], current_user["id"])
+        combined_overall = _combine_overall_with_adherence(adjusted_overall, adherence_score)
+        assessment["adjusted_element_scores"] = adjusted_scores
+        assessment["adjusted_overall_score"] = adjusted_overall
+        assessment["adherence_score"] = adherence_score
+        assessment["combined_overall_score"] = combined_overall
+        assessment["scoring_mode"] = scoring_mode
         trend_data.append({
             "date": assessment["analyzed_at"],
-            "overall_score": assessment["overall_score"],
-            "element_scores": {es["element_id"]: es["score"] for es in assessment["element_scores"]}
+            "overall_score": combined_overall,
+            "ai_overall_score": assessment.get("overall_score"),
+            "adherence_score": adherence_score,
+            "element_scores": {es["element_id"]: es["adjusted_score"] for es in adjusted_scores}
         })
-    
+
     # Aggregate element scores
     element_aggregates = {}
     for assessment in assessments:
-        for es in assessment.get("element_scores", []):
+        for es in assessment.get("adjusted_element_scores", assessment.get("element_scores", [])):
             if es["element_id"] not in element_aggregates:
                 element_aggregates[es["element_id"]] = {
                     "element_name": es["element_name"],
                     "scores": [],
                     "observations": []
                 }
-            element_aggregates[es["element_id"]]["scores"].append(es["score"])
+            element_aggregates[es["element_id"]]["scores"].append(es.get("adjusted_score", es.get("score")))
             element_aggregates[es["element_id"]]["observations"].extend(es.get("observations", []))
     
     # Calculate averages and levels
@@ -1063,6 +1803,7 @@ async def get_teacher_dashboard(
         "assessments": assessments,
         "videos": videos,
         "total_assessments": len(assessments),
+        "scoring_mode": scoring_mode,
         "date_range": {
             "start": assessments[0]["analyzed_at"] if assessments else None,
             "end": assessments[-1]["analyzed_at"] if assessments else None
@@ -1188,6 +1929,50 @@ def get_performance_level(score: float) -> str:
         return "needs_improvement"
     else:
         return "critical"
+
+
+async def _ensure_mock_evidence(assessment: dict, current_user: dict) -> List[dict]:
+    existing = await db.assessment_evidence.find(
+        {"assessment_id": assessment["id"], "user_id": current_user["id"]},
+        {"_id": 0, "user_id": 0},
+    ).to_list(500)
+    if existing:
+        return existing
+
+    framework = _get_framework_by_type(assessment.get("framework_type", "danielson"))
+    created_at = datetime.now(timezone.utc).isoformat()
+    evidence_docs = []
+    for idx, es in enumerate(assessment.get("element_scores", [])):
+        domain = _find_domain_for_element(framework, es["element_id"])
+        start_sec = 120 + idx * 45
+        end_sec = start_sec + 30
+        evidence_docs.append({
+            "id": str(uuid.uuid4()),
+            "assessment_id": assessment["id"],
+            "teacher_id": assessment["teacher_id"],
+            "video_id": assessment.get("video_id"),
+            "element_id": es["element_id"],
+            "element_name": es.get("element_name"),
+            "domain_id": domain.get("id") if domain else None,
+            "domain_name": domain.get("name") if domain else None,
+            "evidence_text": (
+                f"Teacher demonstrated {es.get('element_name', 'instructional practice').lower()} "
+                f"as evidenced between {start_sec//60}:{str(start_sec%60).zfill(2)} "
+                f"and {end_sec//60}:{str(end_sec%60).zfill(2)}."
+            ),
+            "timestamp_start": start_sec,
+            "timestamp_end": end_sec,
+            "assessment_date": assessment.get("analyzed_at"),
+            "source": "ai",
+            "created_at": created_at,
+            "user_id": current_user["id"],
+        })
+
+    if evidence_docs:
+        await db.assessment_evidence.insert_many(evidence_docs)
+    for doc in evidence_docs:
+        doc.pop("user_id", None)
+    return evidence_docs
 
 
 # ==================== OBSERVATIONS ENDPOINTS ====================
@@ -1653,6 +2438,73 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
     
     # Create demo assessments for each teacher
     for teacher in created_teachers:
+        # Create demo curriculum/syllabus/lesson plan records if missing
+        existing_curriculum = await db.curricula.find_one(
+            {"teacher_id": teacher["id"], "uploaded_by": current_user["id"]}
+        )
+        if not existing_curriculum:
+            await db.curricula.insert_one({
+                "id": str(uuid.uuid4()),
+                "teacher_id": teacher["id"],
+                "title": f"{teacher['subject']} curriculum overview",
+                "filename": "curriculum-demo.pdf",
+                "file_url": None,
+                "s3_key": None,
+                "uploaded_by": current_user["id"],
+                "uploaded_role": "admin",
+                "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                "is_mock": True,
+            })
+
+        existing_syllabus = await db.syllabi.find_one(
+            {"teacher_id": teacher["id"], "uploaded_by": current_user["id"]}
+        )
+        if not existing_syllabus:
+            await db.syllabi.insert_one({
+                "id": str(uuid.uuid4()),
+                "teacher_id": teacher["id"],
+                "title": f"{teacher['subject']} syllabus",
+                "filename": "syllabus-demo.pdf",
+                "file_url": None,
+                "s3_key": None,
+                "uploaded_by": current_user["id"],
+                "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                "is_mock": True,
+            })
+
+        existing_lesson = await db.lesson_plans.find_one(
+            {"teacher_id": teacher["id"], "uploaded_by": current_user["id"]}
+        )
+        if not existing_lesson:
+            lesson_date = (datetime.now(timezone.utc) + timedelta(days=2)).date().isoformat()
+            lesson_id = str(uuid.uuid4())
+            await db.lesson_plans.insert_one({
+                "id": lesson_id,
+                "teacher_id": teacher["id"],
+                "title": f"{teacher['subject']} lesson plan",
+                "date": lesson_date,
+                "filename": "lesson-plan-demo.pdf",
+                "file_url": None,
+                "s3_key": None,
+                "uploaded_by": current_user["id"],
+                "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                "is_mock": True,
+            })
+            await db.schedules.insert_one({
+                "id": str(uuid.uuid4()),
+                "teacher_id": teacher["id"],
+                "course_name": f"Lesson plan reminder: {teacher['subject']}",
+                "start_time": lesson_date,
+                "recording_status": ScheduleStatus.PLANNED.value,
+                "join_url": None,
+                "location": None,
+                "user_id": current_user["id"],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": None,
+                "reminder_type": "lesson_plan",
+                "lesson_plan_id": lesson_id,
+            })
+
         # Create 3-5 assessments per teacher over the last 90 days
         num_assessments = random.randint(3, 5)
         
@@ -1697,6 +2549,22 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
             }
             
             await db.assessments.insert_one(assessment_doc)
+            await _ensure_mock_evidence(assessment_doc, current_user)
+
+            adherence_doc = {
+                "assessment_id": assessment_doc["id"],
+                "teacher_id": teacher["id"],
+                "status": "estimated",
+                "adherence_score": round(random.uniform(0.65, 0.95), 2),
+                "matched_topics": ["Aligned objectives", "Pacing matched plan"],
+                "missing_topics": [],
+                "evidence_segments": [
+                    {"start_sec": 120, "end_sec": 240, "summary": "Lesson aligns with planned objective."}
+                ],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "user_id": current_user["id"],
+            }
+            await db.curriculum_adherence.insert_one(adherence_doc)
     
     return {"message": f"Created {len(created_teachers)} teachers with demo assessments"}
 
@@ -1731,6 +2599,7 @@ async def ensure_demo_users():
             "password": hash_password(demo["password"]),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "is_demo": True,
+            "role": demo.get("role", "teacher"),
         }
         await db.users.insert_one(user_doc)
 

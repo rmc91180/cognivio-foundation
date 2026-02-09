@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { assessmentApi, scheduleApi, teacherApi } from "@/lib/api";
+import { assessmentApi, reportApi, scheduleApi, teacherApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { toast } from "sonner";
 import { Link } from "react-router-dom";
@@ -61,6 +61,7 @@ export function TeachersPage() {
   const [sortBy, setSortBy] = useState("name");
   const [expandedRows, setExpandedRows] = useState(new Set());
   const [showAddTeacher, setShowAddTeacher] = useState(false);
+  const [exportTeacherId, setExportTeacherId] = useState("");
 
   // Load filter preferences from localStorage
   useEffect(() => {
@@ -123,6 +124,13 @@ export function TeachersPage() {
       map[s.teacher_id].push(s);
     });
     return map;
+  }, [schedulesData]);
+
+  const reminderRows = useMemo(() => {
+    const reminders = (schedulesData ?? [])
+      .filter((s) => s.reminder_type === "lesson_plan")
+      .sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
+    return reminders.slice(0, 6);
   }, [schedulesData]);
 
   const departmentOptions = useMemo(() => {
@@ -213,6 +221,23 @@ export function TeachersPage() {
     [selectedElements]
   );
 
+  const downloadReport = async (format, params, filename) => {
+    try {
+      const res = await reportApi.export(format, params);
+      const blob = new Blob([res.data], { type: res.headers["content-type"] });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      toast.error("Failed to export report");
+    }
+  };
+
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
@@ -293,6 +318,42 @@ export function TeachersPage() {
           )}
 
           <div className={showAddTeacher ? "md:col-span-8" : "md:col-span-12"}>
+            {reminderRows.length > 0 && (
+              <div className="mb-6 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+                <div className="mb-2 text-sm font-semibold text-emerald-900">
+                  Upcoming lesson plan reminders
+                </div>
+                <div className="space-y-2 text-xs text-emerald-800">
+                  {reminderRows.map((r) => {
+                    const teacher = teachers.find((t) => t.id === r.teacher_id);
+                    return (
+                      <div
+                        key={r.id}
+                        className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-white px-3 py-2"
+                      >
+                        <div>
+                          <div className="font-medium text-emerald-900">
+                            {teacher?.name || "Teacher"}
+                          </div>
+                          <div className="text-[11px] text-emerald-700">
+                            {r.course_name}
+                          </div>
+                        </div>
+                        <div className="text-[11px] text-emerald-700">
+                          {r.start_time}
+                        </div>
+                        <Link
+                          to={`/teachers/${r.teacher_id}`}
+                          className="text-[11px] text-emerald-800 underline underline-offset-4"
+                        >
+                          View profile
+                        </Link>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             <div className="rounded-xl border border-slate-200 bg-white p-5">
               <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <h2 className="text-sm font-semibold text-slate-900">Roster</h2>
@@ -351,6 +412,92 @@ export function TeachersPage() {
                       <option value="score_high">Highest score</option>
                       <option value="trend">Trend</option>
                     </select>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span className="text-slate-500">Export teacher</span>
+                    <select
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                      value={exportTeacherId}
+                      onChange={(e) => setExportTeacherId(e.target.value)}
+                    >
+                      <option value="">Select teacher</option>
+                      {teachers.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!exportTeacherId) {
+                          toast.error("Select a teacher to export");
+                          return;
+                        }
+                        await downloadReport(
+                          "pdf",
+                          { teacher_id: exportTeacherId },
+                          "teacher-report.pdf"
+                        );
+                      }}
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
+                    >
+                      PDF
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!exportTeacherId) {
+                          toast.error("Select a teacher to export");
+                          return;
+                        }
+                        await downloadReport(
+                          "csv",
+                          { teacher_id: exportTeacherId },
+                          "teacher-report.csv"
+                        );
+                      }}
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
+                    >
+                      CSV
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span className="text-slate-500">Export unit</span>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!departmentFilter) {
+                          toast.error("Select a department to export");
+                          return;
+                        }
+                        await downloadReport(
+                          "pdf",
+                          { department: departmentFilter },
+                          "unit-report.pdf"
+                        );
+                      }}
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
+                    >
+                      PDF
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!departmentFilter) {
+                          toast.error("Select a department to export");
+                          return;
+                        }
+                        await downloadReport(
+                          "csv",
+                          { department: departmentFilter },
+                          "unit-report.csv"
+                        );
+                      }}
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
+                    >
+                      CSV
+                    </button>
                   </div>
                 </div>
               </div>

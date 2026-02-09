@@ -150,9 +150,10 @@ export function VideoPlayerPage() {
   const observations = observationsRes ?? [];
 
   const videoUrl =
-    videoRes && videoRes.stored_filename
+    videoRes?.file_url ||
+    (videoRes && videoRes.stored_filename
       ? `${process.env.REACT_APP_BACKEND_URL}/uploads/${videoRes.stored_filename}`
-      : null;
+      : null);
 
   return (
     <LayoutShell>

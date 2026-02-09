@@ -57,6 +57,8 @@ export const assessmentApi = {
     api.get(`/api/teachers/${teacherId}/summary-reflection`),
   saveTeacherSummaryReflection: (teacherId, payload) =>
     api.post(`/api/teachers/${teacherId}/summary-reflection`, payload),
+  createAdminOverride: (assessmentId, payload) =>
+    api.post(`/api/assessments/${assessmentId}/admin-override`, payload),
 };
 
 export const scheduleApi = {
@@ -83,6 +85,56 @@ export const frameworkApi = {
   createCustomDomain: (payload) => api.post("/api/frameworks/custom-domains", payload),
   deleteCustomDomain: (domainId) =>
     api.delete(`/api/frameworks/custom-domains/${domainId}`),
+};
+
+export const curriculumApi = {
+  upload: (formData) =>
+    api.post("/api/curricula", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+    }),
+  list: (teacherId) => api.get("/api/curricula", { params: { teacher_id: teacherId } }),
+};
+
+export const lessonPlanApi = {
+  upload: (formData) =>
+    api.post("/api/lesson-plans", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+    }),
+  list: (teacherId, date) =>
+    api.get("/api/lesson-plans", { params: { teacher_id: teacherId, date } }),
+};
+
+export const syllabusApi = {
+  upload: (formData) =>
+    api.post("/api/syllabi", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+    }),
+  list: (teacherId) => api.get("/api/syllabi", { params: { teacher_id: teacherId } }),
+};
+
+export const adherenceApi = {
+  get: (assessmentId) => api.get(`/api/assessments/${assessmentId}/curriculum-adherence`),
+};
+
+export const evidenceApi = {
+  get: (assessmentId) => api.get(`/api/assessments/${assessmentId}/evidence`),
+};
+
+export const reportApi = {
+  export: (format, params = {}) =>
+    api.post(
+      "/api/reports/export",
+      new URLSearchParams({ format, ...params }),
+      {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        responseType: "blob",
+      }
+    ),
+};
+
+export const adminApi = {
+  setScoringMode: (scoring_mode) =>
+    api.post("/api/admin/preferences/scoring-mode", { scoring_mode }),
 };
 
 export default api;

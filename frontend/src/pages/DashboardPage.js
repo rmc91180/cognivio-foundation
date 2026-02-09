@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { assessmentApi, frameworkApi } from "@/lib/api";
+import { assessmentApi, frameworkApi, reportApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import {
   Bar,
@@ -78,6 +78,7 @@ export function DashboardPage() {
   );
   const [selectedElementsState, setSelectedElementsState] = useState([]);
   const [showFocusDomains, setShowFocusDomains] = useState(true);
+  const [reportDepartment, setReportDepartment] = useState("");
 
   // Focus areas are driven by framework selection
   const seedDemoMutation = useMutation({
@@ -245,6 +246,31 @@ export function DashboardPage() {
     });
   }, [roster, previousRoster]);
 
+  const departmentOptions = useMemo(() => {
+    const set = new Set();
+    roster.forEach((t) => {
+      if (t.department) set.add(t.department);
+    });
+    return Array.from(set).sort();
+  }, [roster]);
+
+  const downloadReport = async (format, params, filename) => {
+    try {
+      const res = await reportApi.export(format, params);
+      const blob = new Blob([res.data], { type: res.headers["content-type"] });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      toast.error("Failed to export report");
+    }
+  };
+
   const achievements = useMemo(() => {
     if (!focusAreaData.length) return [];
     const sorted = [...focusAreaData]
@@ -292,6 +318,89 @@ export function DashboardPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
+            <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">
+                    Reports
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Export summary reports and drill back into the platform.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      downloadReport("pdf", {}, "summary-report.pdf")
+                    }
+                    className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                  >
+                    Summary PDF
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      downloadReport("csv", {}, "summary-report.csv")
+                    }
+                    className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                  >
+                    Summary CSV
+                  </button>
+                  <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-2">
+                    <label className="text-[11px] text-slate-500">
+                      Unit
+                    </label>
+                    <select
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+                      value={reportDepartment}
+                      onChange={(e) => setReportDepartment(e.target.value)}
+                    >
+                      <option value="">Select dept</option>
+                      {departmentOptions.map((dept) => (
+                        <option key={dept} value={dept}>
+                          {dept}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!reportDepartment) {
+                          toast.error("Select a department to export");
+                          return;
+                        }
+                        downloadReport(
+                          "pdf",
+                          { department: reportDepartment },
+                          "unit-report.pdf"
+                        );
+                      }}
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
+                    >
+                      PDF
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!reportDepartment) {
+                          toast.error("Select a department to export");
+                          return;
+                        }
+                        downloadReport(
+                          "csv",
+                          { department: reportDepartment },
+                          "unit-report.csv"
+                        );
+                      }}
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
+                    >
+                      CSV
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </section>
             <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                 <div>
