@@ -38,6 +38,7 @@ export function FrameworksPage() {
   const [selectedElements, setSelectedElements] = useState([]);
   const [customDomainName, setCustomDomainName] = useState("");
   const [customElementsInput, setCustomElementsInput] = useState("");
+  const [customElementInputs, setCustomElementInputs] = useState({});
 
   useEffect(() => {
     if (selectionRes?.framework_type) {
@@ -122,6 +123,19 @@ export function FrameworksPage() {
     },
     onError: () => {
       toast.error("Failed to delete custom domain");
+    },
+  });
+
+  const addCustomElementMutation = useMutation({
+    mutationFn: ({ domainId, name }) =>
+      frameworkApi.addCustomElement(domainId, { name }),
+    onSuccess: () => {
+      toast.success("Custom element added");
+      queryClient.invalidateQueries({ queryKey: ["custom-domains"] });
+      queryClient.invalidateQueries({ queryKey: ["framework-detail", "custom"] });
+    },
+    onError: () => {
+      toast.error("Failed to add element");
     },
   });
 
@@ -296,6 +310,38 @@ export function FrameworksPage() {
                               {(domain.elements || [])
                                 .map((el) => el.name)
                                 .join(", ")}
+                            </div>
+                            <div className="mt-2 flex flex-wrap items-center gap-2">
+                              <input
+                                type="text"
+                                value={customElementInputs[domain.id] || ""}
+                                onChange={(e) =>
+                                  setCustomElementInputs((prev) => ({
+                                    ...prev,
+                                    [domain.id]: e.target.value,
+                                  }))
+                                }
+                                placeholder="Add new element"
+                                className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const value = (customElementInputs[domain.id] || "").trim();
+                                  if (!value) return;
+                                  addCustomElementMutation.mutate({
+                                    domainId: domain.id,
+                                    name: value,
+                                  });
+                                  setCustomElementInputs((prev) => ({
+                                    ...prev,
+                                    [domain.id]: "",
+                                  }));
+                                }}
+                                className="rounded-md border border-emerald-300 px-2 py-1 text-[11px] text-emerald-700 hover:bg-emerald-50"
+                              >
+                                Add element
+                              </button>
                             </div>
                           </div>
                           <button

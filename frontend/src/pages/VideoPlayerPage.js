@@ -13,6 +13,8 @@ export function VideoPlayerPage() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const hasSeenkedFromUrl = useRef(false);
+  const [videoStatus, setVideoStatus] = useState("processing");
+  const [wsConnected, setWsConnected] = useState(false);
 
   // Parse timestamp from URL and seek to it when video loads
   useEffect(() => {
@@ -65,6 +67,37 @@ export function VideoPlayerPage() {
     queryKey: ["video", videoId],
     queryFn: () => videoApi.detail(videoId).then((r) => r.data),
   });
+
+  useEffect(() => {
+    if (videoRes?.status) {
+      setVideoStatus(videoRes.status);
+    }
+  }, [videoRes]);
+
+  useEffect(() => {
+    const token = localStorage.getItem("cognivio_token");
+    if (!videoId || !token || !process.env.REACT_APP_BACKEND_URL) return;
+    const base = process.env.REACT_APP_BACKEND_URL;
+    const wsBase = base.replace("https://", "wss://").replace("http://", "ws://");
+    const ws = new WebSocket(`${wsBase}/ws/videos/${videoId}?token=${token}`);
+    setWsConnected(true);
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.status) setVideoStatus(data.status);
+      } catch (err) {
+        // ignore parse errors
+      }
+    };
+    ws.onclose = () => {
+      setWsConnected(false);
+    };
+    ws.onerror = () => {
+      setWsConnected(false);
+    };
+    return () => ws.close();
+  }, [videoId]);
 
   const { data: observationsRes } = useQuery({
     queryKey: ["video-observations", videoId],
@@ -161,6 +194,14 @@ export function VideoPlayerPage() {
         <h1 className="mb-4 font-heading text-2xl font-semibold text-slate-900">
           Lesson recording
         </h1>
+        <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-slate-600">
+          <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] text-slate-600">
+            Status: {videoStatus || "unknown"}
+          </span>
+          <span className="text-[11px] text-slate-400">
+            {wsConnected ? "Live updates connected" : "Live updates offline"}
+          </span>
+        </div>
         <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
           <section className="md:col-span-7 space-y-3">
             <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">

@@ -34,6 +34,11 @@ export const teacherApi = {
     api.get(`/api/teachers/${id}/peer-recommendations`),
 };
 
+export const schoolApi = {
+  list: () => api.get("/api/schools"),
+  create: (payload) => api.post("/api/schools", payload),
+};
+
 export const videoApi = {
   upload: (formData) =>
     api.post("/api/videos/upload", formData, {
@@ -85,6 +90,8 @@ export const frameworkApi = {
   saveSelection: (payload) => api.post("/api/frameworks/selection", payload),
   listCustomDomains: () => api.get("/api/frameworks/custom-domains"),
   createCustomDomain: (payload) => api.post("/api/frameworks/custom-domains", payload),
+  addCustomElement: (domainId, payload) =>
+    api.post(`/api/frameworks/custom-domains/${domainId}/elements`, payload),
   deleteCustomDomain: (domainId) =>
     api.delete(`/api/frameworks/custom-domains/${domainId}`),
 };
@@ -132,6 +139,17 @@ export const reportApi = {
         responseType: "blob",
       }
     ),
+};
+
+export const actionPlanApi = {
+  get: (teacherId) => api.get(`/api/teachers/${teacherId}/action-plan`),
+  save: (teacherId, payload) =>
+    api.post(`/api/teachers/${teacherId}/action-plan`, payload),
+};
+
+export const gradebookApi = {
+  list: () => api.get("/api/integrations/gradebook"),
+  connect: (payload) => api.post("/api/integrations/gradebook", payload),
 };
 
 export const adminApi = {

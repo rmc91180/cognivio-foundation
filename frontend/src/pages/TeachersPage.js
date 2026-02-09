@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { assessmentApi, reportApi, scheduleApi, teacherApi } from "@/lib/api";
+import { assessmentApi, reportApi, scheduleApi, teacherApi, schoolApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { toast } from "sonner";
 import { Link } from "react-router-dom";
@@ -24,13 +24,20 @@ export function TeachersPage() {
     queryFn: () => scheduleApi.list().then((res) => res.data),
   });
 
+  const { data: schoolsData } = useQuery({
+    queryKey: ["schools"],
+    queryFn: () => schoolApi.list().then((res) => res.data),
+  });
+
   const [form, setForm] = useState({
     name: "",
     email: "",
     subject: "",
     grade_level: "",
     department: "",
+    school_id: "",
   });
+  const [newSchoolName, setNewSchoolName] = useState("");
 
   const createMutation = useMutation({
     mutationFn: teacherApi.create,
@@ -43,10 +50,23 @@ export function TeachersPage() {
         subject: "",
         grade_level: "",
         department: "",
+        school_id: "",
       });
     },
     onError: (error) => {
       toast.error(error?.response?.data?.detail || "Failed to create teacher");
+    },
+  });
+
+  const createSchoolMutation = useMutation({
+    mutationFn: schoolApi.create,
+    onSuccess: () => {
+      toast.success("School added");
+      setNewSchoolName("");
+      queryClient.invalidateQueries({ queryKey: ["schools"] });
+    },
+    onError: () => {
+      toast.error("Failed to add school");
     },
   });
 
@@ -128,7 +148,7 @@ export function TeachersPage() {
 
   const reminderRows = useMemo(() => {
     const reminders = (schedulesData ?? [])
-      .filter((s) => s.reminder_type === "lesson_plan")
+      .filter((s) => ["lesson_plan", "action_plan"].includes(s.reminder_type))
       .sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
     return reminders.slice(0, 6);
   }, [schedulesData]);
@@ -305,6 +325,44 @@ export function TeachersPage() {
                       setForm((f) => ({ ...f, department: e.target.value }))
                     }
                   />
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600">
+                      School
+                    </label>
+                    <select
+                      className="mt-1 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                      value={form.school_id}
+                      onChange={(e) =>
+                        setForm((f) => ({ ...f, school_id: e.target.value }))
+                      }
+                    >
+                      <option value="">Select school</option>
+                      {(schoolsData || []).map((school) => (
+                        <option key={school.id} value={school.id}>
+                          {school.name}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="mt-2 flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={newSchoolName}
+                        onChange={(e) => setNewSchoolName(e.target.value)}
+                        placeholder="Add new school"
+                        className="flex-1 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!newSchoolName.trim()) return;
+                          createSchoolMutation.mutate({ name: newSchoolName.trim() });
+                        }}
+                        className="rounded-md border border-slate-200 px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
+                      >
+                        Add
+                      </button>
+                    </div>
+                  </div>
                   <button
                     type="submit"
                     disabled={createMutation.isPending}
@@ -321,7 +379,7 @@ export function TeachersPage() {
             {reminderRows.length > 0 && (
               <div className="mb-6 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
                 <div className="mb-2 text-sm font-semibold text-emerald-900">
-                  Upcoming lesson plan reminders
+                  Upcoming reminders
                 </div>
                 <div className="space-y-2 text-xs text-emerald-800">
                   {reminderRows.map((r) => {
@@ -337,6 +395,10 @@ export function TeachersPage() {
                           </div>
                           <div className="text-[11px] text-emerald-700">
                             {r.course_name}
+                          </div>
+                          <div className="mt-1 text-[10px] text-emerald-700">
+                            {r.reminder_type === "action_plan" && "Action plan"}
+                            {r.reminder_type === "lesson_plan" && "Lesson plan"}
                           </div>
                         </div>
                         <div className="text-[11px] text-emerald-700">

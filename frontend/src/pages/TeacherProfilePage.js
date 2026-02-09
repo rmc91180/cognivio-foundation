@@ -13,6 +13,7 @@ import {
   evidenceApi,
   reportApi,
   adminApi,
+  actionPlanApi,
 } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { PeerRecommendations } from "@/components/PeerRecommendations";
@@ -77,6 +78,16 @@ export function TeacherProfilePage() {
   const { data: syllabiRes } = useQuery({
     queryKey: ["syllabi", teacherId],
     queryFn: () => syllabusApi.list(teacherId).then((r) => r.data),
+  });
+
+  const { data: actionPlanRes } = useQuery({
+    queryKey: ["action-plan", teacherId],
+    queryFn: () => actionPlanApi.get(teacherId).then((r) => r.data),
+  });
+
+  const { data: schedulesRes } = useQuery({
+    queryKey: ["schedules", teacherId],
+    queryFn: () => scheduleApi.list({ teacher_id: teacherId }).then((r) => r.data),
   });
 
   const saveReflectionMutation = useMutation({
@@ -169,6 +180,18 @@ export function TeacherProfilePage() {
     },
   });
 
+  const saveActionPlanMutation = useMutation({
+    mutationFn: (payload) => actionPlanApi.save(teacherId, payload),
+    onSuccess: () => {
+      toast.success("Action plan saved");
+      queryClient.invalidateQueries({ queryKey: ["action-plan", teacherId] });
+      queryClient.invalidateQueries({ queryKey: ["schedules", teacherId] });
+    },
+    onError: () => {
+      toast.error("Failed to save action plan");
+    },
+  });
+
   const [selfReflection, setSelfReflection] = useState("");
   const [actionsTaken, setActionsTaken] = useState("");
   const [nextStepsNote, setNextStepsNote] = useState("");
@@ -182,6 +205,15 @@ export function TeacherProfilePage() {
   const [syllabusTitle, setSyllabusTitle] = useState("");
   const [scoringMode, setScoringMode] = useState("override");
   const [overrideScores, setOverrideScores] = useState({});
+  const [actionPlanGoals, setActionPlanGoals] = useState([]);
+  const [actionPlanNotes, setActionPlanNotes] = useState("");
+
+  const makeGoalId = () => {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) {
+      return crypto.randomUUID();
+    }
+    return `goal_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+  };
 
   const nextLessonPlan = useMemo(() => {
     const plans = lessonPlansRes?.lesson_plans || [];
@@ -217,6 +249,13 @@ export function TeacherProfilePage() {
     if (!teacherId) return;
     localStorage.setItem(`next-steps-${teacherId}`, nextStepsNote || "");
   }, [nextStepsNote, teacherId]);
+
+  React.useEffect(() => {
+    if (actionPlanRes) {
+      setActionPlanGoals(actionPlanRes.goals || []);
+      setActionPlanNotes(actionPlanRes.notes || "");
+    }
+  }, [actionPlanRes]);
 
   const elementSummary = dashboardRes?.element_summary ?? [];
   const videos = dashboardRes?.videos ?? [];
@@ -273,6 +312,14 @@ export function TeacherProfilePage() {
     });
     return map;
   }, [evidenceRes]);
+
+  const actionPlanReminders = useMemo(() => {
+    const schedules = schedulesRes ?? [];
+    return schedules
+      .filter((s) => s.reminder_type === "action_plan")
+      .sort((a, b) => new Date(a.start_time) - new Date(b.start_time))
+      .slice(0, 5);
+  }, [schedulesRes]);
 
   const overrideByElement = useMemo(() => {
     const map = {};
@@ -331,6 +378,23 @@ export function TeacherProfilePage() {
     } catch (error) {
       toast.error("Failed to export report");
     }
+  };
+
+  const handleSaveActionPlan = () => {
+    saveActionPlanMutation.mutate({
+      goals: actionPlanGoals,
+      notes: actionPlanNotes,
+    });
+  };
+
+  const updateGoal = (goalId, patch) => {
+    setActionPlanGoals((prev) =>
+      prev.map((goal) => (goal.id === goalId ? { ...goal, ...patch } : goal))
+    );
+  };
+
+  const removeGoal = (goalId) => {
+    setActionPlanGoals((prev) => prev.filter((goal) => goal.id !== goalId));
   };
 
   return (
@@ -517,6 +581,126 @@ export function TeacherProfilePage() {
                   Save reflections
                 </button>
               </form>
+            </section>
+
+            <section className="rounded-xl border border-slate-200 bg-white p-5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">
+                    Action plan & reminders
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Track concrete goals and receive reminders on due dates.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleSaveActionPlan}
+                  disabled={saveActionPlanMutation.isPending}
+                  className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90 disabled:opacity-60"
+                >
+                  Save action plan
+                </button>
+              </div>
+
+              <div className="mt-4 space-y-3 text-xs">
+                {actionPlanGoals.map((goal) => (
+                  <div
+                    key={goal.id}
+                    className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <input
+                        type="text"
+                        value={goal.title}
+                        onChange={(e) => updateGoal(goal.id, { title: e.target.value })}
+                        placeholder="Goal title"
+                        className="flex-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800"
+                      />
+                      <select
+                        value={goal.status || "planned"}
+                        onChange={(e) => updateGoal(goal.id, { status: e.target.value })}
+                        className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+                      >
+                        <option value="planned">Planned</option>
+                        <option value="in_progress">In progress</option>
+                        <option value="complete">Complete</option>
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => removeGoal(goal.id)}
+                        className="text-[11px] text-slate-500 hover:text-slate-700"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <textarea
+                      rows={2}
+                      value={goal.description || ""}
+                      onChange={(e) =>
+                        updateGoal(goal.id, { description: e.target.value })
+                      }
+                      placeholder="Why this matters and what to do next"
+                      className="mt-2 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800"
+                    />
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                      <label className="text-slate-500">Due date</label>
+                      <input
+                        type="date"
+                        value={goal.due_date || ""}
+                        onChange={(e) => updateGoal(goal.id, { due_date: e.target.value })}
+                        className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+                      />
+                    </div>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() =>
+                    setActionPlanGoals((prev) => [
+                      ...prev,
+                      {
+                        id: makeGoalId(),
+                        title: "",
+                        description: "",
+                        due_date: "",
+                        status: "planned",
+                      },
+                    ])
+                  }
+                  className="inline-flex items-center rounded-md border border-dashed border-slate-200 px-3 py-2 text-[11px] text-slate-600 hover:bg-slate-50"
+                >
+                  Add goal
+                </button>
+                <div>
+                  <label className="mb-1 block text-[11px] font-medium text-slate-600">
+                    Action plan notes
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={actionPlanNotes}
+                    onChange={(e) => setActionPlanNotes(e.target.value)}
+                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800"
+                    placeholder="Summary notes, ownership, and follow-up cadence."
+                  />
+                </div>
+              </div>
+
+              {actionPlanReminders.length > 0 && (
+                <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-600">
+                  <div className="font-semibold text-slate-700">
+                    Upcoming action plan reminders
+                  </div>
+                  <ul className="mt-1 space-y-1">
+                    {actionPlanReminders.map((reminder) => (
+                      <li key={reminder.id}>
+                        {new Date(reminder.start_time).toLocaleDateString()} •{" "}
+                        {reminder.course_name}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </section>
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
@@ -935,6 +1119,11 @@ export function TeacherProfilePage() {
                           <div className="text-[11px] text-slate-500">
                             {es.assessment_count} assessments
                           </div>
+                          {typeof es.school_average === "number" && (
+                            <div className="text-[11px] text-slate-500">
+                              School avg: {es.school_average.toFixed(1)}/10
+                            </div>
+                          )}
                         </div>
                         <div className="relative">
                           <span
@@ -949,6 +1138,23 @@ export function TeacherProfilePage() {
                             {es.average_score.toFixed(1)}/10
                           </span>
                         </div>
+                      </div>
+                      <div className="mt-2 text-[10px] text-slate-500">
+                        {es.trend_direction === "improving" && (
+                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-emerald-700">
+                            Improving
+                          </span>
+                        )}
+                        {es.trend_direction === "declining" && (
+                          <span className="rounded-full bg-rose-100 px-2 py-0.5 text-rose-700">
+                            Declining
+                          </span>
+                        )}
+                        {es.trend_direction === "stable" && (
+                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">
+                            Stable
+                          </span>
+                        )}
                       </div>
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
                         <button

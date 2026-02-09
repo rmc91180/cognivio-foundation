@@ -29,3 +29,12 @@ root.render(
   </React.StrictMode>
 );
 
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/service-worker.js").catch(() => {
+      // eslint-disable-next-line no-console
+      console.warn("Service worker registration failed");
+    });
+  });
+}
+

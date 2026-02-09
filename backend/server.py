@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks, Depends, Response
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks, Depends, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
@@ -27,7 +27,6 @@ except Exception as exc:
 import aiofiles
 import asyncio
 from enum import Enum
-from fastapi import UploadFile
 try:
     from reportlab.pdfgen import canvas
 except Exception:
@@ -435,6 +434,7 @@ class TeacherCreate(BaseModel):
     subject: str
     grade_level: str
     department: Optional[str] = None
+    school_id: Optional[str] = None
 
 class TeacherResponse(BaseModel):
     id: str
@@ -443,6 +443,19 @@ class TeacherResponse(BaseModel):
     subject: str
     grade_level: str
     department: Optional[str] = None
+    school_id: Optional[str] = None
+    created_at: str
+
+
+class SchoolCreate(BaseModel):
+    name: str
+    district_name: Optional[str] = None
+
+
+class SchoolResponse(BaseModel):
+    id: str
+    name: str
+    district_name: Optional[str] = None
     created_at: str
 
 class FrameworkSelection(BaseModel):
@@ -589,6 +602,9 @@ class Schedule(BaseModel):
     recording_status: ScheduleStatus
     join_url: Optional[str] = None
     location: Optional[str] = None
+    reminder_type: Optional[str] = None
+    reminder_context: Optional[Dict[str, Any]] = None
+    reminder_note: Optional[str] = None
 
 
 class ScheduleCreate(BaseModel):
@@ -597,11 +613,33 @@ class ScheduleCreate(BaseModel):
     start_time: datetime
     join_url: Optional[str] = None
     location: Optional[str] = None
+    reminder_type: Optional[str] = None
+    reminder_context: Optional[Dict[str, Any]] = None
+    reminder_note: Optional[str] = None
 
 
 class ScheduleUpdate(BaseModel):
     recording_status: Optional[ScheduleStatus] = None
     join_url: Optional[str] = None
+    reminder_note: Optional[str] = None
+
+
+class ActionPlanGoal(BaseModel):
+    id: str
+    title: str
+    description: Optional[str] = None
+    due_date: Optional[str] = None
+    status: Optional[str] = "planned"
+    evidence_links: Optional[List[str]] = None
+
+
+class ActionPlan(BaseModel):
+    id: str
+    teacher_id: str
+    goals: List[ActionPlanGoal]
+    notes: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 class SummaryReflection(BaseModel):
@@ -616,6 +654,32 @@ class SummaryReflection(BaseModel):
 class SummaryReflectionUpsert(BaseModel):
     self_reflection: Optional[str] = None
     actions_taken: Optional[str] = None
+
+
+class NotificationRecord(BaseModel):
+    id: str
+    teacher_id: Optional[str] = None
+    notification_type: str
+    title: str
+    message: str
+    channel: str = "email"
+    status: str = "queued"
+    created_at: str
+    read_at: Optional[str] = None
+
+
+class GradebookIntegrationCreate(BaseModel):
+    provider: str  # "powerschool" | "canvas"
+    api_key: Optional[str] = None
+    status: Optional[str] = "connected"
+
+
+class GradebookIntegrationResponse(BaseModel):
+    id: str
+    provider: str
+    status: str
+    created_at: str
+    updated_at: Optional[str] = None
 
 # ==================== AUTH HELPERS ====================
 def hash_password(password: str) -> str:
@@ -770,6 +834,31 @@ async def create_custom_domain(
     return {"domain": domain_doc}
 
 
+@api_router.post("/frameworks/custom-domains/{domain_id}/elements")
+async def add_custom_element(
+    domain_id: str,
+    payload: CustomElementCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    domain = await db.custom_domains.find_one(
+        {"id": domain_id, "user_id": current_user["id"]},
+        {"_id": 0},
+    )
+    if not domain:
+        raise HTTPException(status_code=404, detail="Domain not found")
+    element_id = f"{domain_id}-{uuid.uuid4().hex[:6]}"
+    element = {"id": element_id, "name": payload.name}
+    await db.custom_domains.update_one(
+        {"id": domain_id, "user_id": current_user["id"]},
+        {"$push": {"elements": element}},
+    )
+    domain = await db.custom_domains.find_one(
+        {"id": domain_id, "user_id": current_user["id"]},
+        {"_id": 0, "user_id": 0},
+    )
+    return {"domain": domain}
+
+
 @api_router.delete("/frameworks/custom-domains/{domain_id}")
 async def delete_custom_domain(
     domain_id: str, current_user: dict = Depends(get_current_user)
@@ -832,6 +921,12 @@ async def get_current_selection(current_user: dict = Depends(get_current_user)):
 @api_router.post("/teachers", response_model=TeacherResponse)
 async def create_teacher(teacher: TeacherCreate, current_user: dict = Depends(get_current_user)):
     teacher_id = str(uuid.uuid4())
+    if teacher.school_id:
+        school = await db.schools.find_one(
+            {"id": teacher.school_id, "user_id": current_user["id"]}
+        )
+        if not school:
+            raise HTTPException(status_code=404, detail="School not found")
     teacher_doc = {
         "id": teacher_id,
         "name": teacher.name,
@@ -839,6 +934,7 @@ async def create_teacher(teacher: TeacherCreate, current_user: dict = Depends(ge
         "subject": teacher.subject,
         "grade_level": teacher.grade_level,
         "department": teacher.department,
+        "school_id": teacher.school_id,
         "created_by": current_user["id"],
         "created_at": datetime.now(timezone.utc).isoformat()
     }
@@ -852,6 +948,33 @@ async def get_teachers(current_user: dict = Depends(get_current_user)):
         {"_id": 0, "created_by": 0}
     ).to_list(1000)
     return [TeacherResponse(**t) for t in teachers]
+
+
+@api_router.post("/schools", response_model=SchoolResponse)
+async def create_school(
+    payload: SchoolCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    school_id = str(uuid.uuid4())
+    doc = {
+        "id": school_id,
+        "name": payload.name,
+        "district_name": payload.district_name,
+        "user_id": current_user["id"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.schools.insert_one(doc)
+    doc.pop("user_id", None)
+    return SchoolResponse(**doc)
+
+
+@api_router.get("/schools", response_model=List[SchoolResponse])
+async def list_schools(current_user: dict = Depends(get_current_user)):
+    schools = await db.schools.find(
+        {"user_id": current_user["id"]},
+        {"_id": 0, "user_id": 0},
+    ).to_list(1000)
+    return [SchoolResponse(**s) for s in schools]
 
 @api_router.get("/teachers/{teacher_id}", response_model=TeacherResponse)
 async def get_teacher(teacher_id: str, current_user: dict = Depends(get_current_user)):
@@ -975,6 +1098,59 @@ async def get_video_status(video_id: str, current_user: dict = Depends(get_curre
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     return {"status": video.get("status", "unknown")}
+
+
+@app.websocket("/ws/videos/{video_id}")
+async def video_status_ws(websocket: WebSocket, video_id: str):
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=1008)
+        return
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = payload.get("user_id")
+        if not user_id:
+            await websocket.close(code=1008)
+            return
+    except jwt.ExpiredSignatureError:
+        await websocket.close(code=1008)
+        return
+    except jwt.InvalidTokenError:
+        await websocket.close(code=1008)
+        return
+
+    video = await db.videos.find_one(
+        {"id": video_id, "uploaded_by": user_id},
+        {"_id": 0},
+    )
+    if not video:
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    last_status = None
+    try:
+        while True:
+            video = await db.videos.find_one(
+                {"id": video_id, "uploaded_by": user_id},
+                {"_id": 0},
+            )
+            if not video:
+                break
+            status = video.get("status", "unknown")
+            if status != last_status:
+                await websocket.send_json({"status": status})
+                last_status = status
+            if status in {"completed", "failed"}:
+                break
+            await asyncio.sleep(2)
+    except WebSocketDisconnect:
+        return
+    except Exception:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 # ==================== CURRICULUM & PLANS ====================
 @api_router.post("/curricula", response_model=CurriculumUploadResponse)
@@ -1487,11 +1663,37 @@ async def export_summary_report(
         pdf.setTitle("Cognivio Summary Report")
         pdf.drawString(50, 800, "Cognivio Summary Report")
         pdf.drawString(50, 785, f"Generated: {datetime.now(timezone.utc).isoformat()}")
-        y = 760
+        if teacher_id:
+            pdf.drawString(50, 770, f"Teacher filter: {teacher_id}")
+        if department:
+            pdf.drawString(50, 755, f"Department filter: {department}")
+        y = 735
         for row in rows[:30]:
-            line = f"{row['teacher_name']} | {row['subject']} | {row['grade_level']} | {row['latest_score']}"
-            pdf.drawString(50, y, line)
-            y -= 14
+            pdf.setFont("Helvetica-Bold", 10)
+            pdf.drawString(
+                50,
+                y,
+                f"{row['teacher_name']} ({row['department'] or 'No dept'})",
+            )
+            y -= 12
+            pdf.setFont("Helvetica", 9)
+            pdf.drawString(
+                50,
+                y,
+                f"Subject: {row['subject'] or 'N/A'} | Grade: {row['grade_level'] or 'N/A'}",
+            )
+            y -= 12
+            pdf.drawString(
+                50,
+                y,
+                f"Latest score: {row['latest_score']} | Avg score: {row['average_score']} | Assessments: {row['assessment_count']} | Evidence: {row['evidence_count']}",
+            )
+            y -= 12
+            if row.get("detail_url"):
+                pdf.drawString(50, y, f"Detail: {row['detail_url']}")
+                y -= 14
+            else:
+                y -= 8
             if y < 60:
                 pdf.showPage()
                 y = 800
@@ -1842,18 +2044,86 @@ async def get_teacher_dashboard(
                 }
             element_aggregates[es["element_id"]]["scores"].append(es.get("adjusted_score", es.get("score")))
             element_aggregates[es["element_id"]]["observations"].extend(es.get("observations", []))
+
+    # Compute school averages for comparative analytics
+    school_query: Dict[str, Any] = {"user_id": current_user["id"]}
+    if start_date and end_date:
+        school_query["analyzed_at"] = {
+            "$gte": start_date.isoformat(),
+            "$lte": end_date.isoformat(),
+        }
+    school_assessments = await db.assessments.find(
+        school_query,
+        {"_id": 0, "user_id": 0}
+    ).to_list(2000)
+
+    overrides_by_assessment_all: Dict[str, List[dict]] = {}
+    if role == "admin" and school_assessments:
+        ids = [a["id"] for a in school_assessments]
+        overrides = await db.admin_assessment_overrides.find(
+            {"admin_id": current_user["id"], "assessment_id": {"$in": ids}},
+            {"_id": 0},
+        ).to_list(2000)
+        for o in overrides:
+            overrides_by_assessment_all.setdefault(o["assessment_id"], []).append(o)
+
+    school_element_scores: Dict[str, List[float]] = {}
+    for assessment in school_assessments:
+        if role == "admin":
+            overrides = overrides_by_assessment_all.get(assessment["id"], [])
+            adjusted_scores, _ = _apply_admin_overrides(
+                assessment.get("element_scores", []),
+                overrides,
+                scoring_mode,
+            )
+            scores = adjusted_scores
+        else:
+            scores = assessment.get("element_scores", [])
+        for es in scores:
+            score = es.get("adjusted_score", es.get("score"))
+            if score is None:
+                continue
+            school_element_scores.setdefault(es["element_id"], []).append(score)
+
+    trend_by_element: Dict[str, str] = {}
+    for element_id in element_aggregates.keys():
+        first = None
+        last = None
+        for point in trend_data:
+            value = point.get("element_scores", {}).get(element_id)
+            if value is None:
+                continue
+            if first is None:
+                first = value
+            last = value
+        if first is None or last is None:
+            trend_by_element[element_id] = "stable"
+        else:
+            delta = last - first
+            if delta > 0.2:
+                trend_by_element[element_id] = "improving"
+            elif delta < -0.2:
+                trend_by_element[element_id] = "declining"
+            else:
+                trend_by_element[element_id] = "stable"
     
     # Calculate averages and levels
     element_summary = []
     for element_id, data in element_aggregates.items():
         avg_score = sum(data["scores"]) / len(data["scores"]) if data["scores"] else 0
+        school_scores = school_element_scores.get(element_id, [])
+        school_avg = (
+            round(sum(school_scores) / len(school_scores), 2) if school_scores else None
+        )
         element_summary.append({
             "element_id": element_id,
             "element_name": data["element_name"],
             "average_score": round(avg_score, 2),
             "level": get_performance_level(avg_score),
             "assessment_count": len(data["scores"]),
-            "recent_observations": data["observations"][-5:] if data["observations"] else []
+            "recent_observations": data["observations"][-5:] if data["observations"] else [],
+            "school_average": school_avg,
+            "trend_direction": trend_by_element.get(element_id, "stable"),
         })
     
     # Get videos
@@ -1875,6 +2145,137 @@ async def get_teacher_dashboard(
             "end": assessments[-1]["analyzed_at"] if assessments else None
         }
     }
+
+
+@api_router.get("/teachers/{teacher_id}/action-plan", response_model=ActionPlan)
+async def get_action_plan(
+    teacher_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await db.teachers.find_one(
+        {"id": teacher_id, "created_by": current_user["id"]},
+        {"_id": 0, "created_by": 0}
+    )
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+
+    plan = await db.action_plans.find_one(
+        {"teacher_id": teacher_id, "user_id": current_user["id"]},
+        {"_id": 0, "user_id": 0},
+    )
+    if not plan:
+        return ActionPlan(
+            id="",
+            teacher_id=teacher_id,
+            goals=[],
+            notes=None,
+            created_at=None,
+            updated_at=None,
+        )
+    return ActionPlan(**plan)
+
+
+class ActionPlanUpsert(BaseModel):
+    goals: List[ActionPlanGoal]
+    notes: Optional[str] = None
+
+
+@api_router.post("/teachers/{teacher_id}/action-plan", response_model=ActionPlan)
+async def save_action_plan(
+    teacher_id: str,
+    payload: ActionPlanUpsert,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await db.teachers.find_one(
+        {"id": teacher_id, "created_by": current_user["id"]},
+        {"_id": 0, "created_by": 0}
+    )
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+
+    existing = await db.action_plans.find_one(
+        {"teacher_id": teacher_id, "user_id": current_user["id"]},
+        {"_id": 0},
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    if existing:
+        update_doc = {
+            "goals": [goal.dict() for goal in payload.goals],
+            "notes": payload.notes,
+            "updated_at": now,
+        }
+        await db.action_plans.update_one(
+            {"id": existing["id"]}, {"$set": update_doc}
+        )
+        plan_id = existing["id"]
+        created_at = existing.get("created_at")
+    else:
+        plan_id = str(uuid.uuid4())
+        created_at = now
+        doc = {
+            "id": plan_id,
+            "teacher_id": teacher_id,
+            "goals": [goal.dict() for goal in payload.goals],
+            "notes": payload.notes,
+            "user_id": current_user["id"],
+            "created_at": created_at,
+            "updated_at": None,
+        }
+        await db.action_plans.insert_one(doc)
+
+    # Refresh action plan reminders
+    await db.schedules.delete_many(
+        {
+            "teacher_id": teacher_id,
+            "user_id": current_user["id"],
+            "reminder_type": "action_plan",
+        }
+    )
+    for goal in payload.goals:
+        if not goal.due_date:
+            continue
+        try:
+            due_dt = datetime.fromisoformat(goal.due_date)
+        except ValueError:
+            try:
+                due_dt = datetime.fromisoformat(f"{goal.due_date}T09:00:00")
+            except ValueError:
+                continue
+        reminder = {
+            "id": str(uuid.uuid4()),
+            "teacher_id": teacher_id,
+            "course_name": f"Action Plan: {goal.title}",
+            "start_time": due_dt.isoformat(),
+            "recording_status": ScheduleStatus.PLANNED.value,
+            "join_url": None,
+            "location": None,
+            "reminder_type": "action_plan",
+            "reminder_context": {
+                "goal_id": goal.id,
+                "goal_title": goal.title,
+                "plan_id": plan_id,
+            },
+            "reminder_note": goal.description,
+            "user_id": current_user["id"],
+            "created_at": now,
+            "updated_at": None,
+        }
+        await db.schedules.insert_one(reminder)
+        await _enqueue_notification(
+            current_user,
+            teacher_id,
+            "action_plan",
+            f"Action plan reminder: {goal.title}",
+            f"Goal due {due_dt.date().isoformat()}",
+        )
+
+    result = await db.action_plans.find_one(
+        {"id": plan_id, "user_id": current_user["id"]},
+        {"_id": 0, "user_id": 0},
+    )
+    if not result:
+        raise HTTPException(status_code=500, detail="Action plan save failed")
+    return ActionPlan(**result)
 
 @api_router.get("/teachers/{teacher_id}/peer-recommendations")
 async def get_peer_recommendations(
@@ -2142,11 +2543,22 @@ async def create_schedule(
         "recording_status": ScheduleStatus.PLANNED.value,
         "join_url": payload.join_url,
         "location": payload.location,
+        "reminder_type": payload.reminder_type,
+        "reminder_context": payload.reminder_context,
+        "reminder_note": payload.reminder_note,
         "user_id": current_user["id"],
         "created_at": now,
         "updated_at": None,
     }
     await db.schedules.insert_one(doc)
+    if payload.reminder_type:
+        await _enqueue_notification(
+            current_user,
+            payload.teacher_id,
+            payload.reminder_type,
+            f"Reminder: {payload.course_name}",
+            f"Reminder scheduled for {payload.start_time.isoformat()}",
+        )
     doc.pop("_id", None)
     doc.pop("user_id", None)
     return Schedule(**doc)
@@ -2180,6 +2592,8 @@ async def update_schedule(
         update_fields["recording_status"] = payload.recording_status.value
     if payload.join_url is not None:
         update_fields["join_url"] = payload.join_url
+    if payload.reminder_note is not None:
+        update_fields["reminder_note"] = payload.reminder_note
 
     result = await db.schedules.find_one_and_update(
         {"id": schedule_id, "user_id": current_user["id"]},
@@ -2191,6 +2605,113 @@ async def update_schedule(
     result.pop("_id", None)
     result.pop("user_id", None)
     return Schedule(**result)
+
+
+# ==================== NOTIFICATION ENDPOINTS ====================
+@api_router.get("/notifications", response_model=List[NotificationRecord])
+async def list_notifications(
+    unread_only: Optional[bool] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    query: Dict[str, Any] = {"user_id": current_user["id"]}
+    if unread_only:
+        query["read_at"] = None
+    notifications = await db.notifications.find(
+        query,
+        {"_id": 0, "user_id": 0},
+    ).sort("created_at", -1).to_list(200)
+    return [NotificationRecord(**n) for n in notifications]
+
+
+@api_router.post("/notifications/{notification_id}/read", response_model=NotificationRecord)
+async def mark_notification_read(
+    notification_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    result = await db.notifications.find_one_and_update(
+        {"id": notification_id, "user_id": current_user["id"]},
+        {"$set": {"read_at": datetime.now(timezone.utc).isoformat()}},
+        return_document=True,
+        projection={"_id": 0, "user_id": 0},
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return NotificationRecord(**result)
+
+
+# ==================== INTEGRATIONS ====================
+@api_router.get("/integrations/gradebook", response_model=List[GradebookIntegrationResponse])
+async def list_gradebook_integrations(current_user: dict = Depends(get_current_user)):
+    integrations = await db.gradebook_integrations.find(
+        {"user_id": current_user["id"]},
+        {"_id": 0, "user_id": 0, "api_key": 0},
+    ).to_list(100)
+    return [GradebookIntegrationResponse(**i) for i in integrations]
+
+
+@api_router.post("/integrations/gradebook", response_model=GradebookIntegrationResponse)
+async def upsert_gradebook_integration(
+    payload: GradebookIntegrationCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    existing = await db.gradebook_integrations.find_one(
+        {"user_id": current_user["id"], "provider": payload.provider},
+        {"_id": 0},
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    if existing:
+        await db.gradebook_integrations.update_one(
+            {"id": existing["id"]},
+            {
+                "$set": {
+                    "status": payload.status or existing.get("status", "connected"),
+                    "api_key": payload.api_key,
+                    "updated_at": now,
+                }
+            },
+        )
+        doc = await db.gradebook_integrations.find_one(
+            {"id": existing["id"]},
+            {"_id": 0, "user_id": 0, "api_key": 0},
+        )
+        return GradebookIntegrationResponse(**doc)
+    doc = {
+        "id": str(uuid.uuid4()),
+        "provider": payload.provider,
+        "status": payload.status or "connected",
+        "api_key": payload.api_key,
+        "user_id": current_user["id"],
+        "created_at": now,
+        "updated_at": None,
+    }
+    await db.gradebook_integrations.insert_one(doc)
+    doc.pop("user_id", None)
+    doc.pop("api_key", None)
+    return GradebookIntegrationResponse(**doc)
+
+
+async def _enqueue_notification(
+    current_user: dict,
+    teacher_id: Optional[str],
+    notification_type: str,
+    title: str,
+    message: str,
+):
+    doc = {
+        "id": str(uuid.uuid4()),
+        "teacher_id": teacher_id,
+        "notification_type": notification_type,
+        "title": title,
+        "message": message,
+        "channel": "email",
+        "status": "queued",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "read_at": None,
+        "user_id": current_user["id"],
+    }
+    await db.notifications.insert_one(doc)
+    # Placeholder for email integration
+    logger.info(f"[EmailQueue] {title} -> {current_user.get('email')}")
 
 async def analyze_video(video_id: str, file_path: str, teacher_id: str, user_id: str):
     """Background task to analyze video using AI"""

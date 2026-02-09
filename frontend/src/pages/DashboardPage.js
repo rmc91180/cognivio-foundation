@@ -1,6 +1,12 @@
 import React, { useMemo, useState, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { assessmentApi, frameworkApi, reportApi, scheduleApi } from "@/lib/api";
+import {
+  assessmentApi,
+  frameworkApi,
+  reportApi,
+  scheduleApi,
+  gradebookApi,
+} from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import {
   Bar,
@@ -70,6 +76,10 @@ export function DashboardPage() {
     queryKey: ["schedules"],
     queryFn: () => scheduleApi.list().then((res) => res.data),
   });
+  const { data: gradebookData } = useQuery({
+    queryKey: ["gradebook-integrations"],
+    queryFn: () => gradebookApi.list().then((res) => res.data),
+  });
 
   const roster = useMemo(() => currentData?.roster ?? [], [currentData]);
   const previousRoster = useMemo(
@@ -83,6 +93,8 @@ export function DashboardPage() {
   const [selectedElementsState, setSelectedElementsState] = useState([]);
   const [showFocusDomains, setShowFocusDomains] = useState(true);
   const [reportDepartment, setReportDepartment] = useState("");
+  const [gradebookProvider, setGradebookProvider] = useState("powerschool");
+  const [gradebookApiKey, setGradebookApiKey] = useState("");
 
   // Focus areas are driven by framework selection
   const seedDemoMutation = useMutation({
@@ -108,6 +120,17 @@ export function DashboardPage() {
     },
     onError: () => {
       toast.error("Failed to update focus domains");
+    },
+  });
+  const connectGradebookMutation = useMutation({
+    mutationFn: (payload) => gradebookApi.connect(payload),
+    onSuccess: () => {
+      toast.success("Gradebook integration saved");
+      queryClient.invalidateQueries({ queryKey: ["gradebook-integrations"] });
+      setGradebookApiKey("");
+    },
+    onError: () => {
+      toast.error("Failed to save integration");
     },
   });
 
@@ -268,7 +291,7 @@ export function DashboardPage() {
 
   const reminderRows = useMemo(() => {
     const reminders = (schedulesData ?? [])
-      .filter((s) => s.reminder_type === "lesson_plan")
+      .filter((s) => ["lesson_plan", "action_plan"].includes(s.reminder_type))
       .sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
     return reminders.slice(0, 6);
   }, [schedulesData]);
@@ -420,10 +443,68 @@ export function DashboardPage() {
                 </div>
               </div>
             </section>
+            <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">
+                    Gradebook integrations
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Connect PowerSchool or Canvas to sync gradebook signals.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <select
+                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+                    value={gradebookProvider}
+                    onChange={(e) => setGradebookProvider(e.target.value)}
+                  >
+                    <option value="powerschool">PowerSchool</option>
+                    <option value="canvas">Canvas</option>
+                  </select>
+                  <input
+                    type="password"
+                    placeholder="API key (optional)"
+                    value={gradebookApiKey}
+                    onChange={(e) => setGradebookApiKey(e.target.value)}
+                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      connectGradebookMutation.mutate({
+                        provider: gradebookProvider,
+                        api_key: gradebookApiKey,
+                        status: "connected",
+                      })
+                    }
+                    className="rounded-md border border-slate-200 bg-white px-3 py-1 text-[11px] text-slate-700 hover:bg-slate-100"
+                  >
+                    Connect
+                  </button>
+                </div>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-slate-600">
+                {(gradebookData || []).length === 0 ? (
+                  <span className="text-slate-500">
+                    No gradebook integrations connected yet.
+                  </span>
+                ) : (
+                  gradebookData.map((integration) => (
+                    <span
+                      key={integration.id}
+                      className="rounded-full bg-emerald-50 px-2 py-1 text-emerald-700"
+                    >
+                      {integration.provider} • {integration.status}
+                    </span>
+                  ))
+                )}
+              </div>
+            </section>
             {reminderRows.length > 0 && (
               <section className="md:col-span-12 rounded-xl border border-emerald-200 bg-emerald-50 p-5">
                 <div className="mb-2 text-sm font-semibold text-emerald-900">
-                  Upcoming lesson plan reminders
+                  Upcoming reminders
                 </div>
                 <div className="space-y-2 text-xs text-emerald-800">
                   {reminderRows.map((r) => (
@@ -439,6 +520,10 @@ export function DashboardPage() {
                           {teacherNameById[r.teacher_id]
                             ? `Teacher: ${teacherNameById[r.teacher_id]}`
                             : `Teacher ID: ${r.teacher_id}`}
+                        </div>
+                        <div className="mt-1 text-[10px] text-emerald-700">
+                          {r.reminder_type === "action_plan" && "Action plan"}
+                          {r.reminder_type === "lesson_plan" && "Lesson plan"}
                         </div>
                       </div>
                       <div className="text-[11px] text-emerald-700">
