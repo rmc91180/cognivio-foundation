@@ -482,7 +482,10 @@ class VideoUploadResponse(BaseModel):
 class CurriculumUploadResponse(BaseModel):
     id: str
     teacher_id: str
+    school_id: Optional[str] = None
     title: str
+    subject: Optional[str] = None
+    grade_level: Optional[str] = None
     filename: str
     file_url: str
     uploaded_by: str
@@ -494,6 +497,7 @@ class LessonPlanUploadResponse(BaseModel):
     teacher_id: str
     title: str
     date: str
+    curriculum_id: Optional[str] = None
     filename: str
     file_url: str
     uploaded_by: str
@@ -1157,6 +1161,9 @@ async def video_status_ws(websocket: WebSocket, video_id: str):
 async def upload_curriculum(
     teacher_id: str = Form(...),
     title: str = Form(""),
+    school_id: Optional[str] = Form(None),
+    subject: Optional[str] = Form(None),
+    grade_level: Optional[str] = Form(None),
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user),
 ):
@@ -1164,7 +1171,7 @@ async def upload_curriculum(
     if role not in {"admin", "teacher"}:
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    await _get_teacher_or_404(teacher_id, current_user)
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
     _ensure_allowed_extension(file.filename)
 
     doc_id = str(uuid.uuid4())
@@ -1174,7 +1181,10 @@ async def upload_curriculum(
     doc = {
         "id": doc_id,
         "teacher_id": teacher_id,
+        "school_id": school_id or teacher.get("school_id"),
         "title": title or Path(file.filename).stem,
+        "subject": subject or teacher.get("subject"),
+        "grade_level": grade_level or teacher.get("grade_level"),
         "filename": file.filename,
         "file_url": file_url,
         "s3_key": key,
@@ -1206,6 +1216,7 @@ async def upload_lesson_plan(
     teacher_id: str = Form(...),
     date: str = Form(...),
     title: str = Form(""),
+    curriculum_id: Optional[str] = Form(None),
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user),
 ):
@@ -1225,6 +1236,7 @@ async def upload_lesson_plan(
         "teacher_id": teacher_id,
         "title": title or Path(file.filename).stem,
         "date": date,
+        "curriculum_id": curriculum_id,
         "filename": file.filename,
         "file_url": file_url,
         "s3_key": key,
@@ -1467,8 +1479,10 @@ async def _ensure_adherence_for_assessment(assessment: dict, current_user: dict)
         return None
 
     adherence = {
+        "id": str(uuid.uuid4()),
         "assessment_id": assessment["id"],
         "teacher_id": assessment["teacher_id"],
+        "lesson_plan_id": lesson_plan[0]["id"] if lesson_plan else None,
         "status": "estimated",
         "adherence_score": 0.82,
         "topic_match_rate": 0.78,
@@ -1541,8 +1555,10 @@ async def get_curriculum_adherence(
     ).sort("date", -1).to_list(1)
     if not lesson_plan:
         return {
+            "id": None,
             "assessment_id": assessment_id,
             "teacher_id": teacher_id,
+            "lesson_plan_id": None,
             "status": "no_lesson_plan",
             "adherence_score": None,
             "matched_topics": [],
@@ -1551,8 +1567,10 @@ async def get_curriculum_adherence(
         }
 
     adherence = {
+        "id": str(uuid.uuid4()),
         "assessment_id": assessment_id,
         "teacher_id": teacher_id,
+        "lesson_plan_id": lesson_plan[0]["id"] if lesson_plan else None,
         "status": "estimated",
         "adherence_score": 0.82,
         "topic_match_rate": 0.78,
@@ -1628,6 +1646,32 @@ async def export_summary_report(
                 sum(a.get("overall_score") or 0 for a in teacher_assessments) / len(teacher_assessments),
                 2,
             )
+        trend_summary = None
+        if len(teacher_assessments) >= 2:
+            # Determine element deltas between earliest and latest assessment
+            earliest = teacher_assessments[-1]
+            latest = teacher_assessments[0]
+            early_scores = {es["element_id"]: es.get("score") for es in earliest.get("element_scores", [])}
+            late_scores = {es["element_id"]: es.get("score") for es in latest.get("element_scores", [])}
+            deltas = []
+            for element_id, late_score in late_scores.items():
+                early_score = early_scores.get(element_id)
+                if early_score is None or late_score is None:
+                    continue
+                deltas.append((element_id, round(late_score - early_score, 2)))
+            deltas.sort(key=lambda x: x[1], reverse=True)
+            gains = [f"{d[0].upper()}({d[1]:+0.2f})" for d in deltas[:2]]
+            declines = [f"{d[0].upper()}({d[1]:+0.2f})" for d in deltas[-2:]] if deltas else []
+            trend_summary = f"Gains: {', '.join(gains)} | Declines: {', '.join(declines)}" if deltas else None
+
+        adherence_score = None
+        if assessment:
+            adherence_doc = await db.curriculum_adherence.find_one(
+                {"assessment_id": assessment["id"], "user_id": current_user["id"]},
+                {"_id": 0, "adherence_score": 1},
+            )
+            if adherence_doc:
+                adherence_score = adherence_doc.get("adherence_score")
         rows.append(
             {
                 "teacher_name": t.get("name"),
@@ -1638,6 +1682,8 @@ async def export_summary_report(
                 "average_score": avg_score,
                 "assessment_count": len(teacher_assessments),
                 "evidence_count": evidence_count,
+                "adherence_score": adherence_score,
+                "domain_trend_summary": trend_summary,
                 "last_assessment": assessment.get("analyzed_at") if assessment else None,
                 "detail_url": f"{FRONTEND_URL.rstrip('/')}/teachers/{t['id']}" if FRONTEND_URL else None,
             }
@@ -1687,6 +1733,12 @@ async def export_summary_report(
                 50,
                 y,
                 f"Latest score: {row['latest_score']} | Avg score: {row['average_score']} | Assessments: {row['assessment_count']} | Evidence: {row['evidence_count']}",
+            )
+            y -= 12
+            pdf.drawString(
+                50,
+                y,
+                f"Adherence: {row.get('adherence_score')} | Trend: {row.get('domain_trend_summary')}",
             )
             y -= 12
             if row.get("detail_url"):
@@ -2443,16 +2495,43 @@ async def _ensure_mock_evidence(assessment: dict, current_user: dict) -> List[di
         {"_id": 0, "user_id": 0},
     ).to_list(500)
     if existing:
+        # Ensure embedded evidence segments exist in assessment element_scores
+        if assessment.get("element_scores"):
+            element_scores = assessment.get("element_scores", [])
+            updated = False
+            for es in element_scores:
+                if es.get("evidence_segments"):
+                    continue
+                matching = [
+                    e for e in existing if e.get("element_id") == es.get("element_id")
+                ]
+                if matching:
+                    es["evidence_segments"] = [
+                        {
+                            "start_sec": m.get("timestamp_start"),
+                            "end_sec": m.get("timestamp_end"),
+                            "summary": m.get("evidence_text"),
+                            "rationale": m.get("source"),
+                        }
+                        for m in matching
+                    ]
+                    updated = True
+            if updated:
+                await db.assessments.update_one(
+                    {"id": assessment["id"], "user_id": current_user["id"]},
+                    {"$set": {"element_scores": element_scores}},
+                )
         return existing
 
     framework = _get_framework_by_type(assessment.get("framework_type", "danielson"))
     created_at = datetime.now(timezone.utc).isoformat()
     evidence_docs = []
+    element_scores = assessment.get("element_scores", [])
     for idx, es in enumerate(assessment.get("element_scores", [])):
         domain = _find_domain_for_element(framework, es["element_id"])
         start_sec = 120 + idx * 45
         end_sec = start_sec + 30
-        evidence_docs.append({
+        evidence_doc = {
             "id": str(uuid.uuid4()),
             "assessment_id": assessment["id"],
             "teacher_id": assessment["teacher_id"],
@@ -2472,10 +2551,24 @@ async def _ensure_mock_evidence(assessment: dict, current_user: dict) -> List[di
             "source": "ai",
             "created_at": created_at,
             "user_id": current_user["id"],
-        })
+        }
+        evidence_docs.append(evidence_doc)
+        es.setdefault("evidence_segments", [])
+        es["evidence_segments"].append(
+            {
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+                "summary": evidence_doc["evidence_text"],
+                "rationale": "ai",
+            }
+        )
 
     if evidence_docs:
         await db.assessment_evidence.insert_many(evidence_docs)
+        await db.assessments.update_one(
+            {"id": assessment["id"], "user_id": current_user["id"]},
+            {"$set": {"element_scores": element_scores}},
+        )
     for doc in evidence_docs:
         doc.pop("user_id", None)
     return evidence_docs
@@ -2782,6 +2875,19 @@ async def analyze_video(video_id: str, file_path: str, teacher_id: str, user_id:
         
         # Analyze with AI
         element_scores = await analyze_frames_with_ai(frames, framework, selected_elements)
+        # Attach placeholder evidence segments for demo traceability
+        for idx, es in enumerate(element_scores):
+            start_sec = 60 + idx * 35
+            end_sec = start_sec + 20
+            es.setdefault("evidence_segments", [])
+            es["evidence_segments"].append(
+                {
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                    "summary": f"Evidence aligned to {es.get('element_name', 'domain')} observed.",
+                    "rationale": "ai",
+                }
+            )
         
         # Calculate overall score (1-10 gradient mapped from underlying 1-4 scale if needed)
         valid_scores = [es["score"] for es in element_scores if es["score"] > 0]
@@ -2805,6 +2911,7 @@ async def analyze_video(video_id: str, file_path: str, teacher_id: str, user_id:
         }
         
         await db.assessments.insert_one(assessment_doc)
+        await _ensure_mock_evidence(assessment_doc, {"id": user_id})
         
         # Update video status
         await db.videos.update_one(
@@ -3072,7 +3179,10 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
             await db.curricula.insert_one({
                 "id": str(uuid.uuid4()),
                 "teacher_id": teacher["id"],
+                "school_id": teacher.get("school_id"),
                 "title": f"{teacher['subject']} curriculum overview",
+                "subject": teacher.get("subject"),
+                "grade_level": teacher.get("grade_level"),
                 "filename": "curriculum-demo.pdf",
                 "file_url": None,
                 "s3_key": None,
@@ -3101,6 +3211,7 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
         existing_lesson = await db.lesson_plans.find_one(
             {"teacher_id": teacher["id"], "uploaded_by": current_user["id"]}
         )
+        lesson_plan_id = existing_lesson["id"] if existing_lesson else None
         if not existing_lesson:
             lesson_date = (datetime.now(timezone.utc) + timedelta(days=2)).date().isoformat()
             lesson_id = str(uuid.uuid4())
@@ -3109,6 +3220,7 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
                 "teacher_id": teacher["id"],
                 "title": f"{teacher['subject']} lesson plan",
                 "date": lesson_date,
+                "curriculum_id": existing_curriculum["id"] if existing_curriculum else None,
                 "filename": "lesson-plan-demo.pdf",
                 "file_url": None,
                 "s3_key": None,
@@ -3116,6 +3228,7 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
                 "uploaded_at": datetime.now(timezone.utc).isoformat(),
                 "is_mock": True,
             })
+            lesson_plan_id = lesson_id
             await db.schedules.insert_one({
                 "id": str(uuid.uuid4()),
                 "teacher_id": teacher["id"],
@@ -3178,8 +3291,10 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
             await _ensure_mock_evidence(assessment_doc, current_user)
 
             adherence_doc = {
+                "id": str(uuid.uuid4()),
                 "assessment_id": assessment_doc["id"],
                 "teacher_id": teacher["id"],
+                "lesson_plan_id": lesson_plan_id,
                 "status": "estimated",
                 "adherence_score": round(random.uniform(0.65, 0.95), 2),
                 "matched_topics": ["Aligned objectives", "Pacing matched plan"],
