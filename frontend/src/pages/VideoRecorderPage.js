@@ -61,7 +61,8 @@ export function VideoRecorderPage() {
     setQueued(false);
     const subjectValue = subject || selectedTeacherObj?.subject || "";
     const recordedAt = new Date().toISOString();
-    const file = new File([recordedBlob], "class-recording.webm", {
+    const ext = recordedBlob.type?.includes("mp4") ? "mp4" : "webm";
+    const file = new File([recordedBlob], `class-recording.${ext}`, {
       type: recordedBlob.type || "video/webm",
     });
     uploadMutation.mutate({

@@ -184,9 +184,11 @@ export function VideoPlayerPage() {
 
   const videoUrl =
     videoRes?.file_url ||
-    (videoRes && videoRes.stored_filename
-      ? `${process.env.REACT_APP_BACKEND_URL}/uploads/${videoRes.stored_filename}`
-      : null);
+    (videoRes && videoRes.file_path
+      ? `${process.env.REACT_APP_BACKEND_URL}/uploads/${videoRes.file_path}`
+      : videoRes && videoRes.stored_filename
+        ? `${process.env.REACT_APP_BACKEND_URL}/uploads/${videoRes.stored_filename}`
+        : null);
 
   return (
     <LayoutShell>

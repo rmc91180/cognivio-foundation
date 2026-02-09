@@ -32,9 +32,15 @@ export function VideoRecorder({ onRecordingReady }) {
       if (videoRef.current) {
         videoRef.current.srcObject = mediaStream;
       }
-      const recorder = new MediaRecorder(mediaStream, {
-        mimeType: "video/webm;codecs=vp8,opus",
-      });
+      let options = undefined;
+      if (MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")) {
+        options = { mimeType: "video/webm;codecs=vp8,opus" };
+      } else if (MediaRecorder.isTypeSupported("video/webm")) {
+        options = { mimeType: "video/webm" };
+      }
+      const recorder = options
+        ? new MediaRecorder(mediaStream, options)
+        : new MediaRecorder(mediaStream);
       mediaRecorderRef.current = recorder;
       recorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) {
@@ -42,7 +48,11 @@ export function VideoRecorder({ onRecordingReady }) {
         }
       };
       recorder.onstop = () => {
-        const blob = new Blob(chunks, { type: "video/webm" });
+        const mimeType =
+          recorder.mimeType && recorder.mimeType.length
+            ? recorder.mimeType
+            : "video/webm";
+        const blob = new Blob(chunks, { type: mimeType });
         const url = URL.createObjectURL(blob);
         setPreviewUrl(url);
         setRecordingState("stopped");

@@ -985,12 +985,8 @@ async def list_schools(current_user: dict = Depends(get_current_user)):
 
 @api_router.get("/teachers/{teacher_id}", response_model=TeacherResponse)
 async def get_teacher(teacher_id: str, current_user: dict = Depends(get_current_user)):
-    teacher = await db.teachers.find_one(
-        {"id": teacher_id, "created_by": current_user["id"]},
-        {"_id": 0, "created_by": 0}
-    )
-    if not teacher:
-        raise HTTPException(status_code=404, detail="Teacher not found")
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    teacher.pop("created_by", None)
     return TeacherResponse(**teacher)
 
 @api_router.delete("/teachers/{teacher_id}")
@@ -1018,16 +1014,24 @@ async def upload_video(
     if file.content_type not in ["video/mp4", "video/quicktime", "video/x-msvideo", "video/x-matroska", "video/webm"]:
         raise HTTPException(status_code=400, detail="Invalid content type for video upload")
     
-    # Verify teacher exists
-    teacher = await db.teachers.find_one({"id": teacher_id, "created_by": current_user["id"]})
+    # Verify teacher exists (admins can upload for their roster; teachers can upload for themselves)
+    teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
     if not teacher:
         raise HTTPException(status_code=404, detail="Teacher not found")
+    role = _get_user_role(current_user)
+    if role == "admin":
+        if teacher.get("created_by") != current_user["id"]:
+            raise HTTPException(status_code=403, detail="Not authorized for this teacher")
+    else:
+        if teacher.get("email", "").lower() != current_user.get("email", "").lower():
+            raise HTTPException(status_code=403, detail="Not authorized for this teacher")
     
     video_id = str(uuid.uuid4())
     filename = f"{video_id}{file_ext}"
     teacher_dir = UPLOAD_DIR / "videos" / teacher_id
     teacher_dir.mkdir(parents=True, exist_ok=True)
     file_path = teacher_dir / filename
+    relative_path = f"videos/{teacher_id}/{filename}"
     
     # Save file (optional size guard via env)
     MAX_BYTES = os.getenv("MAX_VIDEO_BYTES")
@@ -1063,7 +1067,7 @@ async def upload_video(
         "stored_filename": filename,
         "s3_key": s3_key,
         "file_url": file_url,
-        "file_path": str(file_path),
+        "file_path": relative_path,
         "teacher_id": teacher_id,
         "uploaded_by": current_user["id"],
         "status": "processing",
@@ -1078,7 +1082,7 @@ async def upload_video(
         "id": str(uuid.uuid4()),
         "video_id": video_id,
         "teacher_id": teacher_id,
-        "file_path": str(file_path),
+        "file_path": relative_path,
         "subject": subject,
         "recorded_at": recorded_at,
         "analysis_status": "processing",
@@ -1097,14 +1101,17 @@ async def upload_video(
         upload_date=video_doc["upload_date"],
         subject=subject,
         recorded_at=recorded_at,
-        file_path=str(file_path),
+        file_path=relative_path,
     )
 
 @api_router.get("/videos")
 async def get_videos(teacher_id: Optional[str] = None, current_user: dict = Depends(get_current_user)):
-    query = {"uploaded_by": current_user["id"]}
+    query: Dict[str, Any] = {}
     if teacher_id:
+        await _get_teacher_or_404(teacher_id, current_user)
         query["teacher_id"] = teacher_id
+    else:
+        query["uploaded_by"] = current_user["id"]
     videos = await db.videos.find(query, {"_id": 0, "uploaded_by": 0, "stored_filename": 0}).to_list(1000)
     return videos
 
@@ -1112,22 +1119,18 @@ async def get_videos(teacher_id: Optional[str] = None, current_user: dict = Depe
 @api_router.get("/videos/{video_id}")
 async def get_video_detail(video_id: str, current_user: dict = Depends(get_current_user)):
     """Get full video metadata including stored filename for playback."""
-    video = await db.videos.find_one(
-        {"id": video_id, "uploaded_by": current_user["id"]},
-        {"_id": 0},
-    )
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
+    await _get_teacher_or_404(video.get("teacher_id"), current_user)
     return video
 
 @api_router.get("/videos/{video_id}/status")
 async def get_video_status(video_id: str, current_user: dict = Depends(get_current_user)):
-    video = await db.videos.find_one(
-        {"id": video_id, "uploaded_by": current_user["id"]},
-        {"_id": 0}
-    )
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
+    await _get_teacher_or_404(video.get("teacher_id"), current_user)
     return {"status": video.get("status", "unknown")}
 
 
@@ -1150,11 +1153,19 @@ async def video_status_ws(websocket: WebSocket, video_id: str):
         await websocket.close(code=1008)
         return
 
-    video = await db.videos.find_one(
-        {"id": video_id, "uploaded_by": user_id},
-        {"_id": 0},
-    )
+    user = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    if not user:
+        await websocket.close(code=1008)
+        return
+
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
     if not video:
+        await websocket.close(code=1008)
+        return
+
+    try:
+        await _get_teacher_or_404(video.get("teacher_id"), user)
+    except HTTPException:
         await websocket.close(code=1008)
         return
 
@@ -2086,12 +2097,8 @@ async def get_teacher_dashboard(
     current_user: dict = Depends(get_current_user)
 ):
     """Get detailed dashboard data for a specific teacher"""
-    teacher = await db.teachers.find_one(
-        {"id": teacher_id, "created_by": current_user["id"]},
-        {"_id": 0, "created_by": 0}
-    )
-    if not teacher:
-        raise HTTPException(status_code=404, detail="Teacher not found")
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    teacher.pop("created_by", None)
     
     # Get assessments
     assessment_query = {
@@ -2246,7 +2253,7 @@ async def get_teacher_dashboard(
     
     # Get videos
     videos = await db.videos.find(
-        {"teacher_id": teacher_id, "uploaded_by": current_user["id"]},
+        {"teacher_id": teacher_id},
         {"_id": 0, "uploaded_by": 0}
     ).to_list(100)
     
