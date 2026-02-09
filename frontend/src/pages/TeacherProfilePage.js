@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams, Link } from "react-router-dom";
 import {
@@ -103,6 +104,16 @@ export function TeacherProfilePage() {
       toast.error("Failed to save reflection");
     },
   });
+
+  const latestAssessmentId = useMemo(() => {
+    if (!dashboardRes?.assessments?.length) return null;
+    return dashboardRes.assessments[dashboardRes.assessments.length - 1].id;
+  }, [dashboardRes]);
+
+  const latestAssessment = useMemo(() => {
+    if (!dashboardRes?.assessments?.length) return null;
+    return dashboardRes.assessments[dashboardRes.assessments.length - 1];
+  }, [dashboardRes]);
 
   const adminOverrideMutation = useMutation({
     mutationFn: (payload) =>
@@ -270,16 +281,6 @@ export function TeacherProfilePage() {
     });
     return map;
   }, [observations]);
-
-  const latestAssessmentId = useMemo(() => {
-    if (!dashboardRes?.assessments?.length) return null;
-    return dashboardRes.assessments[dashboardRes.assessments.length - 1].id;
-  }, [dashboardRes]);
-
-  const latestAssessment = useMemo(() => {
-    if (!dashboardRes?.assessments?.length) return null;
-    return dashboardRes.assessments[dashboardRes.assessments.length - 1];
-  }, [dashboardRes]);
 
   const { data: adherenceRes } = useQuery({
     queryKey: ["curriculum-adherence", latestAssessmentId],
