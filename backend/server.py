@@ -1708,6 +1708,45 @@ async def export_summary_report(
     raise HTTPException(status_code=400, detail="Invalid export format. Use pdf or csv.")
 
 
+@api_router.get("/qa/smoke")
+async def smoke_test(current_user: dict = Depends(get_current_user)):
+    """Lightweight QA check for demo readiness."""
+    curricula_count = await db.curricula.count_documents(
+        {"uploaded_by": current_user["id"]}
+    )
+    lesson_plan_count = await db.lesson_plans.count_documents(
+        {"uploaded_by": current_user["id"]}
+    )
+    adherence_count = await db.curriculum_adherence.count_documents(
+        {"user_id": current_user["id"]}
+    )
+    evidence_count = await db.assessment_evidence.count_documents(
+        {"user_id": current_user["id"]}
+    )
+    assessment_count = await db.assessments.count_documents(
+        {"user_id": current_user["id"]}
+    )
+    override_count = await db.admin_assessment_overrides.count_documents(
+        {"admin_id": current_user["id"]}
+    )
+
+    return {
+        "curriculum_uploads": curricula_count,
+        "lesson_plan_uploads": lesson_plan_count,
+        "adherence_records": adherence_count,
+        "evidence_segments": evidence_count,
+        "assessments": assessment_count,
+        "admin_overrides": override_count,
+        "checks": {
+            "curriculum_upload": curricula_count > 0,
+            "lesson_plan_upload": lesson_plan_count > 0,
+            "adherence_data": adherence_count > 0,
+            "evidence_data": evidence_count > 0,
+            "export_report_ready": assessment_count > 0,
+        },
+    }
+
+
 @api_router.get("/teachers/{teacher_id}/summary-insights")
 async def get_teacher_summary_insights(
     teacher_id: str,
