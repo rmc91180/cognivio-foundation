@@ -5,6 +5,7 @@ import type { StatusColor } from '@/types';
 interface ColorChipProps {
   color: StatusColor;
   size?: 'sm' | 'md' | 'lg';
+  label?: string;
   showTooltip?: boolean;
   tooltipContent?: string;
   onClick?: () => void;
@@ -12,20 +13,22 @@ interface ColorChipProps {
 }
 
 const sizeClasses = {
-  sm: 'w-6 h-6 text-xs',
-  md: 'w-8 h-8 text-sm',
-  lg: 'w-10 h-10 text-base',
+  sm: 'w-3 h-3 text-[10px]',
+  md: 'w-4 h-4 text-[11px]',
+  lg: 'w-6 h-6 text-xs',
 };
 
 const colorClasses = {
-  green: 'bg-green-100 text-green-700 border-green-500',
-  yellow: 'bg-yellow-100 text-yellow-700 border-yellow-500',
-  red: 'bg-red-100 text-red-700 border-red-500',
+  green: 'bg-green-100 text-green-700 border-green-500 bg-status-green',
+  yellow: 'bg-yellow-100 text-yellow-700 border-yellow-500 bg-status-yellow',
+  red: 'bg-red-100 text-red-700 border-red-500 bg-status-red',
+  gray: 'bg-gray-400 text-gray-700 border-gray-500 bg-status-gray',
 };
 
 export const ColorChip: React.FC<ColorChipProps> = ({
   color,
   size = 'md',
+  label,
   showTooltip = false,
   tooltipContent,
   onClick,
@@ -45,15 +48,14 @@ export const ColorChip: React.FC<ColorChipProps> = ({
         className={clsx(
           'rounded-full border-2 flex items-center justify-center font-bold transition-transform hover:scale-110 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500',
           sizeClasses[size],
-          colorClasses[color],
+          colorClasses[color] || colorClasses.gray,
           onClick && 'cursor-pointer',
           className
         )}
+        role="status"
         aria-label={`Status: ${color}`}
       >
-        {color === 'green' && '✓'}
-        {color === 'yellow' && '!'}
-        {color === 'red' && '✕'}
+        {label ?? (color === 'green' ? '✓' : color === 'yellow' ? '!' : color === 'red' ? '✕' : '')}
       </button>
 
       {showTooltip && showTip && tooltipContent && (

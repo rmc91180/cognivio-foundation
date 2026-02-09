@@ -3,7 +3,7 @@
 // ============================================
 
 export type UserRole = 'admin' | 'principal' | 'department_head' | 'teacher' | 'observer';
-export type StatusColor = 'green' | 'yellow' | 'red';
+export type StatusColor = 'green' | 'yellow' | 'red' | 'gray';
 export type AggregationMode = 'weighted' | 'worst' | 'majority';
 export type VideoStatus = 'pending' | 'processing' | 'completed' | 'failed';
 export type AIObservationStatus = 'pending' | 'accepted' | 'rejected' | 'edited';

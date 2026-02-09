@@ -1,11 +1,21 @@
 import '@testing-library/jest-dom';
 
-// Mock localStorage
+// Provide jest alias for legacy tests
+globalThis.jest = vi;
+
+// Mock localStorage with in-memory store
+const store = new Map<string, string>();
 const localStorageMock = {
-  getItem: vi.fn(),
-  setItem: vi.fn(),
-  removeItem: vi.fn(),
-  clear: vi.fn(),
+  getItem: vi.fn((key: string) => (store.has(key) ? store.get(key) : null)),
+  setItem: vi.fn((key: string, value: string) => {
+    store.set(key, value);
+  }),
+  removeItem: vi.fn((key: string) => {
+    store.delete(key);
+  }),
+  clear: vi.fn(() => {
+    store.clear();
+  }),
   length: 0,
   key: vi.fn(),
 };
@@ -37,5 +47,8 @@ window.ResizeObserver = ResizeObserverMock;
 // Reset mocks before each test
 beforeEach(() => {
   vi.clearAllMocks();
-  localStorageMock.getItem.mockReturnValue(null);
+  store.clear();
+  localStorageMock.getItem.mockImplementation((key: string) =>
+    store.has(key) ? store.get(key) : null
+  );
 });

@@ -21,10 +21,11 @@ interface AuthState {
   isAuthenticated: boolean;
   isLoading: boolean;
   error: string | null;
-  login: (credentials: LoginCredentials) => Promise<void>;
+  login: (credentialsOrUser: LoginCredentials | User, token?: string) => Promise<void> | void;
   logout: () => void;
   setUser: (user: User) => void;
   setAuth: (params: SetAuthParams) => void;
+  setActiveRole: (role: User['activeRole']) => void;
   clearError: () => void;
 }
 
@@ -37,10 +38,25 @@ export const useAuthStore = create<AuthState>()(
       isLoading: false,
       error: null,
 
-      login: async (credentials) => {
+      login: async (credentialsOrUser, token) => {
+        // Legacy signature: login(user, token)
+        if (typeof token === 'string' && typeof credentialsOrUser === 'object') {
+          const user = credentialsOrUser as User;
+          localStorage.setItem('auth_token', token);
+          set({
+            user,
+            token,
+            isAuthenticated: true,
+            isLoading: false,
+            error: null,
+          });
+          return;
+        }
+        const credentials = credentialsOrUser as LoginCredentials;
         set({ isLoading: true, error: null });
         try {
           const response = await authApi.login(credentials);
+          localStorage.setItem('auth_token', response.token);
           set({
             user: response.user,
             token: response.token,
@@ -58,6 +74,7 @@ export const useAuthStore = create<AuthState>()(
 
       logout: () => {
         authApi.logout();
+        localStorage.removeItem('auth_token');
         set({
           user: null,
           token: null,
@@ -98,6 +115,14 @@ export const useAuthStore = create<AuthState>()(
           isAuthenticated: true,
           isLoading: false,
           error: null,
+        });
+      },
+
+      setActiveRole: (role) => {
+        const current = get().user;
+        if (!current) return;
+        set({
+          user: { ...current, activeRole: role },
         });
       },
 

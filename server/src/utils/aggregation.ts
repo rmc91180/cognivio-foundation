@@ -8,6 +8,9 @@ export const DEFAULT_THRESHOLDS: ColorThresholds = {
   yellowMin: 60,
 };
 
+// Legacy alias used by older tests
+export const DEFAULT_COLOR_THRESHOLDS: ColorThresholds = DEFAULT_THRESHOLDS;
+
 /**
  * Convert numeric score to color based on thresholds
  */
@@ -146,12 +149,29 @@ export function computeColumnScore(
  */
 export function calculateProblemScore(
   currentScore: number,
-  previousScore: number | null,
-  weight: number = 1,
-  observationCount: number = 0,
+  previousScoreOrColor: number | StatusColor | null,
+  weightOrHasGradebook: number | boolean = 1,
+  observationCountOrTrend: number | string | null = 0,
   avgAiConfidence: number = 0
 ): number {
-  const previous = previousScore ?? currentScore;
+  // Legacy signature: (score, color, hasGradebook, trend)
+  if (typeof previousScoreOrColor === 'string') {
+    const color = previousScoreOrColor;
+    const hasGradebook = Boolean(weightOrHasGradebook);
+    const trend = observationCountOrTrend as string | null;
+    let base = 100 - currentScore;
+    if (color === 'red') base += 30;
+    if (color === 'yellow') base += 15;
+    if (trend === 'declining') base += 10;
+    if (hasGradebook) base += 8;
+    return Math.max(0, base);
+  }
+
+  // Current signature: (score, previousScore, weight, observationCount, avgAiConfidence)
+  const previous = (previousScoreOrColor as number | null) ?? currentScore;
+  const weight = typeof weightOrHasGradebook === 'number' ? weightOrHasGradebook : 1;
+  const observationCount = typeof observationCountOrTrend === 'number' ? observationCountOrTrend : 0;
+
   const delta = previous - currentScore; // positive = regression
   const deficit = (100 - currentScore) * weight;
   const freq = observationCount;
@@ -163,6 +183,42 @@ export function calculateProblemScore(
     avgAiConfidence * 0.2;
 
   return Math.max(0, problemScore);
+}
+
+/**
+ * Legacy aggregate helper for tests.
+ */
+export function aggregateScores(
+  elementScores: { score: number; weight: number }[],
+  mode: 'weighted' | 'worst_score' | 'majority_color',
+  thresholds: ColorThresholds = DEFAULT_THRESHOLDS
+): { score: number; color: StatusColor | 'gray' } {
+  if (elementScores.length === 0) {
+    return { score: 0, color: 'gray' };
+  }
+
+  if (mode === 'worst_score') {
+    const score = worstScoreAggregation(elementScores);
+    return { score, color: colorFromScore(score, thresholds) };
+  }
+
+  if (mode === 'majority_color') {
+    const colors = elementScores.map((e) => colorFromScore(e.score, thresholds));
+    const counts = {
+      green: colors.filter((c) => c === 'green').length,
+      yellow: colors.filter((c) => c === 'yellow').length,
+      red: colors.filter((c) => c === 'red').length,
+    };
+    const max = Math.max(counts.green, counts.yellow, counts.red);
+    const ties = Object.entries(counts).filter(([, v]) => v === max);
+    const color = ties.length > 1 ? 'red' : (ties[0][0] as StatusColor);
+    const avg =
+      elementScores.reduce((sum, e) => sum + e.score, 0) / elementScores.length;
+    return { score: avg, color };
+  }
+
+  const score = weightedAverageAggregation(elementScores);
+  return { score, color: colorFromScore(score, thresholds) };
 }
 
 /**
