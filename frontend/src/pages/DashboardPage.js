@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { assessmentApi, frameworkApi, reportApi } from "@/lib/api";
+import { assessmentApi, frameworkApi, reportApi, scheduleApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import {
   Bar,
@@ -65,6 +65,10 @@ export function DashboardPage() {
   const { data: frameworkDetailRes, isLoading: frameworkLoading } = useQuery({
     queryKey: ["framework-detail", frameworkType],
     queryFn: () => frameworkApi.get(frameworkType).then((res) => res.data),
+  });
+  const { data: schedulesData } = useQuery({
+    queryKey: ["schedules"],
+    queryFn: () => scheduleApi.list().then((res) => res.data),
   });
 
   const roster = useMemo(() => currentData?.roster ?? [], [currentData]);
@@ -200,6 +204,14 @@ export function DashboardPage() {
     return { teacherCount, assessmentCount, deptCount };
   }, [roster]);
 
+  const teacherNameById = useMemo(() => {
+    const map = {};
+    roster.forEach((t) => {
+      map[t.teacher_id] = t.teacher_name;
+    });
+    return map;
+  }, [roster]);
+
   const departmentData = useMemo(() => {
     if (!roster.length && !previousRoster.length) return [];
     const buildBuckets = (rows) => {
@@ -253,6 +265,13 @@ export function DashboardPage() {
     });
     return Array.from(set).sort();
   }, [roster]);
+
+  const reminderRows = useMemo(() => {
+    const reminders = (schedulesData ?? [])
+      .filter((s) => s.reminder_type === "lesson_plan")
+      .sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
+    return reminders.slice(0, 6);
+  }, [schedulesData]);
 
   const downloadReport = async (format, params, filename) => {
     try {
@@ -401,6 +420,35 @@ export function DashboardPage() {
                 </div>
               </div>
             </section>
+            {reminderRows.length > 0 && (
+              <section className="md:col-span-12 rounded-xl border border-emerald-200 bg-emerald-50 p-5">
+                <div className="mb-2 text-sm font-semibold text-emerald-900">
+                  Upcoming lesson plan reminders
+                </div>
+                <div className="space-y-2 text-xs text-emerald-800">
+                  {reminderRows.map((r) => (
+                    <div
+                      key={r.id}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-white px-3 py-2"
+                    >
+                      <div>
+                        <div className="font-medium text-emerald-900">
+                          {r.course_name}
+                        </div>
+                        <div className="text-[11px] text-emerald-700">
+                          {teacherNameById[r.teacher_id]
+                            ? `Teacher: ${teacherNameById[r.teacher_id]}`
+                            : `Teacher ID: ${r.teacher_id}`}
+                        </div>
+                      </div>
+                      <div className="text-[11px] text-emerald-700">
+                        {r.start_time}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
             <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                 <div>
