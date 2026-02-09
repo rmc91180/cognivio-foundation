@@ -1,141 +1,165 @@
 import React, { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { assessmentApi } from "@/lib/api";
-import { TrendIndicator } from "@/components/TrendIndicator";
 
 /**
  * MonthlySummary - Displays aggregated performance summary for a period
- * @param {string} teacherId - The teacher's ID
- * @param {string} period - Period type: 'month' | 'quarter' | 'year'
+ * @param {object} dashboardRes - Teacher dashboard payload
+ * @param {number} periodMonths - Period in months (1, 3, 6, 12)
  */
-export function MonthlySummary({ teacherId, period = "month" }) {
-  const { data: dashboardRes, isLoading } = useQuery({
-    queryKey: ["teacher-dashboard", teacherId],
-    queryFn: () =>
-      assessmentApi.teacherDashboard(teacherId).then((r) => r.data),
-    enabled: !!teacherId,
-  });
-
+export function MonthlySummary({
+  dashboardRes,
+  periodMonths = 3,
+  evidenceByElement = {},
+}) {
   const summaryData = useMemo(() => {
     if (!dashboardRes?.assessments?.length) {
       return null;
     }
 
-    const assessments = dashboardRes.assessments;
-    const now = new Date();
-    let periodStart;
+    const trendData = dashboardRes.trend_data || [];
+    const elementSummary = dashboardRes.element_summary || [];
+    const elementNameById = elementSummary.reduce((acc, item) => {
+      acc[item.element_id] = item.element_name;
+      return acc;
+    }, {});
 
-    switch (period) {
-      case "quarter":
-        periodStart = new Date(now.getFullYear(), now.getMonth() - 3, 1);
-        break;
-      case "year":
-        periodStart = new Date(now.getFullYear(), 0, 1);
-        break;
-      case "month":
-      default:
-        periodStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    }
-
-    // Filter assessments for current period
-    const currentPeriodAssessments = assessments.filter(
-      (a) => new Date(a.analyzed_at) >= periodStart
-    );
-
-    // Previous period for comparison
-    let prevPeriodStart;
-    let prevPeriodEnd;
-    switch (period) {
-      case "quarter":
-        prevPeriodStart = new Date(now.getFullYear(), now.getMonth() - 6, 1);
-        prevPeriodEnd = periodStart;
-        break;
-      case "year":
-        prevPeriodStart = new Date(now.getFullYear() - 1, 0, 1);
-        prevPeriodEnd = periodStart;
-        break;
-      case "month":
-      default:
-        prevPeriodStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-        prevPeriodEnd = periodStart;
-    }
-
-    const previousPeriodAssessments = assessments.filter(
-      (a) =>
-        new Date(a.analyzed_at) >= prevPeriodStart &&
-        new Date(a.analyzed_at) < prevPeriodEnd
-    );
-
-    // Calculate averages
-    const currentAvg =
-      currentPeriodAssessments.length > 0
-        ? currentPeriodAssessments.reduce((sum, a) => sum + a.overall_score, 0) /
-          currentPeriodAssessments.length
-        : null;
-
-    const previousAvg =
-      previousPeriodAssessments.length > 0
-        ? previousPeriodAssessments.reduce((sum, a) => sum + a.overall_score, 0) /
-          previousPeriodAssessments.length
-        : null;
-
-    // Find highlights (highest scored elements)
-    const elementScores = {};
-    currentPeriodAssessments.forEach((a) => {
-      a.element_scores?.forEach((es) => {
-        if (!elementScores[es.element_id]) {
-          elementScores[es.element_id] = {
-            name: es.element_name,
-            scores: [],
+    const domainStats = {};
+    trendData.forEach((point) => {
+      Object.entries(point.element_scores || {}).forEach(([elementId, score]) => {
+        if (!domainStats[elementId]) {
+          domainStats[elementId] = {
+            elementId,
+            name: elementNameById[elementId] || elementId,
+            firstScore: score,
+            lastScore: score,
+            samples: 1,
           };
+        } else {
+          if (domainStats[elementId].firstScore == null) {
+            domainStats[elementId].firstScore = score;
+          }
+          domainStats[elementId].lastScore = score;
+          domainStats[elementId].samples += 1;
         }
-        elementScores[es.element_id].scores.push(es.score);
       });
     });
 
-    const elementAverages = Object.entries(elementScores)
-      .map(([id, data]) => ({
-        id,
-        name: data.name,
-        avg: data.scores.reduce((a, b) => a + b, 0) / data.scores.length,
-      }))
-      .sort((a, b) => b.avg - a.avg);
+    const domainDeltas = Object.values(domainStats).map((item) => {
+      const baseline = item.firstScore ?? item.lastScore ?? 0;
+      const latest = item.lastScore ?? item.firstScore ?? 0;
+      const delta = latest - baseline;
+      return {
+        ...item,
+        baseline,
+        latest,
+        delta,
+      };
+    });
 
-    const highlights = elementAverages.slice(0, 3);
-    const lowlights = elementAverages.slice(-3).reverse();
+    const highlights = [...domainDeltas]
+      .sort((a, b) => b.delta - a.delta)
+      .slice(0, 3);
+    const growthAreas = [...domainDeltas]
+      .sort((a, b) => a.delta - b.delta)
+      .slice(0, 3);
 
-    // Generate recommendations based on lowlights
-    const recommendations = lowlights
-      .filter((e) => e.avg < 6)
-      .map((e) => `Focus on improving ${e.name} (currently ${e.avg.toFixed(1)}/10)`);
+    const periodLabel =
+      periodMonths === 1
+        ? "Last 1 month"
+        : periodMonths === 3
+          ? "Last 3 months"
+          : periodMonths === 6
+            ? "Last 6 months"
+            : "Last 12 months";
+
+    const observationByElement = (dashboardRes.element_summary || []).reduce(
+      (acc, item) => {
+        if (item.element_id) {
+          acc[item.element_id] = item.recent_observations || [];
+        }
+        return acc;
+      },
+      {}
+    );
+
+    const makeWhyDetails = (elementId) => {
+      const evidenceItems = evidenceByElement[elementId] || [];
+      const evidenceLines = evidenceItems.slice(0, 2).map((ev) => {
+        const time =
+          typeof ev.timestamp_start === "number" && typeof ev.timestamp_end === "number"
+            ? ` (${Math.round(ev.timestamp_start)}s-${Math.round(ev.timestamp_end)}s)`
+            : "";
+        return `${ev.evidence_text}${time}`;
+      });
+      const observationLines = (observationByElement[elementId] || [])
+        .slice(0, 2)
+        .map((obs) => obs.admin_comment || obs.summary || "")
+        .filter(Boolean);
+      return [...evidenceLines, ...observationLines].slice(0, 2);
+    };
+
+    const baseRecommendations = (domainName, evidenceLines = []) => {
+      const name = (domainName || "").toLowerCase();
+      const evidenceText = evidenceLines.join(" ").toLowerCase();
+      const recs = [];
+
+      if (name.includes("instruction") || evidenceText.includes("question")) {
+        recs.push(
+          "Increase higher-order questioning and wait time (3-5 seconds) before prompting."
+        );
+      }
+      if (name.includes("classroom environment") || evidenceText.includes("routine")) {
+        recs.push(
+          "Reinforce routines with visual cues and a consistent start-of-lesson reset."
+        );
+      }
+      if (name.includes("planning") || name.includes("preparation")) {
+        recs.push(
+          "Align lesson objectives to a clear success criteria and check for mastery mid-lesson."
+        );
+      }
+      if (name.includes("professional")) {
+        recs.push(
+          "Log post-lesson reflections and tie one adjustment to a specific student need."
+        );
+      }
+      if (evidenceText.includes("teacher talk")) {
+        recs.push("Reduce teacher talk by inserting paired turn-and-talk every 7-10 minutes.");
+      }
+      if (evidenceText.includes("engage") || evidenceText.includes("participation")) {
+        recs.push("Use cold-call plus equity sticks to increase student participation.");
+      }
+      if (evidenceText.includes("checks for understanding") || evidenceText.includes("assessment")) {
+        recs.push("Add a quick exit ticket or hinge question to verify understanding.");
+      }
+
+      if (!recs.length) {
+        recs.push(
+          `Focus on ${domainName} by planning one concrete practice to apply in the next lesson.`
+        );
+      }
+
+      return recs.slice(0, 2);
+    };
+
+    const growthAreaDetails = growthAreas.map((area) => {
+      const whyDetails = makeWhyDetails(area.elementId);
+      const recommendations = baseRecommendations(area.name, whyDetails);
+      return { ...area, whyDetails, recommendations };
+    });
 
     return {
-      currentAvg,
-      previousAvg,
-      assessmentCount: currentPeriodAssessments.length,
-      previousCount: previousPeriodAssessments.length,
+      domainDeltas,
       highlights,
-      lowlights,
-      recommendations,
-      periodLabel: period === "month" ? "This Month" : period === "quarter" ? "This Quarter" : "This Year",
+      growthAreas: growthAreaDetails,
+      assessmentCount: dashboardRes.assessments.length,
+      periodLabel,
     };
-  }, [dashboardRes, period]);
-
-  if (isLoading) {
-    return (
-      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-5">
-        <h2 className="mb-2 text-sm font-semibold text-slate-200">
-          Performance Summary
-        </h2>
-        <div className="text-xs text-slate-500">Loading summary...</div>
-      </div>
-    );
-  }
+  }, [dashboardRes, periodMonths, evidenceByElement]);
 
   if (!summaryData) {
     return (
-      <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-5">
-        <h2 className="mb-2 text-sm font-semibold text-slate-200">
+      <div className="rounded-xl border border-slate-200 bg-white p-5">
+        <h2 className="mb-2 text-sm font-semibold text-slate-900">
           Performance Summary
         </h2>
         <div className="text-xs text-slate-500">
@@ -146,54 +170,79 @@ export function MonthlySummary({ teacherId, period = "month" }) {
   }
 
   return (
-    <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-5">
+    <div className="rounded-xl border border-slate-200 bg-white p-5">
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-slate-200">
+        <h2 className="text-sm font-semibold text-slate-900">
           Performance Summary
         </h2>
-        <span className="rounded-full bg-slate-800 px-2 py-0.5 text-[10px] text-slate-300">
+        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600">
           {summaryData.periodLabel}
         </span>
       </div>
 
-      {/* Overall score */}
-      <div className="mb-4 flex items-center gap-4">
-        <div className="rounded-lg bg-slate-900 px-4 py-3">
-          <div className="text-[11px] text-slate-400">Overall Score</div>
-          <div className="flex items-center gap-2">
-            <span className="text-xl font-bold text-slate-50">
-              {summaryData.currentAvg?.toFixed(1) || "—"}
-            </span>
-            <span className="text-sm text-slate-400">/10</span>
-            <TrendIndicator
-              currentScore={summaryData.currentAvg}
-              previousScore={summaryData.previousAvg}
-              size="md"
-            />
-          </div>
-        </div>
-        <div className="text-xs text-slate-400">
-          <div>{summaryData.assessmentCount} assessments this period</div>
-          {summaryData.previousCount > 0 && (
-            <div>vs {summaryData.previousCount} previous period</div>
-          )}
-        </div>
+      <div className="mb-4 text-xs text-slate-500">
+        {summaryData.assessmentCount} assessments in the selected period. Domain
+        movement reflects the teacher's change from the first to the latest
+        assessment in this period.
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        {summaryData.domainDeltas.map((domain) => {
+          const trend =
+            domain.delta > 0.2 ? "up" : domain.delta < -0.2 ? "down" : "flat";
+          const trendClass =
+            trend === "up"
+              ? "text-emerald-700 bg-emerald-50"
+              : trend === "down"
+                ? "text-rose-700 bg-rose-50"
+                : "text-slate-600 bg-slate-100";
+          const deltaLabel =
+            domain.delta > 0 ? `+${domain.delta.toFixed(1)}` : domain.delta.toFixed(1);
+          return (
+            <div
+              key={domain.elementId}
+              className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs"
+            >
+              <div className="flex items-center justify-between">
+                <div className="text-[11px] font-semibold text-slate-800">
+                  {domain.name}
+                </div>
+                <span className={`rounded-full px-2 py-0.5 text-[10px] ${trendClass}`}>
+                  {trend === "up"
+                    ? "Improving"
+                    : trend === "down"
+                      ? "Declining"
+                      : "Stable"}
+                </span>
+              </div>
+              <div className="mt-1 flex items-center justify-between text-[11px] text-slate-600">
+                <span>
+                  Baseline {domain.baseline.toFixed(1)} → Latest{" "}
+                  {domain.latest.toFixed(1)}
+                </span>
+                <span className="font-semibold text-slate-700">{deltaLabel}</span>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
       {/* Highlights */}
       {summaryData.highlights.length > 0 && (
-        <div className="mb-3">
-          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-emerald-400">
-            Highlights
+        <div className="mt-4">
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-emerald-600">
+            Highlights (relative gains)
           </div>
           <div className="flex flex-wrap gap-2">
             {summaryData.highlights.map((h) => (
               <span
-                key={h.id}
-                className="inline-flex items-center rounded bg-emerald-500/20 px-2 py-1 text-[11px] text-emerald-300"
+                key={h.elementId}
+                className="inline-flex items-center rounded bg-emerald-50 px-2 py-1 text-[11px] text-emerald-700"
               >
-                {h.name || h.id}
-                <span className="ml-1.5 font-semibold">{h.avg.toFixed(1)}</span>
+                {h.name}
+                <span className="ml-1.5 font-semibold">
+                  {h.delta > 0 ? `+${h.delta.toFixed(1)}` : h.delta.toFixed(1)}
+                </span>
               </span>
             ))}
           </div>
@@ -201,39 +250,55 @@ export function MonthlySummary({ teacherId, period = "month" }) {
       )}
 
       {/* Areas for growth */}
-      {summaryData.lowlights.length > 0 && (
-        <div className="mb-3">
-          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-amber-400">
-            Areas for Growth
+      {summaryData.growthAreas.length > 0 && (
+        <div className="mt-4">
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-amber-600">
+            Areas for Growth (relative declines)
           </div>
           <div className="flex flex-wrap gap-2">
-            {summaryData.lowlights.map((l) => (
+            {summaryData.growthAreas.map((l) => (
               <span
-                key={l.id}
-                className="inline-flex items-center rounded bg-amber-500/20 px-2 py-1 text-[11px] text-amber-300"
+                key={l.elementId}
+                className="inline-flex items-center rounded bg-amber-50 px-2 py-1 text-[11px] text-amber-700"
               >
-                {l.name || l.id}
-                <span className="ml-1.5 font-semibold">{l.avg.toFixed(1)}</span>
+                {l.name}
+                <span className="ml-1.5 font-semibold">
+                  {l.delta > 0 ? `+${l.delta.toFixed(1)}` : l.delta.toFixed(1)}
+                </span>
               </span>
             ))}
           </div>
-        </div>
-      )}
-
-      {/* Recommendations */}
-      {summaryData.recommendations.length > 0 && (
-        <div>
-          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-            Recommendations
-          </div>
-          <ul className="space-y-1 text-xs text-slate-300">
-            {summaryData.recommendations.map((rec, i) => (
-              <li key={i} className="flex items-start gap-1.5">
-                <span className="text-primary">•</span>
-                {rec}
-              </li>
-            ))}
-          </ul>
+          {summaryData.growthAreas.map((l) => (
+            <div
+              key={`${l.elementId}-why`}
+              className="mt-3 rounded-md border border-amber-200 bg-amber-50/40 px-3 py-2 text-[11px] text-amber-900"
+            >
+              <div className="font-semibold text-amber-800">
+                Why this moved for {l.name}
+              </div>
+              {l.whyDetails?.length ? (
+                <div className="mt-1 space-y-1 text-amber-800">
+                  {l.whyDetails.map((line, idx) => (
+                    <div key={idx}>• {line}</div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-amber-700">
+                  Evidence detail is limited. Add more observations to surface context.
+                </div>
+              )}
+              {l.recommendations?.length ? (
+                <div className="mt-2 text-amber-900">
+                  <div className="font-semibold">Next steps</div>
+                  <div className="mt-1 space-y-1">
+                    {l.recommendations.map((rec, idx) => (
+                      <div key={idx}>• {rec}</div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ))}
         </div>
       )}
     </div>

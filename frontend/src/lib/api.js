@@ -59,6 +59,8 @@ export const assessmentApi = {
     api.post(`/api/teachers/${teacherId}/summary-reflection`, payload),
   createAdminOverride: (assessmentId, payload) =>
     api.post(`/api/assessments/${assessmentId}/admin-override`, payload),
+  listAdminOverrides: (assessmentId) =>
+    api.get(`/api/assessments/${assessmentId}/admin-overrides`),
 };
 
 export const scheduleApi = {

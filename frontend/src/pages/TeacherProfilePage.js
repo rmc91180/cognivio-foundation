@@ -254,6 +254,13 @@ export function TeacherProfilePage() {
     queryFn: () => evidenceApi.get(latestAssessmentId).then((r) => r.data),
   });
 
+  const { data: adminOverridesRes } = useQuery({
+    queryKey: ["admin-overrides", latestAssessmentId],
+    enabled: Boolean(latestAssessmentId) && user?.role === "admin",
+    queryFn: () =>
+      assessmentApi.listAdminOverrides(latestAssessmentId).then((r) => r.data),
+  });
+
   const [selectedEvidenceElement, setSelectedEvidenceElement] = useState(null);
 
   const evidenceByElement = useMemo(() => {
@@ -266,6 +273,15 @@ export function TeacherProfilePage() {
     });
     return map;
   }, [evidenceRes]);
+
+  const overrideByElement = useMemo(() => {
+    const map = {};
+    const overrides = adminOverridesRes?.overrides || [];
+    overrides.forEach((ov) => {
+      map[ov.domain_id] = ov;
+    });
+    return map;
+  }, [adminOverridesRes]);
 
   const nextStepsItems = useMemo(() => {
     const items = [];
@@ -408,7 +424,11 @@ export function TeacherProfilePage() {
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           <div className="lg:col-span-8 space-y-6">
             <section>
-              <MonthlySummary teacherId={teacherId} period="month" />
+              <MonthlySummary
+                dashboardRes={dashboardRes}
+                periodMonths={periodMonths}
+                evidenceByElement={evidenceByElement}
+              />
             </section>
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
@@ -1015,14 +1035,21 @@ export function TeacherProfilePage() {
                             </div>
                           );
                         }
+                        const existingOverride = overrideByElement[selectedEvidenceElement];
                         const value =
                           overrideScores[selectedEvidenceElement] ??
+                          existingOverride?.adjusted_score ??
                           scoreRow.score;
                         return (
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="text-slate-500">
                               AI score: {scoreRow.score.toFixed(1)}/10
                             </span>
+                            {existingOverride && (
+                              <span className="text-[10px] text-emerald-700">
+                                Current override: {existingOverride.adjusted_score.toFixed(1)}/10
+                              </span>
+                            )}
                             <input
                               type="number"
                               step="0.1"
@@ -1059,6 +1086,25 @@ export function TeacherProfilePage() {
                           </div>
                         );
                       })()}
+                    </div>
+                  )}
+                  {user?.role === "admin" && overrideByElement[selectedEvidenceElement] && (
+                    <div className="mt-2 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-2 text-[11px] text-emerald-800">
+                      <div className="font-semibold">Override history</div>
+                      <div>
+                        Adjusted from{" "}
+                        {overrideByElement[selectedEvidenceElement].original_score?.toFixed(1)}
+                        /10 to{" "}
+                        {overrideByElement[selectedEvidenceElement].adjusted_score?.toFixed(1)}/10
+                      </div>
+                      {overrideByElement[selectedEvidenceElement].rationale && (
+                        <div className="text-[10px] text-emerald-700">
+                          {overrideByElement[selectedEvidenceElement].rationale}
+                        </div>
+                      )}
+                      <div className="text-[10px] text-emerald-700">
+                        {overrideByElement[selectedEvidenceElement].created_at}
+                      </div>
                     </div>
                   )}
                 </div>

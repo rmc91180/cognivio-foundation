@@ -1206,7 +1206,7 @@ async def list_admin_overrides(
     docs = await db.admin_assessment_overrides.find(
         {"assessment_id": assessment_id, "admin_id": current_user["id"]},
         {"_id": 0},
-    ).to_list(1000)
+    ).sort("created_at", -1).to_list(1000)
     return {"overrides": docs}
 
 
