@@ -1,9 +1,9 @@
 import React, { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { assessmentApi, teacherApi, videoApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { toast } from "sonner";
-import { Link } from "react-router-dom";
 
 export function VideosPage() {
   const queryClient = useQueryClient();
@@ -69,12 +69,6 @@ export function VideosPage() {
               Upload classroom videos and review AI-generated assessments.
             </p>
           </div>
-          <Link
-            to="/videos/record"
-            className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
-          >
-            Record in browser
-          </Link>
         </div>
 
         <div className="grid grid-cols-1 gap-6 md:grid-cols-12">

@@ -180,6 +180,167 @@ async def _get_teacher_or_404(teacher_id: str, current_user: dict) -> dict:
     raise HTTPException(status_code=403, detail="Not authorized for this teacher")
 
 
+def _parse_teacher_subjects(subject_value: Optional[Any]) -> List[str]:
+    if not subject_value:
+        return []
+    if isinstance(subject_value, list):
+        return [str(s).strip() for s in subject_value if str(s).strip()]
+    if isinstance(subject_value, str):
+        if "," in subject_value:
+            return [s.strip() for s in subject_value.split(",") if s.strip()]
+        return [subject_value.strip()]
+    return [str(subject_value).strip()]
+
+
+async def _get_recording_policy(admin_id: str, school_id: Optional[str] = None) -> Optional[dict]:
+    query: Dict[str, Any] = {"created_by": admin_id}
+    if school_id:
+        policy = await db.recording_policies.find_one(
+            {**query, "school_id": school_id},
+            {"_id": 0},
+        )
+        if policy:
+            return policy
+    policy = await db.recording_policies.find_one(query, {"_id": 0})
+    return policy
+
+
+def _current_recording_period(period_length_days: int) -> Tuple[datetime, datetime]:
+    now = datetime.now(timezone.utc)
+    period_end = now
+    period_start = now - timedelta(days=period_length_days)
+    return period_start, period_end
+
+
+async def _calculate_recording_compliance(
+    teacher: dict,
+    admin_id: str,
+    policy: dict,
+) -> dict:
+    period_start, period_end = _current_recording_period(policy["period_length_days"])
+    required_subjects = _parse_teacher_subjects(teacher.get("subject"))
+    recordings_required = int(policy.get("min_recordings_per_period", 0))
+
+    query = {"teacher_id": teacher["id"]}
+    videos = await db.videos.find(query, {"_id": 0}).to_list(2000)
+    recordings_in_period = []
+    for v in videos:
+        timestamp = v.get("recorded_at") or v.get("upload_date")
+        if not timestamp:
+            continue
+        try:
+            recorded_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if period_start <= recorded_at <= period_end:
+            recordings_in_period.append(v)
+
+    recordings_completed = len(recordings_in_period)
+    subjects_completed = set()
+    for v in recordings_in_period:
+        for subject in _parse_teacher_subjects(v.get("subject")):
+            subjects_completed.add(subject.lower())
+    missing_subjects = [
+        s for s in required_subjects if s.lower() not in subjects_completed
+    ]
+
+    is_compliant = (
+        recordings_completed >= recordings_required
+        and len(missing_subjects) == 0
+    )
+
+    return {
+        "teacher_id": teacher["id"],
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "recordings_required": recordings_required,
+        "recordings_completed": recordings_completed,
+        "required_subjects": required_subjects,
+        "missing_subjects": missing_subjects,
+        "is_compliant": is_compliant,
+        "last_checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _upsert_recording_compliance(teacher: dict, admin_id: str, policy: dict) -> dict:
+    compliance = await _calculate_recording_compliance(teacher, admin_id, policy)
+    existing = await db.recording_compliance.find_one(
+        {"teacher_id": teacher["id"], "period_start": compliance["period_start"]},
+        {"_id": 0},
+    )
+    if existing:
+        await db.recording_compliance.update_one(
+            {"id": existing["id"]},
+            {"$set": compliance},
+        )
+        compliance_id = existing["id"]
+    else:
+        compliance_id = str(uuid.uuid4())
+        compliance["id"] = compliance_id
+        await db.recording_compliance.insert_one(compliance)
+    compliance["id"] = compliance_id
+    return compliance
+
+
+async def _refresh_recording_reminders(
+    teacher: dict,
+    admin_id: str,
+    policy: dict,
+    compliance: dict,
+) -> None:
+    teacher_user = None
+    if teacher.get("email"):
+        teacher_user = await db.users.find_one(
+            {"email": teacher.get("email")},
+            {"_id": 0},
+        )
+    reminder_user_ids = {admin_id}
+    if teacher_user and teacher_user.get("id"):
+        reminder_user_ids.add(teacher_user["id"])
+
+    await db.schedules.delete_many(
+        {
+            "teacher_id": teacher["id"],
+            "user_id": {"$in": list(reminder_user_ids)},
+            "reminder_type": "recording_compliance",
+        }
+    )
+    if compliance.get("is_compliant"):
+        return
+    period_start = datetime.fromisoformat(compliance["period_start"])
+    period_end = datetime.fromisoformat(compliance["period_end"])
+    for offset in policy.get("reminder_offsets_days", []):
+        try:
+            offset_days = int(offset)
+        except (TypeError, ValueError):
+            continue
+        reminder_time = period_end - timedelta(days=offset_days)
+        if reminder_time <= datetime.now(timezone.utc):
+            reminder_time = datetime.now(timezone.utc) + timedelta(minutes=5)
+        for user_id in reminder_user_ids:
+            reminder = {
+                "id": str(uuid.uuid4()),
+                "teacher_id": teacher["id"],
+                "course_name": f"Recording compliance reminder: {teacher.get('name','Teacher')}",
+                "start_time": reminder_time.isoformat(),
+                "recording_status": ScheduleStatus.PLANNED.value,
+                "join_url": None,
+                "location": None,
+                "user_id": user_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": None,
+                "reminder_type": "recording_compliance",
+                "reminder_context": {
+                    "recordings_required": compliance["recordings_required"],
+                    "recordings_completed": compliance["recordings_completed"],
+                    "missing_subjects": compliance["missing_subjects"],
+                    "period_end": period_end.isoformat(),
+                },
+                "reminder_note": "Submit missing lesson recordings for this period.",
+            }
+            await db.schedules.insert_one(reminder)
+
+
 # MongoDB connection
 mongo_url = _get_required_env("MONGO_URL")
 client = AsyncIOMotorClient(mongo_url)
@@ -631,6 +792,37 @@ class ScheduleUpdate(BaseModel):
     reminder_note: Optional[str] = None
 
 
+class RecordingPolicy(BaseModel):
+    id: str
+    created_by: str
+    school_id: Optional[str] = None
+    period_length_days: int
+    min_recordings_per_period: int
+    reminder_offsets_days: List[int]
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class RecordingPolicyUpsert(BaseModel):
+    school_id: Optional[str] = None
+    period_length_days: int = 30
+    min_recordings_per_period: int = 2
+    reminder_offsets_days: List[int] = [7, 2]
+
+
+class RecordingCompliance(BaseModel):
+    id: str
+    teacher_id: str
+    period_start: str
+    period_end: str
+    recordings_required: int
+    recordings_completed: int
+    required_subjects: List[str]
+    missing_subjects: List[str]
+    is_compliant: bool
+    last_checked_at: str
+
+
 class ActionPlanGoal(BaseModel):
     id: str
     title: str
@@ -1026,6 +1218,7 @@ async def upload_video(
         if teacher.get("email", "").lower() != current_user.get("email", "").lower():
             raise HTTPException(status_code=403, detail="Not authorized for this teacher")
     
+    subject = subject or teacher.get("subject")
     video_id = str(uuid.uuid4())
     filename = f"{video_id}{file_ext}"
     teacher_dir = UPLOAD_DIR / "videos" / teacher_id
@@ -1089,6 +1282,15 @@ async def upload_video(
         "uploaded_by": current_user["id"],
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
     })
+
+    try:
+        admin_id = teacher.get("created_by") or current_user["id"]
+        policy = await _get_recording_policy(admin_id, teacher.get("school_id"))
+        if policy:
+            compliance = await _upsert_recording_compliance(teacher, admin_id, policy)
+            await _refresh_recording_reminders(teacher, admin_id, policy, compliance)
+    except Exception:
+        logger.warning("Unable to update recording compliance after upload")
     
     # Queue video analysis in background
     background_tasks.add_task(analyze_video, video_id, str(file_path), teacher_id, current_user["id"])
@@ -2256,6 +2458,16 @@ async def get_teacher_dashboard(
         {"teacher_id": teacher_id},
         {"_id": 0, "uploaded_by": 0}
     ).to_list(100)
+
+    recording_policy = None
+    recording_compliance = None
+    try:
+        admin_id = teacher.get("created_by") or current_user["id"]
+        recording_policy = await _get_recording_policy(admin_id, teacher.get("school_id"))
+        if recording_policy:
+            recording_compliance = await _upsert_recording_compliance(teacher, admin_id, recording_policy)
+    except Exception:
+        logger.warning("Unable to attach recording compliance for dashboard")
     
     return {
         "teacher": teacher,
@@ -2263,6 +2475,8 @@ async def get_teacher_dashboard(
         "trend_data": trend_data,
         "assessments": assessments,
         "videos": videos,
+        "recording_policy": recording_policy,
+        "recording_compliance": recording_compliance,
         "total_assessments": len(assessments),
         "scoring_mode": scoring_mode,
         "date_range": {
@@ -2771,6 +2985,122 @@ async def update_schedule(
     result.pop("_id", None)
     result.pop("user_id", None)
     return Schedule(**result)
+
+
+# ==================== RECORDING POLICY & COMPLIANCE ====================
+@api_router.get("/recording-policies", response_model=List[RecordingPolicy])
+async def list_recording_policies(current_user: dict = Depends(get_current_user)):
+    role = _get_user_role(current_user)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can access policies")
+    docs = await db.recording_policies.find(
+        {"created_by": current_user["id"]},
+        {"_id": 0},
+    ).to_list(50)
+    return [RecordingPolicy(**d) for d in docs]
+
+
+@api_router.post("/recording-policies", response_model=RecordingPolicy)
+async def create_recording_policy(
+    payload: RecordingPolicyUpsert,
+    current_user: dict = Depends(get_current_user),
+):
+    role = _get_user_role(current_user)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can create policies")
+    existing = await db.recording_policies.find_one(
+        {"created_by": current_user["id"]},
+        {"_id": 0},
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    if existing:
+        update = payload.dict()
+        update["updated_at"] = now
+        await db.recording_policies.update_one({"id": existing["id"]}, {"$set": update})
+        existing.update(update)
+        return RecordingPolicy(**existing)
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "created_by": current_user["id"],
+        "school_id": payload.school_id,
+        "period_length_days": payload.period_length_days,
+        "min_recordings_per_period": payload.min_recordings_per_period,
+        "reminder_offsets_days": payload.reminder_offsets_days,
+        "created_at": now,
+        "updated_at": None,
+    }
+    await db.recording_policies.insert_one(doc)
+    return RecordingPolicy(**doc)
+
+
+@api_router.patch("/recording-policies/{policy_id}", response_model=RecordingPolicy)
+async def update_recording_policy(
+    policy_id: str,
+    payload: RecordingPolicyUpsert,
+    current_user: dict = Depends(get_current_user),
+):
+    role = _get_user_role(current_user)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can update policies")
+    now = datetime.now(timezone.utc).isoformat()
+    update = payload.dict()
+    update["updated_at"] = now
+    doc = await db.recording_policies.find_one_and_update(
+        {"id": policy_id, "created_by": current_user["id"]},
+        {"$set": update},
+        return_document=True,
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    doc.pop("_id", None)
+    return RecordingPolicy(**doc)
+
+
+@api_router.get("/recording-compliance", response_model=RecordingCompliance)
+async def get_recording_compliance(
+    teacher_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    admin_id = teacher.get("created_by") or current_user["id"]
+    policy = await _get_recording_policy(admin_id, teacher.get("school_id"))
+    if not policy:
+        raise HTTPException(status_code=404, detail="Recording policy not configured")
+    compliance = await _upsert_recording_compliance(teacher, admin_id, policy)
+    await _refresh_recording_reminders(teacher, admin_id, policy, compliance)
+    return RecordingCompliance(**compliance)
+
+
+@api_router.get("/recording-compliance/summary")
+async def get_recording_compliance_summary(current_user: dict = Depends(get_current_user)):
+    role = _get_user_role(current_user)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can access compliance summary")
+    policy = await _get_recording_policy(current_user["id"])
+    if not policy:
+        return {"policy": None, "summary": []}
+    teachers = await db.teachers.find(
+        {"created_by": current_user["id"]},
+        {"_id": 0},
+    ).to_list(1000)
+    summary = []
+    for teacher in teachers:
+        compliance = await _upsert_recording_compliance(teacher, current_user["id"], policy)
+        await _refresh_recording_reminders(teacher, current_user["id"], policy, compliance)
+        summary.append(
+            {
+                "teacher_id": teacher["id"],
+                "teacher_name": teacher.get("name"),
+                "subject": teacher.get("subject"),
+                "recordings_required": compliance["recordings_required"],
+                "recordings_completed": compliance["recordings_completed"],
+                "missing_subjects": compliance["missing_subjects"],
+                "is_compliant": compliance["is_compliant"],
+                "period_end": compliance["period_end"],
+            }
+        )
+    return {"policy": policy, "summary": summary}
 
 
 # ==================== NOTIFICATION ENDPOINTS ====================

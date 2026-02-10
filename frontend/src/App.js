@@ -10,7 +10,6 @@ import { TeacherProfilePage } from "@/pages/TeacherProfilePage";
 import { MasterSchedulePage } from "@/pages/MasterSchedulePage";
 import { VideoPlayerPage } from "@/pages/VideoPlayerPage";
 import { FrameworksPage } from "@/pages/FrameworksPage";
-import { VideoRecorderPage } from "@/pages/VideoRecorderPage";
 
 function App() {
   return (
@@ -46,14 +45,6 @@ function App() {
           element={
             <ProtectedRoute>
               <VideosPage />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/videos/record"
-          element={
-            <ProtectedRoute>
-              <VideoRecorderPage />
             </ProtectedRoute>
           }
         />

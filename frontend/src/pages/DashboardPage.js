@@ -1,11 +1,14 @@
 import React, { useMemo, useState, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
 import {
   assessmentApi,
   frameworkApi,
   reportApi,
   scheduleApi,
   gradebookApi,
+  recordingPolicyApi,
+  recordingComplianceApi,
 } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import {
@@ -20,9 +23,11 @@ import {
 } from "recharts";
 import { toast } from "sonner";
 import { subDays, format } from "date-fns";
+import { useAuth } from "@/hooks/useAuth";
 
 export function DashboardPage() {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const now = useMemo(() => new Date(), []);
   const currentRange = useMemo(
     () => ({ start: subDays(now, 30), end: now }),
@@ -81,6 +86,18 @@ export function DashboardPage() {
     queryFn: () => gradebookApi.list().then((res) => res.data),
   });
 
+  const { data: recordingPolicyRes } = useQuery({
+    queryKey: ["recording-policies"],
+    enabled: user?.role === "admin",
+    queryFn: () => recordingPolicyApi.list().then((res) => res.data),
+  });
+
+  const { data: recordingComplianceRes } = useQuery({
+    queryKey: ["recording-compliance-summary"],
+    enabled: user?.role === "admin",
+    queryFn: () => recordingComplianceApi.summary().then((res) => res.data),
+  });
+
   const roster = useMemo(() => currentData?.roster ?? [], [currentData]);
   const previousRoster = useMemo(
     () => previousData?.roster ?? [],
@@ -95,6 +112,9 @@ export function DashboardPage() {
   const [reportDepartment, setReportDepartment] = useState("");
   const [gradebookProvider, setGradebookProvider] = useState("powerschool");
   const [gradebookApiKey, setGradebookApiKey] = useState("");
+  const [policyPeriodDays, setPolicyPeriodDays] = useState(30);
+  const [policyMinRecordings, setPolicyMinRecordings] = useState(2);
+  const [policyReminderOffsets, setPolicyReminderOffsets] = useState([7, 2]);
 
   // Focus areas are driven by framework selection
   const seedDemoMutation = useMutation({
@@ -134,6 +154,18 @@ export function DashboardPage() {
     },
   });
 
+  const saveRecordingPolicyMutation = useMutation({
+    mutationFn: (payload) => recordingPolicyApi.create(payload),
+    onSuccess: () => {
+      toast.success("Recording policy saved");
+      queryClient.invalidateQueries({ queryKey: ["recording-policies"] });
+      queryClient.invalidateQueries({ queryKey: ["recording-compliance-summary"] });
+    },
+    onError: () => {
+      toast.error("Failed to save recording policy");
+    },
+  });
+
   // Use custom focus areas if set, otherwise default to first 3
   const focusElementIds = useMemo(
     () => selectedElementsState.slice(0, 3),
@@ -152,6 +184,15 @@ export function DashboardPage() {
       setSelectedElementsState(frameworkSelectionRes.selected_elements);
     }
   }, [selectedElements, frameworkSelectionRes]);
+
+  useEffect(() => {
+    const policy = recordingPolicyRes?.[0];
+    if (policy) {
+      setPolicyPeriodDays(policy.period_length_days || 30);
+      setPolicyMinRecordings(policy.min_recordings_per_period || 2);
+      setPolicyReminderOffsets(policy.reminder_offsets_days || [7, 2]);
+    }
+  }, [recordingPolicyRes]);
 
   const toggleDomainSelection = (domain) => {
     const elementIds = (domain.elements || []).map((el) => el.id);
@@ -291,7 +332,11 @@ export function DashboardPage() {
 
   const reminderRows = useMemo(() => {
     const reminders = (schedulesData ?? [])
-      .filter((s) => ["lesson_plan", "action_plan"].includes(s.reminder_type))
+      .filter((s) =>
+        ["lesson_plan", "action_plan", "recording_compliance"].includes(
+          s.reminder_type
+        )
+      )
       .sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
     return reminders.slice(0, 6);
   }, [schedulesData]);
@@ -524,6 +569,8 @@ export function DashboardPage() {
                         <div className="mt-1 text-[10px] text-emerald-700">
                           {r.reminder_type === "action_plan" && "Action plan"}
                           {r.reminder_type === "lesson_plan" && "Lesson plan"}
+                          {r.reminder_type === "recording_compliance" &&
+                            "Recording compliance"}
                         </div>
                       </div>
                       <div className="text-[11px] text-emerald-700">
@@ -532,6 +579,148 @@ export function DashboardPage() {
                     </div>
                   ))}
                 </div>
+              </section>
+            )}
+            {user?.role === "admin" && (
+              <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold text-slate-900">
+                      Recording compliance policy
+                    </h2>
+                    <p className="text-xs text-slate-500">
+                      Define the recording cadence and reminder schedule.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      saveRecordingPolicyMutation.mutate({
+                        period_length_days: policyPeriodDays,
+                        min_recordings_per_period: policyMinRecordings,
+                        reminder_offsets_days: policyReminderOffsets,
+                      })
+                    }
+                    disabled={saveRecordingPolicyMutation.isPending}
+                    className="rounded-md bg-primary px-3 py-2 text-xs font-semibold text-white hover:bg-primary/90 disabled:opacity-60"
+                  >
+                    {saveRecordingPolicyMutation.isPending
+                      ? "Saving..."
+                      : "Save policy"}
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 gap-4 text-xs md:grid-cols-3">
+                  <label className="flex flex-col gap-1 text-[11px] text-slate-600">
+                    Period length
+                    <select
+                      value={policyPeriodDays}
+                      onChange={(e) => setPolicyPeriodDays(Number(e.target.value))}
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                    >
+                      <option value={7}>7 days</option>
+                      <option value={14}>14 days</option>
+                      <option value={30}>30 days</option>
+                      <option value={60}>60 days</option>
+                      <option value={90}>90 days</option>
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1 text-[11px] text-slate-600">
+                    Min recordings
+                    <select
+                      value={policyMinRecordings}
+                      onChange={(e) => setPolicyMinRecordings(Number(e.target.value))}
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                    >
+                      <option value={1}>1</option>
+                      <option value={2}>2</option>
+                      <option value={3}>3</option>
+                      <option value={4}>4</option>
+                      <option value={5}>5</option>
+                    </select>
+                  </label>
+                  <div className="flex flex-col gap-1 text-[11px] text-slate-600">
+                    Reminder timing
+                    <div className="flex flex-wrap gap-2 text-[11px] text-slate-600">
+                      {[14, 7, 3, 2, 1].map((day) => (
+                        <label key={day} className="flex items-center gap-1">
+                          <input
+                            type="checkbox"
+                            checked={policyReminderOffsets.includes(day)}
+                            onChange={(e) => {
+                              setPolicyReminderOffsets((prev) =>
+                                e.target.checked
+                                  ? Array.from(new Set([...prev, day]))
+                                  : prev.filter((v) => v !== day)
+                              );
+                            }}
+                          />
+                          {day}d before
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </section>
+            )}
+            {user?.role === "admin" && (
+              <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold text-slate-900">
+                      Recording compliance dashboard
+                    </h2>
+                    <p className="text-xs text-slate-500">
+                      Track which teachers are meeting the recording requirements.
+                    </p>
+                  </div>
+                  <span className="text-xs text-slate-400">
+                    {recordingComplianceRes?.summary?.length || 0} teachers
+                  </span>
+                </div>
+                {recordingComplianceRes?.summary?.length ? (
+                  <div className="space-y-2 text-xs text-slate-600">
+                    {recordingComplianceRes.summary.map((row) => (
+                      <div
+                        key={row.teacher_id}
+                        className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
+                      >
+                        <div>
+                          <div className="text-xs font-medium text-slate-800">
+                            {row.teacher_name}
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            {row.subject || "Subject not set"}
+                          </div>
+                        </div>
+                        <div className="text-[11px] text-slate-600">
+                          {row.recordings_completed}/{row.recordings_required} recordings
+                        </div>
+                        {row.missing_subjects?.length ? (
+                          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] text-amber-700">
+                            Missing: {row.missing_subjects.join(", ")}
+                          </span>
+                        ) : (
+                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] text-emerald-700">
+                            Subjects complete
+                          </span>
+                        )}
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                            row.is_compliant
+                              ? "bg-emerald-100 text-emerald-700"
+                              : "bg-rose-100 text-rose-700"
+                          }`}
+                        >
+                          {row.is_compliant ? "Compliant" : "Behind"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-xs text-slate-500">
+                    No compliance data yet. Save a policy to begin tracking.
+                  </div>
+                )}
               </section>
             )}
             <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">

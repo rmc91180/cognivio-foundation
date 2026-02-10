@@ -50,6 +50,17 @@ export const videoApi = {
   detail: (videoId) => api.get(`/api/videos/${videoId}`),
 };
 
+export const recordingPolicyApi = {
+  list: () => api.get("/api/recording-policies"),
+  create: (payload) => api.post("/api/recording-policies", payload),
+  update: (id, payload) => api.patch(`/api/recording-policies/${id}`, payload),
+};
+
+export const recordingComplianceApi = {
+  get: (teacherId) => api.get("/api/recording-compliance", { params: { teacher_id: teacherId } }),
+  summary: () => api.get("/api/recording-compliance/summary"),
+};
+
 export const assessmentApi = {
   list: (params) => api.get("/api/assessments", { params }),
   get: (id) => api.get(`/api/assessments/${id}`),

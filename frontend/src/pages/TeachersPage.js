@@ -148,7 +148,11 @@ export function TeachersPage() {
 
   const reminderRows = useMemo(() => {
     const reminders = (schedulesData ?? [])
-      .filter((s) => ["lesson_plan", "action_plan"].includes(s.reminder_type))
+      .filter((s) =>
+        ["lesson_plan", "action_plan", "recording_compliance"].includes(
+          s.reminder_type
+        )
+      )
       .sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
     return reminders.slice(0, 6);
   }, [schedulesData]);
@@ -399,6 +403,8 @@ export function TeachersPage() {
                           <div className="mt-1 text-[10px] text-emerald-700">
                             {r.reminder_type === "action_plan" && "Action plan"}
                             {r.reminder_type === "lesson_plan" && "Lesson plan"}
+                            {r.reminder_type === "recording_compliance" &&
+                              "Recording compliance"}
                           </div>
                         </div>
                         <div className="text-[11px] text-emerald-700">

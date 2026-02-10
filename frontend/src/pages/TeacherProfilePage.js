@@ -282,6 +282,8 @@ export function TeacherProfilePage() {
 
   const elementSummary = dashboardRes?.element_summary ?? [];
   const videos = dashboardRes?.videos ?? [];
+  const recordingPolicy = dashboardRes?.recording_policy;
+  const recordingCompliance = dashboardRes?.recording_compliance;
   const observations = useMemo(() => observationsRes ?? [], [observationsRes]);
 
   const observationsByElement = useMemo(() => {
@@ -1240,6 +1242,48 @@ export function TeacherProfilePage() {
           </div>
 
           <div className="lg:col-span-4 space-y-6 lg:sticky lg:top-6 self-start">
+            <section className="rounded-xl border border-slate-200 bg-white p-5">
+              <h2 className="mb-2 text-sm font-semibold text-slate-900">
+                Recording compliance
+              </h2>
+              {recordingPolicy ? (
+                <div className="space-y-2 text-xs text-slate-600">
+                  <div className="flex items-center justify-between">
+                    <span>Required recordings</span>
+                    <span className="text-slate-900">
+                      {recordingCompliance?.recordings_completed ?? 0} /{" "}
+                      {recordingPolicy.min_recordings_per_period}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    Period length: {recordingPolicy.period_length_days} days
+                  </div>
+                  {recordingCompliance?.missing_subjects?.length ? (
+                    <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
+                      Missing subjects: {recordingCompliance.missing_subjects.join(", ")}
+                    </div>
+                  ) : (
+                    <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px] text-emerald-700">
+                      Subject coverage complete for this period.
+                    </div>
+                  )}
+                  {recordingCompliance?.is_compliant ? (
+                    <span className="inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
+                      Compliant
+                    </span>
+                  ) : (
+                    <span className="inline-flex rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-medium text-rose-700">
+                      Behind schedule
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <div className="text-xs text-slate-500">
+                  Recording policy not configured yet.
+                </div>
+              )}
+            </section>
+
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 Curriculum adherence
