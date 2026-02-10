@@ -1,6 +1,6 @@
 import React from "react";
 import { Link, NavLink } from "react-router-dom";
-import { Layers, LayoutDashboard, Users } from "lucide-react";
+import { Layers, LayoutDashboard, PlayCircle, Users } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 
 export function LayoutShell({ children }) {
