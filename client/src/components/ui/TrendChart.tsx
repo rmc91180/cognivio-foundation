@@ -87,6 +87,7 @@ export const TrendChart: React.FC<TrendChartProps> = ({
     green: '#22c55e',
     yellow: '#eab308',
     red: '#ef4444',
+    gray: '#9ca3af',
   };
 
   // Generate SVG path
