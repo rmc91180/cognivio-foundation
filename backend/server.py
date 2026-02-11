@@ -914,6 +914,9 @@ def create_token(user_id: str) -> str:
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
+def _is_admin_role(role: Optional[str]) -> bool:
+    return role in {"admin", "principal", "super_admin"}
+
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
         token = credentials.credentials
@@ -3112,7 +3115,7 @@ async def update_schedule(
 @api_router.get("/recording-policies", response_model=List[RecordingPolicy])
 async def list_recording_policies(current_user: dict = Depends(get_current_user)):
     role = _get_user_role(current_user)
-    if role != "admin":
+    if not _is_admin_role(role):
         raise HTTPException(status_code=403, detail="Only admins can access policies")
     docs = await db.recording_policies.find(
         {"created_by": current_user["id"]},
@@ -3127,7 +3130,7 @@ async def create_recording_policy(
     current_user: dict = Depends(get_current_user),
 ):
     role = _get_user_role(current_user)
-    if role != "admin":
+    if not _is_admin_role(role):
         raise HTTPException(status_code=403, detail="Only admins can create policies")
     teacher = None
     if payload.teacher_id:
@@ -3172,7 +3175,7 @@ async def update_recording_policy(
     current_user: dict = Depends(get_current_user),
 ):
     role = _get_user_role(current_user)
-    if role != "admin":
+    if not _is_admin_role(role):
         raise HTTPException(status_code=403, detail="Only admins can update policies")
     if payload.teacher_id:
         await _get_teacher_or_404(payload.teacher_id, current_user)
@@ -3209,7 +3212,7 @@ async def get_recording_compliance(
 @api_router.get("/recording-compliance/summary")
 async def get_recording_compliance_summary(current_user: dict = Depends(get_current_user)):
     role = _get_user_role(current_user)
-    if role != "admin":
+    if not _is_admin_role(role):
         raise HTTPException(status_code=403, detail="Only admins can access compliance summary")
     teachers = await db.teachers.find(
         {"created_by": current_user["id"]},
@@ -3257,7 +3260,7 @@ async def send_recording_compliance_reminder(
     current_user: dict = Depends(get_current_user),
 ):
     role = _get_user_role(current_user)
-    if role != "admin":
+    if not _is_admin_role(role):
         raise HTTPException(status_code=403, detail="Only admins can send reminders")
     teacher = await _get_teacher_or_404(teacher_id, current_user)
     admin_id = current_user["id"]

@@ -27,6 +27,7 @@ import { useAuth } from "@/hooks/useAuth";
 export function DashboardPage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
   const now = useMemo(() => new Date(), []);
   const currentRange = useMemo(
     () => ({ start: subDays(now, 30), end: now }),
@@ -82,19 +83,19 @@ export function DashboardPage() {
   });
   const { data: teachersData } = useQuery({
     queryKey: ["teachers"],
-    enabled: user?.role === "admin",
+    enabled: isAdmin,
     queryFn: () => teacherApi.list().then((res) => res.data),
   });
 
   const { data: recordingPolicyRes } = useQuery({
     queryKey: ["recording-policies"],
-    enabled: user?.role === "admin",
+    enabled: isAdmin,
     queryFn: () => recordingPolicyApi.list().then((res) => res.data),
   });
 
   const { data: recordingComplianceRes } = useQuery({
     queryKey: ["recording-compliance-summary"],
-    enabled: user?.role === "admin",
+    enabled: isAdmin,
     queryFn: () => recordingComplianceApi.summary().then((res) => res.data),
   });
 
@@ -615,7 +616,7 @@ export function DashboardPage() {
                 </div>
               </div>
             </section>
-            {user?.role === "admin" && (
+            {isAdmin && (
               <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                   <div>
@@ -716,7 +717,7 @@ export function DashboardPage() {
                 </div>
               </section>
             )}
-            {user?.role === "admin" && (
+            {isAdmin && (
               <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                   <div>

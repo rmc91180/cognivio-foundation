@@ -27,6 +27,7 @@ export function TeacherProfilePage() {
   const { teacherId } = useParams();
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
   const [periodMonths, setPeriodMonths] = useState(3);
 
   const { data: teacherRes } = useQuery({
@@ -310,7 +311,7 @@ export function TeacherProfilePage() {
 
   const { data: adminOverridesRes } = useQuery({
     queryKey: ["admin-overrides", latestAssessmentId],
-    enabled: Boolean(latestAssessmentId) && user?.role === "admin",
+    enabled: Boolean(latestAssessmentId) && isAdmin,
     queryFn: () =>
       assessmentApi.listAdminOverrides(latestAssessmentId).then((r) => r.data),
   });
@@ -560,7 +561,7 @@ export function TeacherProfilePage() {
                 <option value={12}>12 months</option>
               </select>
             </div>
-            {user?.role === "admin" && (
+            {isAdmin && (
               <div className="flex items-center gap-2 text-xs">
                 <label className="text-slate-600">Admin scoring</label>
                 <select
@@ -880,7 +881,7 @@ export function TeacherProfilePage() {
               </p>
               
 
-              {(user?.role === "admin" || user?.role === "teacher") && (
+              {(isAdmin || user?.role === "teacher") && (
                 <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs">
                   <div className="mb-2 font-semibold text-slate-700">Curriculum (admin or teacher)</div>
                   <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
@@ -1484,7 +1485,7 @@ export function TeacherProfilePage() {
                       No evidence captured yet for this domain.
                     </div>
                   )}
-                  {user?.role === "admin" && latestAssessment && (
+                  {isAdmin && latestAssessment && (
                     <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-2 text-[11px]">
                       <div className="mb-2 font-semibold text-slate-700">
                         Admin score adjustment
@@ -1553,7 +1554,7 @@ export function TeacherProfilePage() {
                       })()}
                     </div>
                   )}
-                  {user?.role === "admin" && overrideByElement[selectedEvidenceElement] && (
+                  {isAdmin && overrideByElement[selectedEvidenceElement] && (
                     <div className="mt-2 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-2 text-[11px] text-emerald-800">
                       <div className="font-semibold">Override history</div>
                       <div>

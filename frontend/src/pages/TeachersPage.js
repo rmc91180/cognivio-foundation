@@ -18,6 +18,7 @@ import { useAuth } from "@/hooks/useAuth";
 export function TeachersPage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
   const { data: teachersData, isLoading } = useQuery({
     queryKey: ["teachers"],
     queryFn: () => teacherApi.list().then((res) => res.data),
@@ -802,7 +803,7 @@ export function TeachersPage() {
                                       {roster.recording_compliance.recordings_required}
                                     </span>
                                     {!roster.recording_compliance.is_compliant &&
-                                      user?.role === "admin" && (
+                                      isAdmin && (
                                         <button
                                           type="button"
                                           onClick={() =>
@@ -961,7 +962,7 @@ export function TeachersPage() {
                                           View Videos
                                         </Link>
                                       </div>
-                                      {user?.role === "admin" && (
+                                      {isAdmin && (
                                         <div className="mt-4">
                                           <h5 className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
                                             Category
