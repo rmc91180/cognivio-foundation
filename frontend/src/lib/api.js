@@ -59,6 +59,11 @@ export const recordingPolicyApi = {
 export const recordingComplianceApi = {
   get: (teacherId) => api.get("/api/recording-compliance", { params: { teacher_id: teacherId } }),
   summary: () => api.get("/api/recording-compliance/summary"),
+  remind: (teacherId) =>
+    api.post(
+      "/api/recording-compliance/remind",
+      new URLSearchParams({ teacher_id: teacherId })
+    ),
 };
 
 export const assessmentApi = {

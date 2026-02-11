@@ -6,6 +6,7 @@ import {
   reportApi,
   scheduleApi,
   gradebookApi,
+  teacherApi,
   recordingPolicyApi,
   recordingComplianceApi,
 } from "@/lib/api";
@@ -84,6 +85,11 @@ export function DashboardPage() {
     queryKey: ["gradebook-integrations"],
     queryFn: () => gradebookApi.list().then((res) => res.data),
   });
+  const { data: teachersData } = useQuery({
+    queryKey: ["teachers"],
+    enabled: user?.role === "admin",
+    queryFn: () => teacherApi.list().then((res) => res.data),
+  });
 
   const { data: recordingPolicyRes } = useQuery({
     queryKey: ["recording-policies"],
@@ -114,6 +120,7 @@ export function DashboardPage() {
   const [policyPeriodDays, setPolicyPeriodDays] = useState(30);
   const [policyMinRecordings, setPolicyMinRecordings] = useState(2);
   const [policyReminderOffsets, setPolicyReminderOffsets] = useState([7, 2]);
+  const [policyTeacherId, setPolicyTeacherId] = useState("");
 
   // Focus areas are driven by framework selection
   const seedDemoMutation = useMutation({
@@ -162,6 +169,17 @@ export function DashboardPage() {
     },
     onError: () => {
       toast.error("Failed to save recording policy");
+    },
+  });
+
+  const sendComplianceReminderMutation = useMutation({
+    mutationFn: (teacherId) => recordingComplianceApi.remind(teacherId),
+    onSuccess: () => {
+      toast.success("Reminder sent");
+      queryClient.invalidateQueries({ queryKey: ["schedules"] });
+    },
+    onError: () => {
+      toast.error("Failed to send reminder");
     },
   });
 
@@ -595,6 +613,7 @@ export function DashboardPage() {
                     type="button"
                     onClick={() =>
                       saveRecordingPolicyMutation.mutate({
+                        teacher_id: policyTeacherId || null,
                         period_length_days: policyPeriodDays,
                         min_recordings_per_period: policyMinRecordings,
                         reminder_offsets_days: policyReminderOffsets,
@@ -608,7 +627,22 @@ export function DashboardPage() {
                       : "Save policy"}
                   </button>
                 </div>
-                <div className="grid grid-cols-1 gap-4 text-xs md:grid-cols-3">
+                <div className="grid grid-cols-1 gap-4 text-xs md:grid-cols-4">
+                  <label className="flex flex-col gap-1 text-[11px] text-slate-600">
+                    Assign to teacher
+                    <select
+                      value={policyTeacherId}
+                      onChange={(e) => setPolicyTeacherId(e.target.value)}
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                    >
+                      <option value="">All teachers (default)</option>
+                      {(teachersData?.teachers || []).map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <label className="flex flex-col gap-1 text-[11px] text-slate-600">
                     Period length
                     <select
@@ -658,6 +692,10 @@ export function DashboardPage() {
                       ))}
                     </div>
                   </div>
+                </div>
+                <div className="mt-3 text-[11px] text-slate-500">
+                  Required subjects are automatically taken from each teacher’s
+                  subject field.
                 </div>
               </section>
             )}
@@ -712,6 +750,17 @@ export function DashboardPage() {
                         >
                           {row.is_compliant ? "Compliant" : "Behind"}
                         </span>
+                        {!row.is_compliant && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              sendComplianceReminderMutation.mutate(row.teacher_id)
+                            }
+                            className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-700 hover:bg-slate-100"
+                          >
+                            Send reminder
+                          </button>
+                        )}
                       </div>
                     ))}
                   </div>

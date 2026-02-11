@@ -1248,6 +1248,10 @@ export function TeacherProfilePage() {
               </h2>
               {recordingPolicy ? (
                 <div className="space-y-2 text-xs text-slate-600">
+                  <div className="text-[11px] text-slate-500">
+                    Policy: {recordingPolicy.min_recordings_per_period} recordings every{" "}
+                    {recordingPolicy.period_length_days} days.
+                  </div>
                   <div className="flex items-center justify-between">
                     <span>Required recordings</span>
                     <span className="text-slate-900">

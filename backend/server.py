@@ -193,7 +193,7 @@ def _parse_teacher_subjects(subject_value: Optional[Any]) -> List[str]:
 
 
 async def _get_recording_policy(admin_id: str, school_id: Optional[str] = None) -> Optional[dict]:
-    query: Dict[str, Any] = {"created_by": admin_id}
+    query: Dict[str, Any] = {"created_by": admin_id, "teacher_id": None}
     if school_id:
         policy = await db.recording_policies.find_one(
             {**query, "school_id": school_id},
@@ -203,6 +203,16 @@ async def _get_recording_policy(admin_id: str, school_id: Optional[str] = None) 
             return policy
     policy = await db.recording_policies.find_one(query, {"_id": 0})
     return policy
+
+
+async def _get_recording_policy_for_teacher(admin_id: str, teacher: dict) -> Optional[dict]:
+    teacher_policy = await db.recording_policies.find_one(
+        {"created_by": admin_id, "teacher_id": teacher.get("id")},
+        {"_id": 0},
+    )
+    if teacher_policy:
+        return teacher_policy
+    return await _get_recording_policy(admin_id, teacher.get("school_id"))
 
 
 def _current_recording_period(period_length_days: int) -> Tuple[datetime, datetime]:
@@ -804,6 +814,7 @@ class RecordingPolicy(BaseModel):
 
 
 class RecordingPolicyUpsert(BaseModel):
+    teacher_id: Optional[str] = None
     school_id: Optional[str] = None
     period_length_days: int = 30
     min_recordings_per_period: int = 2
@@ -2198,6 +2209,10 @@ async def get_teacher_roster(
     
     roster = []
     for teacher in teachers:
+        policy = await _get_recording_policy_for_teacher(current_user["id"], teacher)
+        compliance_summary = None
+        if policy:
+            compliance_summary = await _upsert_recording_compliance(teacher, current_user["id"], policy)
         # Get assessments for this teacher within date range
         assessment_query = {
             "teacher_id": teacher["id"],
@@ -2282,6 +2297,7 @@ async def get_teacher_roster(
                 "overall_score": overall_score,
                 "assessment_count": len(assessments),
                 "last_assessment_date": assessments[-1]["analyzed_at"] if assessments else None,
+                "recording_compliance": compliance_summary,
             }
         )
     
@@ -2463,7 +2479,7 @@ async def get_teacher_dashboard(
     recording_compliance = None
     try:
         admin_id = teacher.get("created_by") or current_user["id"]
-        recording_policy = await _get_recording_policy(admin_id, teacher.get("school_id"))
+        recording_policy = await _get_recording_policy_for_teacher(admin_id, teacher)
         if recording_policy:
             recording_compliance = await _upsert_recording_compliance(teacher, admin_id, recording_policy)
     except Exception:
@@ -3008,13 +3024,22 @@ async def create_recording_policy(
     role = _get_user_role(current_user)
     if role != "admin":
         raise HTTPException(status_code=403, detail="Only admins can create policies")
-    existing = await db.recording_policies.find_one(
-        {"created_by": current_user["id"]},
-        {"_id": 0},
-    )
+    teacher = None
+    if payload.teacher_id:
+        teacher = await _get_teacher_or_404(payload.teacher_id, current_user)
+    policy_query = {"created_by": current_user["id"], "teacher_id": payload.teacher_id or None}
+    if payload.teacher_id:
+        policy_query["teacher_id"] = payload.teacher_id
+    else:
+        policy_query["teacher_id"] = None
+        if payload.school_id:
+            policy_query["school_id"] = payload.school_id
+
+    existing = await db.recording_policies.find_one(policy_query, {"_id": 0})
     now = datetime.now(timezone.utc).isoformat()
     if existing:
         update = payload.dict()
+        update["teacher_id"] = payload.teacher_id or None
         update["updated_at"] = now
         await db.recording_policies.update_one({"id": existing["id"]}, {"$set": update})
         existing.update(update)
@@ -3023,7 +3048,8 @@ async def create_recording_policy(
     doc = {
         "id": str(uuid.uuid4()),
         "created_by": current_user["id"],
-        "school_id": payload.school_id,
+        "teacher_id": payload.teacher_id or None,
+        "school_id": payload.school_id or (teacher.get("school_id") if teacher else None),
         "period_length_days": payload.period_length_days,
         "min_recordings_per_period": payload.min_recordings_per_period,
         "reminder_offsets_days": payload.reminder_offsets_days,
@@ -3043,8 +3069,11 @@ async def update_recording_policy(
     role = _get_user_role(current_user)
     if role != "admin":
         raise HTTPException(status_code=403, detail="Only admins can update policies")
+    if payload.teacher_id:
+        await _get_teacher_or_404(payload.teacher_id, current_user)
     now = datetime.now(timezone.utc).isoformat()
     update = payload.dict()
+    update["teacher_id"] = payload.teacher_id or None
     update["updated_at"] = now
     doc = await db.recording_policies.find_one_and_update(
         {"id": policy_id, "created_by": current_user["id"]},
@@ -3064,7 +3093,7 @@ async def get_recording_compliance(
 ):
     teacher = await _get_teacher_or_404(teacher_id, current_user)
     admin_id = teacher.get("created_by") or current_user["id"]
-    policy = await _get_recording_policy(admin_id, teacher.get("school_id"))
+    policy = await _get_recording_policy_for_teacher(admin_id, teacher)
     if not policy:
         raise HTTPException(status_code=404, detail="Recording policy not configured")
     compliance = await _upsert_recording_compliance(teacher, admin_id, policy)
@@ -3077,15 +3106,28 @@ async def get_recording_compliance_summary(current_user: dict = Depends(get_curr
     role = _get_user_role(current_user)
     if role != "admin":
         raise HTTPException(status_code=403, detail="Only admins can access compliance summary")
-    policy = await _get_recording_policy(current_user["id"])
-    if not policy:
-        return {"policy": None, "summary": []}
     teachers = await db.teachers.find(
         {"created_by": current_user["id"]},
         {"_id": 0},
     ).to_list(1000)
     summary = []
     for teacher in teachers:
+        policy = await _get_recording_policy_for_teacher(current_user["id"], teacher)
+        if not policy:
+            summary.append(
+                {
+                    "teacher_id": teacher["id"],
+                    "teacher_name": teacher.get("name"),
+                    "subject": teacher.get("subject"),
+                    "recordings_required": 0,
+                    "recordings_completed": 0,
+                    "missing_subjects": [],
+                    "is_compliant": False,
+                    "period_end": None,
+                    "policy_assigned": False,
+                }
+            )
+            continue
         compliance = await _upsert_recording_compliance(teacher, current_user["id"], policy)
         await _refresh_recording_reminders(teacher, current_user["id"], policy, compliance)
         summary.append(
@@ -3098,9 +3140,64 @@ async def get_recording_compliance_summary(current_user: dict = Depends(get_curr
                 "missing_subjects": compliance["missing_subjects"],
                 "is_compliant": compliance["is_compliant"],
                 "period_end": compliance["period_end"],
+                "policy_assigned": True,
             }
         )
-    return {"policy": policy, "summary": summary}
+    return {"policy": None, "summary": summary}
+
+
+@api_router.post("/recording-compliance/remind")
+async def send_recording_compliance_reminder(
+    teacher_id: str = Form(...),
+    current_user: dict = Depends(get_current_user),
+):
+    role = _get_user_role(current_user)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can send reminders")
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    admin_id = current_user["id"]
+    policy = await _get_recording_policy_for_teacher(admin_id, teacher)
+    if not policy:
+        raise HTTPException(status_code=404, detail="Recording policy not configured")
+    compliance = await _upsert_recording_compliance(teacher, admin_id, policy)
+    teacher_user = None
+    if teacher.get("email"):
+        teacher_user = await db.users.find_one(
+            {"email": teacher.get("email")},
+            {"_id": 0},
+        )
+    if not teacher_user or not teacher_user.get("id"):
+        raise HTTPException(status_code=404, detail="Teacher user account not found")
+
+    reminder = {
+        "id": str(uuid.uuid4()),
+        "teacher_id": teacher["id"],
+        "course_name": f"Recording compliance reminder: {teacher.get('name','Teacher')}",
+        "start_time": datetime.now(timezone.utc).isoformat(),
+        "recording_status": ScheduleStatus.PLANNED.value,
+        "join_url": None,
+        "location": None,
+        "user_id": teacher_user["id"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": None,
+        "reminder_type": "recording_compliance",
+        "reminder_context": {
+            "recordings_required": compliance["recordings_required"],
+            "recordings_completed": compliance["recordings_completed"],
+            "missing_subjects": compliance["missing_subjects"],
+            "period_end": compliance["period_end"],
+        },
+        "reminder_note": "Admin reminder: submit missing lesson recordings.",
+    }
+    await db.schedules.insert_one(reminder)
+    await _enqueue_notification(
+        teacher_user,
+        teacher["id"],
+        "recording_compliance",
+        "Recording compliance reminder",
+        "Please submit missing lesson recordings for this period.",
+    )
+    return {"message": "Reminder sent"}
 
 
 # ==================== NOTIFICATION ENDPOINTS ====================

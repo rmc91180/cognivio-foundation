@@ -1,14 +1,23 @@
 import React, { useMemo, useState, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { assessmentApi, reportApi, scheduleApi, teacherApi, schoolApi } from "@/lib/api";
+import {
+  assessmentApi,
+  reportApi,
+  scheduleApi,
+  teacherApi,
+  schoolApi,
+  recordingComplianceApi,
+} from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { toast } from "sonner";
 import { Link } from "react-router-dom";
 import { ScoreCell } from "@/components/ScoreCell";
 import { TrendIndicator } from "@/components/TrendIndicator";
+import { useAuth } from "@/hooks/useAuth";
 
 export function TeachersPage() {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const { data: teachersData, isLoading } = useQuery({
     queryKey: ["teachers"],
     queryFn: () => teacherApi.list().then((res) => res.data),
@@ -67,6 +76,17 @@ export function TeachersPage() {
     },
     onError: () => {
       toast.error("Failed to add school");
+    },
+  });
+
+  const sendComplianceReminderMutation = useMutation({
+    mutationFn: (teacherId) => recordingComplianceApi.remind(teacherId),
+    onSuccess: () => {
+      toast.success("Reminder sent");
+      queryClient.invalidateQueries({ queryKey: ["schedules"] });
+    },
+    onError: () => {
+      toast.error("Failed to send reminder");
     },
   });
 
@@ -585,6 +605,7 @@ export function TeachersPage() {
                         <th className="px-3 py-2">Teacher</th>
                         <th className="px-3 py-2">Dept</th>
                         <th className="px-3 py-2">Flag</th>
+                        <th className="px-3 py-2">Compliance</th>
                         <th className="px-3 py-2">Trend</th>
                         {displayedElements.map((el) => (
                           <th key={el} className="px-3 py-2 text-center">
@@ -643,7 +664,7 @@ export function TeachersPage() {
                         const isExpanded = expandedRows.has(teacher.id);
                         const extraColumns =
                           selectedElements.length > displayedElements.length ? 1 : 0;
-                        const colSpan = 6 + displayedElements.length + extraColumns;
+                        const colSpan = 7 + displayedElements.length + extraColumns;
 
                         return (
                           <React.Fragment key={teacher.id}>
@@ -695,6 +716,43 @@ export function TeachersPage() {
                                     {flagReason}
                                   </span>
                                 </div>
+                              </td>
+                              <td className="px-3 py-2 align-top">
+                                {roster?.recording_compliance ? (
+                                  <div className="flex flex-col gap-1 text-[10px] text-slate-600">
+                                    <span
+                                      className={`inline-flex rounded-full px-2 py-0.5 font-medium ${
+                                        roster.recording_compliance.is_compliant
+                                          ? "bg-emerald-100 text-emerald-700"
+                                          : "bg-rose-100 text-rose-700"
+                                      }`}
+                                    >
+                                      {roster.recording_compliance.is_compliant
+                                        ? "Compliant"
+                                        : "Behind"}
+                                    </span>
+                                    <span>
+                                      {roster.recording_compliance.recordings_completed}/
+                                      {roster.recording_compliance.recordings_required}
+                                    </span>
+                                    {!roster.recording_compliance.is_compliant &&
+                                      user?.role === "admin" && (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            sendComplianceReminderMutation.mutate(teacher.id)
+                                          }
+                                          className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-700 hover:bg-slate-100"
+                                        >
+                                          Send reminder
+                                        </button>
+                                      )}
+                                  </div>
+                                ) : (
+                                  <span className="text-[10px] text-slate-400">
+                                    No policy
+                                  </span>
+                                )}
                               </td>
                               <td className="px-3 py-2 align-top">
                                 <TrendIndicator
