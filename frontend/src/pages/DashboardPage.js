@@ -4,7 +4,6 @@ import {
   assessmentApi,
   frameworkApi,
   reportApi,
-  scheduleApi,
   gradebookApi,
   teacherApi,
   recordingPolicyApi,
@@ -76,10 +75,6 @@ export function DashboardPage() {
   const { data: frameworkDetailRes, isLoading: frameworkLoading } = useQuery({
     queryKey: ["framework-detail", frameworkType],
     queryFn: () => frameworkApi.get(frameworkType).then((res) => res.data),
-  });
-  const { data: schedulesData } = useQuery({
-    queryKey: ["schedules"],
-    queryFn: () => scheduleApi.list().then((res) => res.data),
   });
   const { data: gradebookData } = useQuery({
     queryKey: ["gradebook-integrations"],
@@ -285,13 +280,6 @@ export function DashboardPage() {
     return { teacherCount, assessmentCount, deptCount };
   }, [roster]);
 
-  const teacherNameById = useMemo(() => {
-    const map = {};
-    roster.forEach((t) => {
-      map[t.teacher_id] = t.teacher_name;
-    });
-    return map;
-  }, [roster]);
 
   const departmentData = useMemo(() => {
     if (!roster.length && !previousRoster.length) return [];
@@ -347,16 +335,6 @@ export function DashboardPage() {
     return Array.from(set).sort();
   }, [roster]);
 
-  const reminderRows = useMemo(() => {
-    const reminders = (schedulesData ?? [])
-      .filter((s) =>
-        ["lesson_plan", "action_plan", "recording_compliance"].includes(
-          s.reminder_type
-        )
-      )
-      .sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
-    return reminders.slice(0, 6);
-  }, [schedulesData]);
 
   const downloadReport = async (format, params, filename) => {
     try {
@@ -422,6 +400,138 @@ export function DashboardPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
+            <section className="md:col-span-7 rounded-xl border border-slate-200 bg-white p-5">
+              <h2 className="mb-2 text-sm font-semibold text-slate-900">
+                School focus areas
+              </h2>
+              <p className="mb-2 text-xs text-slate-500">
+                Aggregate performance on your top three priority rubric
+                elements.
+              </p>
+              <div className="mb-4 flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
+                <span>{focusSummary.teacherCount} teachers included</span>
+                <span>•</span>
+                <span>{focusSummary.assessmentCount} observations analyzed</span>
+                <span>•</span>
+                <span>{focusSummary.deptCount} departments represented</span>
+              </div>
+              {focusAreaData.length === 0 ? (
+                <div className="text-xs text-slate-500">
+                  No focus area data yet.
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                    {focusAreaData.map((item) => {
+                      const previous = previousRoster
+                        .map((t) => t.element_scores?.[item.elementId]?.score)
+                        .filter((s) => typeof s === "number");
+                      const previousAvg = previous.length
+                        ? previous.reduce((a, b) => a + b, 0) / previous.length
+                        : null;
+                      const delta =
+                        previousAvg != null && item.averageScore != null
+                          ? item.averageScore - previousAvg
+                          : null;
+                      return (
+                        <div
+                          key={item.elementId}
+                          className="rounded-lg border border-slate-200 bg-slate-50 p-3"
+                        >
+                          <div className="text-xs font-semibold text-slate-700">
+                            {item.elementName}
+                          </div>
+                          <div className="mt-2 text-2xl font-semibold text-slate-900">
+                            {item.averageScore != null ? item.averageScore.toFixed(1) : "—"}
+                          </div>
+                          <div className="mt-1 text-[11px] text-slate-500">
+                            {item.teacherCount} teachers • {item.assessmentCount} observations
+                          </div>
+                          <div className="mt-2 h-1 w-full rounded-full bg-slate-200">
+                            <div
+                              className="h-1 rounded-full bg-primary"
+                              style={{
+                                width: `${Math.min(100, (item.averageScore || 0) * 10)}%`,
+                              }}
+                            />
+                          </div>
+                          <div className="mt-1 text-[10px] text-slate-500">
+                            {delta == null
+                              ? "No prior trend"
+                              : delta > 0
+                                ? `▲ ${delta.toFixed(2)} vs prior`
+                                : delta < 0
+                                  ? `▼ ${Math.abs(delta).toFixed(2)} vs prior`
+                                  : "No change vs prior"}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-4 h-56">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={focusAreaData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis dataKey="label" stroke="#64748b" />
+                        <YAxis stroke="#64748b" domain={[0, 10]} />
+                        <Tooltip
+                          contentStyle={{
+                            backgroundColor: "#ffffff",
+                            borderColor: "#e2e8f0",
+                            fontSize: 12,
+                          }}
+                        />
+                        <Bar dataKey="averageScore" fill="#4f46e5" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </>
+              )}
+            </section>
+
+            <section className="md:col-span-5 rounded-xl border border-slate-200 bg-white p-5">
+              <h2 className="mb-2 text-sm font-semibold text-slate-900">
+                Departmental progress
+              </h2>
+              <p className="mb-2 text-xs text-slate-500">
+                Compare average performance across departments to identify
+                pockets of strength and support needs.
+              </p>
+              <p className="mb-4 text-[11px] text-slate-500">
+                Showing {format(previousRange.start, "MMM d")}–{format(previousRange.end, "MMM d")} vs{" "}
+                {format(currentRange.start, "MMM d")}–{format(currentRange.end, "MMM d")}.
+              </p>
+              {departmentData.length === 0 ? (
+                <div className="text-xs text-slate-500">
+                  No departmental data yet.
+                </div>
+              ) : (
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={departmentData} layout="vertical">
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis type="number" stroke="#64748b" domain={[0, 10]} />
+                      <YAxis
+                        dataKey="department"
+                        type="category"
+                        stroke="#64748b"
+                        width={90}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "#ffffff",
+                          borderColor: "#e2e8f0",
+                          fontSize: 12,
+                        }}
+                      />
+                      <Legend />
+                      <Bar dataKey="averageScore" name="Current" fill="#22c55e" />
+                      <Bar dataKey="previousAverage" name="Month ago" fill="#94a3b8" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </section>
             <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
@@ -505,99 +615,6 @@ export function DashboardPage() {
                 </div>
               </div>
             </section>
-            <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h2 className="text-sm font-semibold text-slate-900">
-                    Gradebook integrations
-                  </h2>
-                  <p className="text-xs text-slate-500">
-                    Connect PowerSchool or Canvas to sync gradebook signals.
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2 text-xs">
-                  <select
-                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
-                    value={gradebookProvider}
-                    onChange={(e) => setGradebookProvider(e.target.value)}
-                  >
-                    <option value="powerschool">PowerSchool</option>
-                    <option value="canvas">Canvas</option>
-                  </select>
-                  <input
-                    type="password"
-                    placeholder="API key (optional)"
-                    value={gradebookApiKey}
-                    onChange={(e) => setGradebookApiKey(e.target.value)}
-                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
-                  />
-                  <button
-                    type="button"
-                    onClick={() =>
-                      connectGradebookMutation.mutate({
-                        provider: gradebookProvider,
-                        api_key: gradebookApiKey,
-                        status: "connected",
-                      })
-                    }
-                    className="rounded-md border border-slate-200 bg-white px-3 py-1 text-[11px] text-slate-700 hover:bg-slate-100"
-                  >
-                    Connect
-                  </button>
-                </div>
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-slate-600">
-                {(gradebookData || []).length === 0 ? (
-                  <span className="text-slate-500">
-                    No gradebook integrations connected yet.
-                  </span>
-                ) : (
-                  gradebookData.map((integration) => (
-                    <span
-                      key={integration.id}
-                      className="rounded-full bg-emerald-50 px-2 py-1 text-emerald-700"
-                    >
-                      {integration.provider} • {integration.status}
-                    </span>
-                  ))
-                )}
-              </div>
-            </section>
-            {reminderRows.length > 0 && (
-              <section className="md:col-span-12 rounded-xl border border-emerald-200 bg-emerald-50 p-5">
-                <div className="mb-2 text-sm font-semibold text-emerald-900">
-                  Upcoming reminders
-                </div>
-                <div className="space-y-2 text-xs text-emerald-800">
-                  {reminderRows.map((r) => (
-                    <div
-                      key={r.id}
-                      className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-white px-3 py-2"
-                    >
-                      <div>
-                        <div className="font-medium text-emerald-900">
-                          {r.course_name}
-                        </div>
-                        <div className="text-[11px] text-emerald-700">
-                          {teacherNameById[r.teacher_id]
-                            ? `Teacher: ${teacherNameById[r.teacher_id]}`
-                            : `Teacher ID: ${r.teacher_id}`}
-                        </div>
-                        <div className="mt-1 text-[10px] text-emerald-700">
-                          {r.reminder_type === "action_plan" && "Action plan"}
-                          {r.reminder_type === "lesson_plan" && "Lesson plan"}
-                          {r.reminder_type === "recording_compliance" &&
-                            "Recording compliance"}
-                        </div>
-                      </div>
-                      <div className="text-[11px] text-emerald-700">
-                        {r.start_time}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            )}
             {user?.role === "admin" && (
               <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
@@ -837,122 +854,65 @@ export function DashboardPage() {
                 </div>
               )}
             </section>
-            <section className="md:col-span-7 rounded-xl border border-slate-200 bg-white p-5">
-              <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                School focus areas
-              </h2>
-              <p className="mb-2 text-xs text-slate-500">
-                Aggregate performance on your top three priority rubric
-                elements.
-              </p>
-              <div className="mb-4 flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
-                <span>{focusSummary.teacherCount} teachers included</span>
-                <span>•</span>
-                <span>{focusSummary.assessmentCount} observations analyzed</span>
-                <span>•</span>
-                <span>{focusSummary.deptCount} departments represented</span>
+
+            <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">
+                    Gradebook integrations
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Connect PowerSchool or Canvas to sync gradebook signals.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <select
+                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+                    value={gradebookProvider}
+                    onChange={(e) => setGradebookProvider(e.target.value)}
+                  >
+                    <option value="powerschool">PowerSchool</option>
+                    <option value="canvas">Canvas</option>
+                  </select>
+                  <input
+                    type="password"
+                    placeholder="API key (optional)"
+                    value={gradebookApiKey}
+                    onChange={(e) => setGradebookApiKey(e.target.value)}
+                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      connectGradebookMutation.mutate({
+                        provider: gradebookProvider,
+                        api_key: gradebookApiKey,
+                        status: "connected",
+                      })
+                    }
+                    className="rounded-md border border-slate-200 bg-white px-3 py-1 text-[11px] text-slate-700 hover:bg-slate-100"
+                  >
+                    Connect
+                  </button>
+                </div>
               </div>
-              {focusAreaData.length === 0 ? (
-                <div className="text-xs text-slate-500">
-                  No focus area data yet.
-                </div>
-              ) : (
-                <>
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                    {focusAreaData.map((item) => (
-                      <div
-                        key={item.elementId}
-                        className="rounded-lg border border-slate-200 bg-slate-50 p-3"
-                      >
-                        <div className="text-xs font-semibold text-slate-700">
-                          {item.elementName}
-                        </div>
-                        <div className="mt-2 text-2xl font-semibold text-slate-900">
-                          {item.averageScore != null ? item.averageScore.toFixed(1) : "—"}
-                        </div>
-                        <div className="mt-1 text-[11px] text-slate-500">
-                          {item.teacherCount} teachers • {item.assessmentCount} observations
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="mt-4 h-56">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={focusAreaData}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                        <XAxis dataKey="label" stroke="#64748b" />
-                        <YAxis stroke="#64748b" domain={[0, 10]} />
-                        <Tooltip
-                          contentStyle={{
-                            backgroundColor: "#ffffff",
-                            borderColor: "#e2e8f0",
-                            fontSize: 12,
-                          }}
-                        />
-                        <Bar dataKey="averageScore" fill="#4f46e5" />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                </>
-              )}
+              <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-slate-600">
+                {(gradebookData || []).length === 0 ? (
+                  <span className="text-slate-500">
+                    No gradebook integrations connected yet.
+                  </span>
+                ) : (
+                  gradebookData.map((integration) => (
+                    <span
+                      key={integration.id}
+                      className="rounded-full bg-emerald-50 px-2 py-1 text-emerald-700"
+                    >
+                      {integration.provider} • {integration.status}
+                    </span>
+                  ))
+                )}
+              </div>
             </section>
-
-            <section className="md:col-span-5 rounded-xl border border-slate-200 bg-white p-5">
-              <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                Departmental progress
-              </h2>
-              <p className="mb-2 text-xs text-slate-500">
-                Compare average performance across departments to identify
-                pockets of strength and support needs.
-              </p>
-              <p className="mb-4 text-[11px] text-slate-500">
-                Showing {format(previousRange.start, "MMM d")}–{format(previousRange.end, "MMM d")} vs{" "}
-                {format(currentRange.start, "MMM d")}–{format(currentRange.end, "MMM d")}.
-              </p>
-              {departmentData.length === 0 ? (
-                <div className="text-xs text-slate-500">
-                  No departmental data yet.
-                </div>
-              ) : (
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={departmentData} layout="vertical">
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                      <XAxis type="number" stroke="#64748b" domain={[0, 10]} />
-                      <YAxis
-                        dataKey="department"
-                        type="category"
-                        stroke="#64748b"
-                        width={90}
-                      />
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: "#ffffff",
-                          borderColor: "#e2e8f0",
-                          fontSize: 12,
-                        }}
-                      />
-                      <Legend />
-                      <Bar dataKey="averageScore" name="Current" fill="#22c55e" />
-                      <Bar dataKey="previousAverage" name="Month ago" fill="#94a3b8" />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
-              {departmentData.length > 0 && (
-                <div className="mt-4 space-y-2 text-[11px] text-slate-600">
-                  {departmentData.slice(0, 4).map((dept) => (
-                    <div key={dept.department} className="flex items-center justify-between">
-                      <span>{dept.department}</span>
-                      <span>
-                        {dept.delta == null ? "—" : `${dept.delta > 0 ? "+" : ""}${dept.delta}`}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
-
             <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 Key achievements

@@ -328,12 +328,16 @@ export function TeacherProfilePage() {
     return map;
   }, [evidenceRes]);
 
-  const actionPlanReminders = useMemo(() => {
+  const scheduleReminders = useMemo(() => {
     const schedules = schedulesRes ?? [];
     return schedules
-      .filter((s) => s.reminder_type === "action_plan")
+      .filter((s) =>
+        ["lesson_plan", "action_plan", "recording_compliance"].includes(
+          s.reminder_type
+        )
+      )
       .sort((a, b) => new Date(a.start_time) - new Date(b.start_time))
-      .slice(0, 5);
+      .slice(0, 6);
   }, [schedulesRes]);
 
   const overrideByElement = useMemo(() => {
@@ -502,6 +506,37 @@ export function TeacherProfilePage() {
           </div>
         </header>
 
+        {scheduleReminders.length > 0 && (
+          <details className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+            <summary className="cursor-pointer text-sm font-semibold text-emerald-900">
+              Upcoming reminders ({scheduleReminders.length})
+            </summary>
+            <div className="mt-3 space-y-2 text-xs text-emerald-800">
+              {scheduleReminders.map((r) => (
+                <div
+                  key={r.id}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-white px-3 py-2"
+                >
+                  <div>
+                    <div className="font-medium text-emerald-900">
+                      {r.course_name}
+                    </div>
+                    <div className="text-[11px] text-emerald-700">
+                      {r.reminder_type === "lesson_plan" && "Lesson plan"}
+                      {r.reminder_type === "action_plan" && "Action plan"}
+                      {r.reminder_type === "recording_compliance" &&
+                        "Recording compliance"}
+                    </div>
+                  </div>
+                  <div className="text-[11px] text-emerald-700">
+                    {r.start_time}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+
         <div className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
@@ -547,14 +582,6 @@ export function TeacherProfilePage() {
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           <div className="lg:col-span-8 space-y-6">
-            <section>
-              <MonthlySummary
-                dashboardRes={dashboardRes}
-                periodMonths={periodMonths}
-                evidenceByElement={evidenceByElement}
-              />
-            </section>
-
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 AI Summary & Insights
@@ -602,55 +629,13 @@ export function TeacherProfilePage() {
             </section>
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
-              <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                Professional insights
-              </h2>
-              <p className="mb-3 text-xs text-slate-500">
-                Teacher responses and administrator reflections.
-              </p>
-              <form onSubmit={handleSaveReflection} className="space-y-3 text-xs">
-                <div>
-                  <label className="mb-1 block text-[11px] font-medium text-slate-600">
-                    Teacher reflection
-                  </label>
-                  <textarea
-                    rows={3}
-                    value={selfReflection}
-                    onChange={(e) => setSelfReflection(e.target.value)}
-                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
-                    placeholder="How does the teacher interpret these insights? What patterns are they noticing?"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-[11px] font-medium text-slate-600">
-                    Administrator reflections
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={actionsTaken}
-                    onChange={(e) => setActionsTaken(e.target.value)}
-                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
-                    placeholder="Summarize admin observations, coaching direction, or agreed adjustments."
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={saveReflectionMutation.isPending}
-                  className="mt-1 inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90 disabled:opacity-60"
-                >
-                  Save reflections
-                </button>
-              </form>
-            </section>
-
-            <section className="rounded-xl border border-slate-200 bg-white p-5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-900">
-                    Action plan & reminders
+                    Action plan
                   </h2>
                   <p className="text-xs text-slate-500">
-                    Track concrete goals and receive reminders on due dates.
+                    Track concrete goals and next steps for this teacher.
                   </p>
                 </div>
                 <button
@@ -746,21 +731,6 @@ export function TeacherProfilePage() {
                 </div>
               </div>
 
-              {actionPlanReminders.length > 0 && (
-                <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-600">
-                  <div className="font-semibold text-slate-700">
-                    Upcoming action plan reminders
-                  </div>
-                  <ul className="mt-1 space-y-1">
-                    {actionPlanReminders.map((reminder) => (
-                      <li key={reminder.id}>
-                        {new Date(reminder.start_time).toLocaleDateString()} •{" "}
-                        {reminder.course_name}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
             </section>
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
@@ -908,12 +878,7 @@ export function TeacherProfilePage() {
               <p className="mb-3 text-xs text-slate-500">
                 Upload supporting materials for curriculum adherence checks.
               </p>
-              {nextLessonPlan && (
-                <div className="mb-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
-                  Reminder: Lesson plan scheduled for {nextLessonPlan.date}. Upload the
-                  class video for adherence scoring after the lesson.
-                </div>
-              )}
+              
 
               {(user?.role === "admin" || user?.role === "teacher") && (
                 <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs">
@@ -1047,6 +1012,56 @@ export function TeacherProfilePage() {
                 {(lessonPlansRes?.lesson_plans || []).length} • Syllabi:{" "}
                 {(syllabiRes?.syllabi || []).length}
               </div>
+            </section>
+
+            <section className="rounded-xl border border-slate-200 bg-white p-5">
+              <h2 className="mb-2 text-sm font-semibold text-slate-900">
+                Professional insights
+              </h2>
+              <p className="mb-3 text-xs text-slate-500">
+                Teacher responses and administrator reflections.
+              </p>
+              <form onSubmit={handleSaveReflection} className="space-y-3 text-xs">
+                <div>
+                  <label className="mb-1 block text-[11px] font-medium text-slate-600">
+                    Teacher reflection
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={selfReflection}
+                    onChange={(e) => setSelfReflection(e.target.value)}
+                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                    placeholder="How does the teacher interpret these insights? What patterns are they noticing?"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[11px] font-medium text-slate-600">
+                    Administrator reflections
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={actionsTaken}
+                    onChange={(e) => setActionsTaken(e.target.value)}
+                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                    placeholder="Summarize admin observations, coaching direction, or agreed adjustments."
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={saveReflectionMutation.isPending}
+                  className="mt-1 inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90 disabled:opacity-60"
+                >
+                  Save reflections
+                </button>
+              </form>
+            </section>
+
+            <section>
+              <MonthlySummary
+                dashboardRes={dashboardRes}
+                periodMonths={periodMonths}
+                evidenceByElement={evidenceByElement}
+              />
             </section>
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">

@@ -45,8 +45,11 @@ export function TeachersPage() {
     grade_level: "",
     department: "",
     school_id: "",
+    category: "",
+    category_custom: "",
   });
   const [newSchoolName, setNewSchoolName] = useState("");
+  const [categoryEdits, setCategoryEdits] = useState({});
 
   const createMutation = useMutation({
     mutationFn: teacherApi.create,
@@ -60,10 +63,23 @@ export function TeachersPage() {
         grade_level: "",
         department: "",
         school_id: "",
+        category: "",
+        category_custom: "",
       });
     },
     onError: (error) => {
       toast.error(error?.response?.data?.detail || "Failed to create teacher");
+    },
+  });
+
+  const updateCategoryMutation = useMutation({
+    mutationFn: ({ id, payload }) => teacherApi.update(id, payload),
+    onSuccess: () => {
+      toast.success("Category updated");
+      queryClient.invalidateQueries({ queryKey: ["teachers"] });
+    },
+    onError: (error) => {
+      toast.error(error?.response?.data?.detail || "Failed to update category");
     },
   });
 
@@ -98,6 +114,7 @@ export function TeachersPage() {
   const [departmentFilter, setDepartmentFilter] = useState("");
   const [performanceLevelFilter, setPerformanceLevelFilter] = useState("");
   const [trendFilter, setTrendFilter] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("");
   const [sortBy, setSortBy] = useState("name");
   const [expandedRows, setExpandedRows] = useState(new Set());
   const [showAddTeacher, setShowAddTeacher] = useState(false);
@@ -108,11 +125,12 @@ export function TeachersPage() {
     const saved = localStorage.getItem("teachersPageFilters");
     if (saved) {
       try {
-        const { department, performanceLevel, trend, sort } = JSON.parse(saved);
+        const { department, performanceLevel, trend, sort, category } = JSON.parse(saved);
         if (department) setDepartmentFilter(department);
         if (performanceLevel) setPerformanceLevelFilter(performanceLevel);
         if (trend) setTrendFilter(trend);
         if (sort) setSortBy(sort);
+        if (category) setCategoryFilter(category);
       } catch (e) {
         // Ignore parse errors
       }
@@ -128,9 +146,10 @@ export function TeachersPage() {
         performanceLevel: performanceLevelFilter,
         trend: trendFilter,
         sort: sortBy,
+        category: categoryFilter,
       })
     );
-  }, [departmentFilter, performanceLevelFilter, trendFilter, sortBy]);
+  }, [departmentFilter, performanceLevelFilter, trendFilter, sortBy, categoryFilter]);
 
   const toggleRowExpanded = (teacherId) => {
     setExpandedRows((prev) => {
@@ -166,16 +185,30 @@ export function TeachersPage() {
     return map;
   }, [schedulesData]);
 
-  const reminderRows = useMemo(() => {
-    const reminders = (schedulesData ?? [])
-      .filter((s) =>
-        ["lesson_plan", "action_plan", "recording_compliance"].includes(
-          s.reminder_type
-        )
-      )
-      .sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
-    return reminders.slice(0, 6);
-  }, [schedulesData]);
+  const categoryOptions = useMemo(() => {
+    const defaults = [
+      "first_year",
+      "second_year",
+      "third_year",
+      "tenure",
+      "dept_head",
+    ];
+    const set = new Set(defaults);
+    teachers.forEach((t) => {
+      if (t.category) set.add(t.category);
+      if (t.category_custom) set.add(t.category_custom);
+    });
+    return Array.from(set);
+  }, [teachers]);
+
+  const categorySelectOptions = [
+    { value: "first_year", label: "First year" },
+    { value: "second_year", label: "Second year" },
+    { value: "third_year", label: "Third year" },
+    { value: "tenure", label: "Tenure" },
+    { value: "dept_head", label: "Dept head" },
+    { value: "custom", label: "Custom" },
+  ];
 
   const departmentOptions = useMemo(() => {
     const set = new Set();
@@ -216,6 +249,9 @@ export function TeachersPage() {
         performanceLevel,
         trend,
         elementScores: roster?.element_scores || {},
+        categoryLabel:
+          t.category_custom ||
+          (t.category ? t.category.replace("_", " ") : ""),
       };
     });
 
@@ -232,6 +268,11 @@ export function TeachersPage() {
     // Apply trend filter
     if (trendFilter) {
       rows = rows.filter((r) => r.trend === trendFilter);
+    }
+    if (categoryFilter) {
+      rows = rows.filter(
+        (r) => r.categoryLabel?.toLowerCase() === categoryFilter.toLowerCase()
+      );
     }
 
     // Apply sorting
@@ -258,7 +299,7 @@ export function TeachersPage() {
     }
 
     return rows;
-  }, [teachers, rosterByTeacher, departmentFilter, performanceLevelFilter, trendFilter, sortBy]);
+  }, [teachers, rosterByTeacher, departmentFilter, performanceLevelFilter, trendFilter, categoryFilter, sortBy]);
 
   const displayedElements = useMemo(
     () => selectedElements.slice(0, 6),
@@ -351,6 +392,38 @@ export function TeachersPage() {
                   />
                   <div>
                     <label className="block text-xs font-medium text-slate-600">
+                      Category
+                    </label>
+                    <select
+                      className="mt-1 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                      value={form.category}
+                      onChange={(e) =>
+                        setForm((f) => ({
+                          ...f,
+                          category: e.target.value,
+                          category_custom: e.target.value === "custom" ? f.category_custom : "",
+                        }))
+                      }
+                    >
+                      <option value="">Select category</option>
+                      {categorySelectOptions.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {form.category === "custom" && (
+                    <Input
+                      label="Custom category"
+                      value={form.category_custom}
+                      onChange={(e) =>
+                        setForm((f) => ({ ...f, category_custom: e.target.value }))
+                      }
+                    />
+                  )}
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600">
                       School
                     </label>
                     <select
@@ -400,48 +473,6 @@ export function TeachersPage() {
           )}
 
           <div className={showAddTeacher ? "md:col-span-8" : "md:col-span-12"}>
-            {reminderRows.length > 0 && (
-              <div className="mb-6 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
-                <div className="mb-2 text-sm font-semibold text-emerald-900">
-                  Upcoming reminders
-                </div>
-                <div className="space-y-2 text-xs text-emerald-800">
-                  {reminderRows.map((r) => {
-                    const teacher = teachers.find((t) => t.id === r.teacher_id);
-                    return (
-                      <div
-                        key={r.id}
-                        className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-white px-3 py-2"
-                      >
-                        <div>
-                          <div className="font-medium text-emerald-900">
-                            {teacher?.name || "Teacher"}
-                          </div>
-                          <div className="text-[11px] text-emerald-700">
-                            {r.course_name}
-                          </div>
-                          <div className="mt-1 text-[10px] text-emerald-700">
-                            {r.reminder_type === "action_plan" && "Action plan"}
-                            {r.reminder_type === "lesson_plan" && "Lesson plan"}
-                            {r.reminder_type === "recording_compliance" &&
-                              "Recording compliance"}
-                          </div>
-                        </div>
-                        <div className="text-[11px] text-emerald-700">
-                          {r.start_time}
-                        </div>
-                        <Link
-                          to={`/teachers/${r.teacher_id}`}
-                          className="text-[11px] text-emerald-800 underline underline-offset-4"
-                        >
-                          View profile
-                        </Link>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
             <div className="rounded-xl border border-slate-200 bg-white p-5">
               <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <h2 className="text-sm font-semibold text-slate-900">Roster</h2>
@@ -457,6 +488,21 @@ export function TeachersPage() {
                       {departmentOptions.map((dept) => (
                         <option key={dept} value={dept}>
                           {dept}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span className="text-slate-500">Category</span>
+                    <select
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                      value={categoryFilter}
+                      onChange={(e) => setCategoryFilter(e.target.value)}
+                    >
+                      <option value="">All</option>
+                      {categoryOptions.map((cat) => (
+                        <option key={cat} value={cat}>
+                          {cat.replace("_", " ")}
                         </option>
                       ))}
                     </select>
@@ -637,6 +683,10 @@ export function TeachersPage() {
                         let flagLabel = "Stable";
                         let flagReason = "On track";
                         let flagColor = "bg-emerald-50 text-emerald-700 border-emerald-200";
+                        const daysSinceInteraction = roster?.days_since_interaction;
+                        const noInteraction =
+                          typeof daysSinceInteraction === "number" &&
+                          daysSinceInteraction >= 14;
                         if (level == null) {
                           flagLabel = "Needs data";
                           flagReason = "No observations yet";
@@ -654,20 +704,30 @@ export function TeachersPage() {
                           flagReason = lowElementLabel || "Mixed performance";
                           flagColor = "bg-amber-50 text-amber-700 border-amber-200";
                         }
-                        const courses = (schedulesByTeacher[teacher.id] || [])
-                          .filter((s) => s.recording_status !== "completed")
-                          .sort((a, b) =>
-                            (a.start_time || "").localeCompare(
-                              b.start_time || ""
-                            )
-                          );
-                        const isExpanded = expandedRows.has(teacher.id);
-                        const extraColumns =
-                          selectedElements.length > displayedElements.length ? 1 : 0;
-                        const colSpan = 7 + displayedElements.length + extraColumns;
+                        if (noInteraction) {
+                          flagLabel = "No touch";
+                          flagReason = `${daysSinceInteraction} days since interaction`;
+                          flagColor = "bg-amber-50 text-amber-700 border-amber-200";
+                        }
+      const courses = (schedulesByTeacher[teacher.id] || [])
+        .filter((s) => s.recording_status !== "completed")
+        .sort((a, b) =>
+          (a.start_time || "").localeCompare(
+            b.start_time || ""
+          )
+        );
+      const isExpanded = expandedRows.has(teacher.id);
+      const extraColumns =
+        selectedElements.length > displayedElements.length ? 1 : 0;
+      const colSpan = 7 + displayedElements.length + extraColumns;
+      const categoryEdit = categoryEdits[teacher.id] || {
+        category: teacher.category_custom ? "custom" : (teacher.category || ""),
+        category_custom: teacher.category_custom || "",
+      };
+      const isCustomCategory = categoryEdit.category === "custom";
 
-                        return (
-                          <React.Fragment key={teacher.id}>
+      return (
+        <React.Fragment key={teacher.id}>
                             <tr className="border-t border-slate-200 hover:bg-slate-50">
                               <td className="px-3 py-2 align-top">
                                 <button
@@ -699,6 +759,12 @@ export function TeachersPage() {
                                   >
                                     {teacher.name}
                                   </Link>
+                                  {teacher.category || teacher.category_custom ? (
+                                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600">
+                                      {teacher.category_custom ||
+                                        teacher.category?.replace(/_/g, " ")}
+                                    </span>
+                                  ) : null}
                                 </div>
                                 <div className="text-[11px] text-slate-500">
                                   {teacher.subject} • {teacher.grade_level}
@@ -816,34 +882,7 @@ export function TeachersPage() {
                             {isExpanded && (
                               <tr className="border-t border-slate-200 bg-slate-50">
                                 <td colSpan={colSpan} className="px-6 py-4">
-                                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-                                    <div>
-                                      <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                                        Element Breakdown
-                                      </h4>
-                                      <div className="space-y-1.5">
-                                        {Object.entries(elementScores).map(([elementId, es]) => (
-                                          <div
-                                            key={elementId}
-                                            className="flex items-center justify-between rounded bg-white px-2 py-1 text-[11px] border border-slate-200"
-                                          >
-                                            <span className="text-slate-700">{elementId.toUpperCase()}</span>
-                                            <div className="flex items-center gap-2">
-                                              <span className="text-slate-600">
-                                                {es.score?.toFixed(1) || "—"}/10
-                                              </span>
-                                              {es.previous_score != null && (
-                                                <TrendIndicator
-                                                  currentScore={es.score}
-                                                  previousScore={es.previous_score}
-                                                  size="sm"
-                                                />
-                                              )}
-                                            </div>
-                                          </div>
-                                        ))}
-                                      </div>
-                                    </div>
+                                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                                     <div>
                                       <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                                         Recent Observations
@@ -878,6 +917,87 @@ export function TeachersPage() {
                                           View Videos
                                         </Link>
                                       </div>
+                                      {user?.role === "admin" && (
+                                        <div className="mt-4">
+                                          <h5 className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                                            Category
+                                          </h5>
+                                          <div className="flex flex-wrap items-center gap-2">
+                                            <select
+                                              className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+                                              value={categoryEdit.category}
+                                              onChange={(e) => {
+                                                const nextCategory = e.target.value;
+                                                setCategoryEdits((prev) => ({
+                                                  ...prev,
+                                                  [teacher.id]: {
+                                                    ...categoryEdit,
+                                                    category: nextCategory,
+                                                    category_custom:
+                                                      nextCategory === "custom"
+                                                        ? categoryEdit.category_custom
+                                                        : "",
+                                                  },
+                                                }));
+                                              }}
+                                            >
+                                              <option value="">Select category</option>
+                                              {categorySelectOptions.map((opt) => (
+                                                <option key={opt.value} value={opt.value}>
+                                                  {opt.label}
+                                                </option>
+                                              ))}
+                                            </select>
+                                            {isCustomCategory && (
+                                              <input
+                                                className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+                                                placeholder="Custom category"
+                                                value={categoryEdit.category_custom}
+                                                onChange={(e) =>
+                                                  setCategoryEdits((prev) => ({
+                                                    ...prev,
+                                                    [teacher.id]: {
+                                                      ...categoryEdit,
+                                                      category_custom: e.target.value,
+                                                    },
+                                                  }))
+                                                }
+                                              />
+                                            )}
+                                            <button
+                                              type="button"
+                                              className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700 hover:bg-slate-200"
+                                              onClick={() => {
+                                                if (categoryEdit.category === "custom") {
+                                                  const customValue = categoryEdit.category_custom.trim();
+                                                  if (!customValue) {
+                                                    toast.error("Enter a custom category");
+                                                    return;
+                                                  }
+                                                  updateCategoryMutation.mutate({
+                                                    id: teacher.id,
+                                                    payload: {
+                                                      category: null,
+                                                      category_custom: customValue,
+                                                    },
+                                                  });
+                                                  return;
+                                                }
+                                                updateCategoryMutation.mutate({
+                                                  id: teacher.id,
+                                                  payload: {
+                                                    category: categoryEdit.category || null,
+                                                    category_custom: null,
+                                                  },
+                                                });
+                                              }}
+                                              disabled={updateCategoryMutation.isPending}
+                                            >
+                                              Save
+                                            </button>
+                                          </div>
+                                        </div>
+                                      )}
                                     </div>
                                   </div>
                                 </td>

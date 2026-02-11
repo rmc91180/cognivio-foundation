@@ -30,6 +30,7 @@ export const teacherApi = {
   list: () => api.get("/api/teachers"),
   create: (payload) => api.post("/api/teachers", payload),
   get: (id) => api.get(`/api/teachers/${id}`),
+  update: (id, payload) => api.patch(`/api/teachers/${id}`, payload),
   getPeerRecommendations: (id) =>
     api.get(`/api/teachers/${id}/peer-recommendations`),
 };

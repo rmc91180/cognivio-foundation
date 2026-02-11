@@ -606,6 +606,8 @@ class TeacherCreate(BaseModel):
     grade_level: str
     department: Optional[str] = None
     school_id: Optional[str] = None
+    category: Optional[str] = None
+    category_custom: Optional[str] = None
 
 class TeacherResponse(BaseModel):
     id: str
@@ -615,7 +617,14 @@ class TeacherResponse(BaseModel):
     grade_level: str
     department: Optional[str] = None
     school_id: Optional[str] = None
+    category: Optional[str] = None
+    category_custom: Optional[str] = None
     created_at: str
+
+
+class TeacherUpdate(BaseModel):
+    category: Optional[str] = None
+    category_custom: Optional[str] = None
 
 
 class SchoolCreate(BaseModel):
@@ -1145,11 +1154,33 @@ async def create_teacher(teacher: TeacherCreate, current_user: dict = Depends(ge
         "grade_level": teacher.grade_level,
         "department": teacher.department,
         "school_id": teacher.school_id,
+        "category": teacher.category,
+        "category_custom": teacher.category_custom,
         "created_by": current_user["id"],
         "created_at": datetime.now(timezone.utc).isoformat()
     }
     await db.teachers.insert_one(teacher_doc)
     return TeacherResponse(**{k: v for k, v in teacher_doc.items() if k not in ["created_by", "_id"]})
+
+@api_router.patch("/teachers/{teacher_id}", response_model=TeacherResponse)
+async def update_teacher(
+    teacher_id: str,
+    payload: TeacherUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    update_fields: Dict[str, Any] = {}
+    if payload.category is not None:
+        update_fields["category"] = payload.category
+    if payload.category_custom is not None:
+        update_fields["category_custom"] = payload.category_custom
+    if not update_fields:
+        teacher.pop("created_by", None)
+        return TeacherResponse(**teacher)
+    await db.teachers.update_one({"id": teacher_id}, {"$set": update_fields})
+    teacher.update(update_fields)
+    teacher.pop("created_by", None)
+    return TeacherResponse(**teacher)
 
 @api_router.get("/teachers", response_model=List[TeacherResponse])
 async def get_teachers(current_user: dict = Depends(get_current_user)):
@@ -2213,6 +2244,22 @@ async def get_teacher_roster(
         compliance_summary = None
         if policy:
             compliance_summary = await _upsert_recording_compliance(teacher, current_user["id"], policy)
+        last_interaction_at = None
+        interaction_days = None
+        last_obs = await db.observations.find(
+            {"teacher_id": teacher["id"]},
+            {"_id": 0, "created_at": 1},
+        ).sort("created_at", -1).to_list(1)
+        if last_obs:
+            last_interaction_at = last_obs[0].get("created_at")
+        else:
+            last_interaction_at = teacher.get("created_at")
+        if last_interaction_at:
+            try:
+                last_dt = datetime.fromisoformat(last_interaction_at.replace("Z", "+00:00"))
+                interaction_days = (datetime.now(timezone.utc) - last_dt).days
+            except Exception:
+                interaction_days = None
         # Get assessments for this teacher within date range
         assessment_query = {
             "teacher_id": teacher["id"],
@@ -2293,10 +2340,14 @@ async def get_teacher_roster(
                 "subject": teacher["subject"],
                 "grade_level": teacher["grade_level"],
                 "department": teacher.get("department"),
+                "category": teacher.get("category"),
+                "category_custom": teacher.get("category_custom"),
                 "element_scores": element_scores,
                 "overall_score": overall_score,
                 "assessment_count": len(assessments),
                 "last_assessment_date": assessments[-1]["analyzed_at"] if assessments else None,
+                "last_interaction_at": last_interaction_at,
+                "days_since_interaction": interaction_days,
                 "recording_compliance": compliance_summary,
             }
         )
@@ -3615,12 +3666,12 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
     
     # Create demo teachers
     demo_teachers = [
-        {"name": "Sarah Johnson", "email": "sarah.j@school.edu", "subject": "Mathematics", "grade_level": "9th Grade", "department": "STEM"},
-        {"name": "Michael Chen", "email": "michael.c@school.edu", "subject": "English Literature", "grade_level": "11th Grade", "department": "Humanities"},
-        {"name": "Emily Rodriguez", "email": "emily.r@school.edu", "subject": "Biology", "grade_level": "10th Grade", "department": "STEM"},
-        {"name": "David Park", "email": "david.p@school.edu", "subject": "History", "grade_level": "8th Grade", "department": "Humanities"},
-        {"name": "Jennifer Williams", "email": "jennifer.w@school.edu", "subject": "Chemistry", "grade_level": "12th Grade", "department": "STEM"},
-        {"name": "Robert Martinez", "email": "robert.m@school.edu", "subject": "Physical Education", "grade_level": "7th Grade", "department": "Athletics"},
+        {"name": "Sarah Johnson", "email": "sarah.j@school.edu", "subject": "Mathematics", "grade_level": "9th Grade", "department": "STEM", "category": "first_year"},
+        {"name": "Michael Chen", "email": "michael.c@school.edu", "subject": "English Literature", "grade_level": "11th Grade", "department": "Humanities", "category": "second_year"},
+        {"name": "Emily Rodriguez", "email": "emily.r@school.edu", "subject": "Biology", "grade_level": "10th Grade", "department": "STEM", "category": "third_year"},
+        {"name": "David Park", "email": "david.p@school.edu", "subject": "History", "grade_level": "8th Grade", "department": "Humanities", "category": "tenure"},
+        {"name": "Jennifer Williams", "email": "jennifer.w@school.edu", "subject": "Chemistry", "grade_level": "12th Grade", "department": "STEM", "category": "dept_head"},
+        {"name": "Robert Martinez", "email": "robert.m@school.edu", "subject": "Physical Education", "grade_level": "7th Grade", "department": "Athletics", "category": "first_year"},
     ]
     
     created_teachers = []
@@ -3630,6 +3681,7 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
             teacher_doc = {
                 "id": str(uuid.uuid4()),
                 **teacher_data,
+                "category_custom": None,
                 "created_by": current_user["id"],
                 "created_at": datetime.now(timezone.utc).isoformat()
             }
