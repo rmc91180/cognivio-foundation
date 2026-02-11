@@ -2282,6 +2282,59 @@ async def get_teacher_roster(
             ).to_list(1000)
             for o in overrides:
                 overrides_by_assessment.setdefault(o["assessment_id"], []).append(o)
+
+        # Build 30-day trend snapshot per element (last 30 days vs prior 30 days)
+        trend_30d = []
+        trend_window_end = datetime.now(timezone.utc)
+        trend_window_start = trend_window_end - timedelta(days=30)
+        trend_prev_start = trend_window_start - timedelta(days=30)
+        trend_prev_end = trend_window_start
+
+        def _scores_for_assessment(assessment: dict) -> List[dict]:
+            if role == "admin":
+                adjusted_scores, _ = _apply_admin_overrides(
+                    assessment.get("element_scores", []),
+                    overrides_by_assessment.get(assessment["id"], []),
+                    scoring_mode,
+                )
+                return adjusted_scores
+            return assessment.get("element_scores", [])
+
+        def _assessment_in_window(assessment: dict, start: datetime, end: datetime) -> bool:
+            timestamp = assessment.get("analyzed_at")
+            if not timestamp:
+                return False
+            try:
+                analyzed_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError:
+                return False
+            return start <= analyzed_at < end
+
+        for element_id in selected_elements:
+            recent_scores = []
+            prev_scores = []
+            for assessment in assessments:
+                if _assessment_in_window(assessment, trend_window_start, trend_window_end):
+                    for es in _scores_for_assessment(assessment):
+                        if es.get("element_id") == element_id:
+                            recent_scores.append(es.get("adjusted_score", es.get("score")))
+                if _assessment_in_window(assessment, trend_prev_start, trend_prev_end):
+                    for es in _scores_for_assessment(assessment):
+                        if es.get("element_id") == element_id:
+                            prev_scores.append(es.get("adjusted_score", es.get("score")))
+            if recent_scores:
+                recent_avg = sum(recent_scores) / len(recent_scores)
+                prev_avg = sum(prev_scores) / len(prev_scores) if prev_scores else None
+                delta = round(recent_avg - prev_avg, 2) if prev_avg is not None else None
+                trend_30d.append(
+                    {
+                        "element_id": element_id,
+                        "avg_score": round(recent_avg, 2),
+                        "delta": delta,
+                        "recent_count": len(recent_scores),
+                        "previous_count": len(prev_scores),
+                    }
+                )
         
         # Aggregate scores per element
         element_scores = {}
@@ -2349,6 +2402,7 @@ async def get_teacher_roster(
                 "last_interaction_at": last_interaction_at,
                 "days_since_interaction": interaction_days,
                 "recording_compliance": compliance_summary,
+                "trend_30d": trend_30d,
             }
         )
     

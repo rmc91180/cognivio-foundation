@@ -885,6 +885,50 @@ export function TeachersPage() {
                                   <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                                     <div>
                                       <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                        30-day trend snapshot
+                                      </h4>
+                                      {roster?.trend_30d?.length ? (
+                                        <div className="grid gap-2">
+                                          {roster.trend_30d.slice(0, 6).map((trend) => {
+                                            const delta = trend.delta;
+                                            const deltaLabel =
+                                              typeof delta === "number"
+                                                ? `${delta > 0 ? "+" : ""}${delta.toFixed(1)}`
+                                                : "—";
+                                            const deltaClass =
+                                              typeof delta !== "number"
+                                                ? "text-slate-400"
+                                                : delta > 0
+                                                  ? "text-emerald-600"
+                                                  : delta < 0
+                                                    ? "text-rose-600"
+                                                    : "text-slate-500";
+                                            return (
+                                              <div
+                                                key={trend.element_id}
+                                                className="rounded-md border border-slate-200 bg-white px-2 py-1"
+                                              >
+                                                <div className="flex items-center justify-between text-[11px] text-slate-700">
+                                                  <span className="font-medium">
+                                                    {trend.element_id.toUpperCase()}
+                                                  </span>
+                                                  <span className={deltaClass}>
+                                                    {deltaLabel}
+                                                  </span>
+                                                </div>
+                                                <div className="text-[10px] text-slate-500">
+                                                  Avg {trend.avg_score} • {trend.recent_count} obs
+                                                </div>
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                      ) : (
+                                        <p className="text-[11px] text-slate-500">
+                                          Not enough recent observations for a 30-day trend.
+                                        </p>
+                                      )}
+                                      <h4 className="mb-2 mt-4 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                                         Recent Observations
                                       </h4>
                                       {roster?.recent_observations?.length ? (
