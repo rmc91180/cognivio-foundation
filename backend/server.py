@@ -55,8 +55,12 @@ def _get_optional_env_list(name: str) -> List[str]:
 def _get_user_role(user: dict) -> str:
     role = (user or {}).get("role")
     if role:
-        return role
+        return "admin" if role == "principal" else role
     email = (user or {}).get("email", "").lower()
+    if email == "principal@demo.cognivio.app":
+        return "admin"
+    if email == "teacher@demo.cognivio.app":
+        return "teacher"
     if email and email in ADMIN_EMAILS:
         return "admin"
     return "teacher"
@@ -4024,6 +4028,13 @@ async def ensure_demo_users():
     for demo in DEMO_USERS:
         existing = await db.users.find_one({"email": demo["email"]})
         if existing:
+            # Ensure demo roles are correct
+            desired_role = "admin" if demo["email"] == "principal@demo.cognivio.app" else "teacher"
+            updates = {}
+            if existing.get("role") != desired_role:
+                updates["role"] = desired_role
+            if updates:
+                await db.users.update_one({"email": demo["email"]}, {"$set": updates})
             continue
         user_id = str(uuid.uuid4())
         user_doc = {
