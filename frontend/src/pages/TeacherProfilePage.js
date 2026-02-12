@@ -906,6 +906,12 @@ export function TeacherProfilePage() {
                     Record in-browser or review the teacher’s full video library.
                   </p>
                 </div>
+                <Link
+                  to={`/videos?teacher_id=${teacherId}`}
+                  className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                >
+                  Open recordings page
+                </Link>
                 {videoTab === "record" && (
                   <button
                     type="button"

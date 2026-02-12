@@ -1,13 +1,27 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { assessmentApi, teacherApi, videoApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { toast } from "sonner";
+import { Link, useLocation } from "react-router-dom";
 
 export function VideosPage() {
   const queryClient = useQueryClient();
   const [selectedTeacher, setSelectedTeacher] = useState("");
   const [file, setFile] = useState(null);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [subjectFilter, setSubjectFilter] = useState("all");
+  const [timeRange, setTimeRange] = useState("90");
+  const location = useLocation();
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const teacherId = params.get("teacher_id");
+    if (teacherId) {
+      setSelectedTeacher(teacherId);
+    }
+  }, [location.search]);
 
   const { data: teachers = [] } = useQuery({
     queryKey: ["teachers"],
@@ -23,9 +37,50 @@ export function VideosPage() {
   });
 
   const { data: assessments = [], isLoading: loadingAssessments } = useQuery({
-    queryKey: ["assessments"],
-    queryFn: () => assessmentApi.list().then((res) => res.data),
+    queryKey: ["assessments", { teacherId: selectedTeacher || undefined }],
+    queryFn: () =>
+      assessmentApi
+        .list({ teacher_id: selectedTeacher || undefined })
+        .then((res) => res.data),
   });
+
+  const assessmentByVideoId = useMemo(() => {
+    const map = new Map();
+    assessments.forEach((a) => {
+      if (a.video_id && !map.has(a.video_id)) {
+        map.set(a.video_id, a);
+      }
+    });
+    return map;
+  }, [assessments]);
+
+  const subjectOptions = useMemo(() => {
+    const set = new Set();
+    videos.forEach((v) => {
+      if (v.subject) set.add(v.subject);
+    });
+    return Array.from(set);
+  }, [videos]);
+
+  const filteredVideos = useMemo(() => {
+    const now = Date.now();
+    const rangeDays = Number(timeRange);
+    const cutoff = now - rangeDays * 24 * 60 * 60 * 1000;
+    return videos.filter((v) => {
+      if (statusFilter !== "all" && v.status !== statusFilter) return false;
+      if (subjectFilter !== "all" && v.subject !== subjectFilter) return false;
+      if (search) {
+        const haystack = `${v.filename} ${v.subject || ""}`.toLowerCase();
+        if (!haystack.includes(search.toLowerCase())) return false;
+      }
+      const recorded = v.recorded_at || v.upload_date;
+      if (recorded) {
+        const ts = Date.parse(recorded);
+        if (!Number.isNaN(ts) && ts < cutoff) return false;
+      }
+      return true;
+    });
+  }, [videos, statusFilter, subjectFilter, search, timeRange]);
 
   const uploadMutation = useMutation({
     mutationFn: (payload) => {
@@ -65,16 +120,98 @@ export function VideosPage() {
               Videos & Assessments
             </h1>
             <p className="mt-1 text-sm text-slate-600">
-              Upload classroom videos and review AI-generated assessments.
+              Review recordings, filter by focus, and take action on insights.
             </p>
           </div>
         </div>
 
         <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
-          <div className="md:col-span-5">
+          <div className="md:col-span-3 space-y-6">
             <div className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-3 text-sm font-semibold text-slate-900">
-                Upload video
+                Filters
+              </h2>
+              <div className="space-y-3 text-xs">
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600">
+                    Teacher
+                  </label>
+                  <select
+                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                    value={selectedTeacher}
+                    onChange={(e) => setSelectedTeacher(e.target.value)}
+                  >
+                    <option value="">All teachers</option>
+                    {teachers.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name} • {t.subject}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600">
+                    Subject
+                  </label>
+                  <select
+                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                    value={subjectFilter}
+                    onChange={(e) => setSubjectFilter(e.target.value)}
+                  >
+                    <option value="all">All subjects</option>
+                    {subjectOptions.map((subject) => (
+                      <option key={subject} value={subject}>
+                        {subject}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600">
+                    Status
+                  </label>
+                  <select
+                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                    value={statusFilter}
+                    onChange={(e) => setStatusFilter(e.target.value)}
+                  >
+                    <option value="all">All</option>
+                    <option value="processing">Processing</option>
+                    <option value="completed">Completed</option>
+                    <option value="failed">Failed</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600">
+                    Time range
+                  </label>
+                  <select
+                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                    value={timeRange}
+                    onChange={(e) => setTimeRange(e.target.value)}
+                  >
+                    <option value="30">Last 30 days</option>
+                    <option value="60">Last 60 days</option>
+                    <option value="90">Last 90 days</option>
+                    <option value="365">Last 12 months</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600">
+                    Search
+                  </label>
+                  <input
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Search by filename or subject"
+                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white p-5">
+              <h2 className="mb-3 text-sm font-semibold text-slate-900">
+                Upload recording
               </h2>
               <form onSubmit={onSubmit} className="space-y-3 text-sm">
                 <div>
@@ -118,71 +255,95 @@ export function VideosPage() {
             </div>
           </div>
 
-          <div className="space-y-6 md:col-span-7">
+          <div className="space-y-6 md:col-span-9">
             <div className="rounded-xl border border-slate-200 bg-white p-5">
-              <h2 className="mb-3 text-sm font-semibold text-slate-900">
-                Recent videos
-              </h2>
-              {loadingVideos ? (
-                <div className="text-xs text-slate-500">Loading videos...</div>
-              ) : videos.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-slate-200 bg-white p-4 text-xs text-slate-500">
-                  No videos uploaded yet.
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">
+                    Recordings library
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Filter by topic, status, and time to review recordings that matter.
+                  </p>
                 </div>
-              ) : (
-                <div className="space-y-2 text-sm">
-                  {videos.map((v) => (
-                    <div
-                      key={v.id}
-                      className="flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
-                    >
-                      <div>
-                        <div className="font-medium text-slate-900">
-                          {v.filename}
-                        </div>
-                        <div className="text-xs text-slate-500">
-                          {v.upload_date} • {v.status}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="rounded-xl border border-slate-200 bg-white p-5">
-              <h2 className="mb-3 text-sm font-semibold text-slate-900">
-                Recent assessments
-              </h2>
-              {loadingAssessments ? (
                 <div className="text-xs text-slate-500">
-                  Loading assessments...
+                  {filteredVideos.length} recordings
                 </div>
-              ) : assessments.length === 0 ? (
+              </div>
+              {loadingVideos || loadingAssessments ? (
+                <div className="text-xs text-slate-500">Loading recordings...</div>
+              ) : filteredVideos.length === 0 ? (
                 <div className="rounded-lg border border-dashed border-slate-200 bg-white p-4 text-xs text-slate-500">
-                  No assessments yet. Upload a classroom video to generate your
-                  first one.
+                  No recordings match the current filters.
                 </div>
               ) : (
-                <div className="space-y-2 text-sm">
-                  {assessments.slice(0, 5).map((a) => (
-                    <div
-                      key={a.id}
-                      className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
-                    >
-                      <div className="flex items-center justify-between">
-                        <div className="font-medium text-slate-900">
-                          Overall {a.overall_score.toFixed(2)}/4
+                <div className="space-y-3">
+                  {filteredVideos.map((v) => {
+                    const assessment = assessmentByVideoId.get(v.id);
+                    const teacher = teachers.find((t) => t.id === v.teacher_id);
+                    return (
+                      <div
+                        key={v.id}
+                        className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div>
+                            <div className="text-xs font-semibold text-slate-900">
+                              {teacher?.name || "Teacher"} • {v.subject || "Subject"}
+                            </div>
+                            <div className="text-[11px] text-slate-500">
+                              {v.recorded_at || v.upload_date} • {v.status}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 text-[11px] text-slate-600">
+                            {assessment && (
+                              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-emerald-700">
+                                Score {assessment.overall_score?.toFixed(1) ?? "N/A"}
+                              </span>
+                            )}
+                            <Link
+                              to={`/teachers/${v.teacher_id}`}
+                              className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
+                            >
+                              Teacher page
+                            </Link>
+                            <Link
+                              to={`/videos/${v.id}`}
+                              className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
+                            >
+                              View recording
+                            </Link>
+                          </div>
                         </div>
-                        <div className="text-xs text-slate-500">
-                          {a.analyzed_at}
+                        <div className="mt-2 grid gap-2 text-xs text-slate-600 md:grid-cols-2">
+                          <div>
+                            <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                              Summary
+                            </div>
+                            <div className="mt-1 line-clamp-2">
+                              {assessment?.summary || "No assessment summary yet."}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                              Recommendations
+                            </div>
+                            {assessment?.recommendations?.length ? (
+                              <ul className="mt-1 list-disc space-y-1 pl-4">
+                                {assessment.recommendations.slice(0, 2).map((rec, idx) => (
+                                  <li key={idx}>{rec}</li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <div className="mt-1 text-xs text-slate-500">
+                                No recommendations yet.
+                              </div>
+                            )}
+                          </div>
                         </div>
                       </div>
-                      <div className="mt-1 text-xs text-slate-600 line-clamp-2">
-                        {a.summary}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
