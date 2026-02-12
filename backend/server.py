@@ -3946,6 +3946,38 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
         for i in range(num_assessments):
             days_ago = random.randint(1, 90)
             assessment_date = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+            recorded_at = (datetime.now(timezone.utc) - timedelta(days=days_ago, hours=random.randint(1, 6))).isoformat()
+
+            video_id = str(uuid.uuid4())
+            video_doc = {
+                "id": video_id,
+                "filename": f"{teacher['name'].split()[0].lower()}-{teacher['subject'].split()[0].lower()}-{i+1}.mp4",
+                "stored_filename": None,
+                "s3_key": None,
+                "file_url": None,
+                "file_path": None,
+                "teacher_id": teacher["id"],
+                "uploaded_by": current_user["id"],
+                "status": "completed",
+                "analysis_status": "completed",
+                "subject": teacher.get("subject"),
+                "recorded_at": recorded_at,
+                "upload_date": assessment_date,
+                "is_mock": True,
+            }
+            await db.videos.insert_one(video_doc)
+            await db.video_evidence.insert_one({
+                "id": str(uuid.uuid4()),
+                "video_id": video_id,
+                "teacher_id": teacher["id"],
+                "file_path": None,
+                "subject": teacher.get("subject"),
+                "recorded_at": recorded_at,
+                "analysis_status": "completed",
+                "uploaded_by": current_user["id"],
+                "uploaded_at": assessment_date,
+                "is_mock": True,
+            })
             
             # Generate element scores
             element_scores = []
@@ -3972,7 +4004,7 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
             
             assessment_doc = {
                 "id": str(uuid.uuid4()),
-                "video_id": str(uuid.uuid4()),
+                "video_id": video_id,
                 "teacher_id": teacher["id"],
                 "user_id": current_user["id"],
                 "framework_type": "danielson",
@@ -3985,6 +4017,20 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
             
             await db.assessments.insert_one(assessment_doc)
             await _ensure_mock_evidence(assessment_doc, current_user)
+            await db.observations.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": current_user["id"],
+                "teacher_id": teacher["id"],
+                "video_id": video_id,
+                "element_id": random.choice([es["element_id"] for es in element_scores]),
+                "timestamp_seconds": random.randint(60, 900),
+                "admin_comment": f"Observed {teacher['name'].split()[0]} demonstrating active engagement strategies.",
+                "teacher_response": None,
+                "implementation_status": "planned",
+                "created_at": assessment_date,
+                "updated_at": None,
+                "is_mock": True,
+            })
 
             adherence_doc = {
                 "id": str(uuid.uuid4()),
