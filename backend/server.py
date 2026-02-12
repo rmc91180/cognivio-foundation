@@ -608,6 +608,7 @@ class TeacherCreate(BaseModel):
     school_id: Optional[str] = None
     category: Optional[str] = None
     category_custom: Optional[str] = None
+    next_coaching_conference: Optional[str] = None
 
 class TeacherResponse(BaseModel):
     id: str
@@ -619,12 +620,14 @@ class TeacherResponse(BaseModel):
     school_id: Optional[str] = None
     category: Optional[str] = None
     category_custom: Optional[str] = None
+    next_coaching_conference: Optional[str] = None
     created_at: str
 
 
 class TeacherUpdate(BaseModel):
     category: Optional[str] = None
     category_custom: Optional[str] = None
+    next_coaching_conference: Optional[str] = None
 
 
 class SchoolCreate(BaseModel):
@@ -1159,6 +1162,7 @@ async def create_teacher(teacher: TeacherCreate, current_user: dict = Depends(ge
         "school_id": teacher.school_id,
         "category": teacher.category,
         "category_custom": teacher.category_custom,
+        "next_coaching_conference": teacher.next_coaching_conference,
         "created_by": current_user["id"],
         "created_at": datetime.now(timezone.utc).isoformat()
     }
@@ -1177,6 +1181,8 @@ async def update_teacher(
         update_fields["category"] = payload.category
     if payload.category_custom is not None:
         update_fields["category_custom"] = payload.category_custom
+    if payload.next_coaching_conference is not None:
+        update_fields["next_coaching_conference"] = payload.next_coaching_conference
     if not update_fields:
         teacher.pop("created_by", None)
         return TeacherResponse(**teacher)
@@ -2582,6 +2588,33 @@ async def get_teacher_dashboard(
         {"teacher_id": teacher_id},
         {"_id": 0, "uploaded_by": 0}
     ).to_list(100)
+    videos_sorted = sorted(
+        videos,
+        key=lambda v: v.get("recorded_at") or v.get("upload_date") or "",
+        reverse=True,
+    )
+    recent_videos = videos_sorted[:4]
+    recent_video_ids = [v.get("id") for v in recent_videos if v.get("id")]
+    recent_video_highlights = []
+    if recent_video_ids:
+        recent_obs = await db.observations.find(
+            {"teacher_id": teacher_id, "video_id": {"$in": recent_video_ids}},
+            {"_id": 0},
+        ).sort("created_at", -1).to_list(50)
+        for obs in recent_obs:
+            if len(recent_video_highlights) >= 2:
+                break
+            summary = obs.get("summary") or obs.get("admin_comment")
+            if not summary:
+                continue
+            recent_video_highlights.append(
+                {
+                    "video_id": obs.get("video_id"),
+                    "created_at": obs.get("created_at"),
+                    "summary": summary,
+                    "timestamp_seconds": obs.get("timestamp_seconds"),
+                }
+            )
 
     recording_policy = None
     recording_compliance = None
@@ -2599,6 +2632,7 @@ async def get_teacher_dashboard(
         "trend_data": trend_data,
         "assessments": assessments,
         "videos": videos,
+        "recent_video_highlights": recent_video_highlights,
         "recording_policy": recording_policy,
         "recording_compliance": recording_compliance,
         "total_assessments": len(assessments),
@@ -3739,6 +3773,7 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
                 "id": str(uuid.uuid4()),
                 **teacher_data,
                 "category_custom": None,
+                "next_coaching_conference": None,
                 "created_by": current_user["id"],
                 "created_at": datetime.now(timezone.utc).isoformat()
             }

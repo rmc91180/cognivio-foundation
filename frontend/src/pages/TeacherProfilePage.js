@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams, Link } from "react-router-dom";
 import {
@@ -17,7 +17,6 @@ import {
   videoApi,
 } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
-import { PeerRecommendations } from "@/components/PeerRecommendations";
 import { MonthlySummary } from "@/components/MonthlySummary";
 import { VideoRecorder } from "@/components/VideoRecorder";
 import { toast } from "sonner";
@@ -29,11 +28,16 @@ export function TeacherProfilePage() {
   const { user } = useAuth();
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
   const [periodMonths, setPeriodMonths] = useState(3);
+  const [nextCoachingConference, setNextCoachingConference] = useState("");
 
   const { data: teacherRes } = useQuery({
     queryKey: ["teacher", teacherId],
     queryFn: () => teacherApi.get(teacherId).then((r) => r.data),
   });
+
+  useEffect(() => {
+    setNextCoachingConference(teacherRes?.next_coaching_conference || "");
+  }, [teacherRes]);
 
   const { data: dashboardRes } = useQuery({
     queryKey: ["teacher-dashboard", teacherId, periodMonths],
@@ -104,6 +108,17 @@ export function TeacherProfilePage() {
     },
     onError: () => {
       toast.error("Failed to save reflection");
+    },
+  });
+
+  const saveNextCoachingConferenceMutation = useMutation({
+    mutationFn: (payload) => teacherApi.update(teacherId, payload),
+    onSuccess: () => {
+      toast.success("Next coaching conference updated");
+      queryClient.invalidateQueries({ queryKey: ["teacher", teacherId] });
+    },
+    onError: () => {
+      toast.error("Failed to update coaching conference");
     },
   });
 
@@ -585,43 +600,73 @@ export function TeacherProfilePage() {
           <div className="lg:col-span-8 space-y-6">
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                AI Summary & Insights
+                AI Insights
               </h2>
               <p className="mb-3 text-xs text-slate-500">
-                Anchored in recent evidence with actionable guidance.
+                Recent performance summary, growth recommendations, and highlights.
               </p>
               {summaryInsightsRes ? (
-                <>
-                  <div className="mb-3 flex flex-wrap items-center gap-3 text-xs">
-                    <div className="rounded-lg bg-slate-50 px-3 py-2">
-                      <div className="text-[11px] text-slate-500">
-                        Overall trend score
-                      </div>
-                      <div className="text-sm font-semibold text-slate-900">
-                        {summaryInsightsRes.overall_trend_score != null
-                          ? `${summaryInsightsRes.overall_trend_score.toFixed(1)}/10`
-                          : "No data yet"}
-                      </div>
+                <div className="space-y-3 text-xs text-slate-700">
+                  <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                    <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                      Recent performance summary
                     </div>
-                    <div className="flex-1 text-slate-700">
+                    <div className="mt-1 text-xs text-slate-700">
                       {summaryInsightsRes.summary}
                     </div>
                   </div>
                   {summaryInsightsRes.recommendations?.length ? (
                     <div>
-                      <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                        Actionable focus
+                      <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                        Growth recommendations (long-term goals)
                       </div>
                       <ul className="list-disc space-y-1 pl-5 text-xs text-slate-700">
-                        {summaryInsightsRes.recommendations
-                          .slice(0, 4)
-                          .map((r, idx) => (
-                            <li key={idx}>{r}</li>
-                          ))}
+                        {summaryInsightsRes.recommendations.slice(0, 4).map((r, idx) => (
+                          <li key={idx}>{r}</li>
+                        ))}
                       </ul>
                     </div>
                   ) : null}
-                </>
+                  <div>
+                    <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      Highlights from recent observations
+                    </div>
+                    {(dashboardRes?.recent_video_highlights || []).length ? (
+                      <ul className="space-y-2 text-xs text-slate-700">
+                        {dashboardRes.recent_video_highlights.map((h, idx) => (
+                          <li
+                            key={`${h.video_id}-${idx}`}
+                            className="rounded-md border border-slate-200 bg-white px-3 py-2"
+                          >
+                            <div className="text-[11px] text-slate-500">
+                              {h.created_at}
+                              {typeof h.timestamp_seconds === "number" && (
+                                <span className="ml-2">
+                                  • {Math.round(h.timestamp_seconds)}s
+                                </span>
+                              )}
+                            </div>
+                            <div className="mt-1 text-xs text-slate-700">
+                              {h.summary}
+                            </div>
+                            {h.video_id && (
+                              <Link
+                                to={`/videos/${h.video_id}`}
+                                className="mt-1 inline-flex text-[11px] text-primary hover:underline"
+                              >
+                                Watch clip
+                              </Link>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="text-xs text-slate-500">
+                        No highlights from recent videos yet.
+                      </div>
+                    )}
+                  </div>
+                </div>
               ) : (
                 <div className="text-xs text-slate-500">
                   No summary data yet for this teacher.
@@ -629,6 +674,123 @@ export function TeacherProfilePage() {
               )}
             </section>
 
+            <section className="rounded-xl border border-slate-200 bg-white p-5">
+              <h2 className="mb-2 text-sm font-semibold text-slate-900">
+                Professional insights
+              </h2>
+              <p className="mb-3 text-xs text-slate-500">
+                Teacher and principal reflections (food for thought).
+              </p>
+              <div className="space-y-3 text-xs text-slate-700">
+                <div>
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    Teacher
+                  </div>
+                  <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                    {selfReflection || "No teacher reflection yet."}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    Principal
+                  </div>
+                  <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                    {actionsTaken || "No principal reflection yet."}
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <div className="lg:col-span-4 space-y-6">
+            <section className="rounded-xl border border-slate-200 bg-white p-5">
+              <h2 className="mb-2 text-sm font-semibold text-slate-900">
+                Next steps
+              </h2>
+              <p className="mb-3 text-xs text-slate-500">
+                Concrete action items for the teacher.
+              </p>
+              {nextStepsItems.length > 0 ? (
+                <ul className="list-disc space-y-1 pl-5 text-xs text-slate-700">
+                  {nextStepsItems.map((item, idx) => (
+                    <li key={idx}>{item}</li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="text-xs text-slate-500">
+                  Add next steps to combine with AI recommendations.
+                </div>
+              )}
+              <div className="mt-3">
+                <label className="mb-1 block text-[11px] font-medium text-slate-600">
+                  Final edit (admin)
+                </label>
+                <textarea
+                  rows={2}
+                  value={nextStepsNote}
+                  onChange={(e) => setNextStepsNote(e.target.value)}
+                  className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                  placeholder="Add a final edited summary of next steps."
+                />
+              </div>
+            </section>
+
+            <section className="rounded-xl border border-slate-200 bg-white p-5">
+              <h2 className="mb-2 text-sm font-semibold text-slate-900">
+                Next coaching conference
+              </h2>
+              <p className="mb-3 text-xs text-slate-500">
+                Scheduled coaching checkpoint for this teacher.
+              </p>
+              <div className="space-y-2 text-xs text-slate-700">
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                  {nextCoachingConference
+                    ? nextCoachingConference
+                    : "Not scheduled yet."}
+                </div>
+                {isAdmin && (
+                  <div className="space-y-2">
+                    <input
+                      type="datetime-local"
+                      value={nextCoachingConference
+                        ? nextCoachingConference.replace("Z", "").slice(0, 16)
+                        : ""}
+                      onChange={(e) => setNextCoachingConference(e.target.value)}
+                      className="w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const value = nextCoachingConference
+                          ? new Date(nextCoachingConference).toISOString()
+                          : null;
+                        saveNextCoachingConferenceMutation.mutate({
+                          next_coaching_conference: value,
+                        });
+                      }}
+                      disabled={saveNextCoachingConferenceMutation.isPending}
+                      className="rounded-md bg-primary px-3 py-2 text-xs font-semibold text-white hover:bg-primary/90 disabled:opacity-60"
+                    >
+                      Save date
+                    </button>
+                  </div>
+                )}
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <div className="mt-8">
+          <h2 className="text-sm font-semibold text-slate-900">
+            Breaking it down
+          </h2>
+          <p className="text-xs text-slate-500">
+            Drill into domain evidence, curriculum adherence, and detailed observations.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+          <div className="lg:col-span-8 space-y-6">
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
@@ -1063,85 +1225,6 @@ export function TeacherProfilePage() {
                 periodMonths={periodMonths}
                 evidenceByElement={evidenceByElement}
               />
-            </section>
-
-            <section className="rounded-xl border border-slate-200 bg-white p-5">
-              <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                Next steps
-              </h2>
-              <p className="mb-3 text-xs text-slate-500">
-                Starts with AI recommendations and updates as you add notes.
-              </p>
-              {nextStepsItems.length > 0 ? (
-                <ul className="list-disc space-y-1 pl-5 text-xs text-slate-700">
-                  {nextStepsItems.map((item, idx) => (
-                    <li key={idx}>{item}</li>
-                  ))}
-                </ul>
-              ) : (
-                <div className="text-xs text-slate-500">
-                  Add next steps to combine with AI recommendations.
-                </div>
-              )}
-              <div className="mt-3">
-                <label className="mb-1 block text-[11px] font-medium text-slate-600">
-                  Final edit (admin)
-                </label>
-                <textarea
-                  rows={2}
-                  value={nextStepsNote}
-                  onChange={(e) => setNextStepsNote(e.target.value)}
-                  className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
-                  placeholder="Add a final edited summary of next steps."
-                />
-              </div>
-            </section>
-
-            <section className="grid grid-cols-1 gap-4 md:grid-cols-12">
-              <div className="md:col-span-7 rounded-xl border border-slate-200 bg-white p-5">
-                <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                  Growth insights
-                </h2>
-                <p className="mb-3 text-xs text-slate-500">
-                  Specific, actionable moves to improve performance.
-                </p>
-                {dashboardRes?.assessments?.length ? (
-                  <ul className="space-y-2 text-xs text-slate-700">
-                    {dashboardRes.assessments.slice(0, 3).map((a) => (
-                      <li
-                        key={a.id}
-                        className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
-                      >
-                        <div className="mb-1 flex items-center justify-between text-[11px] text-slate-500">
-                          <span>{a.analyzed_at}</span>
-                          <span>
-                            Overall{" "}
-                            {(() => {
-                              const score =
-                                a.combined_overall_score ??
-                                a.adjusted_overall_score ??
-                                a.overall_score;
-                              return score != null ? `${score.toFixed(1)}/10` : "N/A";
-                            })()}{" "}
-                            • {a.framework_type}
-                          </span>
-                        </div>
-                        <div className="text-xs text-slate-700">
-                          {a.summary}
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <div className="text-xs text-slate-500">
-                    No assessments yet for this teacher.
-                  </div>
-                )}
-              </div>
-
-              <div className="md:col-span-5">
-                <PeerRecommendations teacherId={teacherId} />
-              </div>
             </section>
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
