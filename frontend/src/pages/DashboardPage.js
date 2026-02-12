@@ -28,6 +28,11 @@ export function DashboardPage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
+  const buildSha = process.env.REACT_APP_BUILD_SHA;
+  const buildTime = process.env.REACT_APP_BUILD_TIME;
+  const buildStamp = buildSha
+    ? `${buildSha}${buildTime ? ` • ${buildTime}` : ""}`
+    : null;
   const now = useMemo(() => new Date(), []);
   const currentRange = useMemo(
     () => ({ start: subDays(now, 30), end: now }),
@@ -379,6 +384,11 @@ export function DashboardPage() {
               Macro-level view of growth across priority focus areas and
               departments.
             </p>
+            {buildStamp && (
+              <div className="mt-2 text-[10px] text-slate-400">
+                Build: {buildStamp}
+              </div>
+            )}
           </div>
           <div className="relative flex items-center gap-2">
             <button
