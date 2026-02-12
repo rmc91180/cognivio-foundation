@@ -3845,9 +3845,10 @@ def generate_recommendations(element_scores: List[dict]) -> List[str]:
         )
 
     if not recommendations:
-        recommendations.append(
-            "[00:30–01:10] Maintain strong instructional routines and consider mentoring peers."
-        )
+        recommendations.extend([
+            "[00:40–01:20] Continue modeling strong routines and ask two more higher-order questions before providing examples.",
+            "[06:10–06:55] Invite quieter students to share their thinking and paraphrase their responses for clarity.",
+        ])
 
     return recommendations
 
