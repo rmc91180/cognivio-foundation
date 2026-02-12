@@ -3853,6 +3853,56 @@ def generate_recommendations(element_scores: List[dict]) -> List[str]:
     return recommendations
 
 # ==================== SEED DATA ENDPOINT ====================
+@api_router.post("/seed-demo-data/reset")
+async def reset_demo_data(current_user: dict = Depends(get_current_user)):
+    """Delete demo data for the current user and return counts."""
+    demo_emails = {
+        "sarah.j@school.edu",
+        "michael.c@school.edu",
+        "emily.r@school.edu",
+        "david.p@school.edu",
+        "jennifer.w@school.edu",
+        "robert.m@school.edu",
+    }
+    demo_teachers = await db.teachers.find(
+        {"created_by": current_user["id"], "email": {"$in": list(demo_emails)}},
+        {"_id": 0, "id": 1},
+    ).to_list(100)
+    teacher_ids = [t["id"] for t in demo_teachers]
+    if not teacher_ids:
+        return {"message": "No demo data found", "deleted": {}}
+
+    deleted = {}
+    deleted["assessments"] = (await db.assessments.delete_many(
+        {"teacher_id": {"$in": teacher_ids}, "user_id": current_user["id"]}
+    )).deleted_count
+    deleted["observations"] = (await db.observations.delete_many(
+        {"teacher_id": {"$in": teacher_ids}, "user_id": current_user["id"]}
+    )).deleted_count
+    deleted["videos"] = (await db.videos.delete_many(
+        {"teacher_id": {"$in": teacher_ids}, "uploaded_by": current_user["id"]}
+    )).deleted_count
+    deleted["video_evidence"] = (await db.video_evidence.delete_many(
+        {"teacher_id": {"$in": teacher_ids}, "uploaded_by": current_user["id"]}
+    )).deleted_count
+    deleted["curriculum_adherence"] = (await db.curriculum_adherence.delete_many(
+        {"teacher_id": {"$in": teacher_ids}, "user_id": current_user["id"]}
+    )).deleted_count
+    deleted["lesson_plans"] = (await db.lesson_plans.delete_many(
+        {"teacher_id": {"$in": teacher_ids}, "uploaded_by": current_user["id"]}
+    )).deleted_count
+    deleted["curricula"] = (await db.curricula.delete_many(
+        {"teacher_id": {"$in": teacher_ids}, "uploaded_by": current_user["id"]}
+    )).deleted_count
+    deleted["syllabi"] = (await db.syllabi.delete_many(
+        {"teacher_id": {"$in": teacher_ids}, "uploaded_by": current_user["id"]}
+    )).deleted_count
+    deleted["schedules"] = (await db.schedules.delete_many(
+        {"teacher_id": {"$in": teacher_ids}, "user_id": current_user["id"]}
+    )).deleted_count
+
+    return {"message": "Demo data reset", "deleted": deleted}
+
 @api_router.post("/seed-demo-data")
 async def seed_demo_data(current_user: dict = Depends(get_current_user)):
     """Seed demo data for testing"""
@@ -4032,7 +4082,8 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
                 "overall_score": overall_score,
                 "summary": generate_summary(element_scores, overall_score),
                 "recommendations": generate_recommendations(element_scores),
-                "analyzed_at": assessment_date
+                "analyzed_at": assessment_date,
+                "is_mock": True,
             }
             
             await db.assessments.insert_one(assessment_doc)
