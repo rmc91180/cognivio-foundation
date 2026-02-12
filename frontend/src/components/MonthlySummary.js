@@ -1,5 +1,4 @@
 import React, { useMemo } from "react";
-import { useMemo } from "react";
 
 /**
  * MonthlySummary - Displays aggregated performance summary for a period
