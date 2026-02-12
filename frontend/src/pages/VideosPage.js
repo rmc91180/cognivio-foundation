@@ -1,12 +1,224 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { assessmentApi, teacherApi, videoApi } from "@/lib/api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { assessmentApi, teacherApi, videoApi, evidenceApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { toast } from "sonner";
 import { Link, useLocation } from "react-router-dom";
+import { useAuth } from "@/hooks/useAuth";
+
+function VideoRow({ video, assessment, teacher, isAdmin }) {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [selectedDomain, setSelectedDomain] = useState(
+    assessment?.element_scores?.[0]?.element_id || ""
+  );
+  const [adjustedScore, setAdjustedScore] = useState("");
+  const [adminNote, setAdminNote] = useState("");
+
+  const { data: evidenceRes } = useQuery({
+    queryKey: ["assessment-evidence", assessment?.id],
+    enabled: open && Boolean(assessment?.id),
+    queryFn: () => evidenceApi.get(assessment.id).then((res) => res.data),
+  });
+
+  const evidenceByElement = useMemo(() => {
+    const map = {};
+    const items = evidenceRes?.evidence || [];
+    items.forEach((ev) => {
+      if (!ev.element_id) return;
+      if (!map[ev.element_id]) map[ev.element_id] = [];
+      map[ev.element_id].push(ev);
+    });
+    return map;
+  }, [evidenceRes]);
+
+  const overrideMutation = useMutation({
+    mutationFn: (payload) => assessmentApi.createAdminOverride(assessment.id, payload),
+    onSuccess: () => {
+      toast.success("Admin adjustment saved");
+      queryClient.invalidateQueries({ queryKey: ["assessments"] });
+    },
+    onError: () => {
+      toast.error("Failed to save admin adjustment");
+    },
+  });
+
+  const elementOptions = assessment?.element_scores || [];
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="text-xs font-semibold text-slate-900">
+            {teacher?.name || "Teacher"} • {video.subject || "Subject"}
+          </div>
+          <div className="text-[11px] text-slate-500">
+            {video.recorded_at || video.upload_date} • {video.status}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 text-[11px] text-slate-600">
+          {assessment && (
+            <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-emerald-700">
+              Score {assessment.overall_score?.toFixed(1) ?? "N/A"}
+            </span>
+          )}
+          <Link
+            to={`/teachers/${video.teacher_id}`}
+            className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
+          >
+            Teacher page
+          </Link>
+          <Link
+            to={`/videos/${video.id}`}
+            className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
+          >
+            View recording
+          </Link>
+        </div>
+      </div>
+      <div className="mt-2 grid gap-2 text-xs text-slate-600 md:grid-cols-2">
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+            Summary assessment
+          </div>
+          <div className="mt-1 line-clamp-2">
+            {assessment?.summary || "No assessment summary yet."}
+          </div>
+        </div>
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+            Recommendations
+          </div>
+          {assessment?.recommendations?.length ? (
+            <ul className="mt-1 list-disc space-y-1 pl-4">
+              {assessment.recommendations.slice(0, 2).map((rec, idx) => (
+                <li key={idx}>{rec}</li>
+              ))}
+            </ul>
+          ) : (
+            <div className="mt-1 text-xs text-slate-500">
+              No recommendations yet.
+            </div>
+          )}
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        className="mt-3 inline-flex items-center rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
+      >
+        {open ? "Hide detailed assessment" : "View detailed assessment"}
+      </button>
+      {open && (
+        <div className="mt-3 rounded-md border border-slate-200 bg-white p-3 text-xs text-slate-700">
+          {elementOptions.length === 0 ? (
+            <div className="text-xs text-slate-500">No detailed scores yet.</div>
+          ) : (
+            <div className="space-y-2">
+              {elementOptions.map((el) => (
+                <div key={el.element_id} className="rounded-md bg-slate-50 px-2 py-2">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-semibold text-slate-800">{el.element_name}</span>
+                    <span className="text-slate-600">{el.score?.toFixed(1)}/10</span>
+                  </div>
+                  {(evidenceByElement[el.element_id] || []).length ? (
+                    <ul className="mt-1 space-y-1 text-[11px] text-slate-600">
+                      {evidenceByElement[el.element_id].slice(0, 2).map((ev) => (
+                        <li key={ev.id}>
+                          {ev.evidence_text}{" "}
+                          {typeof ev.timestamp_start === "number" && (
+                            <span className="text-slate-400">
+                              ({Math.round(ev.timestamp_start)}s-
+                              {Math.round(ev.timestamp_end)}s)
+                            </span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="mt-1 text-[11px] text-slate-500">
+                      No evidence yet.
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {isAdmin && assessment && (
+            <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-2 text-[11px]">
+              <div className="mb-2 font-semibold text-slate-700">
+                Admin comment & adjustment
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+                  value={selectedDomain}
+                  onChange={(e) => setSelectedDomain(e.target.value)}
+                >
+                  <option value="">Select domain</option>
+                  {elementOptions.map((el) => (
+                    <option key={el.element_id} value={el.element_id}>
+                      {el.element_name}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="1"
+                  max="10"
+                  value={adjustedScore}
+                  onChange={(e) => setAdjustedScore(e.target.value)}
+                  placeholder="Adjusted score"
+                  className="w-24 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+                />
+              </div>
+              <textarea
+                rows={2}
+                value={adminNote}
+                onChange={(e) => setAdminNote(e.target.value)}
+                placeholder="Admin comment or rationale"
+                className="mt-2 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  if (!selectedDomain || !adjustedScore) {
+                    toast.error("Select a domain and adjusted score");
+                    return;
+                  }
+                  const adjusted = parseFloat(adjustedScore);
+                  if (Number.isNaN(adjusted)) {
+                    toast.error("Enter a valid score");
+                    return;
+                  }
+                  const original =
+                    elementOptions.find((el) => el.element_id === selectedDomain)?.score ??
+                    adjusted;
+                  overrideMutation.mutate({
+                    domain_id: selectedDomain,
+                    original_score: original,
+                    adjusted_score: adjusted,
+                    rationale: adminNote || "Admin comment",
+                  });
+                }}
+                className="mt-2 inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90"
+              >
+                Save adjustment
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function VideosPage() {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
+  const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
   const [selectedTeacher, setSelectedTeacher] = useState("");
   const [file, setFile] = useState(null);
   const [search, setSearch] = useState("");
@@ -282,66 +494,13 @@ export function VideosPage() {
                     const assessment = assessmentByVideoId.get(v.id);
                     const teacher = teachers.find((t) => t.id === v.teacher_id);
                     return (
-                      <div
+                      <VideoRow
                         key={v.id}
-                        className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3"
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-3">
-                          <div>
-                            <div className="text-xs font-semibold text-slate-900">
-                              {teacher?.name || "Teacher"} • {v.subject || "Subject"}
-                            </div>
-                            <div className="text-[11px] text-slate-500">
-                              {v.recorded_at || v.upload_date} • {v.status}
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2 text-[11px] text-slate-600">
-                            {assessment && (
-                              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-emerald-700">
-                                Score {assessment.overall_score?.toFixed(1) ?? "N/A"}
-                              </span>
-                            )}
-                            <Link
-                              to={`/teachers/${v.teacher_id}`}
-                              className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
-                            >
-                              Teacher page
-                            </Link>
-                            <Link
-                              to={`/videos/${v.id}`}
-                              className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
-                            >
-                              View recording
-                            </Link>
-                          </div>
-                        </div>
-                        <div className="mt-2 grid gap-2 text-xs text-slate-600 md:grid-cols-2">
-                          <div>
-                            <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                              Summary
-                            </div>
-                            <div className="mt-1 line-clamp-2">
-                              {assessment?.summary || "No assessment summary yet."}
-                            </div>
-                          </div>
-                          <div>
-                            <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                              Recommendations
-                            </div>
-                            {assessment?.recommendations?.length ? (
-                              <ul className="mt-1 list-disc space-y-1 pl-4">
-                                {assessment.recommendations.slice(0, 2).map((rec, idx) => (
-                                  <li key={idx}>{rec}</li>
-                                ))}
-                              </ul>
-                            ) : (
-                              <div className="mt-1 text-xs text-slate-500">
-                                No recommendations yet.
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
+                        video={v}
+                        assessment={assessment}
+                        teacher={teacher}
+                        isAdmin={isAdmin}
+                      />
                     );
                   })}
                 </div>

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams, Link } from "react-router-dom";
 import {
@@ -257,26 +258,26 @@ export function TeacherProfilePage() {
     return upcoming[0] || null;
   }, [lessonPlansRes]);
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (teacherRes?.subject) {
       setVideoSubject(teacherRes.subject);
     }
   }, [teacherRes]);
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (summaryReflectionRes) {
       setSelfReflection(summaryReflectionRes.self_reflection || "");
       setActionsTaken(summaryReflectionRes.actions_taken || "");
     }
   }, [summaryReflectionRes]);
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (dashboardRes?.scoring_mode) {
       setScoringMode(dashboardRes.scoring_mode);
     }
   }, [dashboardRes]);
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (!teacherId) return;
     const saved = localStorage.getItem(`next-steps-${teacherId}`);
     if (saved) {
@@ -284,33 +285,22 @@ export function TeacherProfilePage() {
     }
   }, [teacherId]);
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (!teacherId) return;
     localStorage.setItem(`next-steps-${teacherId}`, nextStepsNote || "");
   }, [nextStepsNote, teacherId]);
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (actionPlanRes) {
       setActionPlanGoals(actionPlanRes.goals || []);
       setActionPlanNotes(actionPlanRes.notes || "");
     }
   }, [actionPlanRes]);
 
-  const elementSummary = dashboardRes?.element_summary ?? [];
   const videos = dashboardRes?.videos ?? [];
   const recordingPolicy = dashboardRes?.recording_policy;
   const recordingCompliance = dashboardRes?.recording_compliance;
   const observations = useMemo(() => observationsRes ?? [], [observationsRes]);
-
-  const observationsByElement = useMemo(() => {
-    const map = {};
-    observations.forEach((obs) => {
-      if (!obs.element_id) return;
-      if (!map[obs.element_id]) map[obs.element_id] = [];
-      map[obs.element_id].push(obs);
-    });
-    return map;
-  }, [observations]);
 
   const { data: adherenceRes } = useQuery({
     queryKey: ["curriculum-adherence", latestAssessmentId],
@@ -367,17 +357,19 @@ export function TeacherProfilePage() {
 
   const nextStepsItems = useMemo(() => {
     const items = [];
-    if (summaryInsightsRes?.recommendations?.length) {
-      items.push(...summaryInsightsRes.recommendations.slice(0, 4));
-    }
-    if (actionsTaken) {
-      items.push(`Admin notes: ${actionsTaken}`);
+    if (actionPlanGoals?.length) {
+      items.push(
+        ...actionPlanGoals
+          .filter((g) => g?.title)
+          .slice(0, 4)
+          .map((g) => g.title)
+      );
     }
     if (nextStepsNote) {
-      items.push(`Final edit: ${nextStepsNote}`);
+      items.push(nextStepsNote);
     }
     return items;
-  }, [summaryInsightsRes, actionsTaken, nextStepsNote]);
+  }, [actionPlanGoals, nextStepsNote]);
 
   const handleSaveReflection = (e) => {
     e.preventDefault();
@@ -618,7 +610,7 @@ export function TeacherProfilePage() {
                   {summaryInsightsRes.recommendations?.length ? (
                     <div>
                       <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                        Growth recommendations (long-term goals)
+                        Long-term goals (semester and beyond)
                       </div>
                       <ul className="list-disc space-y-1 pl-5 text-xs text-slate-700">
                         {summaryInsightsRes.recommendations.slice(0, 4).map((r, idx) => (
@@ -699,6 +691,39 @@ export function TeacherProfilePage() {
                   </div>
                 </div>
               </div>
+              <form onSubmit={handleSaveReflection} className="mt-3 space-y-3 text-xs">
+                <div>
+                  <label className="mb-1 block text-[11px] font-medium text-slate-600">
+                    Teacher reflection
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={selfReflection}
+                    onChange={(e) => setSelfReflection(e.target.value)}
+                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                    placeholder="How does the teacher interpret these insights? What patterns are they noticing?"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[11px] font-medium text-slate-600">
+                    Administrator reflections
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={actionsTaken}
+                    onChange={(e) => setActionsTaken(e.target.value)}
+                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                    placeholder="Summarize admin observations, coaching direction, or agreed adjustments."
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={saveReflectionMutation.isPending}
+                  className="mt-1 inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90 disabled:opacity-60"
+                >
+                  Save reflections
+                </button>
+              </form>
             </section>
           </div>
 
@@ -1183,55 +1208,155 @@ export function TeacherProfilePage() {
               </div>
             </section>
 
-            <section className="rounded-xl border border-slate-200 bg-white p-5">
-              <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                Professional insights
-              </h2>
-              <p className="mb-3 text-xs text-slate-500">
-                Teacher responses and administrator reflections.
-              </p>
-              <form onSubmit={handleSaveReflection} className="space-y-3 text-xs">
-                <div>
-                  <label className="mb-1 block text-[11px] font-medium text-slate-600">
-                    Teacher reflection
-                  </label>
-                  <textarea
-                    rows={3}
-                    value={selfReflection}
-                    onChange={(e) => setSelfReflection(e.target.value)}
-                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
-                    placeholder="How does the teacher interpret these insights? What patterns are they noticing?"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-[11px] font-medium text-slate-600">
-                    Administrator reflections
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={actionsTaken}
-                    onChange={(e) => setActionsTaken(e.target.value)}
-                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
-                    placeholder="Summarize admin observations, coaching direction, or agreed adjustments."
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={saveReflectionMutation.isPending}
-                  className="mt-1 inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90 disabled:opacity-60"
-                >
-                  Save reflections
-                </button>
-              </form>
-            </section>
-
             <section>
               <MonthlySummary
                 dashboardRes={dashboardRes}
                 periodMonths={periodMonths}
                 evidenceByElement={evidenceByElement}
+                onViewEvidence={setSelectedEvidenceElement}
               />
             </section>
+            {selectedEvidenceElement && (
+              <section className="rounded-xl border border-slate-200 bg-white p-5">
+                <div className="mb-2 flex items-center justify-between">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    Evidence breakdown
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedEvidenceElement(null)}
+                    className="text-[11px] text-slate-500 hover:text-slate-700"
+                  >
+                    Close
+                  </button>
+                </div>
+                {(evidenceByElement[selectedEvidenceElement] || []).length ? (
+                  <ul className="space-y-2 text-[11px] text-slate-700">
+                    {evidenceByElement[selectedEvidenceElement].map((ev) => (
+                      <li key={ev.id} className="rounded-md bg-slate-50 px-2 py-2">
+                        <div className="text-slate-800">{ev.evidence_text}</div>
+                        <div className="mt-1 text-[10px] text-slate-500">
+                          {typeof ev.timestamp_start === "number" && (
+                            <span>
+                              {Math.round(ev.timestamp_start)}s -{" "}
+                              {Math.round(ev.timestamp_end)}s
+                            </span>
+                          )}
+                          {ev.assessment_date && (
+                            <span className="ml-2">• {ev.assessment_date}</span>
+                          )}
+                          {ev.video_id && (
+                            <span className="ml-2">
+                              •{" "}
+                              <Link
+                                to={`/videos/${ev.video_id}?t=${Math.round(
+                                  ev.timestamp_start || 0
+                                )}`}
+                                className="text-primary hover:underline"
+                              >
+                                Open clip
+                              </Link>
+                            </span>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="text-[11px] text-slate-500">
+                    No evidence captured yet for this domain.
+                  </div>
+                )}
+                {isAdmin && latestAssessment && (
+                  <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-2 text-[11px]">
+                    <div className="mb-2 font-semibold text-slate-700">
+                      Admin score adjustment
+                    </div>
+                    {(() => {
+                      const scoreRow = latestAssessment.element_scores?.find(
+                        (row) => row.element_id === selectedEvidenceElement
+                      );
+                      if (!scoreRow) {
+                        return (
+                          <div className="text-[11px] text-slate-500">
+                            No score found for this domain.
+                          </div>
+                        );
+                      }
+                      const existingOverride = overrideByElement[selectedEvidenceElement];
+                      const value =
+                        overrideScores[selectedEvidenceElement] ??
+                        existingOverride?.adjusted_score ??
+                        scoreRow.score;
+                      return (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-slate-500">
+                            AI score: {scoreRow.score.toFixed(1)}/10
+                          </span>
+                          {existingOverride && (
+                            <span className="text-[10px] text-emerald-700">
+                              Current override: {existingOverride.adjusted_score.toFixed(1)}/10
+                            </span>
+                          )}
+                          <input
+                            type="number"
+                            step="0.1"
+                            min="1"
+                            max="10"
+                            value={value}
+                            onChange={(e) =>
+                              setOverrideScores((prev) => ({
+                                ...prev,
+                                [selectedEvidenceElement]: e.target.value,
+                              }))
+                            }
+                            className="w-20 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const adjusted = parseFloat(value);
+                              if (Number.isNaN(adjusted)) {
+                                toast.error("Enter a valid score");
+                                return;
+                              }
+                              adminOverrideMutation.mutate({
+                                domain_id: selectedEvidenceElement,
+                                original_score: scoreRow.score,
+                                adjusted_score: adjusted,
+                                rationale: "Admin adjustment",
+                              });
+                            }}
+                            className="rounded-md bg-primary px-2 py-1 text-[11px] font-medium text-white hover:bg-primary/90"
+                          >
+                            Apply
+                          </button>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+                {isAdmin && overrideByElement[selectedEvidenceElement] && (
+                  <div className="mt-2 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-2 text-[11px] text-emerald-800">
+                    <div className="font-semibold">Override history</div>
+                    <div>
+                      Adjusted from{" "}
+                      {overrideByElement[selectedEvidenceElement].original_score?.toFixed(1)}
+                      /10 to{" "}
+                      {overrideByElement[selectedEvidenceElement].adjusted_score?.toFixed(1)}/10
+                    </div>
+                    {overrideByElement[selectedEvidenceElement].rationale && (
+                      <div className="text-[10px] text-emerald-700">
+                        {overrideByElement[selectedEvidenceElement].rationale}
+                      </div>
+                    )}
+                    <div className="text-[10px] text-emerald-700">
+                      {overrideByElement[selectedEvidenceElement].created_at}
+                    </div>
+                  </div>
+                )}
+              </section>
+            )}
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-3 text-sm font-semibold text-slate-900">
@@ -1447,238 +1572,7 @@ export function TeacherProfilePage() {
                 </div>
               )}
             </section>
-            <section className="rounded-xl border border-slate-200 bg-white p-5">
-              <h2 className="mb-3 text-sm font-semibold text-slate-900">
-                Domain scores & evidence
-              </h2>
-              <div className="space-y-2 text-xs">
-                {elementSummary.map((es) => {
-                  const obsForElement = observationsByElement[es.element_id] || [];
-                  const evidenceItems = evidenceByElement[es.element_id] || [];
-                  return (
-                    <div
-                      key={es.element_id}
-                      className="group rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
-                    >
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <div className="text-xs font-medium text-slate-800">
-                            {es.element_name}
-                          </div>
-                          <div className="text-[11px] text-slate-500">
-                            {es.assessment_count} assessments
-                          </div>
-                          {typeof es.school_average === "number" && (
-                            <div className="text-[11px] text-slate-500">
-                              School avg: {es.school_average.toFixed(1)}/10
-                            </div>
-                          )}
-                        </div>
-                        <div className="relative">
-                          <span
-                            className="inline-flex h-6 w-16 items-center justify-center rounded-full text-[11px] font-semibold text-white"
-                            style={{
-                              backgroundImage:
-                                "linear-gradient(to right, #ef4444, #f97316, #22c55e)",
-                              opacity: 0.9,
-                            }}
-                            title={`${es.average_score.toFixed(1)}/10`}
-                          >
-                            {es.average_score.toFixed(1)}/10
-                          </span>
-                        </div>
-                      </div>
-                      <div className="mt-2 text-[10px] text-slate-500">
-                        {es.trend_direction === "improving" && (
-                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-emerald-700">
-                            Improving
-                          </span>
-                        )}
-                        {es.trend_direction === "declining" && (
-                          <span className="rounded-full bg-rose-100 px-2 py-0.5 text-rose-700">
-                            Declining
-                          </span>
-                        )}
-                        {es.trend_direction === "stable" && (
-                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">
-                            Stable
-                          </span>
-                        )}
-                      </div>
-                      <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                        <button
-                          type="button"
-                          onClick={() => setSelectedEvidenceElement(es.element_id)}
-                          className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
-                        >
-                          View evidence
-                        </button>
-                        {evidenceItems.length > 0 && (
-                          <span className="text-[10px] text-slate-500">
-                            {evidenceItems.length} evidence items
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-              {selectedEvidenceElement && (
-                <div className="mt-4 rounded-lg border border-slate-200 bg-white p-3 text-xs">
-                  <div className="mb-2 flex items-center justify-between">
-                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                      Evidence detail
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedEvidenceElement(null)}
-                      className="text-[11px] text-slate-500 hover:text-slate-700"
-                    >
-                      Close
-                    </button>
-                  </div>
-                  {(evidenceByElement[selectedEvidenceElement] || []).length ? (
-                    <ul className="space-y-2 text-[11px] text-slate-700">
-                      {evidenceByElement[selectedEvidenceElement].map((ev) => (
-                        <li key={ev.id} className="rounded-md bg-slate-50 px-2 py-2">
-                          <div className="text-slate-800">{ev.evidence_text}</div>
-                          <div className="mt-1 text-[10px] text-slate-500">
-                            {typeof ev.timestamp_start === "number" && (
-                              <span>
-                                {Math.round(ev.timestamp_start)}s -{" "}
-                                {Math.round(ev.timestamp_end)}s
-                              </span>
-                            )}
-                            {ev.assessment_date && (
-                              <span className="ml-2">• {ev.assessment_date}</span>
-                            )}
-                            {ev.video_id && (
-                              <span className="ml-2">
-                                •{" "}
-                                <Link
-                                  to={`/videos/${ev.video_id}?t=${Math.round(
-                                    ev.timestamp_start || 0
-                                  )}`}
-                                  className="text-primary hover:underline"
-                                >
-                                  Open clip
-                                </Link>
-                              </span>
-                            )}
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <div className="text-[11px] text-slate-500">
-                      No evidence captured yet for this domain.
-                    </div>
-                  )}
-                  {isAdmin && latestAssessment && (
-                    <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-2 text-[11px]">
-                      <div className="mb-2 font-semibold text-slate-700">
-                        Admin score adjustment
-                      </div>
-                      {(() => {
-                        const scoreRow = latestAssessment.element_scores?.find(
-                          (row) => row.element_id === selectedEvidenceElement
-                        );
-                        if (!scoreRow) {
-                          return (
-                            <div className="text-[11px] text-slate-500">
-                              No score found for this domain.
-                            </div>
-                          );
-                        }
-                        const existingOverride = overrideByElement[selectedEvidenceElement];
-                        const value =
-                          overrideScores[selectedEvidenceElement] ??
-                          existingOverride?.adjusted_score ??
-                          scoreRow.score;
-                        return (
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-slate-500">
-                              AI score: {scoreRow.score.toFixed(1)}/10
-                            </span>
-                            {existingOverride && (
-                              <span className="text-[10px] text-emerald-700">
-                                Current override: {existingOverride.adjusted_score.toFixed(1)}/10
-                              </span>
-                            )}
-                            <input
-                              type="number"
-                              step="0.1"
-                              min="1"
-                              max="10"
-                              value={value}
-                              onChange={(e) =>
-                                setOverrideScores((prev) => ({
-                                  ...prev,
-                                  [selectedEvidenceElement]: e.target.value,
-                                }))
-                              }
-                              className="w-20 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const adjusted = parseFloat(value);
-                                if (Number.isNaN(adjusted)) {
-                                  toast.error("Enter a valid score");
-                                  return;
-                                }
-                                adminOverrideMutation.mutate({
-                                  domain_id: selectedEvidenceElement,
-                                  original_score: scoreRow.score,
-                                  adjusted_score: adjusted,
-                                  rationale: "Admin adjustment",
-                                });
-                              }}
-                              className="rounded-md bg-primary px-2 py-1 text-[11px] font-medium text-white hover:bg-primary/90"
-                            >
-                              Apply
-                            </button>
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  )}
-                  {isAdmin && overrideByElement[selectedEvidenceElement] && (
-                    <div className="mt-2 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-2 text-[11px] text-emerald-800">
-                      <div className="font-semibold">Override history</div>
-                      <div>
-                        Adjusted from{" "}
-                        {overrideByElement[selectedEvidenceElement].original_score?.toFixed(1)}
-                        /10 to{" "}
-                        {overrideByElement[selectedEvidenceElement].adjusted_score?.toFixed(1)}/10
-                      </div>
-                      {overrideByElement[selectedEvidenceElement].rationale && (
-                        <div className="text-[10px] text-emerald-700">
-                          {overrideByElement[selectedEvidenceElement].rationale}
-                        </div>
-                      )}
-                      <div className="text-[10px] text-emerald-700">
-                        {overrideByElement[selectedEvidenceElement].created_at}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-              {videos.length > 0 && (
-                <div className="mt-4 text-[11px] text-slate-500">
-                  Linked videos:{" "}
-                  {videos.slice(0, 3).map((v) => (
-                    <Link
-                      key={v.id}
-                      to={`/videos/${v.id}`}
-                      className="mr-2 text-primary hover:underline"
-                    >
-                      {v.filename}
-                    </Link>
-                  ))}
-                </div>
-              )}
-            </section>
+            
           </div>
         </div>
       </div>

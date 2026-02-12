@@ -1,4 +1,5 @@
 import React, { useMemo } from "react";
+import { useMemo } from "react";
 
 /**
  * MonthlySummary - Displays aggregated performance summary for a period
@@ -9,6 +10,7 @@ export function MonthlySummary({
   dashboardRes,
   periodMonths = 3,
   evidenceByElement = {},
+  onViewEvidence,
 }) {
   const summaryData = useMemo(() => {
     if (!dashboardRes?.assessments?.length) {
@@ -198,6 +200,7 @@ export function MonthlySummary({
                 : "text-slate-600 bg-slate-100";
           const deltaLabel =
             domain.delta > 0 ? `+${domain.delta.toFixed(1)}` : domain.delta.toFixed(1);
+          const evidenceCount = (evidenceByElement[domain.elementId] || []).length;
           return (
             <div
               key={domain.elementId}
@@ -221,6 +224,18 @@ export function MonthlySummary({
                   {domain.latest.toFixed(1)}
                 </span>
                 <span className="font-semibold text-slate-700">{deltaLabel}</span>
+              </div>
+              <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
+                <span>{evidenceCount} evidence items</span>
+                {typeof onViewEvidence === "function" && (
+                  <button
+                    type="button"
+                    onClick={() => onViewEvidence(domain.elementId)}
+                    className="rounded-md border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-100"
+                  >
+                    View evidence
+                  </button>
+                )}
               </div>
             </div>
           );
