@@ -2246,6 +2246,15 @@ async def get_teacher_roster(
         {"created_by": current_user["id"]},
         {"_id": 0}
     ).to_list(1000)
+    teacher_ids = [t["id"] for t in teachers]
+    action_plan_map: Dict[str, dict] = {}
+    if teacher_ids:
+        action_plans = await db.action_plans.find(
+            {"user_id": current_user["id"], "teacher_id": {"$in": teacher_ids}},
+            {"_id": 0},
+        ).to_list(1000)
+        for plan in action_plans:
+            action_plan_map[plan["teacher_id"]] = plan
     
     roster = []
     for teacher in teachers:
@@ -2291,6 +2300,73 @@ async def get_teacher_roster(
             ).to_list(1000)
             for o in overrides:
                 overrides_by_assessment.setdefault(o["assessment_id"], []).append(o)
+
+        def _base_overall(assessment: dict) -> Optional[float]:
+            if role == "admin":
+                _, adjusted_overall = _apply_admin_overrides(
+                    assessment.get("element_scores", []),
+                    overrides_by_assessment.get(assessment["id"], []),
+                    scoring_mode,
+                )
+                return adjusted_overall
+            return assessment.get("overall_score")
+
+        def _trend_snapshot(days: int) -> dict:
+            end = datetime.now(timezone.utc)
+            start = end - timedelta(days=days)
+            prev_start = start - timedelta(days=days)
+            prev_end = start
+            recent_scores = []
+            prev_scores = []
+            for assessment in assessments:
+                timestamp = assessment.get("analyzed_at")
+                if not timestamp:
+                    continue
+                try:
+                    analyzed_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                score = _base_overall(assessment)
+                if score is None:
+                    continue
+                if start <= analyzed_at < end:
+                    recent_scores.append(score)
+                elif prev_start <= analyzed_at < prev_end:
+                    prev_scores.append(score)
+            recent_avg = sum(recent_scores) / len(recent_scores) if recent_scores else None
+            prev_avg = sum(prev_scores) / len(prev_scores) if prev_scores else None
+            delta = round(recent_avg - prev_avg, 2) if recent_avg is not None and prev_avg is not None else None
+            return {
+                "avg_score": round(recent_avg, 2) if recent_avg is not None else None,
+                "delta": delta,
+                "recent_count": len(recent_scores),
+                "previous_count": len(prev_scores),
+            }
+
+        trend_windows = {
+            "30d": _trend_snapshot(30),
+            "60d": _trend_snapshot(60),
+            "90d": _trend_snapshot(90),
+        }
+
+        recent_observations = await db.observations.find(
+            {"teacher_id": teacher["id"]},
+            {"_id": 0, "summary": 1, "admin_comment": 1, "created_at": 1},
+        ).sort("created_at", -1).to_list(3)
+
+        action_plan = action_plan_map.get(teacher["id"])
+        action_items = []
+        if action_plan:
+            for goal in action_plan.get("goals", []):
+                title = goal.get("title")
+                if title:
+                    action_items.append({
+                        "title": title,
+                        "status": goal.get("status"),
+                        "due_date": goal.get("due_date"),
+                    })
+                if len(action_items) >= 2:
+                    break
 
         # Build 30-day trend snapshot per element (last 30 days vs prior 30 days)
         trend_30d = []
@@ -2412,6 +2488,9 @@ async def get_teacher_roster(
                 "days_since_interaction": interaction_days,
                 "recording_compliance": compliance_summary,
                 "trend_30d": trend_30d,
+                "trend_windows": trend_windows,
+                "recent_observations": recent_observations,
+                "action_items": action_items,
             }
         )
     

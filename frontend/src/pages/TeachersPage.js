@@ -6,13 +6,10 @@ import {
   scheduleApi,
   teacherApi,
   schoolApi,
-  recordingComplianceApi,
 } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { toast } from "sonner";
 import { Link } from "react-router-dom";
-import { ScoreCell } from "@/components/ScoreCell";
-import { TrendIndicator } from "@/components/TrendIndicator";
 import { useAuth } from "@/hooks/useAuth";
 
 export function TeachersPage() {
@@ -96,17 +93,6 @@ export function TeachersPage() {
     },
   });
 
-  const sendComplianceReminderMutation = useMutation({
-    mutationFn: (teacherId) => recordingComplianceApi.remind(teacherId),
-    onSuccess: () => {
-      toast.success("Reminder sent");
-      queryClient.invalidateQueries({ queryKey: ["schedules"] });
-    },
-    onError: () => {
-      toast.error("Failed to send reminder");
-    },
-  });
-
   const onSubmit = (e) => {
     e.preventDefault();
     createMutation.mutate(form);
@@ -172,11 +158,6 @@ export function TeachersPage() {
     });
     return map;
   }, [rosterData]);
-  const selectedElements = useMemo(
-    () => rosterData?.selected_elements ?? [],
-    [rosterData]
-  );
-
   const schedulesByTeacher = useMemo(() => {
     const map = {};
     (schedulesData ?? []).forEach((s) => {
@@ -246,10 +227,8 @@ export function TeachersPage() {
         teacher: t,
         roster,
         overallScore,
-        previousScore: prevScore,
         performanceLevel,
         trend,
-        elementScores: roster?.element_scores || {},
         categoryLabel:
           t.category_custom ||
           (t.category ? t.category.replace("_", " ") : ""),
@@ -301,11 +280,6 @@ export function TeachersPage() {
 
     return rows;
   }, [teachers, rosterByTeacher, departmentFilter, performanceLevelFilter, trendFilter, categoryFilter, sortBy]);
-
-  const displayedElements = useMemo(
-    () => selectedElements.slice(0, 6),
-    [selectedElements]
-  );
 
   const downloadReport = async (format, params, filename) => {
     try {
@@ -652,35 +626,19 @@ export function TeachersPage() {
                         <th className="px-3 py-2">Teacher</th>
                         <th className="px-3 py-2">Dept</th>
                         <th className="px-3 py-2">Flag</th>
-                        <th className="px-3 py-2">Compliance</th>
-                        <th className="px-3 py-2">Trend</th>
-                        {displayedElements.map((el) => (
-                          <th key={el} className="px-3 py-2 text-center">
-                            {el.toUpperCase()}
-                          </th>
-                        ))}
-                        {selectedElements.length > displayedElements.length && (
-                          <th className="px-3 py-2 text-center">More</th>
-                        )}
+                        <th className="px-3 py-2">Recent observations</th>
+                        <th className="px-3 py-2">Trends (30/60/90)</th>
+                        <th className="px-3 py-2">Action items</th>
                         <th className="px-3 py-2">Courses</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {tableRows.map(({ teacher, roster, overallScore, previousScore, elementScores }) => {
+                      {tableRows.map(({ teacher, roster, overallScore }) => {
                         const level =
                           typeof overallScore === "number"
                             ? overallScore
                             : null;
                         const assessmentCount = roster?.assessment_count ?? 0;
-                        const elementEntries = Object.entries(elementScores || {});
-                        const lowestElement = elementEntries
-                          .filter(([, es]) => typeof es.score === "number")
-                          .sort((a, b) => a[1].score - b[1].score)[0];
-                        const lowElementLabel =
-                          lowestElement && typeof lowestElement[1].score === "number" && lowestElement[1].score < 5
-                            ? `Low ${lowestElement[0].toUpperCase()} scores`
-                            : null;
-
                         let flagLabel = "Stable";
                         let flagReason = "On track";
                         let flagColor = "bg-emerald-50 text-emerald-700 border-emerald-200";
@@ -698,11 +656,11 @@ export function TeachersPage() {
                           flagColor = "bg-slate-50 text-slate-600 border-slate-200";
                         } else if (level < 5) {
                           flagLabel = "Support";
-                          flagReason = lowElementLabel || "Low overall score";
+                          flagReason = "Low overall score";
                           flagColor = "bg-rose-50 text-rose-700 border-rose-200";
                         } else if (level < 8) {
                           flagLabel = "Watch";
-                          flagReason = lowElementLabel || "Mixed performance";
+                          flagReason = "Mixed performance";
                           flagColor = "bg-amber-50 text-amber-700 border-amber-200";
                         }
                         if (noInteraction) {
@@ -718,9 +676,7 @@ export function TeachersPage() {
           )
         );
       const isExpanded = expandedRows.has(teacher.id);
-      const extraColumns =
-        selectedElements.length > displayedElements.length ? 1 : 0;
-      const colSpan = 7 + displayedElements.length + extraColumns;
+                        const colSpan = 8;
       const categoryEdit = categoryEdits[teacher.id] || {
         category: teacher.category_custom ? "custom" : (teacher.category || ""),
         category_custom: teacher.category_custom || "",
@@ -784,73 +740,86 @@ export function TeachersPage() {
                                   </span>
                                 </div>
                               </td>
-                              <td className="px-3 py-2 align-top">
-                                {roster?.recording_compliance ? (
-                                  <div className="flex flex-col gap-1 text-[10px] text-slate-600">
-                                    <span
-                                      className={`inline-flex rounded-full px-2 py-0.5 font-medium ${
-                                        roster.recording_compliance.is_compliant
-                                          ? "bg-emerald-100 text-emerald-700"
-                                          : "bg-rose-100 text-rose-700"
-                                      }`}
-                                    >
-                                      {roster.recording_compliance.is_compliant
-                                        ? "Compliant"
-                                        : "Behind"}
-                                    </span>
-                                    <span>
-                                      {roster.recording_compliance.recordings_completed}/
-                                      {roster.recording_compliance.recordings_required}
-                                    </span>
-                                    {!roster.recording_compliance.is_compliant &&
-                                      isAdmin && (
-                                        <button
-                                          type="button"
-                                          onClick={() =>
-                                            sendComplianceReminderMutation.mutate(teacher.id)
-                                          }
-                                          className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-700 hover:bg-slate-100"
-                                        >
-                                          Send reminder
-                                        </button>
-                                      )}
-                                  </div>
+                              <td className="px-3 py-2 align-top text-[11px] text-slate-600">
+                                {roster?.recent_observations?.length ? (
+                                  <ul className="space-y-1">
+                                    {roster.recent_observations.slice(0, 2).map((obs, idx) => (
+                                      <li key={idx} className="rounded bg-slate-50 px-2 py-1">
+                                        {obs.summary || obs.admin_comment || "Observation recorded"}
+                                      </li>
+                                    ))}
+                                    <li>
+                                      <Link
+                                        to={`/teachers/${teacher.id}`}
+                                        className="text-[10px] text-primary hover:underline"
+                                      >
+                                        View all observations
+                                      </Link>
+                                    </li>
+                                  </ul>
                                 ) : (
                                   <span className="text-[10px] text-slate-400">
-                                    No policy
+                                    No recent observations
                                   </span>
                                 )}
                               </td>
-                              <td className="px-3 py-2 align-top">
-                                <TrendIndicator
-                                  currentScore={overallScore}
-                                  previousScore={previousScore}
-                                  size="sm"
-                                />
+                              <td className="px-3 py-2 align-top text-[11px] text-slate-600">
+                                {roster?.trend_windows ? (
+                                  <div className="flex flex-col gap-1 text-[10px]">
+                                    {[
+                                      ["30d", "30d"],
+                                      ["60d", "60d"],
+                                      ["90d", "90d"],
+                                    ].map(([key, label]) => {
+                                      const trend = roster.trend_windows?.[key] || {};
+                                      const delta = trend.delta;
+                                      const deltaLabel =
+                                        typeof delta === "number"
+                                          ? `${delta > 0 ? "+" : ""}${delta.toFixed(1)}`
+                                          : "—";
+                                      const deltaClass =
+                                        typeof delta !== "number"
+                                          ? "text-slate-400"
+                                          : delta > 0
+                                            ? "text-emerald-600"
+                                            : delta < 0
+                                              ? "text-rose-600"
+                                              : "text-slate-500";
+                                      return (
+                                        <div key={key} className="flex items-center justify-between gap-2">
+                                          <span className="text-slate-500">{label}</span>
+                                          <span className={deltaClass}>{deltaLabel}</span>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                ) : (
+                                  <span className="text-[10px] text-slate-400">No trend data</span>
+                                )}
                               </td>
-                              {displayedElements.map((elementId) => {
-                                const es = elementScores?.[elementId] || {};
-                                return (
-                                  <td key={elementId} className="px-3 py-2 text-center">
-                                    <div className="flex justify-center">
-                                      <ScoreCell
-                                        score={es.score}
-                                        elementId={elementId}
-                                        evidence={es.observations?.[0]}
-                                        videoId={es.video_id}
-                                        timestamp={es.timestamp}
-                                        confidence={es.confidence}
-                                        previousScore={es.previous_score}
-                                      />
-                                    </div>
-                                  </td>
-                                );
-                              })}
-                              {selectedElements.length > displayedElements.length && (
-                                <td className="px-3 py-2 text-center text-[11px] text-slate-500">
-                                  +{selectedElements.length - displayedElements.length}
-                                </td>
-                              )}
+                              <td className="px-3 py-2 align-top text-[11px] text-slate-600">
+                                {roster?.action_items?.length ? (
+                                  <ul className="space-y-1">
+                                    {roster.action_items.map((item, idx) => (
+                                      <li key={idx} className="rounded bg-slate-50 px-2 py-1">
+                                        {item.title}
+                                      </li>
+                                    ))}
+                                    <li>
+                                      <Link
+                                        to={`/teachers/${teacher.id}`}
+                                        className="text-[10px] text-primary hover:underline"
+                                      >
+                                        View full action plan
+                                      </Link>
+                                    </li>
+                                  </ul>
+                                ) : (
+                                  <span className="text-[10px] text-slate-400">
+                                    No action items
+                                  </span>
+                                )}
+                              </td>
                               <td className="px-3 py-2 align-top text-[11px] text-slate-600">
                                 {courses.length === 0 ? (
                                   <span className="text-slate-500">
