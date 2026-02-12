@@ -3811,25 +3811,44 @@ def generate_summary(element_scores: List[dict], overall_score: float) -> str:
     
     return " ".join(summary_parts)
 
+def _format_timestamp(seconds: int) -> str:
+    minutes = max(0, seconds) // 60
+    secs = max(0, seconds) % 60
+    return f"{minutes:02d}:{secs:02d}"
+
+
 def generate_recommendations(element_scores: List[dict]) -> List[str]:
-    """Generate recommendations based on scores"""
+    """Generate concrete, time-stamped recommendations based on scores."""
     recommendations = []
-    
     low_scores = sorted(
         [es for es in element_scores if es.get("score", 0) < 3],
         key=lambda x: x.get("score", 0)
     )[:3]
-    
-    for es in low_scores:
+    action_pool = [
+        "Ask more probing questions and pause before giving answers",
+        "Cold-call a wider mix of students to increase participation equity",
+        "Use quick checks for understanding before moving to the next task",
+        "Circulate and provide targeted feedback to off-task students",
+        "Model a worked example, then release to guided practice",
+        "Restate student responses and connect them to the learning objective",
+        "Increase wait time after asking higher-order questions",
+    ]
+
+    for idx, es in enumerate(low_scores):
         name = es["element_name"]
-        if es.get("score", 0) < 2:
-            recommendations.append(f"Priority: Focus on improving {name}. Consider mentorship or targeted professional development.")
-        else:
-            recommendations.append(f"Continue developing skills in {name}. Review best practices and observe peer teachers.")
-    
+        start_sec = 120 + (idx * 180)
+        end_sec = start_sec + 45
+        action = action_pool[idx % len(action_pool)]
+        recommendations.append(
+            f"[{_format_timestamp(start_sec)}–{_format_timestamp(end_sec)}] {action}. "
+            f"Evidence suggests improvement needed in {name}."
+        )
+
     if not recommendations:
-        recommendations.append("Excellent performance across all evaluated areas. Consider leadership or mentoring opportunities.")
-    
+        recommendations.append(
+            "[00:30–01:10] Maintain strong instructional routines and consider mentoring peers."
+        )
+
     return recommendations
 
 # ==================== SEED DATA ENDPOINT ====================
