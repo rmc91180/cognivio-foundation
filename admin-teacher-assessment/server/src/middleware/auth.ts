@@ -2,7 +2,13 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { AuthPayload, UserRole } from '../types';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key';
+const JWT_SECRET = (() => {
+  const value = process.env.JWT_SECRET;
+  if (!value) {
+    throw new Error('JWT_SECRET environment variable is required. Refusing to start.');
+  }
+  return value;
+})();
 
 // Type declaration moved to src/types/express.d.ts
 
@@ -89,3 +95,4 @@ export function generateToken(payload: AuthPayload): string {
 export function generateRefreshToken(userId: string): string {
   return jwt.sign({ userId, type: 'refresh' }, JWT_SECRET, { expiresIn: '7d' } as jwt.SignOptions);
 }
+
