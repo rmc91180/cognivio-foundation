@@ -27,13 +27,14 @@ export function SSOCallback() {
           return;
         }
 
-        // Get token from URL params
-        const token = searchParams.get('token');
-        const refreshToken = searchParams.get('refreshToken');
-        const userId = searchParams.get('userId');
-        const email = searchParams.get('email');
-        const name = searchParams.get('name');
-        const activeRole = searchParams.get('activeRole');
+        const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+        // Prefer hash params to avoid leaking tokens in query strings.
+        const token = hashParams.get('token') || searchParams.get('token');
+        const refreshToken = hashParams.get('refreshToken') || searchParams.get('refreshToken');
+        const userId = hashParams.get('userId') || searchParams.get('userId');
+        const email = hashParams.get('email') || searchParams.get('email');
+        const name = hashParams.get('name') || searchParams.get('name');
+        const activeRole = hashParams.get('activeRole') || searchParams.get('activeRole');
 
         if (!token || !userId) {
           setError('Authentication failed. No token received.');

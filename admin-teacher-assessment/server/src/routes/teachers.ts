@@ -28,6 +28,17 @@ router.get('/:teacherId/detail', authenticateToken, async (req: Request, res: Re
     const { teacherId } = req.params;
     const { templateId, start, end } = req.query;
     const userId = req.user!.userId;
+    const schoolId = req.user!.schoolId;
+
+    if (!schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'User must be associated with a school',
+        },
+      });
+    }
 
     if (!templateId) {
       return res.status(400).json({
@@ -42,6 +53,7 @@ router.get('/:teacherId/detail', authenticateToken, async (req: Request, res: Re
     // Get teacher
     const teacher = await db('teachers')
       .where('id', teacherId)
+      .where('school_id', schoolId)
       .first();
 
     if (!teacher) {
@@ -327,9 +339,21 @@ router.get('/:teacherId/summary', authenticateToken, async (req: Request, res: R
   try {
     const { teacherId } = req.params;
     const { columnId } = req.query;
+    const schoolId = req.user!.schoolId;
+
+    if (!schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'User must be associated with a school',
+        },
+      });
+    }
 
     const teacher = await db('teachers')
       .where('id', teacherId)
+      .where('school_id', schoolId)
       .first();
 
     if (!teacher) {

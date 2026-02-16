@@ -10,6 +10,26 @@ const JWT_SECRET = (() => {
   return value;
 })();
 
+interface DecodedAuthToken extends jwt.JwtPayload {
+  userId?: string;
+  email?: string;
+  roles?: UserRole[];
+  activeRole?: UserRole;
+  schoolId?: string | null;
+  type?: 'access' | 'refresh' | string;
+}
+
+function isValidAccessPayload(decoded: DecodedAuthToken): decoded is DecodedAuthToken & AuthPayload {
+  return (
+    typeof decoded.userId === 'string' &&
+    typeof decoded.email === 'string' &&
+    Array.isArray(decoded.roles) &&
+    decoded.roles.length > 0 &&
+    typeof decoded.activeRole === 'string' &&
+    decoded.type !== 'refresh'
+  );
+}
+
 // Type declaration moved to src/types/express.d.ts
 
 /**
@@ -35,7 +55,17 @@ export function authenticateToken(
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as AuthPayload;
+    const decoded = jwt.verify(token, JWT_SECRET) as DecodedAuthToken;
+    if (!isValidAccessPayload(decoded)) {
+      res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'Invalid token payload',
+        },
+      });
+      return;
+    }
     req.user = decoded;
     next();
   } catch (error) {
@@ -86,7 +116,7 @@ export function requireRoles(...roles: UserRole[]) {
  */
 export function generateToken(payload: AuthPayload): string {
   const expiresIn = process.env.JWT_EXPIRES_IN || '24h';
-  return jwt.sign(payload, JWT_SECRET, { expiresIn } as jwt.SignOptions);
+  return jwt.sign({ ...payload, type: 'access' }, JWT_SECRET, { expiresIn } as jwt.SignOptions);
 }
 
 /**

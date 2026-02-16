@@ -21,6 +21,17 @@ router.post('/upload', authenticateToken, async (req: Request, res: Response) =>
   try {
     const { teacherId, classId, filename, anonymize } = req.body;
     const userId = req.user!.userId;
+    const schoolId = req.user!.schoolId;
+
+    if (!schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'User must be associated with a school',
+        },
+      });
+    }
 
     if (!teacherId) {
       return res.status(400).json({
@@ -35,6 +46,7 @@ router.post('/upload', authenticateToken, async (req: Request, res: Response) =>
     // Verify teacher exists
     const teacher = await db('teachers')
       .where('id', teacherId)
+      .where('school_id', schoolId)
       .first();
 
     if (!teacher) {
@@ -114,9 +126,22 @@ router.post('/upload', authenticateToken, async (req: Request, res: Response) =>
 router.get('/:videoId/status', authenticateToken, async (req: Request, res: Response) => {
   try {
     const { videoId } = req.params;
+    const schoolId = req.user!.schoolId;
+    if (!schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'User must be associated with a school',
+        },
+      });
+    }
 
-    const video = await db('video_evidence')
-      .where('id', videoId)
+    const video = await db('video_evidence as v')
+      .join('teachers as t', 'v.teacher_id', 't.id')
+      .where('v.id', videoId)
+      .where('t.school_id', schoolId)
+      .select('v.*')
       .first();
 
     if (!video) {
@@ -167,9 +192,22 @@ router.get('/:videoId/status', authenticateToken, async (req: Request, res: Resp
 router.get('/:videoId', authenticateToken, async (req: Request, res: Response) => {
   try {
     const { videoId } = req.params;
+    const schoolId = req.user!.schoolId;
+    if (!schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'User must be associated with a school',
+        },
+      });
+    }
 
-    const video = await db('video_evidence')
-      .where('id', videoId)
+    const video = await db('video_evidence as v')
+      .join('teachers as t', 'v.teacher_id', 't.id')
+      .where('v.id', videoId)
+      .where('t.school_id', schoolId)
+      .select('v.*')
       .first();
 
     if (!video) {
@@ -220,11 +258,22 @@ router.get('/:videoId', authenticateToken, async (req: Request, res: Response) =
 router.get('/:videoId/analysis', authenticateToken, async (req: Request, res: Response) => {
   try {
     const { videoId } = req.params;
+    const schoolId = req.user!.schoolId;
+    if (!schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'User must be associated with a school',
+        },
+      });
+    }
 
     // Get video with teacher info
     const video = await db('video_evidence as v')
       .join('teachers as t', 'v.teacher_id', 't.id')
       .where('v.id', videoId)
+      .where('t.school_id', schoolId)
       .select('v.*', 't.name as teacher_name', 't.subjects', 't.grades')
       .first();
 
@@ -465,11 +514,22 @@ router.get('/:videoId/report', authenticateToken, async (req: Request, res: Resp
   try {
     const { videoId } = req.params;
     const { format } = req.query; // 'json' or 'text' (default: json)
+    const schoolId = req.user!.schoolId;
+    if (!schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'User must be associated with a school',
+        },
+      });
+    }
 
     // Get video with teacher info
     const video = await db('video_evidence as v')
       .join('teachers as t', 'v.teacher_id', 't.id')
       .where('v.id', videoId)
+      .where('t.school_id', schoolId)
       .where('v.processing_status', 'completed')
       .select('v.*', 't.name as teacher_name')
       .first();

@@ -176,8 +176,6 @@ router.get('/google/callback',
         activeRole,
         schoolId: user.school_id,
       });
-      const refreshToken = generateRefreshToken(user.id);
-
       // Update last login
       await db('users')
         .where('id', user.id)
@@ -186,14 +184,13 @@ router.get('/google/callback',
       // Redirect to frontend with token
       const params = new URLSearchParams({
         token,
-        refreshToken,
         userId: user.id,
         email: user.email,
         name: user.name,
         activeRole,
       });
 
-      return res.redirect(`${FRONTEND_URL}/auth/callback?${params.toString()}`);
+      return res.redirect(`${FRONTEND_URL}/auth/callback#${params.toString()}`);
     } catch (error) {
       console.error('Google callback error:', error);
       return res.redirect(`${FRONTEND_URL}/login?error=callback_failed`);
@@ -248,8 +245,6 @@ router.get('/microsoft/callback',
         activeRole,
         schoolId: user.school_id,
       });
-      const refreshToken = generateRefreshToken(user.id);
-
       // Update last login
       await db('users')
         .where('id', user.id)
@@ -258,14 +253,13 @@ router.get('/microsoft/callback',
       // Redirect to frontend with token
       const params = new URLSearchParams({
         token,
-        refreshToken,
         userId: user.id,
         email: user.email,
         name: user.name,
         activeRole,
       });
 
-      return res.redirect(`${FRONTEND_URL}/auth/callback?${params.toString()}`);
+      return res.redirect(`${FRONTEND_URL}/auth/callback#${params.toString()}`);
     } catch (error) {
       console.error('Microsoft callback error:', error);
       return res.redirect(`${FRONTEND_URL}/login?error=callback_failed`);

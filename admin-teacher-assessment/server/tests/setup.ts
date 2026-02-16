@@ -6,6 +6,7 @@ dotenv.config({ path: '.env.test' });
 // Set test environment variables
 process.env.NODE_ENV = 'test';
 process.env.JWT_SECRET = 'test-jwt-secret';
+process.env.SESSION_SECRET = 'test-session-secret';
 process.env.DB_NAME = 'teacher_assessment_test';
 
 // Global test timeout

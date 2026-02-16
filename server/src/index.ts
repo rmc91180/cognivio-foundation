@@ -27,6 +27,10 @@ import feedbackRoutes from './routes/feedback';
 
 const app = express();
 const PORT = process.env.PORT || 8000;
+const SESSION_SECRET = process.env.SESSION_SECRET;
+if (!SESSION_SECRET) {
+  throw new Error('SESSION_SECRET environment variable is required. Refusing to start.');
+}
 
 // Middleware
 // In development, allow multiple frontend ports (Vite may use different ports)
@@ -50,11 +54,13 @@ app.use(express.json());
 
 // Session middleware (required for OAuth state management)
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'cognivio-session-secret-change-in-production',
+  secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   cookie: {
     secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    sameSite: 'lax',
     maxAge: 10 * 60 * 1000, // 10 minutes (short-lived for OAuth state only)
   },
 }));

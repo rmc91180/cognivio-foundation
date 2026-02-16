@@ -51,6 +51,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/teacher_assessment_test
           JWT_SECRET: test-secret
+          SESSION_SECRET: test-session-secret
           NODE_ENV: test
         run: npm test -- --coverage
 
@@ -178,6 +179,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/teacher_assessment_test
           JWT_SECRET: test-secret
+          SESSION_SECRET: test-session-secret
           PORT: 8000
           NODE_ENV: test
         run: npm start &

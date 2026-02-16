@@ -14,6 +14,15 @@ router.get('/summary', authenticateToken, async (req: Request, res: Response) =>
   try {
     const userId = req.user!.userId;
     const schoolId = req.user!.schoolId;
+    if (!schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'User must be associated with a school',
+        },
+      });
+    }
 
     // Get user preferences for default template
     const preferences = await db('user_preferences')
@@ -37,10 +46,7 @@ router.get('/summary', authenticateToken, async (req: Request, res: Response) =>
     }
 
     // Get teacher counts by status
-    let teacherQuery = db('teachers').where('status', 'active');
-    if (schoolId) {
-      teacherQuery = teacherQuery.where('school_id', schoolId);
-    }
+    let teacherQuery = db('teachers').where('status', 'active').where('school_id', schoolId);
     const teachers = await teacherQuery;
 
     // Calculate color distribution from latest assessments

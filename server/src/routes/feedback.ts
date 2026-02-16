@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { db } from '../utils/db';
 import { authenticateToken, requireRoles } from '../middleware/auth';
 import {
   feedbackService,
@@ -9,6 +10,42 @@ import {
 } from '../services/feedbackService';
 
 const router = Router();
+
+async function observationInSchoolScope(observationId: string, schoolId: string): Promise<boolean> {
+  const row = await db('ai_observations as o')
+    .join('video_evidence as v', 'o.video_id', 'v.id')
+    .join('teachers as t', 'v.teacher_id', 't.id')
+    .where('o.id', observationId)
+    .where('t.school_id', schoolId)
+    .select('o.id')
+    .first();
+  return Boolean(row);
+}
+
+async function feedbackInSchoolScope(feedbackId: string, schoolId: string): Promise<boolean> {
+  const row = await db('ai_feedback as f')
+    .join('ai_observations as o', 'f.observation_id', 'o.id')
+    .join('video_evidence as v', 'o.video_id', 'v.id')
+    .join('teachers as t', 'v.teacher_id', 't.id')
+    .where('f.id', feedbackId)
+    .where('t.school_id', schoolId)
+    .select('f.id')
+    .first();
+  return Boolean(row);
+}
+
+async function correctionInSchoolScope(correctionId: string, schoolId: string): Promise<boolean> {
+  const row = await db('feedback_corrections as c')
+    .join('ai_feedback as f', 'c.feedback_id', 'f.id')
+    .join('ai_observations as o', 'f.observation_id', 'o.id')
+    .join('video_evidence as v', 'o.video_id', 'v.id')
+    .join('teachers as t', 'v.teacher_id', 't.id')
+    .where('c.id', correctionId)
+    .where('t.school_id', schoolId)
+    .select('c.id')
+    .first();
+  return Boolean(row);
+}
 
 /**
  * POST /api/feedback
@@ -29,6 +66,16 @@ router.post('/', authenticateToken, async (req: Request, res: Response) => {
       suggestions,
       feedbackCategories,
     } = req.body;
+    const schoolId = req.user!.schoolId;
+    if (!schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'User must be associated with a school',
+        },
+      });
+    }
 
     if (!observationId) {
       return res.status(400).json({
@@ -36,6 +83,15 @@ router.post('/', authenticateToken, async (req: Request, res: Response) => {
         error: {
           code: 'VALIDATION_ERROR',
           message: 'observationId is required',
+        },
+      });
+    }
+    if (!(await observationInSchoolScope(observationId, schoolId))) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Observation not found',
         },
       });
     }
@@ -100,6 +156,25 @@ router.post('/', authenticateToken, async (req: Request, res: Response) => {
 router.get('/:feedbackId', authenticateToken, async (req: Request, res: Response) => {
   try {
     const { feedbackId } = req.params;
+    const schoolId = req.user!.schoolId;
+    if (!schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'User must be associated with a school',
+        },
+      });
+    }
+    if (!(await feedbackInSchoolScope(feedbackId, schoolId))) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Feedback not found',
+        },
+      });
+    }
 
     const feedback = await feedbackService.getFeedbackById(feedbackId);
 
@@ -138,6 +213,25 @@ router.patch('/:feedbackId', authenticateToken, async (req: Request, res: Respon
   try {
     const { feedbackId } = req.params;
     const updates = req.body;
+    const schoolId = req.user!.schoolId;
+    if (!schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'User must be associated with a school',
+        },
+      });
+    }
+    if (!(await feedbackInSchoolScope(feedbackId, schoolId))) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Feedback not found',
+        },
+      });
+    }
 
     const feedback = await feedbackService.updateFeedback(feedbackId, req.user!.userId, updates);
 
@@ -195,6 +289,25 @@ router.patch('/:feedbackId', authenticateToken, async (req: Request, res: Respon
 router.get('/observation/:observationId', authenticateToken, async (req: Request, res: Response) => {
   try {
     const { observationId } = req.params;
+    const schoolId = req.user!.schoolId;
+    if (!schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'User must be associated with a school',
+        },
+      });
+    }
+    if (!(await observationInSchoolScope(observationId, schoolId))) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Observation not found',
+        },
+      });
+    }
 
     const feedbacks = await feedbackService.getFeedbackForObservation(observationId);
 
@@ -232,6 +345,25 @@ router.post('/:feedbackId/corrections', authenticateToken, async (req: Request, 
       timestampReferences,
       disagreementType,
     } = req.body;
+    const schoolId = req.user!.schoolId;
+    if (!schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'User must be associated with a school',
+        },
+      });
+    }
+    if (!(await feedbackInSchoolScope(feedbackId, schoolId))) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Feedback not found',
+        },
+      });
+    }
 
     if (!elementId || aiScore === undefined || correctedScore === undefined) {
       return res.status(400).json({
@@ -312,6 +444,25 @@ router.post('/:feedbackId/corrections', authenticateToken, async (req: Request, 
 router.post('/:feedbackId/approve', authenticateToken, requireRoles('admin'), async (req: Request, res: Response) => {
   try {
     const { feedbackId } = req.params;
+    const schoolId = req.user!.schoolId;
+    if (!schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'User must be associated with a school',
+        },
+      });
+    }
+    if (!(await feedbackInSchoolScope(feedbackId, schoolId))) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Feedback not found',
+        },
+      });
+    }
 
     const feedback = await feedbackService.approveFeedbackForTraining(feedbackId, req.user!.userId);
 
@@ -349,6 +500,25 @@ router.post('/:feedbackId/approve', authenticateToken, requireRoles('admin'), as
 router.post('/corrections/:correctionId/validate', authenticateToken, requireRoles('admin'), async (req: Request, res: Response) => {
   try {
     const { correctionId } = req.params;
+    const schoolId = req.user!.schoolId;
+    if (!schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'User must be associated with a school',
+        },
+      });
+    }
+    if (!(await correctionInSchoolScope(correctionId, schoolId))) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Correction not found',
+        },
+      });
+    }
 
     const correction = await feedbackService.validateCorrection(correctionId, req.user!.userId);
 

@@ -14,6 +14,17 @@ const router = Router();
 router.get('/status', authenticateToken, async (req: Request, res: Response) => {
   try {
     const { teacherIds } = req.query;
+    const schoolId = req.user!.schoolId;
+
+    if (!schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'User must be associated with a school',
+        },
+      });
+    }
 
     if (!teacherIds) {
       return res.status(400).json({
@@ -27,8 +38,11 @@ router.get('/status', authenticateToken, async (req: Request, res: Response) => 
 
     const ids = (teacherIds as string).split(',');
 
-    const statuses = await db('gradebook_status')
-      .whereIn('teacher_id', ids);
+    const statuses = await db('gradebook_status as gs')
+      .join('teachers as t', 'gs.teacher_id', 't.id')
+      .whereIn('gs.teacher_id', ids)
+      .where('t.school_id', schoolId)
+      .select('gs.*');
 
     // Map to response format
     const data = statuses.map((s) => ({

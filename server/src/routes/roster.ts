@@ -39,6 +39,16 @@ router.get('/', authenticateToken, async (req: Request, res: Response) => {
     const schoolId = req.user!.schoolId;
     const userId = req.user!.userId;
 
+    if (!schoolId) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'User must be associated with a school',
+        },
+      });
+    }
+
     if (!templateId) {
       return res.status(400).json({
         success: false,
@@ -94,9 +104,7 @@ router.get('/', authenticateToken, async (req: Request, res: Response) => {
     // Build teacher query
     let teacherQuery = db('teachers').where('status', 'active');
 
-    if (schoolId) {
-      teacherQuery = teacherQuery.where('school_id', schoolId);
-    }
+    teacherQuery = teacherQuery.where('school_id', schoolId);
 
     if (search) {
       teacherQuery = teacherQuery.where('name', 'ilike', `%${search}%`);
