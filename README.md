@@ -150,6 +150,7 @@ admin-teacher-assessment/
 ## API Documentation
 
 See [API.md](./API.md) for complete API documentation.
+Dashboard V2 implementation notes and rollout controls: [docs/DASHBOARD_V2.md](./docs/DASHBOARD_V2.md).
 
 ## Available Scripts
 

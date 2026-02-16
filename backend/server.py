@@ -17,6 +17,7 @@ import json
 import base64
 import io
 import csv
+import hashlib
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 try:
@@ -394,6 +395,9 @@ S3_REGION = os.getenv("S3_REGION")
 S3_ENDPOINT = os.getenv("S3_ENDPOINT")
 S3_PUBLIC_BASE_URL = os.getenv("S3_PUBLIC_BASE_URL")
 FRONTEND_URL = os.getenv("FRONTEND_URL")
+LEADERSHIP_INSIGHTS_CACHE_TTL_SECONDS = max(
+    0, int(os.getenv("LEADERSHIP_INSIGHTS_CACHE_TTL_SECONDS", "1800"))
+)
 
 # Create uploads directory (used for temp storage)
 UPLOAD_DIR = ROOT_DIR / 'uploads'
@@ -2630,6 +2634,83 @@ async def _build_dashboard_domain_trend_data(
     }
 
 
+def _build_leadership_insights_cache_key(
+    user_id: str,
+    window_months: int,
+    teacher_id: Optional[str],
+    subjects: List[str],
+    framework_type: Optional[str],
+) -> str:
+    key_payload = {
+        "user_id": user_id,
+        "window_months": window_months,
+        "teacher_id": teacher_id or "",
+        "subjects": sorted(_normalize_subject_filter(subject) for subject in subjects if subject),
+        "framework_type": framework_type or "",
+    }
+    key_json = json.dumps(key_payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(key_json.encode("utf-8")).hexdigest()
+
+
+async def _get_cached_leadership_insights(
+    user_id: str,
+    cache_key: str,
+) -> Optional[dict]:
+    if LEADERSHIP_INSIGHTS_CACHE_TTL_SECONDS <= 0:
+        return None
+
+    doc = await db.dashboard_leadership_insights_cache.find_one(
+        {"user_id": user_id, "cache_key": cache_key},
+        {"_id": 0, "payload": 1, "expires_at": 1},
+    )
+    if not doc:
+        return None
+
+    expires_at = _parse_iso_datetime(doc.get("expires_at"))
+    now_utc = datetime.now(timezone.utc)
+    if not expires_at or expires_at <= now_utc:
+        await db.dashboard_leadership_insights_cache.delete_one(
+            {"user_id": user_id, "cache_key": cache_key}
+        )
+        return None
+
+    payload = doc.get("payload")
+    if not isinstance(payload, dict):
+        return None
+
+    response_payload = {**payload}
+    response_payload["cache"] = {
+        "hit": True,
+        "expires_at": doc.get("expires_at"),
+    }
+    return response_payload
+
+
+async def _store_leadership_insights_cache(
+    user_id: str,
+    cache_key: str,
+    payload: dict,
+) -> None:
+    if LEADERSHIP_INSIGHTS_CACHE_TTL_SECONDS <= 0:
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    expires_at = now_utc + timedelta(seconds=LEADERSHIP_INSIGHTS_CACHE_TTL_SECONDS)
+    await db.dashboard_leadership_insights_cache.update_one(
+        {"user_id": user_id, "cache_key": cache_key},
+        {
+            "$set": {
+                "user_id": user_id,
+                "cache_key": cache_key,
+                "payload": payload,
+                "updated_at": now_utc.isoformat(),
+                "expires_at": expires_at.isoformat(),
+            }
+        },
+        upsert=True,
+    )
+
+
 def _build_rule_based_leadership_insights(trend_payload: dict) -> dict:
     periods = trend_payload.get("periods", [])
     domains = trend_payload.get("domains", [])
@@ -2866,12 +2947,24 @@ async def get_dashboard_leadership_insights(
     current_user: dict = Depends(get_current_user),
 ):
     subject_list = [subject.strip() for subject in (subjects or "").split(",") if subject.strip()]
+    resolved_framework_type = framework_type.value if framework_type else None
+    cache_key = _build_leadership_insights_cache_key(
+        user_id=current_user["id"],
+        window_months=window_months,
+        teacher_id=teacher_id,
+        subjects=subject_list,
+        framework_type=resolved_framework_type,
+    )
+    cached_payload = await _get_cached_leadership_insights(current_user["id"], cache_key)
+    if cached_payload:
+        return cached_payload
+
     trend_payload = await _build_dashboard_domain_trend_data(
         current_user=current_user,
         window_months=window_months,
         teacher_id=teacher_id,
         subjects=subject_list,
-        framework_type=framework_type.value if framework_type else None,
+        framework_type=resolved_framework_type,
     )
     fallback_payload = _build_rule_based_leadership_insights(trend_payload)
     ai_payload = await _generate_ai_leadership_insights(trend_payload, fallback_payload)
@@ -2883,6 +2976,8 @@ async def get_dashboard_leadership_insights(
         "selected_teacher": trend_payload.get("selected_teacher"),
         "subjects_filter": trend_payload.get("subjects_filter"),
     }
+    final_payload["cache"] = {"hit": False}
+    await _store_leadership_insights_cache(current_user["id"], cache_key, final_payload)
     return final_payload
 
 
