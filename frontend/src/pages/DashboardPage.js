@@ -10,6 +10,8 @@ import {
   recordingComplianceApi,
 } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
+import { LeadershipInsightsCard } from "@/components/dashboard/LeadershipInsightsCard";
+import { DomainTrendsChart } from "@/components/dashboard/DomainTrendsChart";
 import {
   Bar,
   BarChart,
@@ -41,6 +43,13 @@ export function DashboardPage() {
   const previousRange = useMemo(
     () => ({ start: subDays(now, 60), end: subDays(now, 30) }),
     [now]
+  );
+  const [trendWindowMonths, setTrendWindowMonths] = useState(3);
+  const [trendTeacherId, setTrendTeacherId] = useState("");
+  const [trendSubjects, setTrendSubjects] = useState([]);
+  const trendSubjectsParam = useMemo(
+    () => trendSubjects.slice().sort((a, b) => a.localeCompare(b)).join(","),
+    [trendSubjects]
   );
 
   const { data: currentData, isLoading } = useQuery({
@@ -88,7 +97,6 @@ export function DashboardPage() {
   });
   const { data: teachersData } = useQuery({
     queryKey: ["teachers"],
-    enabled: isAdmin,
     queryFn: () => teacherApi.list().then((res) => res.data),
   });
 
@@ -103,6 +111,25 @@ export function DashboardPage() {
     enabled: isAdmin,
     queryFn: () => recordingComplianceApi.summary().then((res) => res.data),
   });
+  const trendQueryParams = useMemo(() => {
+    const params = {
+      window_months: trendWindowMonths,
+    };
+    if (trendTeacherId) params.teacher_id = trendTeacherId;
+    if (trendSubjectsParam) params.subjects = trendSubjectsParam;
+    return params;
+  }, [trendWindowMonths, trendTeacherId, trendSubjectsParam]);
+  const { data: domainTrendsRes, isLoading: domainTrendsLoading } = useQuery({
+    queryKey: ["dashboard-domain-trends", trendWindowMonths, trendTeacherId, trendSubjectsParam],
+    queryFn: () => assessmentApi.dashboardDomainTrends(trendQueryParams).then((res) => res.data),
+    enabled: Boolean(currentData?.roster?.length),
+  });
+  const { data: leadershipInsightsRes, isLoading: leadershipInsightsLoading } = useQuery({
+    queryKey: ["dashboard-leadership-insights", trendWindowMonths, trendTeacherId, trendSubjectsParam],
+    queryFn: () =>
+      assessmentApi.dashboardLeadershipInsights(trendQueryParams).then((res) => res.data),
+    enabled: Boolean(currentData?.roster?.length),
+  });
 
   const roster = useMemo(() => currentData?.roster ?? [], [currentData]);
   const previousRoster = useMemo(
@@ -113,6 +140,23 @@ export function DashboardPage() {
     () => currentData?.selected_elements ?? [],
     [currentData]
   );
+  const teacherOptions = useMemo(() => {
+    if (Array.isArray(teachersData)) return teachersData;
+    if (Array.isArray(teachersData?.teachers)) return teachersData.teachers;
+    return [];
+  }, [teachersData]);
+  const subjectOptions = useMemo(() => {
+    const set = new Set();
+    teacherOptions.forEach((teacher) => {
+      const rawSubject = teacher?.subject || "";
+      rawSubject
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .forEach((item) => set.add(item));
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [teacherOptions]);
   const [selectedElementsState, setSelectedElementsState] = useState([]);
   const [showFocusDomains, setShowFocusDomains] = useState(true);
   const [reportDepartment, setReportDepartment] = useState("");
@@ -184,12 +228,6 @@ export function DashboardPage() {
     },
   });
 
-  // Use custom focus areas if set, otherwise default to first 3
-  const focusElementIds = useMemo(
-    () => selectedElementsState.slice(0, 3),
-    [selectedElementsState]
-  );
-
   const frameworkDomains = useMemo(
     () => frameworkDetailRes?.domains || [],
     [frameworkDetailRes]
@@ -236,44 +274,6 @@ export function DashboardPage() {
     });
   }, [frameworkDomains, selectedElementsState]);
 
-  const elementNameById = useMemo(() => {
-    const map = {};
-    frameworkDomains.forEach((domain) => {
-      (domain.elements || []).forEach((el) => {
-        map[el.id] = el.name;
-      });
-    });
-    return map;
-  }, [frameworkDomains]);
-
-  const focusAreaData = useMemo(() => {
-    if (!roster.length || !focusElementIds.length) return [];
-    return focusElementIds.map((id) => {
-      const label = id.toUpperCase();
-      const scores = roster
-        .map((t) => t.element_scores?.[id]?.score)
-        .filter((s) => typeof s === "number");
-      const teachersWithScore = roster.filter(
-        (t) => typeof t.element_scores?.[id]?.score === "number"
-      );
-      const assessmentCount = teachersWithScore.reduce(
-        (acc, t) => acc + (t.assessment_count || 0),
-        0
-      );
-      const avg = scores.length
-        ? Number((scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(2))
-        : null;
-      return {
-        elementId: id,
-        label,
-        averageScore: avg,
-        teacherCount: teachersWithScore.length,
-        assessmentCount,
-        elementName: elementNameById[id] || id,
-      };
-    });
-  }, [roster, focusElementIds, elementNameById]);
-
   const focusSummary = useMemo(() => {
     const teacherCount = roster.length;
     const assessmentCount = roster.reduce(
@@ -285,6 +285,30 @@ export function DashboardPage() {
     ).size;
     return { teacherCount, assessmentCount, deptCount };
   }, [roster]);
+  const trendDomains = useMemo(() => domainTrendsRes?.domains || [], [domainTrendsRes]);
+  const trendPeriods = useMemo(() => domainTrendsRes?.periods || [], [domainTrendsRes]);
+  const selectedTrendTeacherName = useMemo(() => {
+    const selectedFromTrend = domainTrendsRes?.selected_teacher?.name;
+    if (selectedFromTrend) return selectedFromTrend;
+    const matched = teacherOptions.find((teacher) => teacher.id === trendTeacherId);
+    return matched?.name || "Selected teacher";
+  }, [domainTrendsRes, teacherOptions, trendTeacherId]);
+  const domainTrendChartData = useMemo(() => {
+    if (!trendPeriods.length || !trendDomains.length) return [];
+    return trendPeriods.map((period) => {
+      const row = {
+        label: period.label,
+        overall_all: period.all_teachers?.overall_score ?? null,
+        overall_teacher: period.selected_teacher?.overall_score ?? null,
+      };
+      trendDomains.forEach((domain) => {
+        row[`all_${domain.id}`] = period.all_teachers?.domain_scores?.[domain.id] ?? null;
+        row[`teacher_${domain.id}`] =
+          period.selected_teacher?.domain_scores?.[domain.id] ?? null;
+      });
+      return row;
+    });
+  }, [trendPeriods, trendDomains]);
 
 
   const departmentData = useMemo(() => {
@@ -359,19 +383,6 @@ export function DashboardPage() {
     }
   };
 
-  const achievements = useMemo(() => {
-    if (!focusAreaData.length) return [];
-    const sorted = [...focusAreaData]
-      .filter((f) => typeof f.averageScore === "number")
-      .sort((a, b) => (b.averageScore || 0) - (a.averageScore || 0));
-    const top = sorted.slice(0, 3);
-    return top.map((item) => {
-      const count = item.teacherCount;
-      const label = item.elementName || item.elementId;
-      return `${count} teacher${count === 1 ? "" : "s"} observed demonstrating ${label.toLowerCase()}`;
-    });
-  }, [focusAreaData]);
-
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
@@ -411,96 +422,86 @@ export function DashboardPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
-            <section className="md:col-span-7 rounded-xl border border-slate-200 bg-white p-5">
-              <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                School focus areas
-              </h2>
-              <p className="mb-2 text-xs text-slate-500">
-                Aggregate performance on your top three priority rubric
-                elements.
-              </p>
-              <div className="mb-4 flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
-                <span>{focusSummary.teacherCount} teachers included</span>
+            <LeadershipInsightsCard
+              insights={leadershipInsightsRes}
+              isLoading={leadershipInsightsLoading}
+            />
+            <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">Domain trends</h2>
+                  <p className="text-xs text-slate-500">
+                    Monthly domain trajectory over the last {trendWindowMonths} month
+                    {trendWindowMonths === 1 ? "" : "s"} with optional teacher comparison.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="text-[11px] text-slate-500">
+                    Window
+                    <select
+                      className="ml-2 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                      value={trendWindowMonths}
+                      onChange={(e) => setTrendWindowMonths(Number(e.target.value))}
+                    >
+                      <option value={3}>3 months</option>
+                      <option value={6}>6 months</option>
+                      <option value={9}>9 months</option>
+                      <option value={12}>12 months</option>
+                    </select>
+                  </label>
+                  <label className="text-[11px] text-slate-500">
+                    Teacher
+                    <select
+                      className="ml-2 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                      value={trendTeacherId}
+                      onChange={(e) => setTrendTeacherId(e.target.value)}
+                    >
+                      <option value="">All teachers</option>
+                      {teacherOptions.map((teacher) => (
+                        <option key={teacher.id} value={teacher.id}>
+                          {teacher.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="text-[11px] text-slate-500">
+                    Subjects
+                    <select
+                      multiple
+                      value={trendSubjects}
+                      onChange={(e) =>
+                        setTrendSubjects(
+                          Array.from(e.target.selectedOptions).map((option) => option.value)
+                        )
+                      }
+                      className="ml-2 h-16 min-w-40 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                    >
+                      {subjectOptions.map((subject) => (
+                        <option key={subject} value={subject}>
+                          {subject}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <div className="mb-3 flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
+                <span>{focusSummary.teacherCount} teachers included in roster</span>
                 <span>•</span>
                 <span>{focusSummary.assessmentCount} observations analyzed</span>
                 <span>•</span>
                 <span>{focusSummary.deptCount} departments represented</span>
               </div>
-              {focusAreaData.length === 0 ? (
-                <div className="text-xs text-slate-500">
-                  No focus area data yet.
-                </div>
-              ) : (
-                <>
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                    {focusAreaData.map((item) => {
-                      const previous = previousRoster
-                        .map((t) => t.element_scores?.[item.elementId]?.score)
-                        .filter((s) => typeof s === "number");
-                      const previousAvg = previous.length
-                        ? previous.reduce((a, b) => a + b, 0) / previous.length
-                        : null;
-                      const delta =
-                        previousAvg != null && item.averageScore != null
-                          ? item.averageScore - previousAvg
-                          : null;
-                      return (
-                        <div
-                          key={item.elementId}
-                          className="rounded-lg border border-slate-200 bg-slate-50 p-3"
-                        >
-                          <div className="text-xs font-semibold text-slate-700">
-                            {item.elementName}
-                          </div>
-                          <div className="mt-2 text-2xl font-semibold text-slate-900">
-                            {item.averageScore != null ? item.averageScore.toFixed(1) : "—"}
-                          </div>
-                          <div className="mt-1 text-[11px] text-slate-500">
-                            {item.teacherCount} teachers • {item.assessmentCount} observations
-                          </div>
-                          <div className="mt-2 h-1 w-full rounded-full bg-slate-200">
-                            <div
-                              className="h-1 rounded-full bg-primary"
-                              style={{
-                                width: `${Math.min(100, (item.averageScore || 0) * 10)}%`,
-                              }}
-                            />
-                          </div>
-                          <div className="mt-1 text-[10px] text-slate-500">
-                            {delta == null
-                              ? "No prior trend"
-                              : delta > 0
-                                ? `▲ ${delta.toFixed(2)} vs prior`
-                                : delta < 0
-                                  ? `▼ ${Math.abs(delta).toFixed(2)} vs prior`
-                                  : "No change vs prior"}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                  <div className="mt-4 h-56">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={focusAreaData}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                        <XAxis dataKey="label" stroke="#64748b" />
-                        <YAxis stroke="#64748b" domain={[0, 10]} />
-                        <Tooltip
-                          contentStyle={{
-                            backgroundColor: "#ffffff",
-                            borderColor: "#e2e8f0",
-                            fontSize: 12,
-                          }}
-                        />
-                        <Bar dataKey="averageScore" fill="#4f46e5" />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                </>
-              )}
+              <DomainTrendsChart
+                chartData={domainTrendChartData}
+                domains={trendDomains}
+                selectedTeacherId={trendTeacherId}
+                selectedTeacherName={selectedTrendTeacherName}
+                isLoading={domainTrendsLoading}
+              />
             </section>
 
-            <section className="md:col-span-5 rounded-xl border border-slate-200 bg-white p-5">
+            <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 Departmental progress
               </h2>
@@ -664,7 +665,7 @@ export function DashboardPage() {
                       className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
                     >
                       <option value="">All teachers (default)</option>
-                      {(teachersData?.teachers || []).map((t) => (
+                      {teacherOptions.map((t) => (
                         <option key={t.id} value={t.id}>
                           {t.name}
                         </option>
@@ -923,25 +924,6 @@ export function DashboardPage() {
                   ))
                 )}
               </div>
-            </section>
-            <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
-              <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                Key achievements
-              </h2>
-              <p className="mb-3 text-xs text-slate-500">
-                Highlights pulled from recent observations and strongest focus areas.
-              </p>
-              {achievements.length === 0 ? (
-                <div className="text-xs text-slate-500">
-                  No achievement highlights yet.
-                </div>
-              ) : (
-                <ul className="list-disc space-y-1 pl-5 text-xs text-slate-700">
-                  {achievements.map((item, idx) => (
-                    <li key={idx}>{item}</li>
-                  ))}
-                </ul>
-              )}
             </section>
           </div>
         )}

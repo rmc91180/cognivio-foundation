@@ -71,6 +71,10 @@ export const assessmentApi = {
   list: (params) => api.get("/api/assessments", { params }),
   get: (id) => api.get(`/api/assessments/${id}`),
   roster: (params) => api.get("/api/roster", { params }),
+  dashboardDomainTrends: (params) =>
+    api.get("/api/dashboard/domain-trends", { params }),
+  dashboardLeadershipInsights: (params) =>
+    api.get("/api/dashboard/leadership-insights", { params }),
   seedDemoData: () => api.post("/api/seed-demo-data"),
   teacherDashboard: (teacherId, params) =>
     api.get(`/api/teachers/${teacherId}/dashboard`, { params }),

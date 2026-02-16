@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks, Depends, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks, Depends, Response, WebSocket, WebSocketDisconnect, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
@@ -2218,6 +2218,673 @@ async def upsert_teacher_summary_reflection(
     doc.pop("_id", None)
     doc.pop("user_id", None)
     return SummaryReflection(**doc)
+
+
+def _normalize_subject_filter(value: str) -> str:
+    return value.strip().lower()
+
+
+def _month_floor(value: datetime) -> datetime:
+    utc_value = value.astimezone(timezone.utc)
+    return datetime(utc_value.year, utc_value.month, 1, tzinfo=timezone.utc)
+
+
+def _shift_month(value: datetime, delta_months: int) -> datetime:
+    year = value.year + (value.month - 1 + delta_months) // 12
+    month = (value.month - 1 + delta_months) % 12 + 1
+    return datetime(year, month, 1, tzinfo=timezone.utc)
+
+
+def _build_month_windows(window_months: int, now: Optional[datetime] = None) -> List[dict]:
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    first_month = _shift_month(_month_floor(now_utc), -(window_months - 1))
+    windows: List[dict] = []
+    for idx in range(window_months):
+        start = _shift_month(first_month, idx)
+        end = _shift_month(start, 1)
+        windows.append(
+            {
+                "start": start,
+                "end": end,
+                "label": start.strftime("%b %Y"),
+            }
+        )
+    return windows
+
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _average(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    return round(sum(values) / len(values), 2)
+
+
+async def _resolve_framework_context(
+    current_user: dict,
+    framework_type: Optional[str] = None,
+) -> Tuple[str, dict, List[str]]:
+    selection = await db.framework_selections.find_one(
+        {"user_id": current_user["id"]},
+        {"_id": 0, "framework_type": 1, "selected_elements": 1},
+    )
+    resolved_type = framework_type or (selection.get("framework_type") if selection else "danielson")
+
+    if resolved_type == FrameworkType.CUSTOM.value:
+        custom_domains = await db.custom_domains.find(
+            {"user_id": current_user["id"]}, {"_id": 0, "user_id": 0}
+        ).to_list(1000)
+        framework = {
+            "name": "Custom Framework",
+            "type": "custom",
+            "domains": DANIELSON_FRAMEWORK["domains"] + MARSHALL_FRAMEWORK["domains"] + custom_domains,
+        }
+    else:
+        framework = _get_framework_by_type(resolved_type)
+
+    selected_elements = []
+    if selection and selection.get("framework_type") == resolved_type:
+        selected_elements = selection.get("selected_elements", []) or []
+
+    if not selected_elements:
+        selected_elements = [
+            element["id"]
+            for domain in framework.get("domains", [])
+            for element in domain.get("elements", [])
+        ]
+
+    # Preserve order and avoid duplicates from legacy selections.
+    seen = set()
+    ordered_selected = []
+    for element_id in selected_elements:
+        if element_id in seen:
+            continue
+        seen.add(element_id)
+        ordered_selected.append(element_id)
+
+    return resolved_type, framework, ordered_selected
+
+
+def _build_domain_index(framework: dict, selected_elements: List[str]) -> Tuple[List[dict], Dict[str, dict]]:
+    selected_set = set(selected_elements)
+    domains: List[dict] = []
+    element_domain_map: Dict[str, dict] = {}
+    for domain in framework.get("domains", []):
+        kept_elements = []
+        for element in domain.get("elements", []):
+            element_id = element.get("id")
+            if not element_id:
+                continue
+            if selected_set and element_id not in selected_set:
+                continue
+            kept_elements.append(element_id)
+            element_domain_map[element_id] = {
+                "domain_id": domain.get("id"),
+                "domain_name": domain.get("name"),
+            }
+        if kept_elements:
+            domains.append(
+                {
+                    "id": domain.get("id"),
+                    "name": domain.get("name"),
+                    "element_ids": kept_elements,
+                    "element_count": len(kept_elements),
+                }
+            )
+    return domains, element_domain_map
+
+
+def _compute_domain_deltas(periods: List[dict], domains: List[dict], series_key: str) -> List[dict]:
+    deltas: List[dict] = []
+    for domain in domains:
+        first = None
+        last = None
+        for period in periods:
+            series = period.get(series_key) or {}
+            domain_scores = series.get("domain_scores") or {}
+            value = domain_scores.get(domain["id"])
+            if value is None:
+                continue
+            if first is None:
+                first = value
+            last = value
+        delta = round(last - first, 2) if first is not None and last is not None else None
+        deltas.append(
+            {
+                "domain_id": domain["id"],
+                "domain_name": domain["name"],
+                "first_score": first,
+                "last_score": last,
+                "delta": delta,
+            }
+        )
+    return deltas
+
+
+def _compute_overall_delta(periods: List[dict], series_key: str) -> Optional[float]:
+    first = None
+    last = None
+    for period in periods:
+        score = (period.get(series_key) or {}).get("overall_score")
+        if score is None:
+            continue
+        if first is None:
+            first = score
+        last = score
+    if first is None or last is None:
+        return None
+    return round(last - first, 2)
+
+
+async def _build_dashboard_domain_trend_data(
+    current_user: dict,
+    window_months: int = 3,
+    teacher_id: Optional[str] = None,
+    subjects: Optional[List[str]] = None,
+    framework_type: Optional[str] = None,
+) -> dict:
+    resolved_framework_type, framework, selected_elements = await _resolve_framework_context(
+        current_user,
+        framework_type=framework_type,
+    )
+    domains, element_domain_map = _build_domain_index(framework, selected_elements)
+    subject_filter = {
+        _normalize_subject_filter(subject)
+        for subject in (subjects or [])
+        if subject and subject.strip()
+    }
+
+    teachers = await db.teachers.find(
+        {"created_by": current_user["id"]},
+        {"_id": 0, "id": 1, "name": 1, "subject": 1},
+    ).to_list(2000)
+    teacher_by_id = {teacher["id"]: teacher for teacher in teachers}
+
+    if teacher_id and teacher_id not in teacher_by_id:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+
+    allowed_teacher_ids: List[str] = []
+    for teacher in teachers:
+        teacher_subjects = {
+            _normalize_subject_filter(subject)
+            for subject in _parse_teacher_subjects(teacher.get("subject"))
+            if subject and subject.strip()
+        }
+        if subject_filter and not teacher_subjects.intersection(subject_filter):
+            continue
+        allowed_teacher_ids.append(teacher["id"])
+
+    role = _get_user_role(current_user)
+    scoring_mode = await _get_admin_scoring_mode(current_user["id"]) if role == "admin" else "ai"
+
+    windows = _build_month_windows(window_months)
+    month_index = {(window["start"].year, window["start"].month): idx for idx, window in enumerate(windows)}
+    first_window_start = windows[0]["start"]
+    last_window_end = windows[-1]["end"]
+
+    periods = [
+        {
+            "bucket_start": window["start"].isoformat(),
+            "bucket_end": window["end"].isoformat(),
+            "label": window["label"],
+            "all_domain_scores": {domain["id"]: [] for domain in domains},
+            "all_overall_scores": [],
+            "all_teacher_ids": set(),
+            "selected_domain_scores": {domain["id"]: [] for domain in domains},
+            "selected_overall_scores": [],
+        }
+        for window in windows
+    ]
+
+    assessments: List[dict] = []
+    if allowed_teacher_ids:
+        assessments = await db.assessments.find(
+            {
+                "user_id": current_user["id"],
+                "teacher_id": {"$in": allowed_teacher_ids},
+                "analyzed_at": {
+                    "$gte": first_window_start.isoformat(),
+                    "$lt": last_window_end.isoformat(),
+                },
+            },
+            {"_id": 0},
+        ).to_list(10000)
+
+    overrides_by_assessment: Dict[str, List[dict]] = {}
+    if role == "admin" and assessments:
+        assessment_ids = [assessment["id"] for assessment in assessments]
+        overrides = await db.admin_assessment_overrides.find(
+            {"admin_id": current_user["id"], "assessment_id": {"$in": assessment_ids}},
+            {"_id": 0},
+        ).to_list(10000)
+        for override in overrides:
+            overrides_by_assessment.setdefault(override["assessment_id"], []).append(override)
+
+    adherence_by_assessment: Dict[str, Optional[float]] = {}
+    if assessments:
+        adherence_docs = await db.curriculum_adherence.find(
+            {"user_id": current_user["id"], "assessment_id": {"$in": [a["id"] for a in assessments]}},
+            {"_id": 0, "assessment_id": 1, "adherence_score": 1},
+        ).to_list(10000)
+        adherence_by_assessment = {
+            doc["assessment_id"]: doc.get("adherence_score")
+            for doc in adherence_docs
+            if doc.get("assessment_id")
+        }
+
+    teacher_performance: Dict[str, dict] = {}
+    for assessment in assessments:
+        analyzed_at = _parse_iso_datetime(assessment.get("analyzed_at"))
+        if not analyzed_at:
+            continue
+        bucket_idx = month_index.get((analyzed_at.year, analyzed_at.month))
+        if bucket_idx is None:
+            continue
+
+        if role == "admin":
+            adjusted_scores, adjusted_overall = _apply_admin_overrides(
+                assessment.get("element_scores", []),
+                overrides_by_assessment.get(assessment["id"], []),
+                scoring_mode,
+            )
+        else:
+            adjusted_scores = [{**es, "adjusted_score": es.get("score")} for es in assessment.get("element_scores", [])]
+            adjusted_overall = assessment.get("overall_score")
+
+        adherence_score = adherence_by_assessment.get(assessment["id"])
+        combined_overall = _combine_overall_with_adherence(adjusted_overall, adherence_score)
+
+        domain_scores_for_assessment: Dict[str, List[float]] = {}
+        for element_score in adjusted_scores:
+            element_id = element_score.get("element_id")
+            domain_info = element_domain_map.get(element_id)
+            if not domain_info:
+                continue
+            score = element_score.get("adjusted_score", element_score.get("score"))
+            if score is None:
+                continue
+            domain_scores_for_assessment.setdefault(domain_info["domain_id"], []).append(score)
+
+        period = periods[bucket_idx]
+        period["all_teacher_ids"].add(assessment.get("teacher_id"))
+        if combined_overall is not None:
+            period["all_overall_scores"].append(combined_overall)
+        for domain_id, scores in domain_scores_for_assessment.items():
+            if scores:
+                period["all_domain_scores"][domain_id].append(sum(scores) / len(scores))
+
+        if teacher_id and assessment.get("teacher_id") == teacher_id:
+            if combined_overall is not None:
+                period["selected_overall_scores"].append(combined_overall)
+            for domain_id, scores in domain_scores_for_assessment.items():
+                if scores:
+                    period["selected_domain_scores"][domain_id].append(sum(scores) / len(scores))
+
+        teacher_row = teacher_performance.setdefault(
+            assessment.get("teacher_id"),
+            {
+                "teacher_id": assessment.get("teacher_id"),
+                "teacher_name": teacher_by_id.get(assessment.get("teacher_id"), {}).get("name", "Unknown"),
+                "bucket_scores": [[] for _ in periods],
+            },
+        )
+        if combined_overall is not None:
+            teacher_row["bucket_scores"][bucket_idx].append(combined_overall)
+
+    response_periods = []
+    for period in periods:
+        all_domain_scores = {
+            domain_id: _average(scores)
+            for domain_id, scores in period["all_domain_scores"].items()
+        }
+        selected_domain_scores = {
+            domain_id: _average(scores)
+            for domain_id, scores in period["selected_domain_scores"].items()
+        }
+        response_periods.append(
+            {
+                "bucket_start": period["bucket_start"],
+                "bucket_end": period["bucket_end"],
+                "label": period["label"],
+                "all_teachers": {
+                    "overall_score": _average(period["all_overall_scores"]),
+                    "assessment_count": len(period["all_overall_scores"]),
+                    "teacher_count": len(period["all_teacher_ids"]),
+                    "domain_scores": all_domain_scores,
+                },
+                "selected_teacher": {
+                    "overall_score": _average(period["selected_overall_scores"]),
+                    "assessment_count": len(period["selected_overall_scores"]),
+                    "domain_scores": selected_domain_scores,
+                }
+                if teacher_id
+                else None,
+            }
+        )
+
+    latest_bucket_idx = len(response_periods) - 1
+    teacher_summaries = []
+    for teacher_stats in teacher_performance.values():
+        bucket_scores = teacher_stats["bucket_scores"]
+        latest_scores = bucket_scores[latest_bucket_idx] if latest_bucket_idx >= 0 else []
+        prior_scores = [
+            score
+            for idx, scores in enumerate(bucket_scores)
+            if idx != latest_bucket_idx
+            for score in scores
+        ]
+        recent_avg = _average(latest_scores)
+        prior_avg = _average(prior_scores)
+        delta = round(recent_avg - prior_avg, 2) if recent_avg is not None and prior_avg is not None else None
+        teacher_summaries.append(
+            {
+                "teacher_id": teacher_stats["teacher_id"],
+                "teacher_name": teacher_stats["teacher_name"],
+                "recent_avg": recent_avg,
+                "prior_avg": prior_avg,
+                "delta": delta,
+                "recent_assessment_count": len(latest_scores),
+            }
+        )
+
+    teacher_attention_candidates = [
+        item
+        for item in teacher_summaries
+        if (item["recent_avg"] is not None and item["recent_avg"] < 6.5)
+        or (item["delta"] is not None and item["delta"] < -0.3)
+    ]
+    teacher_attention_candidates.sort(
+        key=lambda item: (
+            item["recent_avg"] if item["recent_avg"] is not None else 11.0,
+            item["delta"] if item["delta"] is not None else 0.0,
+        )
+    )
+
+    selected_teacher_meta = None
+    if teacher_id:
+        selected_teacher = teacher_by_id.get(teacher_id)
+        selected_teacher_meta = {
+            "id": teacher_id,
+            "name": selected_teacher.get("name") if selected_teacher else None,
+            "subject": selected_teacher.get("subject") if selected_teacher else None,
+            "included_in_subject_filter": teacher_id in allowed_teacher_ids,
+        }
+
+    return {
+        "window_months": window_months,
+        "framework_type": resolved_framework_type,
+        "domains": domains,
+        "periods": response_periods,
+        "selected_teacher": selected_teacher_meta,
+        "subjects_filter": sorted(subject_filter),
+        "scoring_mode": scoring_mode,
+        "teacher_summaries": teacher_summaries,
+        "teacher_attention_candidates": teacher_attention_candidates[:8],
+    }
+
+
+def _build_rule_based_leadership_insights(trend_payload: dict) -> dict:
+    periods = trend_payload.get("periods", [])
+    domains = trend_payload.get("domains", [])
+    selected_teacher = trend_payload.get("selected_teacher")
+
+    domain_deltas = _compute_domain_deltas(periods, domains, "all_teachers")
+    positive_trends = sorted(
+        [item for item in domain_deltas if item.get("delta") is not None and item["delta"] > 0.15],
+        key=lambda item: item["delta"],
+        reverse=True,
+    )[:3]
+    negative_trends = sorted(
+        [item for item in domain_deltas if item.get("delta") is not None and item["delta"] < -0.15],
+        key=lambda item: item["delta"],
+    )[:3]
+
+    overall_delta = _compute_overall_delta(periods, "all_teachers")
+    overall_message = "School-wide performance is stable across the selected window."
+    if overall_delta is not None:
+        if overall_delta > 0.2:
+            overall_message = f"School-wide performance is trending up ({overall_delta:+.2f}) over the selected window."
+        elif overall_delta < -0.2:
+            overall_message = f"School-wide performance is trending down ({overall_delta:+.2f}) over the selected window."
+
+    if positive_trends:
+        positive_message = "Positive momentum: " + ", ".join(
+            f"{item['domain_name']} ({item['delta']:+.2f})" for item in positive_trends[:2]
+        ) + "."
+    else:
+        positive_message = "No domain shows strong positive acceleration yet."
+
+    if negative_trends:
+        negative_message = "Needs attention: " + ", ".join(
+            f"{item['domain_name']} ({item['delta']:+.2f})" for item in negative_trends[:2]
+        ) + "."
+    else:
+        negative_message = "No domain shows a strong negative decline."
+
+    teacher_attention = trend_payload.get("teacher_attention_candidates", [])[:3]
+    teacher_attention_items = []
+    for item in teacher_attention:
+        reasons = []
+        if item.get("recent_avg") is not None and item["recent_avg"] < 6.5:
+            reasons.append(f"recent average {item['recent_avg']:.2f}")
+        if item.get("delta") is not None and item["delta"] < -0.3:
+            reasons.append(f"delta {item['delta']:+.2f}")
+        teacher_attention_items.append(
+            {
+                "teacher_id": item.get("teacher_id"),
+                "teacher_name": item.get("teacher_name"),
+                "reason": ", ".join(reasons) if reasons else "below expected trajectory",
+                "recent_avg": item.get("recent_avg"),
+                "delta": item.get("delta"),
+            }
+        )
+
+    teacher_message = "No individual teacher currently meets the attention threshold."
+    if teacher_attention_items:
+        names = ", ".join(item["teacher_name"] for item in teacher_attention_items[:3] if item.get("teacher_name"))
+        teacher_message = f"Teachers needing closer support this cycle: {names}."
+
+    compare_message = None
+    selected_delta = None
+    if selected_teacher:
+        selected_delta = _compute_overall_delta(periods, "selected_teacher")
+        if selected_delta is None:
+            compare_message = "Selected teacher has limited data in this filtered window."
+        elif overall_delta is None:
+            compare_message = f"Selected teacher trend is {selected_delta:+.2f} over the period."
+        else:
+            compare_message = (
+                f"{selected_teacher.get('name') or 'Selected teacher'} trend is {selected_delta:+.2f} vs "
+                f"school trend {overall_delta:+.2f}."
+            )
+
+    bullets = [overall_message, positive_message, negative_message]
+    if compare_message:
+        bullets[2] = compare_message
+    else:
+        bullets[2] = teacher_message
+
+    return {
+        "generated_by": "rules",
+        "bullets": bullets,
+        "positive_trends": positive_trends,
+        "negative_trends": negative_trends,
+        "teachers_needing_attention": teacher_attention_items,
+    }
+
+
+async def _generate_ai_leadership_insights(trend_payload: dict, fallback_payload: dict) -> Optional[dict]:
+    api_key = os.getenv("EMERGENT_LLM_KEY")
+    if not api_key:
+        return None
+    try:
+        from emergentintegrations.llm.chat import chat, Message
+    except ImportError:
+        return None
+
+    ai_input = {
+        "window_months": trend_payload.get("window_months"),
+        "framework_type": trend_payload.get("framework_type"),
+        "subjects_filter": trend_payload.get("subjects_filter"),
+        "selected_teacher": trend_payload.get("selected_teacher"),
+        "periods": trend_payload.get("periods", []),
+        "domain_deltas": _compute_domain_deltas(
+            trend_payload.get("periods", []),
+            trend_payload.get("domains", []),
+            "all_teachers",
+        ),
+        "teacher_attention_candidates": trend_payload.get("teacher_attention_candidates", []),
+        "rule_based_draft": fallback_payload,
+    }
+
+    prompt = (
+        "You are preparing leadership insights for a school principal dashboard.\n"
+        "Given the structured trend data, produce concise, actionable insights.\n"
+        "Return strict JSON only with this schema:\n"
+        "{\n"
+        "  \"bullets\": [\"...\", \"...\", \"...\"],\n"
+        "  \"positive_trends\": [{\"domain_id\": \"\", \"domain_name\": \"\", \"delta\": 0.0}],\n"
+        "  \"negative_trends\": [{\"domain_id\": \"\", \"domain_name\": \"\", \"delta\": 0.0}],\n"
+        "  \"teachers_needing_attention\": [{\"teacher_id\": \"\", \"teacher_name\": \"\", \"reason\": \"\"}]\n"
+        "}\n"
+        "Rules:\n"
+        "- Exactly 3 bullets, each <= 28 words.\n"
+        "- Mention concrete trend direction and where action is needed.\n"
+        "- Do not invent teachers or domains.\n"
+        "- Use teacher_attention_candidates only when evidence exists.\n"
+        f"DATA:\n{json.dumps(ai_input, ensure_ascii=True)}"
+    )
+
+    try:
+        response = await chat(
+            api_key=api_key,
+            messages=[Message(role="user", content=prompt)],
+            model="gpt-5.2",
+        )
+        response_text = response.content if hasattr(response, "content") else str(response)
+
+        import re
+
+        match = re.search(r"\{[\s\S]*\}", response_text)
+        if not match:
+            return None
+        parsed = json.loads(match.group())
+
+        bullets = [str(item).strip() for item in parsed.get("bullets", []) if str(item).strip()]
+        if len(bullets) < 2:
+            return None
+        bullets = bullets[:3]
+        while len(bullets) < 3:
+            bullets.append(fallback_payload["bullets"][len(bullets)])
+
+        def _normalize_domain_items(items: Any) -> List[dict]:
+            normalized = []
+            if not isinstance(items, list):
+                return normalized
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("domain_name") or "").strip()
+                if not name:
+                    continue
+                delta = item.get("delta")
+                try:
+                    delta_value = round(float(delta), 2) if delta is not None else None
+                except Exception:
+                    delta_value = None
+                normalized.append(
+                    {
+                        "domain_id": str(item.get("domain_id") or "").strip(),
+                        "domain_name": name,
+                        "delta": delta_value,
+                    }
+                )
+            return normalized[:3]
+
+        def _normalize_teacher_items(items: Any) -> List[dict]:
+            normalized = []
+            if not isinstance(items, list):
+                return normalized
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("teacher_name") or "").strip()
+                if not name:
+                    continue
+                normalized.append(
+                    {
+                        "teacher_id": str(item.get("teacher_id") or "").strip(),
+                        "teacher_name": name,
+                        "reason": str(item.get("reason") or "needs targeted support").strip(),
+                    }
+                )
+            return normalized[:5]
+
+        return {
+            "generated_by": "ai",
+            "bullets": bullets,
+            "positive_trends": _normalize_domain_items(parsed.get("positive_trends")),
+            "negative_trends": _normalize_domain_items(parsed.get("negative_trends")),
+            "teachers_needing_attention": _normalize_teacher_items(parsed.get("teachers_needing_attention")),
+        }
+    except Exception as exc:
+        logger.warning(f"AI leadership insights generation failed: {exc}")
+        return None
+
+
+@api_router.get("/dashboard/domain-trends")
+async def get_dashboard_domain_trends(
+    window_months: int = Query(3, ge=1, le=12),
+    teacher_id: Optional[str] = None,
+    subjects: Optional[str] = Query(None),
+    framework_type: Optional[FrameworkType] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    subject_list = [subject.strip() for subject in (subjects or "").split(",") if subject.strip()]
+    return await _build_dashboard_domain_trend_data(
+        current_user=current_user,
+        window_months=window_months,
+        teacher_id=teacher_id,
+        subjects=subject_list,
+        framework_type=framework_type.value if framework_type else None,
+    )
+
+
+@api_router.get("/dashboard/leadership-insights")
+async def get_dashboard_leadership_insights(
+    window_months: int = Query(3, ge=1, le=12),
+    teacher_id: Optional[str] = None,
+    subjects: Optional[str] = Query(None),
+    framework_type: Optional[FrameworkType] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    subject_list = [subject.strip() for subject in (subjects or "").split(",") if subject.strip()]
+    trend_payload = await _build_dashboard_domain_trend_data(
+        current_user=current_user,
+        window_months=window_months,
+        teacher_id=teacher_id,
+        subjects=subject_list,
+        framework_type=framework_type.value if framework_type else None,
+    )
+    fallback_payload = _build_rule_based_leadership_insights(trend_payload)
+    ai_payload = await _generate_ai_leadership_insights(trend_payload, fallback_payload)
+
+    final_payload = ai_payload or fallback_payload
+    final_payload["meta"] = {
+        "window_months": window_months,
+        "framework_type": trend_payload.get("framework_type"),
+        "selected_teacher": trend_payload.get("selected_teacher"),
+        "subjects_filter": trend_payload.get("subjects_filter"),
+    }
+    return final_payload
+
 
 # ==================== ROSTER & DASHBOARD ENDPOINTS ====================
 @api_router.get("/roster")
