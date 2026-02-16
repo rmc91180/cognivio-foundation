@@ -18,6 +18,7 @@ import base64
 import io
 import csv
 import hashlib
+import math
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 try:
@@ -2711,6 +2712,108 @@ async def _store_leadership_insights_cache(
     )
 
 
+def _coerce_insight_priority(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"high", "medium", "low"} else "medium"
+
+
+def _coerce_insight_owner(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"principal", "coach", "teacher"} else "principal"
+
+
+def _coerce_due_window_days(value: Any, default: int = 14) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = default
+    return max(3, min(60, parsed))
+
+
+def _build_leadership_item(
+    insight: str,
+    action: str,
+    priority: str = "medium",
+    owner: str = "principal",
+    due_window_days: int = 14,
+    target_teacher_id: Optional[str] = None,
+    target_teacher_name: Optional[str] = None,
+) -> dict:
+    return {
+        "insight": insight.strip(),
+        "action": action.strip(),
+        "priority": _coerce_insight_priority(priority),
+        "owner": _coerce_insight_owner(owner),
+        "due_window_days": _coerce_due_window_days(due_window_days),
+        "target_teacher_id": (target_teacher_id or "").strip() or None,
+        "target_teacher_name": (target_teacher_name or "").strip() or None,
+    }
+
+
+def _normalize_leadership_items(items: Any, fallback_items: Optional[List[dict]] = None) -> List[dict]:
+    normalized: List[dict] = []
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            insight = str(item.get("insight") or "").strip()
+            action = str(item.get("action") or "").strip()
+            if not insight or not action:
+                continue
+            normalized.append(
+                _build_leadership_item(
+                    insight=insight,
+                    action=action,
+                    priority=item.get("priority"),
+                    owner=item.get("owner"),
+                    due_window_days=item.get("due_window_days", 14),
+                    target_teacher_id=item.get("target_teacher_id"),
+                    target_teacher_name=item.get("target_teacher_name"),
+                )
+            )
+            if len(normalized) >= 7:
+                return normalized[:7]
+
+    fallback = fallback_items or []
+    fallback_index = 0
+    while len(normalized) < 7 and fallback:
+        item = fallback[fallback_index % len(fallback)]
+        fallback_index += 1
+        normalized.append(
+            _build_leadership_item(
+                insight=item.get("insight") or "Trend insight requires follow-up.",
+                action=item.get("action") or "Assign a coaching action and review next cycle.",
+                priority=item.get("priority", "medium"),
+                owner=item.get("owner", "principal"),
+                due_window_days=item.get("due_window_days", 14),
+                target_teacher_id=item.get("target_teacher_id"),
+                target_teacher_name=item.get("target_teacher_name"),
+            )
+        )
+
+    generic_fillers = [
+        _build_leadership_item(
+            "Observation coverage is inconsistent across the selected time window.",
+            "Increase video/observation cadence and confirm at least one evidence point per teacher this month.",
+            priority="medium",
+            owner="principal",
+            due_window_days=14,
+        ),
+        _build_leadership_item(
+            "Coaching follow-through is not yet explicit for all flagged trends.",
+            "Assign one accountable owner per trend and check progress in the next leadership meeting.",
+            priority="medium",
+            owner="coach",
+            due_window_days=7,
+        ),
+    ]
+    filler_index = 0
+    while len(normalized) < 7:
+        normalized.append(generic_fillers[filler_index % len(generic_fillers)])
+        filler_index += 1
+    return normalized[:7]
+
+
 def _build_rule_based_leadership_insights(trend_payload: dict) -> dict:
     periods = trend_payload.get("periods", [])
     domains = trend_payload.get("domains", [])
@@ -2792,9 +2895,105 @@ def _build_rule_based_leadership_insights(trend_payload: dict) -> dict:
     else:
         bullets[2] = teacher_message
 
+    actionable_items: List[dict] = []
+    actionable_items.append(
+        _build_leadership_item(
+            insight=overall_message,
+            action=(
+                "Prioritize immediate instructional support in the next leadership check-in."
+                if overall_delta is not None and overall_delta < -0.2
+                else "Maintain current support cadence and verify gains in the next monthly review."
+            ),
+            priority="high" if overall_delta is not None and overall_delta < -0.2 else "medium",
+            owner="principal",
+            due_window_days=7 if overall_delta is not None and overall_delta < -0.2 else 14,
+        )
+    )
+
+    for trend in positive_trends[:2]:
+        actionable_items.append(
+            _build_leadership_item(
+                insight=f"{trend['domain_name']} is improving ({trend['delta']:+.2f}).",
+                action="Capture the practice causing this gain and replicate it in two additional classrooms.",
+                priority="low",
+                owner="coach",
+                due_window_days=21,
+            )
+        )
+
+    for trend in negative_trends[:2]:
+        actionable_items.append(
+            _build_leadership_item(
+                insight=f"{trend['domain_name']} is declining ({trend['delta']:+.2f}).",
+                action="Launch a targeted coaching cycle for this domain and schedule a follow-up walkthrough.",
+                priority="high",
+                owner="coach",
+                due_window_days=7,
+            )
+        )
+
+    for teacher in teacher_attention_items[:2]:
+        teacher_name = teacher.get("teacher_name") or "A teacher"
+        reason = teacher.get("reason") or "below expected trajectory"
+        actionable_items.append(
+            _build_leadership_item(
+                insight=f"{teacher_name} is underperforming ({reason}).",
+                action="Set one measurable coaching goal and review progress in the next observation window.",
+                priority="high",
+                owner="principal",
+                due_window_days=7,
+                target_teacher_id=teacher.get("teacher_id"),
+                target_teacher_name=teacher_name,
+            )
+        )
+
+    if compare_message:
+        actionable_items.append(
+            _build_leadership_item(
+                insight=compare_message,
+                action=(
+                    "Align this teacher's support plan with schoolwide winning practices and recheck trend movement."
+                ),
+                priority="medium",
+                owner="coach",
+                due_window_days=14,
+                target_teacher_id=selected_teacher.get("id") if isinstance(selected_teacher, dict) else None,
+                target_teacher_name=selected_teacher.get("name") if isinstance(selected_teacher, dict) else None,
+            )
+        )
+    else:
+        actionable_items.append(
+            _build_leadership_item(
+                insight=teacher_message,
+                action="Confirm teachers with the lowest recent averages have active support plans and owner accountability.",
+                priority="medium",
+                owner="principal",
+                due_window_days=14,
+            )
+        )
+
+    sparse_period_count = sum(
+        1
+        for period in periods
+        if (period.get("all_teachers") or {}).get("assessment_count", 0) == 0
+    )
+    if sparse_period_count > 0:
+        actionable_items.append(
+            _build_leadership_item(
+                insight=f"{sparse_period_count} monthly bucket(s) have no assessment evidence.",
+                action="Increase recording cadence so each month has enough evidence to make trend decisions.",
+                priority="medium",
+                owner="principal",
+                due_window_days=14,
+            )
+        )
+
+    items = _normalize_leadership_items(actionable_items, actionable_items)
+
     return {
         "generated_by": "rules",
         "bullets": bullets,
+        "items": items,
         "positive_trends": positive_trends,
         "negative_trends": negative_trends,
         "teachers_needing_attention": teacher_attention_items,
@@ -2827,17 +3026,31 @@ async def _generate_ai_leadership_insights(trend_payload: dict, fallback_payload
 
     prompt = (
         "You are preparing leadership insights for a school principal dashboard.\n"
-        "Given the structured trend data, produce concise, actionable insights.\n"
+        "Given the structured trend data, produce actionable leadership insights.\n"
         "Return strict JSON only with this schema:\n"
         "{\n"
+        "  \"items\": [\n"
+        "    {\n"
+        "      \"insight\": \"...\",\n"
+        "      \"action\": \"...\",\n"
+        "      \"priority\": \"high|medium|low\",\n"
+        "      \"owner\": \"principal|coach|teacher\",\n"
+        "      \"due_window_days\": 14,\n"
+        "      \"target_teacher_id\": \"optional\",\n"
+        "      \"target_teacher_name\": \"optional\"\n"
+        "    }\n"
+        "  ],\n"
         "  \"bullets\": [\"...\", \"...\", \"...\"],\n"
         "  \"positive_trends\": [{\"domain_id\": \"\", \"domain_name\": \"\", \"delta\": 0.0}],\n"
         "  \"negative_trends\": [{\"domain_id\": \"\", \"domain_name\": \"\", \"delta\": 0.0}],\n"
         "  \"teachers_needing_attention\": [{\"teacher_id\": \"\", \"teacher_name\": \"\", \"reason\": \"\"}]\n"
         "}\n"
         "Rules:\n"
-        "- Exactly 3 bullets, each <= 28 words.\n"
-        "- Mention concrete trend direction and where action is needed.\n"
+        "- Exactly 7 items in the items array.\n"
+        "- Every item must include a concrete action starting with a verb.\n"
+        "- Every item must include priority, owner, and due_window_days.\n"
+        "- Keep each insight/action concise and evidence-grounded.\n"
+        "- Keep bullets to 3 short summary lines.\n"
         "- Do not invent teachers or domains.\n"
         "- Use teacher_attention_candidates only when evidence exists.\n"
         f"DATA:\n{json.dumps(ai_input, ensure_ascii=True)}"
@@ -2858,9 +3071,10 @@ async def _generate_ai_leadership_insights(trend_payload: dict, fallback_payload
             return None
         parsed = json.loads(match.group())
 
+        items = _normalize_leadership_items(parsed.get("items"), fallback_payload.get("items", []))
         bullets = [str(item).strip() for item in parsed.get("bullets", []) if str(item).strip()]
-        if len(bullets) < 2:
-            return None
+        if len(bullets) < 3:
+            bullets = [item["insight"] for item in items[:3]]
         bullets = bullets[:3]
         while len(bullets) < 3:
             bullets.append(fallback_payload["bullets"][len(bullets)])
@@ -2911,6 +3125,7 @@ async def _generate_ai_leadership_insights(trend_payload: dict, fallback_payload
         return {
             "generated_by": "ai",
             "bullets": bullets,
+            "items": items,
             "positive_trends": _normalize_domain_items(parsed.get("positive_trends")),
             "negative_trends": _normalize_domain_items(parsed.get("negative_trends")),
             "teachers_needing_attention": _normalize_teacher_items(parsed.get("teachers_needing_attention")),
@@ -4614,6 +4829,164 @@ def generate_recommendations(element_scores: List[dict]) -> List[str]:
 
     return recommendations
 
+
+def _clamp_demo_value(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def _get_demo_teacher_trend_profile(teacher: dict) -> dict:
+    email = str(teacher.get("email") or "").strip().lower()
+    subject = str(teacher.get("subject") or "").strip().lower()
+    department = str(teacher.get("department") or "").strip().lower()
+
+    profiles = {
+        "sarah.j@school.edu": {
+            "base_score": 6.2,
+            "overall_slope": 1.1,
+            "volatility": 0.55,
+            "noise": 0.35,
+            "domain_tilts": [0.45, -0.15, 0.35, -0.25],
+        },
+        "michael.c@school.edu": {
+            "base_score": 6.8,
+            "overall_slope": -1.0,
+            "volatility": 0.7,
+            "noise": 0.45,
+            "domain_tilts": [-0.15, -0.5, 0.1, -0.4],
+        },
+        "emily.r@school.edu": {
+            "base_score": 6.0,
+            "overall_slope": 0.35,
+            "volatility": 1.0,
+            "noise": 0.55,
+            "domain_tilts": [0.65, -0.6, 0.4, -0.45],
+        },
+        "david.p@school.edu": {
+            "base_score": 6.3,
+            "overall_slope": -0.6,
+            "volatility": 0.95,
+            "noise": 0.5,
+            "domain_tilts": [-0.45, -0.2, 0.2, -0.55],
+        },
+        "jennifer.w@school.edu": {
+            "base_score": 7.2,
+            "overall_slope": 0.2,
+            "volatility": 0.75,
+            "noise": 0.4,
+            "domain_tilts": [0.35, -0.35, 0.4, -0.2],
+        },
+        "robert.m@school.edu": {
+            "base_score": 5.4,
+            "overall_slope": 1.3,
+            "volatility": 0.9,
+            "noise": 0.6,
+            "domain_tilts": [0.5, -0.45, 0.6, -0.25],
+        },
+    }
+    profile = profiles.get(
+        email,
+        {
+            "base_score": 6.2,
+            "overall_slope": 0.25,
+            "volatility": 0.75,
+            "noise": 0.45,
+            "domain_tilts": [0.25, -0.2, 0.2, -0.15],
+        },
+    )
+
+    subject_bias = 0.0
+    if subject in {"mathematics", "chemistry"}:
+        subject_bias += 0.2
+    if department == "stem":
+        subject_bias += 0.1
+
+    return {
+        **profile,
+        "subject_bias": subject_bias,
+    }
+
+
+def _build_demo_assessment_datetimes(total_assessments: int, rng: Any) -> List[datetime]:
+    count = max(6, int(total_assessments))
+    now_utc = datetime.now(timezone.utc)
+    oldest_days_ago = (count - 1) * 14 + 7
+    timestamps: List[datetime] = []
+
+    for idx in range(count):
+        base_days_ago = oldest_days_ago - (idx * 14)
+        jitter_days = rng.randint(-4, 4)
+        days_ago = max(1, base_days_ago + jitter_days)
+        hour_offset = rng.randint(1, 8)
+        timestamps.append(now_utc - timedelta(days=days_ago, hours=hour_offset))
+
+    return sorted(timestamps)
+
+
+def _generate_demo_element_scores_for_assessment(
+    teacher: dict,
+    assessment_index: int,
+    total_assessments: int,
+    rng: Any,
+) -> List[dict]:
+    profile = _get_demo_teacher_trend_profile(teacher)
+    trend_position = 0.0
+    if total_assessments > 1:
+        trend_position = (assessment_index / (total_assessments - 1)) * 2.0 - 1.0
+
+    element_scores: List[dict] = []
+    domain_tilts = profile.get("domain_tilts", [0.0])
+
+    for domain_idx, domain in enumerate(DANIELSON_FRAMEWORK["domains"]):
+        domain_tilt = domain_tilts[domain_idx % len(domain_tilts)]
+        for element_idx, element in enumerate(domain["elements"]):
+            cycle = math.sin(
+                ((assessment_index + 1) * (0.95 + domain_idx * 0.12)) + (element_idx * 0.45)
+            )
+            cycle_component = cycle * profile["volatility"]
+            noise_component = rng.uniform(-profile["noise"], profile["noise"])
+            trend_component = trend_position * (profile["overall_slope"] + domain_tilt)
+            raw_score = (
+                profile["base_score"]
+                + profile["subject_bias"]
+                + trend_component
+                + cycle_component
+                + noise_component
+            )
+            score = round(_clamp_demo_value(raw_score, 2.0, 9.8), 1)
+            element_scores.append(
+                {
+                    "element_id": element["id"],
+                    "element_name": element["name"],
+                    "score": score,
+                    "level": get_performance_level(score),
+                    "observations": [
+                        f"Observed {element['name'].lower()} with variable consistency over the lesson.",
+                    ],
+                    "confidence": rng.randint(72, 97),
+                }
+            )
+
+    return element_scores
+
+
+def _generate_demo_adherence_score(
+    teacher: dict,
+    assessment_index: int,
+    total_assessments: int,
+    rng: Any,
+) -> float:
+    profile = _get_demo_teacher_trend_profile(teacher)
+    trend_position = 0.0
+    if total_assessments > 1:
+        trend_position = (assessment_index / (total_assessments - 1)) * 2.0 - 1.0
+
+    cyclical = math.sin((assessment_index + 1) * 1.1) * 0.06
+    trend_component = profile["overall_slope"] * 0.08 * trend_position
+    noise_component = rng.uniform(-0.08, 0.08)
+    raw = 0.76 + trend_component + cyclical + noise_component
+    return round(_clamp_demo_value(raw, 0.45, 0.98), 2)
+
+
 # ==================== SEED DATA ENDPOINT ====================
 @api_router.post("/seed-demo-data/reset")
 async def reset_demo_data(current_user: dict = Depends(get_current_user)):
@@ -4669,6 +5042,7 @@ async def reset_demo_data(current_user: dict = Depends(get_current_user)):
 async def seed_demo_data(current_user: dict = Depends(get_current_user)):
     """Seed demo data for testing"""
     import random
+    rng = random.Random()
     
     # Create demo teachers
     demo_teachers = [
@@ -4697,6 +5071,7 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
         else:
             created_teachers.append(existing)
     
+    created_assessments = 0
     # Create demo assessments for each teacher
     for teacher in created_teachers:
         # Create demo curriculum/syllabus/lesson plan records if missing
@@ -4772,18 +5147,21 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
                 "lesson_plan_id": lesson_id,
             })
 
-        # Create 3-5 assessments per teacher over the last 90 days
-        num_assessments = random.randint(3, 5)
-        
-        for i in range(num_assessments):
-            days_ago = random.randint(1, 90)
-            assessment_date = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
-            recorded_at = (datetime.now(timezone.utc) - timedelta(days=days_ago, hours=random.randint(1, 6))).isoformat()
+        # Create 6-8 assessments per teacher over ~3-4 months to make trends visibly directional.
+        num_assessments = rng.randint(6, 8)
+        assessment_datetimes = _build_demo_assessment_datetimes(num_assessments, rng)
+
+        for assessment_index, assessment_dt in enumerate(assessment_datetimes):
+            assessment_date = assessment_dt.isoformat()
+            recorded_at = (assessment_dt - timedelta(hours=rng.randint(1, 6))).isoformat()
 
             video_id = str(uuid.uuid4())
             video_doc = {
                 "id": video_id,
-                "filename": f"{teacher['name'].split()[0].lower()}-{teacher['subject'].split()[0].lower()}-{i+1}.mp4",
+                "filename": (
+                    f"{teacher['name'].split()[0].lower()}-"
+                    f"{teacher['subject'].split()[0].lower()}-{assessment_index + 1}.mp4"
+                ),
                 "stored_filename": None,
                 "s3_key": None,
                 "file_url": None,
@@ -4811,26 +5189,13 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
                 "is_mock": True,
             })
             
-            # Generate element scores
-            element_scores = []
-            for domain in DANIELSON_FRAMEWORK["domains"]:
-                for element in domain["elements"]:
-                    base_score = random.uniform(4.0, 9.5)
-                    # Add some consistency per teacher
-                    if teacher["subject"] in ["Mathematics", "Chemistry"]:
-                        base_score = min(4.0, base_score + 0.3)
-                    
-                    score = round(base_score, 1)
-                    element_scores.append({
-                        "element_id": element["id"],
-                        "element_name": element["name"],
-                        "score": score,
-                        "level": get_performance_level(score),
-                        "observations": [
-                            f"Observed {element['name'].lower()} during classroom instruction"
-                        ],
-                        "confidence": random.randint(75, 95)
-                    })
+            # Generate element scores with directional trend + volatility per teacher profile.
+            element_scores = _generate_demo_element_scores_for_assessment(
+                teacher=teacher,
+                assessment_index=assessment_index,
+                total_assessments=len(assessment_datetimes),
+                rng=rng,
+            )
             
             overall_score = round(sum(es["score"] for es in element_scores) / len(element_scores), 2)
             
@@ -4849,14 +5214,15 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
             }
             
             await db.assessments.insert_one(assessment_doc)
+            created_assessments += 1
             await _ensure_mock_evidence(assessment_doc, current_user)
             await db.observations.insert_one({
                 "id": str(uuid.uuid4()),
                 "user_id": current_user["id"],
                 "teacher_id": teacher["id"],
                 "video_id": video_id,
-                "element_id": random.choice([es["element_id"] for es in element_scores]),
-                "timestamp_seconds": random.randint(60, 900),
+                "element_id": rng.choice([es["element_id"] for es in element_scores]),
+                "timestamp_seconds": rng.randint(60, 900),
                 "admin_comment": f"Observed {teacher['name'].split()[0]} demonstrating active engagement strategies.",
                 "teacher_response": None,
                 "implementation_status": "planned",
@@ -4871,7 +5237,12 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
                 "teacher_id": teacher["id"],
                 "lesson_plan_id": lesson_plan_id,
                 "status": "estimated",
-                "adherence_score": round(random.uniform(0.65, 0.95), 2),
+                "adherence_score": _generate_demo_adherence_score(
+                    teacher=teacher,
+                    assessment_index=assessment_index,
+                    total_assessments=len(assessment_datetimes),
+                    rng=rng,
+                ),
                 "matched_topics": ["Aligned objectives", "Pacing matched plan"],
                 "missing_topics": [],
                 "evidence_segments": [
@@ -4881,8 +5252,14 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
                 "user_id": current_user["id"],
             }
             await db.curriculum_adherence.insert_one(adherence_doc)
-    
-    return {"message": f"Created {len(created_teachers)} teachers with demo assessments"}
+
+    await db.dashboard_leadership_insights_cache.delete_many({"user_id": current_user["id"]})
+
+    return {
+        "message": f"Created {len(created_teachers)} teachers with demo assessments",
+        "created_teachers": len(created_teachers),
+        "created_assessments": created_assessments,
+    }
 
 # Include the router in the main app
 app.include_router(api_router)

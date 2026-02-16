@@ -49,7 +49,15 @@ Query params are the same as `domain-trends`.
 Response includes:
 
 - `generated_by`: `ai` or `rules`
-- `bullets`: exactly 3 leadership bullets
+- `items`: exactly 7 actionable leadership entries, each with:
+- `insight`
+- `action`
+- `priority` (`high|medium|low`)
+- `owner` (`principal|coach|teacher`)
+- `due_window_days` (int)
+- `target_teacher_id` (optional)
+- `target_teacher_name` (optional)
+- `bullets`: exactly 3 summary bullets (backward-compatibility + compact header summary)
 - `positive_trends`
 - `negative_trends`
 - `teachers_needing_attention`

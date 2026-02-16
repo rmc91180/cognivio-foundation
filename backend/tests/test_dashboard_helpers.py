@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import random
 import sys
 import types
 from datetime import datetime, timezone
@@ -98,6 +99,14 @@ def test_rule_based_insights_include_teacher_comparison_message():
     assert insights["generated_by"] == "rules"
     assert len(insights["bullets"]) == 3
     assert "Ms. Carter trend is" in insights["bullets"][2]
+    assert len(insights["items"]) == 7
+    assert any(item.get("target_teacher_id") == "t1" for item in insights["items"])
+    for item in insights["items"]:
+        assert item["insight"]
+        assert item["action"]
+        assert item["priority"] in {"high", "medium", "low"}
+        assert item["owner"] in {"principal", "coach", "teacher"}
+        assert 3 <= item["due_window_days"] <= 60
 
 
 def test_cache_key_subject_order_is_stable():
@@ -117,3 +126,53 @@ def test_cache_key_subject_order_is_stable():
     )
 
     assert key_one == key_two
+
+
+def test_demo_seed_scores_show_upward_trend_and_variance():
+    teacher = {
+        "email": "sarah.j@school.edu",
+        "subject": "Mathematics",
+        "department": "STEM",
+    }
+    rng = random.Random(42)
+    datetimes = server._build_demo_assessment_datetimes(7, rng)
+    assert len(datetimes) == 7
+    assert datetimes[0] < datetimes[-1]
+
+    overall_scores = []
+    for idx in range(len(datetimes)):
+        element_scores = server._generate_demo_element_scores_for_assessment(
+            teacher=teacher,
+            assessment_index=idx,
+            total_assessments=len(datetimes),
+            rng=rng,
+        )
+        avg = sum(item["score"] for item in element_scores) / len(element_scores)
+        overall_scores.append(avg)
+
+    assert (max(overall_scores) - min(overall_scores)) >= 0.8
+    assert (overall_scores[-1] - overall_scores[0]) >= 0.4
+
+
+def test_demo_seed_scores_show_decline_for_declining_profile():
+    teacher = {
+        "email": "michael.c@school.edu",
+        "subject": "English Literature",
+        "department": "Humanities",
+    }
+    rng = random.Random(7)
+    datetimes = server._build_demo_assessment_datetimes(7, rng)
+
+    overall_scores = []
+    for idx in range(len(datetimes)):
+        element_scores = server._generate_demo_element_scores_for_assessment(
+            teacher=teacher,
+            assessment_index=idx,
+            total_assessments=len(datetimes),
+            rng=rng,
+        )
+        avg = sum(item["score"] for item in element_scores) / len(element_scores)
+        overall_scores.append(avg)
+
+    assert (max(overall_scores) - min(overall_scores)) >= 0.8
+    assert (overall_scores[-1] - overall_scores[0]) <= -0.3

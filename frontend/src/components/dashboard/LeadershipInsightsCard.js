@@ -12,10 +12,54 @@ export function LeadershipInsightsCard({ insights, isLoading }) {
     );
   }
 
-  const bullets = Array.isArray(insights?.bullets)
-    ? insights.bullets.filter((item) => typeof item === "string" && item.trim()).slice(0, 3)
+  const items = Array.isArray(insights?.items)
+    ? insights.items
+        .filter(
+          (item) =>
+            item &&
+            typeof item.insight === "string" &&
+            item.insight.trim() &&
+            typeof item.action === "string" &&
+            item.action.trim()
+        )
+        .slice(0, 7)
+        .map((item) => ({
+          insight: item.insight.trim(),
+          action: item.action.trim(),
+          priority: ["high", "medium", "low"].includes(item.priority) ? item.priority : "medium",
+          owner: ["principal", "coach", "teacher"].includes(item.owner) ? item.owner : "principal",
+          due_window_days: Number.isInteger(item.due_window_days) ? item.due_window_days : 14,
+          target_teacher_name:
+            typeof item.target_teacher_name === "string" && item.target_teacher_name.trim()
+              ? item.target_teacher_name.trim()
+              : null,
+        }))
     : [];
+  const fallbackBullets = Array.isArray(insights?.bullets)
+    ? insights.bullets.filter((item) => typeof item === "string" && item.trim()).slice(0, 7)
+    : [];
+  const actionableItems =
+    items.length > 0
+      ? items
+      : fallbackBullets.map((bullet) => ({
+          insight: bullet,
+          action: "Assign an owner and review this signal in the next leadership check-in.",
+          priority: "medium",
+          owner: "principal",
+          due_window_days: 14,
+          target_teacher_name: null,
+        }));
   const generatedBy = insights?.generated_by === "ai" ? "AI generated" : "Rules fallback";
+  const priorityClassByValue = {
+    high: "bg-rose-50 text-rose-700",
+    medium: "bg-amber-50 text-amber-700",
+    low: "bg-emerald-50 text-emerald-700",
+  };
+  const ownerLabelByValue = {
+    principal: "Principal",
+    coach: "Coach",
+    teacher: "Teacher",
+  };
 
   return (
     <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
@@ -37,14 +81,35 @@ export function LeadershipInsightsCard({ insights, isLoading }) {
         </span>
       </div>
 
-      {bullets.length === 0 ? (
+      {actionableItems.length === 0 ? (
         <div className="text-xs text-slate-500">No leadership insights yet for this filter set.</div>
       ) : (
-        <ul className="list-disc space-y-1 pl-5 text-sm text-slate-700">
-          {bullets.map((bullet, index) => (
-            <li key={index}>{bullet}</li>
+        <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+          {actionableItems.map((item, index) => (
+            <article key={`${item.insight}-${index}`} className="rounded-lg border border-slate-200 p-3">
+              <div className="flex items-start justify-between gap-2">
+                <h3 className="text-sm font-medium text-slate-900">
+                  {index + 1}. {item.insight}
+                </h3>
+                <span
+                  className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                    priorityClassByValue[item.priority] || priorityClassByValue.medium
+                  }`}
+                >
+                  {item.priority}
+                </span>
+              </div>
+              <p className="mt-2 text-xs text-slate-600">
+                <span className="font-semibold text-slate-700">Action:</span> {item.action}
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-500">
+                <span>Owner: {ownerLabelByValue[item.owner] || ownerLabelByValue.principal}</span>
+                <span>Due: {item.due_window_days}d</span>
+                {item.target_teacher_name && <span>Teacher: {item.target_teacher_name}</span>}
+              </div>
+            </article>
           ))}
-        </ul>
+        </div>
       )}
     </section>
   );
