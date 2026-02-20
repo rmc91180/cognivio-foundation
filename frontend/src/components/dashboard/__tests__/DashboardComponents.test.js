@@ -4,7 +4,7 @@ import { LeadershipInsightsCard } from "../LeadershipInsightsCard";
 import { DomainTrendsChart } from "../DomainTrendsChart";
 
 describe("dashboard v2 components", () => {
-  it("renders 7 actionable leadership insights from AI payload", () => {
+  it("renders 4 principal-focused leadership insights and excludes teacher-specific items", () => {
     const insights = {
       generated_by: "ai",
       items: [
@@ -65,11 +65,12 @@ describe("dashboard v2 components", () => {
     render(<LeadershipInsightsCard insights={insights} isLoading={false} />);
 
     expect(screen.getByText("Leadership insights")).toBeTruthy();
-    expect(screen.getByText("AI generated")).toBeTruthy();
     expect(screen.getByText(/1\. School-wide momentum is improving/)).toBeTruthy();
-    expect(screen.getByText(/7\. Cross-subject trend divergence is widening/)).toBeTruthy();
+    expect(screen.getByText(/4\. Positive trend in classroom culture is consistent/)).toBeTruthy();
     expect(screen.getByText("Scale the current coaching protocol to all grade teams this month.")).toBeTruthy();
-    expect(screen.getByText("Teacher: Ms. Carter")).toBeTruthy();
+    expect(screen.queryByText(/Ms\. Carter/)).toBeNull();
+    expect(screen.queryByText(/Ms\. Rivera/)).toBeNull();
+    expect(screen.queryByText(/5\. Cross-subject trend divergence is widening/)).toBeNull();
   });
 
   it("falls back to bullets when items are not provided", () => {
@@ -82,8 +83,11 @@ describe("dashboard v2 components", () => {
 
     expect(screen.getByText(/1\. School trend is flat\./)).toBeTruthy();
     expect(
-      screen.getAllByText("Assign an owner and review this signal in the next leadership check-in.").length
+      screen.getAllByText(
+        "Decide the next principal-led action and review progress in the next leadership meeting."
+      ).length
     ).toBe(3);
+    expect(screen.getByText(/4\. Review where progress has slowed across departments\./)).toBeTruthy();
   });
 
   it("shows empty-state message when chart has no data", () => {
