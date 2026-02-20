@@ -17,7 +17,7 @@
     "test": "npm run test:server && npm run test:client",
     "test:server": "npm run test -w server -- --watchAll=false",
     "test:client": "npm run test -w client -- --run",
-    "test:e2e": "npx playwright test",
+    "test:e2e": "npx playwright test --config=e2e/playwright.config.ts",
     "lint": "npm run lint --workspaces",
     "db:migrate": "npm run db:migrate --workspace=server",
     "db:seed": "npm run db:seed --workspace=server",
