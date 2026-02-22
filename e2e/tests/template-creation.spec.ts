@@ -1,91 +1,108 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+
+const DEMO_EMAIL = 'principal@lincoln.edu';
+const DEMO_PASSWORD = 'password123';
 
 test.describe('Template Creation Flow', () => {
-  test.beforeEach(async ({ page }) => {
-    // Login first
+  test.describe.configure({ mode: 'serial' });
+
+  const loginAsPrincipal = async (page: Page) => {
     await page.goto('/login');
-    await page.getByLabel(/email/i).fill('admin@cognivio.demo');
-    await page.locator('#password').fill('demo123');
+    await page.getByLabel(/email/i).fill(DEMO_EMAIL);
+    await page.locator('#password').fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
-    await expect(page).toHaveURL(/.*dashboard/);
+    await expect(page).toHaveURL(/.*dashboard/, { timeout: 15000 });
+  };
+
+  const openFrameworkSelection = async (page: Page) => {
+    await page.getByRole('button', { name: /manage frameworks/i }).click();
+    await expect(page).toHaveURL(/.*frameworks/);
+    await expect(
+      page.getByRole('heading', { name: /select evaluation framework/i })
+    ).toBeVisible();
+  };
+
+  const selectDanielsonAndContinue = async (page: Page) => {
+    await page
+      .getByRole('heading', { name: /danielson framework for teaching/i })
+      .click();
+    await page.getByRole('button', { name: /^select framework$/i }).click();
+    await expect(page).toHaveURL(/.*frameworks\/elements\?templateId=/);
+    await expect(
+      page.getByRole('heading', { name: /customize evaluation columns/i })
+    ).toBeVisible();
+  };
+
+  test.beforeEach(async ({ page }) => {
+    await loginAsPrincipal(page);
   });
 
   test('navigates to framework selection', async ({ page }) => {
-    await page.getByRole('link', { name: /frameworks/i }).click();
-    await expect(page).toHaveURL(/.*frameworks/);
-    await expect(page.getByRole('heading', { name: /select.*framework/i })).toBeVisible();
+    await openFrameworkSelection(page);
   });
 
   test('displays available framework templates', async ({ page }) => {
     await page.goto('/frameworks');
-
-    // Should show Danielson and Marshall templates
-    await expect(page.getByText(/danielson/i)).toBeVisible();
-    await expect(page.getByText(/marshall/i)).toBeVisible();
+    await expect(
+      page.getByRole('heading', { name: /danielson framework for teaching/i })
+    ).toBeVisible();
+    await expect(page.getByRole('heading', { name: /marshall/i })).toBeVisible();
   });
 
   test('shows template preview on selection', async ({ page }) => {
     await page.goto('/frameworks');
 
-    // Click on Danielson template
-    await page.getByText(/danielson/i).click();
-
-    // Should show element count and preview
-    await expect(page.getByText(/22 elements/i)).toBeVisible();
+    await page.getByRole('button', { name: /^preview$/i }).first().click();
+    await expect(page.getByRole('button', { name: /select this framework/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /^close$/i })).toBeVisible();
+    await page.getByRole('button', { name: /^close$/i }).click();
   });
 
   test('navigates to element selection after choosing template', async ({ page }) => {
     await page.goto('/frameworks');
-
-    // Select Danielson
-    await page.getByText(/danielson/i).click();
-
-    // Click continue/next button
-    await page.getByRole('button', { name: /continue|next|select/i }).click();
-
-    // Should be on element selection page
-    await expect(page).toHaveURL(/.*elements/);
+    await selectDanielsonAndContinue(page);
   });
 
   test('displays elements organized by domain', async ({ page }) => {
     await page.goto('/frameworks');
-    await page.getByText(/danielson/i).click();
-    await page.getByRole('button', { name: /continue|next|select/i }).click();
-
-    // Should show domains
-    await expect(page.getByText(/planning.*preparation/i)).toBeVisible();
-    await expect(page.getByText(/classroom.*environment/i)).toBeVisible();
+    await selectDanielsonAndContinue(page);
+    await expect(page.getByRole('button', { name: /domain 1: planning and preparation/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /domain 2: the classroom environment/i })).toBeVisible();
   });
 
   test('allows assigning elements to metric columns', async ({ page }) => {
-    await page.goto('/frameworks/elements');
-
-    // Find an element and a column
-    const element = page.locator('[data-testid="element-item"]').first();
-    const column = page.locator('[data-testid="metric-column"]').first();
-
-    // Should be able to see both
-    await expect(element).toBeVisible();
-    await expect(column).toBeVisible();
+    await page.goto('/frameworks');
+    await selectDanielsonAndContinue(page);
+    await page.getByRole('button', { name: /domain 1: planning and preparation/i }).click();
+    await page.getByRole('button', { name: /1a: demonstrating knowledge of content and pedagogy/i }).click();
+    await page.getByRole('button', { name: /^1: planning$/i }).click();
+    await expect(page.getByText(/^1 element$/i).first()).toBeVisible();
   });
 
   test('saves template configuration', async ({ page }) => {
-    await page.goto('/frameworks/elements');
+    await page.goto('/frameworks');
+    await selectDanielsonAndContinue(page);
+    await page.getByRole('button', { name: /domain 1: planning and preparation/i }).click();
+    await page.getByRole('button', { name: /1a: demonstrating knowledge of content and pedagogy/i }).click();
+    await page.getByRole('button', { name: /^1: planning$/i }).click();
 
-    // Click save button
-    await page.getByRole('button', { name: /save/i }).click();
+    const enabledCheckboxes = page.getByRole('checkbox', { name: /enabled/i });
+    const enabledCount = await enabledCheckboxes.count();
+    for (let i = 1; i < enabledCount; i += 1) {
+      await enabledCheckboxes.nth(i).click();
+    }
 
-    // Should show success message
-    await expect(page.getByText(/saved|success/i)).toBeVisible();
+    await page.getByLabel(/template name/i).fill(`E2E Template ${Date.now()}`);
+    await page.getByRole('button', { name: /save template/i }).click();
+    await expect(page).toHaveURL(/.*roster\?templateId=/);
   });
 
-  test('creates custom template from scratch', async ({ page }) => {
+  test('allows editing the custom template name', async ({ page }) => {
     await page.goto('/frameworks');
-
-    // Click create custom
-    await page.getByRole('button', { name: /create.*custom|new.*template/i }).click();
-
-    // Should show template name input
-    await expect(page.getByLabel(/template.*name/i)).toBeVisible();
+    await selectDanielsonAndContinue(page);
+    const templateNameInput = page.getByLabel(/template name/i);
+    await expect(templateNameInput).toHaveValue('Custom Template');
+    await templateNameInput.fill('Quarterly Leadership Checkpoint');
+    await expect(templateNameInput).toHaveValue('Quarterly Leadership Checkpoint');
   });
 });

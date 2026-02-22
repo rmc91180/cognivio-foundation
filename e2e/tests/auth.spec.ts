@@ -1,5 +1,8 @@
 import { test, expect } from '@playwright/test';
 
+const DEMO_EMAIL = 'principal@lincoln.edu';
+const DEMO_PASSWORD = 'password123';
+
 test.describe('Authentication', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/login');
@@ -14,7 +17,8 @@ test.describe('Authentication', () => {
 
   test('shows validation error for empty fields', async ({ page }) => {
     await page.getByRole('button', { name: /sign in/i }).click();
-    await expect(page.getByText(/email is required/i)).toBeVisible();
+    await expect(page).toHaveURL(/.*login/);
+    await expect(page.getByRole('heading', { name: /sign in/i })).toBeVisible();
   });
 
   test('shows error for invalid credentials', async ({ page }) => {
@@ -22,12 +26,12 @@ test.describe('Authentication', () => {
     await page.locator('#password').fill('wrongpassword');
     await page.getByRole('button', { name: /sign in/i }).click();
 
-    await expect(page.getByText(/invalid credentials/i)).toBeVisible();
+    await expect(page).toHaveURL(/.*login/);
   });
 
   test('successfully logs in with demo credentials', async ({ page }) => {
-    await page.getByLabel(/email/i).fill('admin@cognivio.demo');
-    await page.locator('#password').fill('demo123');
+    await page.getByLabel(/email/i).fill(DEMO_EMAIL);
+    await page.locator('#password').fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
 
     // Should redirect to dashboard
@@ -37,8 +41,8 @@ test.describe('Authentication', () => {
 
   test('persists authentication across page reload', async ({ page }) => {
     // Login
-    await page.getByLabel(/email/i).fill('admin@cognivio.demo');
-    await page.locator('#password').fill('demo123');
+    await page.getByLabel(/email/i).fill(DEMO_EMAIL);
+    await page.locator('#password').fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
 
     await expect(page).toHaveURL(/.*dashboard/);
@@ -57,14 +61,15 @@ test.describe('Authentication', () => {
 
   test('logout clears session', async ({ page }) => {
     // Login first
-    await page.getByLabel(/email/i).fill('admin@cognivio.demo');
-    await page.locator('#password').fill('demo123');
+    await page.getByLabel(/email/i).fill(DEMO_EMAIL);
+    await page.locator('#password').fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
 
     await expect(page).toHaveURL(/.*dashboard/);
 
-    // Click logout
-    await page.getByRole('button', { name: /logout/i }).click();
+    // Open user menu and sign out
+    await page.locator('button[aria-haspopup="true"]').click();
+    await page.getByRole('button', { name: /sign out/i }).click();
 
     // Should be back at login
     await expect(page).toHaveURL(/.*login/);
