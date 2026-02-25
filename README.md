@@ -20,6 +20,9 @@ See the baseline lock and program plan:
 - [Week 3 Dashboard + Teachers UX](./docs/WEEK3_DASHBOARD_TEACHERS_UX.md)
 - [Week 4 Videos + School Setup UX](./docs/WEEK4_VIDEOS_SCHOOL_SETUP_UX.md)
 - [Week 5 Video Pipeline Foundation](./docs/WEEK5_VIDEO_PIPELINE_FOUNDATION.md)
+- [Week 6 Processing + Playback Reliability](./docs/WEEK6_PROCESSING_PLAYBACK_RELIABILITY.md)
+- [Week 7 MVP Integration Pass](./docs/WEEK7_MVP_INTEGRATION_PASS.md)
+- [Week 8 QA, Security, and Performance](./docs/WEEK8_QA_SECURITY_PERFORMANCE.md)
 
 ## Quick Start (MVP Stack)
 
