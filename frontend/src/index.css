@@ -1,6 +1,23 @@
+@import url("https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Source+Sans+3:wght@400;500;600;700&display=swap");
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+:root {
+  --cv-primary-rgb: 13 107 253;
+  --cv-accent-rgb: 0 166 120;
+  --cv-ink-rgb: 15 23 42;
+  --cv-surface-rgb: 248 250 252;
+  --cv-panel-rgb: 255 255 255;
+  --cv-border-rgb: 226 232 240;
+  --cv-focus-rgb: 0 166 120;
+  --cv-radius-sm: 10px;
+  --cv-radius-md: 14px;
+  --cv-radius-lg: 18px;
+  --cv-shadow-soft: 0 12px 28px -20px rgba(15, 23, 42, 0.3);
+  --cv-shadow-brand: 0 16px 36px -22px rgba(13, 107, 253, 0.45);
+}
 
 html,
 body,
@@ -8,7 +25,61 @@ body,
   height: 100%;
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 body {
-  @apply bg-slate-950 text-slate-50 antialiased;
+  @apply bg-slate-50 text-slate-900 antialiased font-body;
+  text-rendering: optimizeLegibility;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  @apply font-heading;
+}
+
+a {
+  @apply text-primary hover:text-primary/80 transition-colors;
+}
+
+::selection {
+  background-color: rgba(13, 107, 253, 0.2);
+  color: rgb(var(--cv-ink-rgb));
+}
+
+*:focus-visible {
+  outline: 2px solid rgba(var(--cv-focus-rgb), 0.75);
+  outline-offset: 2px;
+}
+
+input,
+select,
+textarea,
+button {
+  @apply transition-colors duration-150;
+}
+
+input,
+select,
+textarea {
+  border-radius: var(--cv-radius-sm);
+}
+
+@layer components {
+  .cv-panel {
+    @apply rounded-2xl border border-slate-200 bg-white;
+    box-shadow: var(--cv-shadow-soft);
+  }
+
+  .cv-brand-chip {
+    @apply inline-flex items-center justify-center rounded-xl text-white font-bold;
+    background: linear-gradient(135deg, rgb(13 107 253), rgb(0 166 120));
+    box-shadow: var(--cv-shadow-brand);
+  }
 }
 

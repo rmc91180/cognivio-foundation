@@ -1,31 +1,25 @@
 import React from "react";
-import { Link, NavLink } from "react-router-dom";
+import { NavLink } from "react-router-dom";
 import { Layers, LayoutDashboard, PlayCircle, Users } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
+import { BrandMark } from "@/components/BrandMark";
 
 export function LayoutShell({ children }) {
   const { user, logout } = useAuth();
 
   return (
     <div className="flex h-screen bg-slate-50 text-slate-900">
-      <aside className="w-64 border-r border-slate-200 bg-white">
-        <div className="flex h-16 items-center justify-between px-4 border-b border-slate-200">
-          <Link to="/" className="flex items-center gap-2">
-            <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-sm font-bold">
-              Co
-            </span>
-            <span className="font-heading text-lg font-semibold tracking-tight text-slate-900">
-              Cognivio
-            </span>
-          </Link>
+      <aside className="w-72 border-r border-slate-200 bg-white/95 backdrop-blur-sm shadow-panel flex flex-col">
+        <div className="flex h-16 items-center justify-between px-5 border-b border-slate-200">
+          <BrandMark to="/" />
         </div>
-        <nav className="mt-4 space-y-1 px-2 text-sm">
+        <nav className="mt-5 space-y-1.5 px-3 text-sm">
           <NavItem to="/dashboard" icon={LayoutDashboard} label="Dashboard" />
           <NavItem to="/teachers" icon={Users} label="Teachers" />
           <NavItem to="/videos" icon={PlayCircle} label="Videos & Assessments" />
           <NavItem to="/school-setup" icon={Layers} label="School Setup" />
         </nav>
-        <div className="mt-auto border-t border-slate-200 px-4 py-3 text-xs text-slate-500">
+        <div className="mt-auto border-t border-slate-200 px-4 py-3 text-xs text-slate-500 bg-slate-50/70">
           {user ? (
             <div className="flex items-center justify-between gap-2">
               <div className="truncate">
@@ -37,7 +31,7 @@ export function LayoutShell({ children }) {
               <button
                 type="button"
                 onClick={logout}
-                className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-100"
+                className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-white"
               >
                 Logout
               </button>
@@ -60,14 +54,14 @@ function NavItem({ to, icon: Icon, label }) {
       to={to}
       className={({ isActive }) =>
         [
-          "flex items-center gap-2 rounded-md px-3 py-2 transition-colors",
+          "flex items-center gap-2 rounded-xl px-3 py-2.5 transition-colors",
           isActive
-            ? "bg-slate-100 text-slate-900"
-            : "text-slate-600 hover:bg-slate-100 hover:text-slate-900",
+            ? "bg-primary/10 text-primary font-semibold border border-primary/20"
+            : "text-slate-600 hover:bg-slate-100 hover:text-slate-900 border border-transparent",
         ].join(" ")
       }
     >
-      <Icon className="h-4 w-4" />
+      <Icon className="h-4 w-4 stroke-[2.25]" />
       <span>{label}</span>
     </NavLink>
   );

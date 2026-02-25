@@ -23,7 +23,14 @@ root.render(
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <App />
-        <Toaster richColors position="top-right" />
+        <Toaster
+          richColors
+          position="top-right"
+          toastOptions={{
+            className: "font-body",
+            style: { borderRadius: 12 },
+          }}
+        />
       </BrowserRouter>
     </QueryClientProvider>
   </React.StrictMode>
