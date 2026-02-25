@@ -2,6 +2,7 @@ import React, { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { scheduleApi, teacherApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
+import { Badge, DataTable, EmptyState, PageHeader, Panel, TableShell } from "@/components/ui";
 
 export function MasterSchedulePage() {
   const { data: teachersRes } = useQuery({
@@ -38,34 +39,31 @@ export function MasterSchedulePage() {
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
-        <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h1 className="font-heading text-2xl font-semibold text-slate-900">
-              Master recording schedule
-            </h1>
-            <p className="mt-1 text-sm text-slate-600">
-              Upcoming class recordings across the school with one-click join.
-            </p>
-          </div>
-          <label className="flex items-center gap-2 text-xs text-slate-600">
-            <input
-              type="checkbox"
-              checked={showPast}
-              onChange={(e) => setShowPast(e.target.checked)}
-              className="h-3 w-3 rounded border-slate-300 bg-white text-primary"
-            />
-            Show past sessions
-          </label>
-        </div>
+        <PageHeader
+          title="Master recording schedule"
+          description="Upcoming class recordings across the school with one-click join."
+          actions={
+            <label className="flex items-center gap-2 text-xs text-slate-600">
+              <input
+                type="checkbox"
+                checked={showPast}
+                onChange={(e) => setShowPast(e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-slate-300 bg-white text-primary"
+              />
+              Show past sessions
+            </label>
+          }
+        />
 
-        <div className="rounded-xl border border-slate-200 bg-white p-5 text-sm">
+        <Panel className="text-sm">
           {upcoming.length === 0 ? (
-            <div className="text-xs text-slate-500">
-              No scheduled recordings yet.
-            </div>
+            <EmptyState
+              title="No scheduled recordings"
+              message="No recording sessions are on the calendar yet."
+            />
           ) : (
-            <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-              <table className="min-w-full text-left text-xs">
+            <TableShell>
+              <DataTable>
                 <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
                   <tr>
                     <th className="px-3 py-2">Time</th>
@@ -80,10 +78,10 @@ export function MasterSchedulePage() {
                     const teacher = teacherById[s.teacher_id];
                     const startStr = s.start.toLocaleString();
                     return (
-                      <tr
-                        key={s.id}
-                        className="border-t border-slate-200 hover:bg-slate-50"
-                      >
+                    <tr
+                      key={s.id}
+                      className="border-t border-slate-200 hover:bg-slate-50"
+                    >
                         <td className="px-3 py-2 text-[11px] text-slate-600">
                           {startStr}
                         </td>
@@ -99,7 +97,7 @@ export function MasterSchedulePage() {
                           {s.location || "—"}
                         </td>
                         <td className="px-3 py-2 text-[11px] text-slate-600">
-                          {s.recording_status}
+                          <Badge variant="neutral">{s.recording_status}</Badge>
                         </td>
                         <td className="px-3 py-2 text-[11px]">
                           {s.join_url ? (
@@ -119,10 +117,10 @@ export function MasterSchedulePage() {
                     );
                   })}
                 </tbody>
-              </table>
-            </div>
+              </DataTable>
+            </TableShell>
           )}
-        </div>
+        </Panel>
       </div>
     </LayoutShell>
   );

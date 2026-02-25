@@ -11,6 +11,7 @@ import { LayoutShell } from "@/components/LayoutShell";
 import { toast } from "sonner";
 import { Link } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
+import { Button, EmptyState, LoadingState, PageHeader, Panel } from "@/components/ui";
 
 export function TeachersPage() {
   const queryClient = useQueryClient();
@@ -301,28 +302,24 @@ export function TeachersPage() {
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
-        <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h1 className="font-heading text-2xl font-semibold text-slate-900">
-              Teachers
-            </h1>
-            <p className="mt-1 text-sm text-slate-600">
-              Manage the teachers in your evaluation roster.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setShowAddTeacher((prev) => !prev)}
-            className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
-          >
-            {showAddTeacher ? "Hide add teacher" : "Add teacher"}
-          </button>
-        </div>
+        <PageHeader
+          title="Teachers"
+          description="Manage the teachers in your evaluation roster."
+          actions={
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setShowAddTeacher((prev) => !prev)}
+            >
+              {showAddTeacher ? "Hide add teacher" : "Add teacher"}
+            </Button>
+          }
+        />
 
         <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
           {showAddTeacher && (
             <div className="md:col-span-4">
-              <div className="rounded-xl border border-slate-200 bg-white p-5">
+              <Panel>
                 <h2 className="mb-3 text-sm font-semibold text-slate-900">
                   Add teacher
                 </h2>
@@ -435,20 +432,16 @@ export function TeachersPage() {
                       </button>
                     </div>
                   </div>
-                  <button
-                    type="submit"
-                    disabled={createMutation.isPending}
-                    className="mt-2 inline-flex w-full items-center justify-center rounded-md bg-primary px-4 py-2 text-xs font-medium text-white shadow-lg shadow-primary/30 hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
+                  <Button type="submit" disabled={createMutation.isPending} fullWidth className="mt-2">
                     {createMutation.isPending ? "Saving..." : "Save teacher"}
-                  </button>
+                  </Button>
                 </form>
-              </div>
+              </Panel>
             </div>
           )}
 
           <div className={showAddTeacher ? "md:col-span-8" : "md:col-span-12"}>
-            <div className="rounded-xl border border-slate-200 bg-white p-5">
+            <Panel>
               <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <h2 className="text-sm font-semibold text-slate-900">Roster</h2>
                 <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -612,11 +605,12 @@ export function TeachersPage() {
               </div>
 
               {isLoading ? (
-                <div className="text-xs text-slate-500">Loading teachers...</div>
+                <LoadingState message="Loading teachers..." />
               ) : tableRows.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-slate-200 bg-white p-4 text-xs text-slate-500">
-                  No teachers yet. Add your first teacher using the form.
-                </div>
+                <EmptyState
+                  title="No teachers yet"
+                  message="Add your first teacher using the form."
+                />
               ) : (
                 <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
                   <table className="min-w-full text-left text-xs">
@@ -1024,7 +1018,7 @@ export function TeachersPage() {
                   </table>
                 </div>
               )}
-            </div>
+            </Panel>
           </div>
         </div>
       </div>

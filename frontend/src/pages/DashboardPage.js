@@ -24,6 +24,7 @@ import {
 import { toast } from "sonner";
 import { subDays, format } from "date-fns";
 import { useAuth } from "@/hooks/useAuth";
+import { Button, EmptyState, LoadingState, PageHeader } from "@/components/ui";
 
 export function DashboardPage() {
   const queryClient = useQueryClient();
@@ -425,40 +426,30 @@ export function DashboardPage() {
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
-        <header className="mb-6 flex items-center justify-between gap-4">
-          <div>
-            <h1 className="font-heading text-2xl font-semibold text-slate-900">
-              Teacher Performance Overview
-            </h1>
-            <p className="mt-1 text-sm text-slate-600">
-              Macro-level view of growth across priority focus areas and
-              departments.
-            </p>
-            {buildStamp && (
-              <div className="mt-2 text-[10px] text-slate-400">
-                Build: {buildStamp}
-              </div>
-            )}
-          </div>
-          <div className="relative flex items-center gap-2">
-            <button
-              type="button"
+        <PageHeader
+          title="Teacher Performance Overview"
+          description="Macro-level view of growth across priority focus areas and departments."
+          meta={buildStamp ? `Build: ${buildStamp}` : null}
+          actions={
+            <Button
+              variant="success"
+              size="sm"
               onClick={() => seedDemoMutation.mutate()}
               disabled={seedDemoMutation.isPending}
-              className="inline-flex items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-50 px-3 py-2 text-xs text-emerald-700 hover:bg-emerald-100 disabled:opacity-60"
             >
               {seedDemoMutation.isPending ? "Seeding data..." : "Seed demo data"}
-            </button>
-          </div>
-        </header>
+            </Button>
+          }
+        />
 
         {isLoading ? (
-          <div className="mt-8 text-sm text-slate-500">Loading roster...</div>
+          <LoadingState className="mt-8" message="Loading roster..." />
         ) : roster.length === 0 ? (
-          <div className="mt-8 rounded-lg border border-dashed border-slate-200 bg-white p-6 text-sm text-slate-500">
-            No teachers found yet. Start by adding teachers and uploading
-            classroom videos.
-          </div>
+          <EmptyState
+            className="mt-8"
+            title="No teachers found yet"
+            message="Start by adding teachers and uploading classroom videos."
+          />
         ) : (
           <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
             {isDashboardV2Enabled ? (

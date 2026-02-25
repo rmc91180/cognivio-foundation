@@ -5,6 +5,7 @@ import { LayoutShell } from "@/components/LayoutShell";
 import { toast } from "sonner";
 import { Link, useLocation } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
+import { Badge, Button, EmptyState, Field, Input, LoadingState, PageHeader, Panel, Select } from "@/components/ui";
 
 function VideoRow({ video, assessment, teacher, isAdmin }) {
   const queryClient = useQueryClient();
@@ -58,9 +59,9 @@ function VideoRow({ video, assessment, teacher, isAdmin }) {
         </div>
         <div className="flex items-center gap-2 text-[11px] text-slate-600">
           {assessment && (
-            <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-emerald-700">
+            <Badge variant="success">
               Score {assessment.overall_score?.toFixed(1) ?? "N/A"}
-            </span>
+            </Badge>
           )}
           <Link
             to={`/teachers/${video.teacher_id}`}
@@ -325,32 +326,23 @@ export function VideosPage() {
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
-        <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h1 className="font-heading text-2xl font-semibold text-slate-900">
-              Videos & Assessments
-            </h1>
-            <p className="mt-1 text-sm text-slate-600">
-              Review recordings, filter by focus, and take action on insights.
-            </p>
-          </div>
-        </div>
+        <PageHeader
+          title="Videos & Assessments"
+          description="Review recordings, filter by focus, and take action on insights."
+        />
 
         <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
           <div className="md:col-span-3 space-y-6">
-            <div className="rounded-xl border border-slate-200 bg-white p-5">
+            <Panel>
               <h2 className="mb-3 text-sm font-semibold text-slate-900">
                 Filters
               </h2>
               <div className="space-y-3 text-xs">
-                <div>
-                  <label className="block text-[11px] font-medium text-slate-600">
-                    Teacher
-                  </label>
-                  <select
-                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                <Field label="Teacher">
+                  <Select
                     value={selectedTeacher}
                     onChange={(e) => setSelectedTeacher(e.target.value)}
+                    size="sm"
                   >
                     <option value="">All teachers</option>
                     {teachers.map((t) => (
@@ -358,16 +350,13 @@ export function VideosPage() {
                         {t.name} • {t.subject}
                       </option>
                     ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-[11px] font-medium text-slate-600">
-                    Subject
-                  </label>
-                  <select
-                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                  </Select>
+                </Field>
+                <Field label="Subject">
+                  <Select
                     value={subjectFilter}
                     onChange={(e) => setSubjectFilter(e.target.value)}
+                    size="sm"
                   >
                     <option value="all">All subjects</option>
                     {subjectOptions.map((subject) => (
@@ -375,64 +364,52 @@ export function VideosPage() {
                         {subject}
                       </option>
                     ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-[11px] font-medium text-slate-600">
-                    Status
-                  </label>
-                  <select
-                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                  </Select>
+                </Field>
+                <Field label="Status">
+                  <Select
                     value={statusFilter}
                     onChange={(e) => setStatusFilter(e.target.value)}
+                    size="sm"
                   >
                     <option value="all">All</option>
                     <option value="processing">Processing</option>
                     <option value="completed">Completed</option>
                     <option value="failed">Failed</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-[11px] font-medium text-slate-600">
-                    Time range
-                  </label>
-                  <select
-                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                  </Select>
+                </Field>
+                <Field label="Time range">
+                  <Select
                     value={timeRange}
                     onChange={(e) => setTimeRange(e.target.value)}
+                    size="sm"
                   >
                     <option value="30">Last 30 days</option>
                     <option value="60">Last 60 days</option>
                     <option value="90">Last 90 days</option>
                     <option value="365">Last 12 months</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-[11px] font-medium text-slate-600">
-                    Search
-                  </label>
-                  <input
+                  </Select>
+                </Field>
+                <Field label="Search">
+                  <Input
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                     placeholder="Search by filename or subject"
-                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                    size="sm"
                   />
-                </div>
+                </Field>
               </div>
-            </div>
-            <div className="rounded-xl border border-slate-200 bg-white p-5">
+            </Panel>
+            <Panel>
               <h2 className="mb-3 text-sm font-semibold text-slate-900">
                 Upload recording
               </h2>
               <form onSubmit={onSubmit} className="space-y-3 text-sm">
-                <div>
-                  <label className="block text-xs font-medium text-slate-600">
-                    Teacher
-                  </label>
-                  <select
-                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                <Field label="Teacher">
+                  <Select
                     value={selectedTeacher}
                     onChange={(e) => setSelectedTeacher(e.target.value)}
+                    size="sm"
                   >
                     <option value="">Select a teacher</option>
                     {teachers.map((t) => (
@@ -440,34 +417,27 @@ export function VideosPage() {
                         {t.name} • {t.subject}
                       </option>
                     ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-600">
-                    Video file
-                  </label>
+                  </Select>
+                </Field>
+                <Field label="Video file">
                   <input
                     type="file"
                     accept="video/*"
                     onChange={(e) => setFile(e.target.files?.[0] || null)}
                     className="mt-1 w-full text-xs text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
                   />
-                </div>
-                <button
-                  type="submit"
-                  disabled={uploadMutation.isPending}
-                  className="mt-2 inline-flex w-full items-center justify-center rounded-md bg-primary px-4 py-2 text-xs font-medium text-white shadow-lg shadow-primary/30 hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
-                >
+                </Field>
+                <Button type="submit" disabled={uploadMutation.isPending} fullWidth className="mt-2">
                   {uploadMutation.isPending
                     ? "Uploading..."
                     : "Upload & analyze"}
-                </button>
+                </Button>
               </form>
-            </div>
+            </Panel>
           </div>
 
           <div className="space-y-6 md:col-span-9">
-            <div className="rounded-xl border border-slate-200 bg-white p-5">
+            <Panel>
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-900">
@@ -482,11 +452,12 @@ export function VideosPage() {
                 </div>
               </div>
               {loadingVideos || loadingAssessments ? (
-                <div className="text-xs text-slate-500">Loading recordings...</div>
+                <LoadingState message="Loading recordings..." />
               ) : filteredVideos.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-slate-200 bg-white p-4 text-xs text-slate-500">
-                  No recordings match the current filters.
-                </div>
+                <EmptyState
+                  title="No matching recordings"
+                  message="No recordings match the current filters."
+                />
               ) : (
                 <div className="space-y-3">
                   {filteredVideos.map((v) => {
@@ -504,7 +475,7 @@ export function VideosPage() {
                   })}
                 </div>
               )}
-            </div>
+            </Panel>
           </div>
         </div>
       </div>

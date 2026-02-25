@@ -16,6 +16,7 @@ See the baseline lock and program plan:
 - [Week 0 Baseline](./docs/WEEK0_BASELINE.md)
 - [MVP Delivery Plan](./docs/MVP_DELIVERY_PLAN.md)
 - [Brand Identity v1](./docs/BRAND_IDENTITY_V1.md)
+- [Week 2 Design System](./docs/WEEK2_DESIGN_SYSTEM.md)
 
 ## Quick Start (MVP Stack)
 

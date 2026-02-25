@@ -81,5 +81,117 @@ textarea {
     background: linear-gradient(135deg, rgb(13 107 253), rgb(0 166 120));
     box-shadow: var(--cv-shadow-brand);
   }
+
+  .cv-btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-brand border text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .cv-btn-primary {
+    @apply border-primary bg-primary text-white hover:bg-primary/90;
+  }
+
+  .cv-btn-secondary {
+    @apply border-slate-200 bg-white text-slate-700 hover:bg-slate-100;
+  }
+
+  .cv-btn-ghost {
+    @apply border-transparent bg-transparent text-slate-600 hover:bg-slate-100 hover:text-slate-900;
+  }
+
+  .cv-btn-danger {
+    @apply border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-100;
+  }
+
+  .cv-btn-success {
+    @apply border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100;
+  }
+
+  .cv-field {
+    @apply flex flex-col gap-1;
+  }
+
+  .cv-label {
+    @apply text-xs font-medium text-slate-600;
+  }
+
+  .cv-help {
+    @apply text-[11px] text-slate-500;
+  }
+
+  .cv-input,
+  .cv-select,
+  .cv-textarea {
+    @apply w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none ring-primary/40 focus:ring;
+  }
+
+  .cv-input-sm,
+  .cv-select-sm,
+  .cv-textarea-sm {
+    @apply px-2.5 py-1.5 text-xs;
+  }
+
+  .cv-textarea {
+    @apply resize-y;
+  }
+
+  .cv-state {
+    @apply rounded-2xl border border-dashed p-5 text-sm;
+  }
+
+  .cv-state-neutral {
+    @apply border-slate-200 bg-white text-slate-600;
+  }
+
+  .cv-state-success {
+    @apply border-emerald-200 bg-emerald-50 text-emerald-800;
+  }
+
+  .cv-state-error {
+    @apply border-rose-200 bg-rose-50 text-rose-800;
+  }
+
+  .cv-badge {
+    @apply inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium;
+  }
+
+  .cv-badge-neutral {
+    @apply bg-slate-100 text-slate-700;
+  }
+
+  .cv-badge-success {
+    @apply bg-emerald-100 text-emerald-700;
+  }
+
+  .cv-badge-warning {
+    @apply bg-amber-100 text-amber-700;
+  }
+
+  .cv-badge-danger {
+    @apply bg-rose-100 text-rose-700;
+  }
+
+  .cv-table-wrap {
+    @apply overflow-hidden rounded-xl border border-slate-200 bg-white;
+  }
+
+  .cv-table {
+    @apply min-w-full text-left text-xs;
+  }
+
+  .cv-table thead {
+    @apply bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500;
+  }
+
+  .cv-table th {
+    @apply px-3 py-2 font-semibold;
+  }
+
+  .cv-table td {
+    @apply px-3 py-2 align-top text-slate-700;
+  }
+
+  .cv-table tbody tr {
+    @apply border-t border-slate-200;
+  }
 }
 

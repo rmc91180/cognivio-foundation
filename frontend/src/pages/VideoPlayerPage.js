@@ -5,6 +5,7 @@ import { assessmentApi, observationApi, videoApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { VideoTimeline } from "@/components/VideoTimeline";
 import { toast } from "sonner";
+import { Badge, Button, EmptyState, Field, PageHeader, Panel, Textarea } from "@/components/ui";
 
 export function VideoPlayerPage() {
   const { videoId } = useParams();
@@ -193,20 +194,18 @@ export function VideoPlayerPage() {
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
-        <h1 className="mb-4 font-heading text-2xl font-semibold text-slate-900">
-          Lesson recording
-        </h1>
+        <PageHeader title="Lesson recording" compact className="mb-4" />
         <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-slate-600">
-          <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] text-slate-600">
+          <Badge variant="neutral">
             Status: {videoStatus || "unknown"}
-          </span>
+          </Badge>
           <span className="text-[11px] text-slate-400">
             {wsConnected ? "Live updates connected" : "Live updates offline"}
           </span>
         </div>
         <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
           <section className="md:col-span-7 space-y-3">
-            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <Panel padded={false} className="overflow-hidden">
               {videoUrl ? (
                 <>
                   <video
@@ -234,11 +233,7 @@ export function VideoPlayerPage() {
                         Current time: {Math.floor(currentTime / 60)}:
                         {String(currentTime % 60).padStart(2, "0")}
                       </span>
-                      <button
-                        type="button"
-                        onClick={copyTimestampLink}
-                        className="inline-flex items-center gap-1.5 rounded bg-slate-200 px-2 py-1 text-[11px] text-slate-700 hover:bg-slate-300"
-                      >
+                      <Button variant="secondary" size="sm" onClick={copyTimestampLink}>
                         <svg
                           className="h-3.5 w-3.5"
                           fill="none"
@@ -253,58 +248,50 @@ export function VideoPlayerPage() {
                           />
                         </svg>
                         Copy link at timestamp
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 </>
               ) : (
-                <div className="p-6 text-sm text-slate-500">
-                  Video file unavailable.
-                </div>
+                <EmptyState
+                  className="m-4"
+                  title="Video file unavailable"
+                  message="This recording cannot be loaded right now."
+                />
               )}
-            </div>
+            </Panel>
 
-            <div className="rounded-xl border border-slate-200 bg-white p-4 text-xs text-slate-700">
+            <Panel className="p-4 text-xs text-slate-700">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 Summary & action items
               </h2>
               <div className="mb-2 text-xs text-slate-600">
                 {assessmentRes?.summary}
               </div>
-              <div className="mb-2">
-                <label className="mb-1 block text-[11px] font-medium text-slate-600">
-                  Additional summary notes
-                </label>
-                <textarea
+              <Field label="Additional summary notes" className="mb-2">
+                <Textarea
                   rows={2}
                   value={summaryNotes}
                   onChange={(e) => setSummaryNotes(e.target.value)}
-                  className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                  size="sm"
                 />
-              </div>
-              <div className="mb-3">
-                <label className="mb-1 block text-[11px] font-medium text-slate-600">
-                  Action items for next lesson
-                </label>
-                <textarea
+              </Field>
+              <Field label="Action items for next lesson" className="mb-3">
+                <Textarea
                   rows={2}
                   value={actionItems}
                   onChange={(e) => setActionItems(e.target.value)}
-                  className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                  size="sm"
                 />
-              </div>
-              <button
-                type="button"
-                onClick={handleGenerateReport}
-                className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90"
-              >
+              </Field>
+              <Button size="sm" onClick={handleGenerateReport}>
                 Generate report
-              </button>
-            </div>
+              </Button>
+            </Panel>
           </section>
 
           <section className="md:col-span-5 space-y-3">
-            <div className="rounded-xl border border-slate-200 bg-white p-4 text-xs">
+            <Panel className="p-4 text-xs">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 Timestamped observations
               </h2>
@@ -332,9 +319,9 @@ export function VideoPlayerPage() {
                   ))}
                 </ul>
               )}
-            </div>
+            </Panel>
 
-            <div className="rounded-xl border border-slate-200 bg-white p-4 text-xs">
+            <Panel className="p-4 text-xs">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 Linked AI insights
               </h2>
@@ -364,7 +351,7 @@ export function VideoPlayerPage() {
                   No AI insights associated with this video yet.
                 </div>
               )}
-            </div>
+            </Panel>
           </section>
         </div>
       </div>

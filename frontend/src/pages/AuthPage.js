@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { BrandMark } from "@/components/BrandMark";
+import { Button, Field, Input, Panel } from "@/components/ui";
 
 export function AuthPage() {
   const navigate = useNavigate();
@@ -34,7 +35,7 @@ export function AuthPage() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-8">
-      <div className="w-full max-w-md cv-panel p-8">
+      <Panel as="div" className="w-full max-w-md p-8">
         <div className="mb-6 text-center">
           <div className="mb-2 inline-flex">
             <BrandMark compact />
@@ -86,61 +87,45 @@ export function AuthPage() {
 
         <form onSubmit={onSubmit} className="space-y-4">
           {mode === "register" && !isDemo && (
-            <div>
-              <label className="block text-xs font-medium text-slate-600">
-                Name
-              </label>
-              <input
+            <Field label="Name">
+              <Input
                 type="text"
-                className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none ring-primary/35 focus:ring"
                 value={form.name}
                 onChange={(e) =>
                   setForm((f) => ({ ...f, name: e.target.value }))
                 }
               />
-            </div>
+            </Field>
           )}
-          <div>
-            <label className="block text-xs font-medium text-slate-600">
-              Email
-            </label>
-            <input
+          <Field label="Email">
+            <Input
               type="email"
               required
-              className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none ring-primary/35 focus:ring"
               value={form.email}
               onChange={(e) =>
                 setForm((f) => ({ ...f, email: e.target.value }))
               }
             />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-600">
-              Password
-            </label>
-            <input
+          </Field>
+          <Field label="Password">
+            <Input
               type="password"
               required
-              className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none ring-primary/35 focus:ring"
               value={form.password}
               onChange={(e) =>
                 setForm((f) => ({ ...f, password: e.target.value }))
               }
             />
-          </div>
-          <button
-            type="submit"
-            disabled={busy}
-            className="mt-2 inline-flex w-full items-center justify-center rounded-xl bg-primary px-4 py-2 text-sm font-medium text-white shadow-brand hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
-          >
+          </Field>
+          <Button type="submit" disabled={busy} fullWidth className="mt-2 shadow-brand">
             {busy
               ? "Signing in..."
               : mode === "login"
               ? "Sign in"
               : "Create account"}
-          </button>
+          </Button>
         </form>
-      </div>
+      </Panel>
     </div>
   );
 }
