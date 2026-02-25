@@ -4,6 +4,7 @@ import { LayoutShell } from "@/components/LayoutShell";
 import { frameworkApi, recordingPolicyApi, teacherApi } from "@/lib/api";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
+import { Link } from "react-router-dom";
 import {
   Button,
   EmptyState,
@@ -44,7 +45,7 @@ export function FrameworksPage() {
     enabled: Boolean(frameworkType),
   });
 
-  const { data: customDomainsRes, isLoading: customDomainsLoading } = useQuery({
+  const { data: customDomainsRes, isLoading: customDomainsLoading, isError: customDomainsError } = useQuery({
     queryKey: ["custom-domains"],
     queryFn: () => frameworkApi.listCustomDomains().then((res) => res.data),
   });
@@ -239,6 +240,22 @@ export function FrameworksPage() {
           description="Configure school-level frameworks and recording compliance settings."
         />
 
+        <Panel className="mb-6 bg-sky-50/60">
+          <h2 className="text-sm font-semibold text-slate-900">Curriculum ownership</h2>
+          <p className="mt-1 text-xs text-slate-600">
+            Admins upload school-wide curriculum in School Setup. Teachers upload class curriculum,
+            lesson plans, and syllabi on their own profile pages.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Link
+              to="/teachers"
+              className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
+            >
+              Open teachers
+            </Link>
+          </div>
+        </Panel>
+
         {isAdmin && (
           <Panel className="mb-6">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
@@ -429,6 +446,8 @@ export function FrameworksPage() {
                   </div>
                   {customDomainsLoading ? (
                     <LoadingState className="mt-4" message="Loading custom domains..." />
+                  ) : customDomainsError ? (
+                    <ErrorState className="mt-4" message="Unable to load custom domains right now." />
                   ) : customDomains.length > 0 ? (
                     <div className="mt-4 space-y-2">
                       {customDomains.map((domain) => (

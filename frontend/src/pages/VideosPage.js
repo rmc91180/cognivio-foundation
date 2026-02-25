@@ -5,7 +5,18 @@ import { LayoutShell } from "@/components/LayoutShell";
 import { toast } from "sonner";
 import { Link, useLocation } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
-import { Badge, Button, EmptyState, Field, Input, LoadingState, PageHeader, Panel, Select } from "@/components/ui";
+import {
+  Badge,
+  Button,
+  EmptyState,
+  ErrorState,
+  Field,
+  Input,
+  LoadingState,
+  PageHeader,
+  Panel,
+  Select,
+} from "@/components/ui";
 
 function VideoRow({ video, assessment, teacher, isAdmin }) {
   const queryClient = useQueryClient();
@@ -45,6 +56,14 @@ function VideoRow({ video, assessment, teacher, isAdmin }) {
   });
 
   const elementOptions = assessment?.element_scores || [];
+  const statusVariant =
+    video.status === "completed"
+      ? "success"
+      : video.status === "failed" || video.status === "error"
+        ? "danger"
+        : video.status === "processing" || video.status === "queued"
+          ? "warning"
+          : "neutral";
 
   return (
     <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
@@ -54,10 +73,11 @@ function VideoRow({ video, assessment, teacher, isAdmin }) {
             {teacher?.name || "Teacher"} • {video.subject || "Subject"}
           </div>
           <div className="text-[11px] text-slate-500">
-            {video.recorded_at || video.upload_date} • {video.status}
+            {video.recorded_at || video.upload_date}
           </div>
         </div>
         <div className="flex items-center gap-2 text-[11px] text-slate-600">
+          <Badge variant={statusVariant}>{video.status || "unknown"}</Badge>
           {assessment && (
             <Badge variant="success">
               Score {assessment.overall_score?.toFixed(1) ?? "N/A"}
@@ -235,12 +255,19 @@ export function VideosPage() {
     }
   }, [location.search]);
 
-  const { data: teachers = [] } = useQuery({
+  const {
+    data: teachers = [],
+    isError: teachersError,
+  } = useQuery({
     queryKey: ["teachers"],
     queryFn: () => teacherApi.list().then((res) => res.data),
   });
 
-  const { data: videos = [], isLoading: loadingVideos } = useQuery({
+  const {
+    data: videos = [],
+    isLoading: loadingVideos,
+    isError: videosError,
+  } = useQuery({
     queryKey: ["videos", { teacherId: selectedTeacher || undefined }],
     queryFn: () =>
       videoApi
@@ -248,7 +275,11 @@ export function VideosPage() {
         .then((res) => res.data),
   });
 
-  const { data: assessments = [], isLoading: loadingAssessments } = useQuery({
+  const {
+    data: assessments = [],
+    isLoading: loadingAssessments,
+    isError: assessmentsError,
+  } = useQuery({
     queryKey: ["assessments", { teacherId: selectedTeacher || undefined }],
     queryFn: () =>
       assessmentApi
@@ -302,7 +333,7 @@ export function VideosPage() {
       return videoApi.upload(formData);
     },
     onSuccess: () => {
-      toast.success("Video uploaded, analysis started");
+      toast.success("Video uploaded and queued for analysis");
       queryClient.invalidateQueries({ queryKey: ["videos"] });
       queryClient.invalidateQueries({ queryKey: ["assessments"] });
       setFile(null);
@@ -322,6 +353,7 @@ export function VideosPage() {
     }
     uploadMutation.mutate({ file, teacherId: selectedTeacher });
   };
+  const hasLoadError = teachersError || videosError || assessmentsError;
 
   return (
     <LayoutShell>
@@ -373,6 +405,7 @@ export function VideosPage() {
                     size="sm"
                   >
                     <option value="all">All</option>
+                    <option value="queued">Queued</option>
                     <option value="processing">Processing</option>
                     <option value="completed">Completed</option>
                     <option value="failed">Failed</option>
@@ -404,6 +437,9 @@ export function VideosPage() {
               <h2 className="mb-3 text-sm font-semibold text-slate-900">
                 Upload recording
               </h2>
+              <p className="mb-3 text-[11px] text-slate-500">
+                Accepted: MP4, MOV, AVI, MKV, WEBM. Large files may take several minutes to process.
+              </p>
               <form onSubmit={onSubmit} className="space-y-3 text-sm">
                 <Field label="Teacher">
                   <Select
@@ -453,6 +489,11 @@ export function VideosPage() {
               </div>
               {loadingVideos || loadingAssessments ? (
                 <LoadingState message="Loading recordings..." />
+              ) : hasLoadError ? (
+                <ErrorState
+                  title="Unable to load recordings"
+                  message="There was a problem loading teachers, recordings, or assessments. Refresh and try again."
+                />
               ) : filteredVideos.length === 0 ? (
                 <EmptyState
                   title="No matching recordings"
