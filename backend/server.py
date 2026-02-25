@@ -5907,13 +5907,37 @@ app.add_middleware(
 
 
 async def _ensure_database_indexes() -> None:
-    await db.videos.create_index([("uploaded_by", 1), ("upload_date", -1)])
-    await db.videos.create_index([("teacher_id", 1), ("upload_date", -1)])
-    await db.videos.create_index([("status", 1), ("upload_date", -1)])
-    await db.assessments.create_index([("teacher_id", 1), ("analyzed_at", -1)])
-    await db.observations.create_index([("video_id", 1), ("created_at", -1)])
-    await db.video_processing_jobs.create_index([("video_id", 1)], unique=True)
-    await db.video_processing_jobs.create_index([("status", 1), ("updated_at", -1)])
+    async def _safe_create_index(collection, keys, **kwargs):
+        try:
+            await collection.create_index(keys, **kwargs)
+        except Exception as exc:
+            message = str(exc)
+            code = getattr(exc, "code", None)
+            is_out_of_disk = (
+                code == 14031
+                or "OutOfDiskSpace" in message
+                or "available disk space" in message
+            )
+            if is_out_of_disk:
+                logger.error(
+                    "Skipping index creation for %s due to Mongo disk constraints: %s",
+                    collection.name,
+                    message,
+                )
+            else:
+                logger.warning(
+                    "Skipping index creation for %s due to startup index error: %s",
+                    collection.name,
+                    message,
+                )
+
+    await _safe_create_index(db.videos, [("uploaded_by", 1), ("upload_date", -1)])
+    await _safe_create_index(db.videos, [("teacher_id", 1), ("upload_date", -1)])
+    await _safe_create_index(db.videos, [("status", 1), ("upload_date", -1)])
+    await _safe_create_index(db.assessments, [("teacher_id", 1), ("analyzed_at", -1)])
+    await _safe_create_index(db.observations, [("video_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.video_processing_jobs, [("video_id", 1)], unique=True)
+    await _safe_create_index(db.video_processing_jobs, [("status", 1), ("updated_at", -1)])
 
 
 async def _stop_video_workers() -> None:
