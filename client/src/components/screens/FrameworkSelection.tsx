@@ -1,23 +1,51 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Check, Eye, FileText, Layers, Sparkles, ArrowLeft } from 'lucide-react';
-import { Card } from '@/components/ui/Card';
+import {
+  Check,
+  Eye,
+  FileText,
+  Layers,
+  Sparkles,
+  ArrowLeft,
+  Upload,
+  Trash2,
+  ShieldCheck,
+  Lock,
+} from 'lucide-react';
+import { formatDistanceToNow } from 'date-fns';
+import { Card, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useTemplateStore } from '@/store/templateStore';
 import type { RubricTemplate, Domain } from '@/types';
 import { rubricsApi } from '@/services/api';
+import { useAuthStore } from '@/store/authStore';
+import type { CurriculumDocument, RecordingCompliancePolicy } from '@/utils/curriculum';
+import { curriculumStorage, recordingComplianceStorage } from '@/utils/curriculum';
 
 export const FrameworkSelection: React.FC = () => {
   const navigate = useNavigate();
+  const { user } = useAuthStore();
   const { templates, fetchTemplates, selectTemplate, isLoading } = useTemplateStore();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [setAsDefault, setSetAsDefault] = useState(true);
   const [previewTemplate, setPreviewTemplate] = useState<RubricTemplate | null>(null);
   const [previewDomains, setPreviewDomains] = useState<Domain[]>([]);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [schoolDocuments, setSchoolDocuments] = useState<CurriculumDocument[]>([]);
+  const [policy, setPolicy] = useState<RecordingCompliancePolicy>(
+    recordingComplianceStorage.getPolicy()
+  );
+  const [policySaved, setPolicySaved] = useState(false);
+
+  const isSchoolAdmin =
+    user?.activeRole === 'admin' ||
+    user?.activeRole === 'principal' ||
+    user?.activeRole === 'department_head';
 
   useEffect(() => {
     fetchTemplates();
+    setSchoolDocuments(curriculumStorage.getSchoolDocuments());
+    setPolicy(recordingComplianceStorage.getPolicy());
   }, [fetchTemplates]);
 
   const handlePreview = async (template: RubricTemplate) => {
@@ -65,6 +93,33 @@ export const FrameworkSelection: React.FC = () => {
     }
   };
 
+  const formatSize = (bytes: number) => {
+    if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  };
+
+  const handleSchoolCurriculumUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    if (files.length === 0) return;
+
+    let updated = curriculumStorage.getSchoolDocuments();
+    files.forEach((file) => {
+      updated = curriculumStorage.addSchoolDocument(file);
+    });
+    setSchoolDocuments(updated);
+    event.target.value = '';
+  };
+
+  const handleRemoveSchoolDocument = (documentId: string) => {
+    setSchoolDocuments(curriculumStorage.removeSchoolDocument(documentId));
+  };
+
+  const handleSavePolicy = () => {
+    recordingComplianceStorage.savePolicy(policy);
+    setPolicySaved(true);
+    setTimeout(() => setPolicySaved(false), 2000);
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -78,10 +133,10 @@ export const FrameworkSelection: React.FC = () => {
         </button>
         <div>
           <h1 className="font-heading text-2xl font-bold text-gray-900">
-            Select Evaluation Framework
+            School Setup
           </h1>
           <p className="text-gray-600 mt-1">
-            Choose a rubric framework to evaluate teacher performance
+            Select an evaluation framework, maintain school curriculum, and manage recording policy.
           </p>
         </div>
       </div>
@@ -156,9 +211,173 @@ export const FrameworkSelection: React.FC = () => {
           disabled={!selectedId || isLoading}
           isLoading={isLoading}
         >
-          Select Framework
+          Select School Framework
         </Button>
       </div>
+
+      <Card>
+        <CardTitle>
+          <div className="inline-flex items-center gap-2">
+            <ShieldCheck className="w-5 h-5 text-primary-600" />
+            Recording Compliance Policy
+          </div>
+        </CardTitle>
+        <p className="text-sm text-gray-600 mt-1">
+          Policy ownership moved here from video upload so recording expectations are set centrally.
+        </p>
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <label className="flex items-start gap-3 p-3 border border-gray-200 rounded-lg cursor-pointer">
+            <input
+              type="checkbox"
+              checked={policy.requireGuardianConsent}
+              onChange={(e) =>
+                setPolicy({ ...policy, requireGuardianConsent: e.target.checked })
+              }
+              className="mt-1"
+            />
+            <div>
+              <p className="text-sm font-medium text-gray-900">Require guardian consent</p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Student guardians must approve classroom recording in advance.
+              </p>
+            </div>
+          </label>
+
+          <label className="flex items-start gap-3 p-3 border border-gray-200 rounded-lg cursor-pointer">
+            <input
+              type="checkbox"
+              checked={policy.requireTeacherConsent}
+              onChange={(e) =>
+                setPolicy({ ...policy, requireTeacherConsent: e.target.checked })
+              }
+              className="mt-1"
+            />
+            <div>
+              <p className="text-sm font-medium text-gray-900">Require teacher consent</p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Recordings are only processed with teacher sign-off.
+              </p>
+            </div>
+          </label>
+
+          <label className="flex items-start gap-3 p-3 border border-gray-200 rounded-lg cursor-pointer">
+            <input
+              type="checkbox"
+              checked={policy.defaultToAnonymizedVideo}
+              onChange={(e) =>
+                setPolicy({ ...policy, defaultToAnonymizedVideo: e.target.checked })
+              }
+              className="mt-1"
+            />
+            <div>
+              <p className="text-sm font-medium text-gray-900">Default to anonymized uploads</p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Student-identifying details are masked before AI review.
+              </p>
+            </div>
+          </label>
+
+          <div className="p-3 border border-gray-200 rounded-lg">
+            <label className="block text-sm font-medium text-gray-900 mb-1">
+              Recording retention window
+            </label>
+            <select
+              value={policy.retentionWindowDays}
+              onChange={(e) =>
+                setPolicy({ ...policy, retentionWindowDays: Number(e.target.value) })
+              }
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+            >
+              <option value={30}>30 days</option>
+              <option value={90}>90 days</option>
+              <option value={180}>180 days</option>
+              <option value={365}>365 days</option>
+            </select>
+          </div>
+        </div>
+        <div className="mt-4 flex items-center gap-3">
+          <Button variant="secondary" onClick={handleSavePolicy}>
+            Save Recording Policy
+          </Button>
+          {policySaved && (
+            <span className="text-sm text-green-700">Recording compliance policy saved.</span>
+          )}
+        </div>
+      </Card>
+
+      {isSchoolAdmin ? (
+        <Card>
+          <CardTitle>School Curriculum Upload</CardTitle>
+          <p className="text-sm text-gray-600 mt-1">
+            Admin role detected. Upload curriculum guides used across the school.
+          </p>
+
+          <div className="mt-4">
+            <label className="inline-flex">
+              <input
+                type="file"
+                className="hidden"
+                multiple
+                accept=".pdf,.doc,.docx,.ppt,.pptx,.txt"
+                onChange={handleSchoolCurriculumUpload}
+              />
+              <span className="inline-flex items-center px-4 py-2 rounded-lg bg-primary-600 text-white text-sm font-medium hover:bg-primary-700 cursor-pointer">
+                <Upload className="w-4 h-4 mr-2" />
+                Upload School Curriculum
+              </span>
+            </label>
+          </div>
+
+          {schoolDocuments.length === 0 ? (
+            <p className="text-sm text-gray-500 mt-4">No school curriculum files uploaded yet.</p>
+          ) : (
+            <div className="mt-4 space-y-2">
+              {schoolDocuments.map((document) => (
+                <div
+                  key={document.id}
+                  className="flex items-center justify-between gap-3 p-3 border border-gray-200 rounded-lg"
+                >
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-gray-900 truncate">{document.name}</p>
+                    <p className="text-xs text-gray-500">
+                      {formatSize(document.sizeBytes)} • Uploaded{' '}
+                      {formatDistanceToNow(new Date(document.uploadedAt), { addSuffix: true })}
+                    </p>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    leftIcon={<Trash2 className="w-4 h-4" />}
+                    onClick={() => handleRemoveSchoolDocument(document.id)}
+                  >
+                    Remove
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      ) : (
+        <Card className="bg-gray-50 border-gray-200">
+          <div className="flex gap-3">
+            <Lock className="w-4 h-4 text-gray-500 mt-1" />
+            <div>
+              <p className="text-sm font-medium text-gray-900">School curriculum upload is admin-managed</p>
+              <p className="text-sm text-gray-600 mt-1">
+                Teachers upload class curriculum from their own profile pages.
+              </p>
+              <Button
+                size="sm"
+                className="mt-3"
+                variant="secondary"
+                onClick={() => navigate('/profile')}
+              >
+                Go to My Profile
+              </Button>
+            </div>
+          </div>
+        </Card>
+      )}
 
       {/* Preview Modal */}
       {previewTemplate && (

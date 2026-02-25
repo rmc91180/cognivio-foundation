@@ -11,7 +11,6 @@ import {
 } from 'lucide-react';
 import { Card, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
-import { ColorChip } from '@/components/ui/ColorChip';
 import { dashboardApi } from '@/services/api';
 import type { DashboardSummary } from '@/types';
 import { formatDistanceToNow } from 'date-fns';
@@ -37,6 +36,15 @@ export const HomePage: React.FC = () => {
     fetchSummary();
   }, []);
 
+  const handleManageRubric = () => {
+    if (summary?.activeRubricId) {
+      navigate(`/frameworks/elements?templateId=${summary.activeRubricId}`);
+      return;
+    }
+
+    navigate('/frameworks');
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -57,31 +65,38 @@ export const HomePage: React.FC = () => {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       {/* Header */}
-      <div>
-        <h1 className="font-heading text-2xl font-bold text-gray-900">Dashboard</h1>
-        <p className="text-gray-600 mt-1">Welcome back! Here's an overview of your assessment platform.</p>
+      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
+        <div>
+          <h1 className="font-heading text-2xl sm:text-3xl font-bold text-gray-900">Dashboard</h1>
+          <p className="text-gray-600 mt-1">
+            Welcome back. Here is a quick snapshot of school performance and setup status.
+          </p>
+        </div>
+        <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-primary-50 text-primary-700 border border-primary-200 w-fit">
+          Today&apos;s overview
+        </span>
       </div>
 
       {/* Quick Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
         {/* Active Rubric Card */}
-        <Card className="hover:shadow-md transition-shadow">
+        <Card className="min-h-[178px]">
           <div className="flex items-start justify-between">
             <div className="p-2 bg-primary-100 rounded-lg">
               <FileText className="w-6 h-6 text-primary-600" />
             </div>
             <button
-              onClick={() => navigate(`/frameworks/edit/${summary?.activeRubricId}`)}
+              onClick={handleManageRubric}
               className="p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded"
-              aria-label="Edit rubric"
+              aria-label="Manage rubric"
             >
               <Edit3 className="w-4 h-4" />
             </button>
           </div>
           <div className="mt-4">
-            <p className="text-sm text-gray-500">Active Rubric</p>
+            <p className="text-sm text-gray-500">School Setup Template</p>
             <p className="font-heading font-semibold text-gray-900 mt-1">
               {summary?.activeRubricName || 'No template selected'}
             </p>
@@ -95,7 +110,7 @@ export const HomePage: React.FC = () => {
 
         {/* Teacher Roster Card */}
         <Card
-          className="hover:shadow-md transition-shadow cursor-pointer"
+          className="min-h-[178px]"
           onClick={() => navigate('/roster')}
         >
           <div className="p-2 bg-green-100 rounded-lg w-fit">
@@ -124,7 +139,7 @@ export const HomePage: React.FC = () => {
         </Card>
 
         {/* Gradebook Health Card */}
-        <Card className="hover:shadow-md transition-shadow">
+        <Card className="min-h-[178px]">
           <div className={`p-2 rounded-lg w-fit ${
             (summary?.missingGradesCount || 0) > 0 ? 'bg-yellow-100' : 'bg-green-100'
           }`}>
@@ -146,7 +161,7 @@ export const HomePage: React.FC = () => {
         </Card>
 
         {/* Quick Action Card */}
-        <Card className="bg-gradient-to-br from-primary-600 to-primary-700 text-white">
+        <Card className="min-h-[178px] bg-gradient-to-br from-primary-600 to-primary-700 text-white">
           <div className="p-2 bg-white/20 rounded-lg w-fit">
             <TrendingUp className="w-6 h-6 text-white" />
           </div>
@@ -169,23 +184,23 @@ export const HomePage: React.FC = () => {
       </div>
 
       {/* Main Actions */}
-      <div className="flex flex-col sm:flex-row gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
         <Button
           size="lg"
-          className="flex-1 sm:flex-none"
+          className="w-full justify-center"
           onClick={() => navigate('/roster')}
         >
           <Users className="w-5 h-5 mr-2" />
-          Open Roster
+          Open Teacher Roster
         </Button>
         <Button
           variant="secondary"
           size="lg"
-          className="flex-1 sm:flex-none"
+          className="w-full justify-center border border-gray-300"
           onClick={() => navigate('/frameworks')}
         >
           <FileText className="w-5 h-5 mr-2" />
-          Manage Frameworks
+          Open School Setup
         </Button>
       </div>
 
@@ -195,9 +210,10 @@ export const HomePage: React.FC = () => {
           <CardTitle>Recent Reports</CardTitle>
           <div className="mt-4 space-y-3">
             {summary.recentReports.map((report) => (
-              <div
+              <button
                 key={report.id}
-                className="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 cursor-pointer"
+                type="button"
+                className="w-full text-left flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 cursor-pointer"
                 onClick={() => navigate(`/reports/${report.id}`)}
               >
                 <div>
@@ -208,7 +224,7 @@ export const HomePage: React.FC = () => {
                   </p>
                 </div>
                 <ArrowRight className="w-5 h-5 text-gray-400" />
-              </div>
+              </button>
             ))}
           </div>
         </Card>

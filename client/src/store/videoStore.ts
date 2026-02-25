@@ -24,7 +24,12 @@ interface VideoState {
 
   // Actions
   fetchAnalysis: (videoId: string) => Promise<void>;
-  uploadVideo: (teacherId: string, classId?: string, filename?: string) => Promise<string>;
+  uploadVideo: (
+    teacherId: string,
+    classId?: string,
+    filename?: string,
+    anonymize?: boolean
+  ) => Promise<string>;
   checkStatus: (videoId: string) => Promise<any>;
   clearAnalysis: () => void;
   clearError: () => void;
@@ -48,7 +53,12 @@ export const useVideoStore = create<VideoState>((set, get) => ({
     }
   },
 
-  uploadVideo: async (teacherId: string, classId?: string, filename?: string) => {
+  uploadVideo: async (
+    teacherId: string,
+    classId?: string,
+    filename?: string,
+    anonymize?: boolean
+  ) => {
     set({ isUploading: true, uploadProgress: 0, error: null });
     try {
       // Simulate upload progress
@@ -58,7 +68,7 @@ export const useVideoStore = create<VideoState>((set, get) => ({
         }));
       }, 200);
 
-      const result = await videoApi.upload(teacherId, classId, filename);
+      const result = await videoApi.upload(teacherId, classId, filename, anonymize);
 
       clearInterval(progressInterval);
       set({ uploadProgress: 100, isUploading: false });

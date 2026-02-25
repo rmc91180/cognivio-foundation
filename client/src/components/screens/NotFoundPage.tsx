@@ -59,7 +59,7 @@ export const NotFoundPage: React.FC = () => {
               className="flex items-center justify-center gap-2 p-3 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors text-sm text-gray-700"
             >
               <Search className="w-4 h-4 text-gray-400" />
-              Frameworks
+              School Setup
             </button>
             <button
               onClick={() => navigate('/video/upload')}

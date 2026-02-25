@@ -95,7 +95,8 @@ export const VideoUploadPage: React.FC = () => {
       const videoId = await uploadVideo(
         selectedTeacherId,
         classId || undefined,
-        selectedFile.name
+        selectedFile.name,
+        anonymize
       );
 
       setUploadedVideoId(videoId);
@@ -333,7 +334,7 @@ export const VideoUploadPage: React.FC = () => {
                 <div>
                   <p className="text-sm font-medium text-gray-700">Anonymize video</p>
                   <p className="text-xs text-gray-500">
-                    Blur student faces for privacy compliance
+                    Blur student faces before analysis
                   </p>
                 </div>
               </label>

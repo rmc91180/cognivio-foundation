@@ -16,6 +16,8 @@ import TeacherDashboard from '@/components/screens/TeacherDashboard';
 import VideoAnalysisPage from '@/components/screens/VideoAnalysisPage';
 import VideoUploadPage from '@/components/screens/VideoUploadPage';
 import SettingsPage from '@/components/screens/SettingsPage';
+import ProfilePage from '@/components/screens/ProfilePage';
+import ReportDetailsPage from '@/components/screens/ReportDetailsPage';
 import NotFoundPage from '@/components/screens/NotFoundPage';
 
 // Protected Route wrapper
@@ -61,8 +63,8 @@ const App: React.FC = () => {
 
         {/* Settings and Profile */}
         <Route path="settings" element={<SettingsPage />} />
-        <Route path="profile" element={<PlaceholderPage title="Profile" />} />
-        <Route path="reports/:reportId" element={<PlaceholderPage title="Report Details" />} />
+        <Route path="profile" element={<ProfilePage />} />
+        <Route path="reports/:reportId" element={<ReportDetailsPage />} />
 
         {/* 404 within authenticated area */}
         <Route path="*" element={<NotFoundPage />} />
@@ -73,13 +75,5 @@ const App: React.FC = () => {
     </Routes>
   );
 };
-
-// Placeholder for routes not yet implemented
-const PlaceholderPage: React.FC<{ title: string }> = ({ title }) => (
-  <div className="text-center py-12">
-    <h1 className="font-heading text-2xl font-bold text-gray-900 mb-4">{title}</h1>
-    <p className="text-gray-600">This page is coming soon.</p>
-  </div>
-);
 
 export default App;
