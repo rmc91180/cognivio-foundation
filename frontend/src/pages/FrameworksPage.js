@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { LayoutShell } from "@/components/LayoutShell";
-import { frameworkApi } from "@/lib/api";
+import { frameworkApi, recordingPolicyApi, teacherApi } from "@/lib/api";
 import { toast } from "sonner";
+import { useAuth } from "@/hooks/useAuth";
 
 const FRAMEWORK_LABELS = {
   danielson: "Danielson Framework",
@@ -12,6 +13,8 @@ const FRAMEWORK_LABELS = {
 
 export function FrameworksPage() {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
+  const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
   const { data: frameworksRes, isLoading: frameworksLoading, isError: frameworksError } = useQuery({
     queryKey: ["frameworks"],
     queryFn: () => frameworkApi.list().then((res) => res.data),
@@ -34,11 +37,25 @@ export function FrameworksPage() {
     queryKey: ["custom-domains"],
     queryFn: () => frameworkApi.listCustomDomains().then((res) => res.data),
   });
+  const { data: teachersData } = useQuery({
+    queryKey: ["teachers"],
+    enabled: isAdmin,
+    queryFn: () => teacherApi.list().then((res) => res.data),
+  });
+  const { data: recordingPolicyRes } = useQuery({
+    queryKey: ["recording-policies"],
+    enabled: isAdmin,
+    queryFn: () => recordingPolicyApi.list().then((res) => res.data),
+  });
 
   const [selectedElements, setSelectedElements] = useState([]);
   const [customDomainName, setCustomDomainName] = useState("");
   const [customElementsInput, setCustomElementsInput] = useState("");
   const [customElementInputs, setCustomElementInputs] = useState({});
+  const [policyPeriodDays, setPolicyPeriodDays] = useState(30);
+  const [policyMinRecordings, setPolicyMinRecordings] = useState(2);
+  const [policyReminderOffsets, setPolicyReminderOffsets] = useState([7, 2]);
+  const [policyTeacherId, setPolicyTeacherId] = useState("");
 
   useEffect(() => {
     if (selectionRes?.framework_type) {
@@ -57,6 +74,11 @@ export function FrameworksPage() {
     () => customDomainsRes?.domains || [],
     [customDomainsRes]
   );
+  const teacherOptions = useMemo(() => {
+    if (Array.isArray(teachersData)) return teachersData;
+    if (Array.isArray(teachersData?.teachers)) return teachersData.teachers;
+    return [];
+  }, [teachersData]);
 
   useEffect(() => {
     if (frameworkType !== "custom") {
@@ -74,6 +96,16 @@ export function FrameworksPage() {
     setSelectedElements(allElements);
   }, [frameworkType, domains, selectedElements.length]);
 
+  useEffect(() => {
+    const policy = recordingPolicyRes?.[0];
+    if (policy) {
+      setPolicyPeriodDays(policy.period_length_days || 30);
+      setPolicyMinRecordings(policy.min_recordings_per_period || 2);
+      setPolicyReminderOffsets(policy.reminder_offsets_days || [7, 2]);
+      setPolicyTeacherId(policy.teacher_id || "");
+    }
+  }, [recordingPolicyRes]);
+
   const saveSelectionMutation = useMutation({
     mutationFn: () =>
       frameworkApi.saveSelection({
@@ -87,6 +119,17 @@ export function FrameworksPage() {
     },
     onError: () => {
       toast.error("Failed to save selection");
+    },
+  });
+  const saveRecordingPolicyMutation = useMutation({
+    mutationFn: (payload) => recordingPolicyApi.create(payload),
+    onSuccess: () => {
+      toast.success("Recording policy saved");
+      queryClient.invalidateQueries({ queryKey: ["recording-policies"] });
+      queryClient.invalidateQueries({ queryKey: ["recording-compliance-summary"] });
+    },
+    onError: () => {
+      toast.error("Failed to save recording policy");
     },
   });
 
@@ -182,13 +225,111 @@ export function FrameworksPage() {
       <div className="mx-auto max-w-6xl px-6 py-6">
         <header className="mb-6">
           <h1 className="font-heading text-2xl font-semibold text-slate-900">
-            Frameworks
+            School Setup
           </h1>
           <p className="mt-1 text-sm text-slate-600">
-            Choose the rubric framework and focus domains that drive scoring and
-            dashboard insights.
+            Configure school-level frameworks and recording compliance settings.
           </p>
         </header>
+
+        {isAdmin && (
+          <section className="mb-6 rounded-xl border border-slate-200 bg-white p-5">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">
+                  Recording compliance policy
+                </h2>
+                <p className="text-xs text-slate-500">
+                  Define the recording cadence and reminder schedule.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  saveRecordingPolicyMutation.mutate({
+                    teacher_id: policyTeacherId || null,
+                    period_length_days: policyPeriodDays,
+                    min_recordings_per_period: policyMinRecordings,
+                    reminder_offsets_days: policyReminderOffsets,
+                  })
+                }
+                disabled={saveRecordingPolicyMutation.isPending}
+                className="rounded-md bg-primary px-3 py-2 text-xs font-semibold text-white hover:bg-primary/90 disabled:opacity-60"
+              >
+                {saveRecordingPolicyMutation.isPending ? "Saving..." : "Save policy"}
+              </button>
+            </div>
+            <div className="grid grid-cols-1 gap-4 text-xs md:grid-cols-4">
+              <label className="flex flex-col gap-1 text-[11px] text-slate-600">
+                Assign to teacher
+                <select
+                  value={policyTeacherId}
+                  onChange={(e) => setPolicyTeacherId(e.target.value)}
+                  className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                >
+                  <option value="">All teachers (default)</option>
+                  {teacherOptions.map((teacher) => (
+                    <option key={teacher.id} value={teacher.id}>
+                      {teacher.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] text-slate-600">
+                Period length
+                <select
+                  value={policyPeriodDays}
+                  onChange={(e) => setPolicyPeriodDays(Number(e.target.value))}
+                  className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                >
+                  <option value={7}>7 days</option>
+                  <option value={14}>14 days</option>
+                  <option value={30}>30 days</option>
+                  <option value={60}>60 days</option>
+                  <option value={90}>90 days</option>
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] text-slate-600">
+                Min recordings
+                <select
+                  value={policyMinRecordings}
+                  onChange={(e) => setPolicyMinRecordings(Number(e.target.value))}
+                  className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                >
+                  <option value={1}>1</option>
+                  <option value={2}>2</option>
+                  <option value={3}>3</option>
+                  <option value={4}>4</option>
+                  <option value={5}>5</option>
+                </select>
+              </label>
+              <div className="flex flex-col gap-1 text-[11px] text-slate-600">
+                Reminder timing
+                <div className="flex flex-wrap gap-2 text-[11px] text-slate-600">
+                  {[14, 7, 3, 2, 1].map((day) => (
+                    <label key={day} className="flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        checked={policyReminderOffsets.includes(day)}
+                        onChange={(e) => {
+                          setPolicyReminderOffsets((prev) =>
+                            e.target.checked
+                              ? Array.from(new Set([...prev, day]))
+                              : prev.filter((value) => value !== day)
+                          );
+                        }}
+                      />
+                      {day}d before
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="mt-3 text-[11px] text-slate-500">
+              Required subjects are automatically taken from each teacher&apos;s subject field.
+            </div>
+          </section>
+        )}
 
         <section className="mb-6 rounded-xl border border-slate-200 bg-white p-5">
           <h2 className="mb-3 text-sm font-semibold text-slate-900">

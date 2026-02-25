@@ -6,7 +6,6 @@ import {
   reportApi,
   gradebookApi,
   teacherApi,
-  recordingPolicyApi,
   recordingComplianceApi,
 } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
@@ -101,12 +100,6 @@ export function DashboardPage() {
     queryFn: () => teacherApi.list().then((res) => res.data),
   });
 
-  const { data: recordingPolicyRes } = useQuery({
-    queryKey: ["recording-policies"],
-    enabled: isAdmin,
-    queryFn: () => recordingPolicyApi.list().then((res) => res.data),
-  });
-
   const { data: recordingComplianceRes } = useQuery({
     queryKey: ["recording-compliance-summary"],
     enabled: isAdmin,
@@ -163,10 +156,6 @@ export function DashboardPage() {
   const [reportDepartment, setReportDepartment] = useState("");
   const [gradebookProvider, setGradebookProvider] = useState("powerschool");
   const [gradebookApiKey, setGradebookApiKey] = useState("");
-  const [policyPeriodDays, setPolicyPeriodDays] = useState(30);
-  const [policyMinRecordings, setPolicyMinRecordings] = useState(2);
-  const [policyReminderOffsets, setPolicyReminderOffsets] = useState([7, 2]);
-  const [policyTeacherId, setPolicyTeacherId] = useState("");
   const [expandedComplianceTeacherId, setExpandedComplianceTeacherId] = useState("");
 
   // Focus areas are driven by framework selection
@@ -207,18 +196,6 @@ export function DashboardPage() {
     },
   });
 
-  const saveRecordingPolicyMutation = useMutation({
-    mutationFn: (payload) => recordingPolicyApi.create(payload),
-    onSuccess: () => {
-      toast.success("Recording policy saved");
-      queryClient.invalidateQueries({ queryKey: ["recording-policies"] });
-      queryClient.invalidateQueries({ queryKey: ["recording-compliance-summary"] });
-    },
-    onError: () => {
-      toast.error("Failed to save recording policy");
-    },
-  });
-
   const sendComplianceReminderMutation = useMutation({
     mutationFn: (teacherId) => recordingComplianceApi.remind(teacherId),
     onSuccess: () => {
@@ -242,15 +219,6 @@ export function DashboardPage() {
       setSelectedElementsState(frameworkSelectionRes.selected_elements);
     }
   }, [selectedElements, frameworkSelectionRes]);
-
-  useEffect(() => {
-    const policy = recordingPolicyRes?.[0];
-    if (policy) {
-      setPolicyPeriodDays(policy.period_length_days || 30);
-      setPolicyMinRecordings(policy.min_recordings_per_period || 2);
-      setPolicyReminderOffsets(policy.reminder_offsets_days || [7, 2]);
-    }
-  }, [recordingPolicyRes]);
 
   const toggleDomainSelection = (domain) => {
     const elementIds = (domain.elements || []).map((el) => el.id);
@@ -660,15 +628,10 @@ export function DashboardPage() {
               ) : (
                 <div className="h-64">
                   <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={departmentData} layout="vertical">
+                    <BarChart data={departmentData}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                      <XAxis type="number" stroke="#64748b" domain={[0, 10]} />
-                      <YAxis
-                        dataKey="department"
-                        type="category"
-                        stroke="#64748b"
-                        width={90}
-                      />
+                      <XAxis dataKey="department" stroke="#64748b" />
+                      <YAxis stroke="#64748b" domain={[0, 10]} />
                       <Tooltip
                         contentStyle={{
                           backgroundColor: "#ffffff",
@@ -744,107 +707,6 @@ export function DashboardPage() {
                 </div>
               </div>
             </section>
-            {isAdmin && (
-              <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <h2 className="text-sm font-semibold text-slate-900">
-                      Recording compliance policy
-                    </h2>
-                    <p className="text-xs text-slate-500">
-                      Define the recording cadence and reminder schedule.
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      saveRecordingPolicyMutation.mutate({
-                        teacher_id: policyTeacherId || null,
-                        period_length_days: policyPeriodDays,
-                        min_recordings_per_period: policyMinRecordings,
-                        reminder_offsets_days: policyReminderOffsets,
-                      })
-                    }
-                    disabled={saveRecordingPolicyMutation.isPending}
-                    className="rounded-md bg-primary px-3 py-2 text-xs font-semibold text-white hover:bg-primary/90 disabled:opacity-60"
-                  >
-                    {saveRecordingPolicyMutation.isPending
-                      ? "Saving..."
-                      : "Save policy"}
-                  </button>
-                </div>
-                <div className="grid grid-cols-1 gap-4 text-xs md:grid-cols-4">
-                  <label className="flex flex-col gap-1 text-[11px] text-slate-600">
-                    Assign to teacher
-                    <select
-                      value={policyTeacherId}
-                      onChange={(e) => setPolicyTeacherId(e.target.value)}
-                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
-                    >
-                      <option value="">All teachers (default)</option>
-                      {teacherOptions.map((t) => (
-                        <option key={t.id} value={t.id}>
-                          {t.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="flex flex-col gap-1 text-[11px] text-slate-600">
-                    Period length
-                    <select
-                      value={policyPeriodDays}
-                      onChange={(e) => setPolicyPeriodDays(Number(e.target.value))}
-                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
-                    >
-                      <option value={7}>7 days</option>
-                      <option value={14}>14 days</option>
-                      <option value={30}>30 days</option>
-                      <option value={60}>60 days</option>
-                      <option value={90}>90 days</option>
-                    </select>
-                  </label>
-                  <label className="flex flex-col gap-1 text-[11px] text-slate-600">
-                    Min recordings
-                    <select
-                      value={policyMinRecordings}
-                      onChange={(e) => setPolicyMinRecordings(Number(e.target.value))}
-                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
-                    >
-                      <option value={1}>1</option>
-                      <option value={2}>2</option>
-                      <option value={3}>3</option>
-                      <option value={4}>4</option>
-                      <option value={5}>5</option>
-                    </select>
-                  </label>
-                  <div className="flex flex-col gap-1 text-[11px] text-slate-600">
-                    Reminder timing
-                    <div className="flex flex-wrap gap-2 text-[11px] text-slate-600">
-                      {[14, 7, 3, 2, 1].map((day) => (
-                        <label key={day} className="flex items-center gap-1">
-                          <input
-                            type="checkbox"
-                            checked={policyReminderOffsets.includes(day)}
-                            onChange={(e) => {
-                              setPolicyReminderOffsets((prev) =>
-                                e.target.checked
-                                  ? Array.from(new Set([...prev, day]))
-                                  : prev.filter((v) => v !== day)
-                              );
-                            }}
-                          />
-                          {day}d before
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-                <div className="mt-3 text-[11px] text-slate-500">
-                  Required subjects are automatically taken from each teacher’s
-                  subject field.
-                </div>
-              </section>
-            )}
             {isAdmin && (
               <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-4">
                 <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
