@@ -57,13 +57,14 @@ function App() {
           }
         />
         <Route
-          path="/frameworks"
+          path="/school-setup"
           element={
             <ProtectedRoute>
               <FrameworksPage />
             </ProtectedRoute>
           }
         />
+        <Route path="/frameworks" element={<Navigate to="/school-setup" replace />} />
         <Route
           path="/master-schedule"
           element={
