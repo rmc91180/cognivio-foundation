@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks, Depends, Response, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, Depends, Response, WebSocket, WebSocketDisconnect, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
@@ -96,6 +96,53 @@ def _parse_optional_iso_datetime(value: Optional[str], field_name: str) -> Optio
         return parsed.astimezone(timezone.utc).isoformat()
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid {field_name}. Expected ISO-8601 datetime.")
+
+
+def _to_public_backend_url(path: str) -> str:
+    if not path:
+        return path
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    if not path.startswith("/"):
+        path = f"/{path}"
+    if BACKEND_PUBLIC_BASE_URL:
+        return f"{BACKEND_PUBLIC_BASE_URL}{path}"
+    return path
+
+
+def _resolve_video_playback_url(video: dict) -> Optional[str]:
+    file_url = video.get("file_url")
+    if file_url:
+        return file_url
+    file_path = video.get("file_path")
+    if file_path:
+        safe_path = str(file_path).replace("\\", "/").lstrip("/")
+        return _to_public_backend_url(f"/uploads/{safe_path}")
+    return None
+
+
+def _resolve_video_thumbnail_url(video: dict) -> Optional[str]:
+    thumb_url = video.get("thumbnail_url")
+    if thumb_url:
+        return thumb_url
+    thumb_path = video.get("thumbnail_path")
+    if thumb_path:
+        safe_path = str(thumb_path).replace("\\", "/").lstrip("/")
+        return _to_public_backend_url(f"/uploads/{safe_path}")
+    return None
+
+
+def _is_terminal_video_status(status: Optional[str]) -> bool:
+    normalized = _normalize_video_status(status)
+    return normalized in {VideoProcessingStatus.COMPLETED.value, VideoProcessingStatus.FAILED.value}
+
+
+def _apply_video_response_defaults(video: dict) -> dict:
+    video["status"] = _normalize_video_status(video.get("status"))
+    video["analysis_status"] = _normalize_video_status(video.get("analysis_status"))
+    video["playback_url"] = _resolve_video_playback_url(video)
+    video["thumbnail_url"] = _resolve_video_thumbnail_url(video)
+    return video
 
 
 async def _save_upload_file(upload: UploadFile, target_path: Path) -> None:
@@ -205,6 +252,30 @@ async def _get_teacher_or_404(teacher_id: str, current_user: dict) -> dict:
     if teacher.get("created_by") == current_user["id"]:
         return teacher
     raise HTTPException(status_code=403, detail="Not authorized for this teacher")
+
+
+def _build_video_visibility_query(
+    current_user: dict,
+    teacher_ids_for_user: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    role = _get_user_role(current_user)
+    if role == "admin":
+        return {"uploaded_by": current_user["id"]}
+    teacher_ids = [teacher_id for teacher_id in (teacher_ids_for_user or []) if teacher_id]
+    if teacher_ids:
+        return {"teacher_id": {"$in": teacher_ids}}
+    return {"uploaded_by": current_user["id"]}
+
+
+async def _list_teacher_ids_for_user(current_user: dict) -> List[str]:
+    email = (current_user.get("email") or "").strip()
+    if not email:
+        return []
+    teachers = await db.teachers.find(
+        {"email": {"$regex": f"^{email}$", "$options": "i"}},
+        {"_id": 0, "id": 1},
+    ).to_list(100)
+    return [teacher["id"] for teacher in teachers if teacher.get("id")]
 
 
 def _parse_teacher_subjects(subject_value: Optional[Any]) -> List[str]:
@@ -418,6 +489,8 @@ VIDEO_ALLOWED_CONTENT_TYPES = {
     "video/webm",
 }
 VIDEO_MAX_UPLOAD_BYTES = int(os.getenv("MAX_VIDEO_BYTES", str(1024 * 1024 * 1024)))
+VIDEO_WORKER_COUNT = max(1, int(os.getenv("VIDEO_WORKER_COUNT", "1")))
+CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS = os.getenv("CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS", "false").lower() == "true"
 ADHERENCE_WEIGHT = float(os.getenv("ADHERENCE_WEIGHT", "0.15"))
 
 # S3 configuration (required for file uploads)
@@ -426,6 +499,7 @@ S3_REGION = os.getenv("S3_REGION")
 S3_ENDPOINT = os.getenv("S3_ENDPOINT")
 S3_PUBLIC_BASE_URL = os.getenv("S3_PUBLIC_BASE_URL")
 FRONTEND_URL = os.getenv("FRONTEND_URL")
+BACKEND_PUBLIC_BASE_URL = os.getenv("BACKEND_PUBLIC_BASE_URL", "").rstrip("/")
 LEADERSHIP_INSIGHTS_CACHE_TTL_SECONDS = max(
     0, int(os.getenv("LEADERSHIP_INSIGHTS_CACHE_TTL_SECONDS", "1800"))
 )
@@ -441,6 +515,8 @@ app = FastAPI(title="Cognivio API", description="Teacher Assessment Platform")
 api_router = APIRouter(prefix="/api")
 
 security = HTTPBearer()
+VIDEO_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
+VIDEO_WORKER_TASKS: List[asyncio.Task] = []
 
 # Health check endpoint (at root level for Railway)
 @app.get("/health")
@@ -1289,9 +1365,181 @@ async def delete_teacher(teacher_id: str, current_user: dict = Depends(get_curre
     return {"message": "Teacher deleted"}
 
 # ==================== VIDEO ENDPOINTS ====================
+def _extract_video_thumbnail(video_path: str, output_path: str) -> bool:
+    try:
+        if cv2 is None:
+            return False
+        cap = cv2.VideoCapture(video_path)
+        if not cap or not cap.isOpened():
+            return False
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames > 1:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, total_frames // 3))
+        ret, frame = cap.read()
+        cap.release()
+        if not ret:
+            return False
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        return bool(cv2.imwrite(str(output), frame, [cv2.IMWRITE_JPEG_QUALITY, 72]))
+    except Exception:
+        return False
+
+
+async def _enqueue_video_processing_job(
+    video_id: str,
+    teacher_id: str,
+    user_id: str,
+    file_path: str,
+) -> None:
+    if not video_id or not teacher_id or not user_id or not file_path:
+        raise ValueError("video_id, teacher_id, user_id, and file_path are required to enqueue")
+    now = datetime.now(timezone.utc).isoformat()
+    await db.video_processing_jobs.update_one(
+        {"video_id": video_id},
+        {
+            "$set": {
+                "video_id": video_id,
+                "teacher_id": teacher_id,
+                "user_id": user_id,
+                "file_path": file_path,
+                "status": VideoProcessingStatus.QUEUED.value,
+                "updated_at": now,
+                "last_error": None,
+            },
+            "$setOnInsert": {
+                "id": str(uuid.uuid4()),
+                "created_at": now,
+                "attempts": 0,
+            },
+        },
+        upsert=True,
+    )
+    await VIDEO_JOB_QUEUE.put(video_id)
+
+
+async def _run_video_job(video_id: str) -> None:
+    job = await db.video_processing_jobs.find_one({"video_id": video_id}, {"_id": 0})
+    if not job:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    claim = await db.video_processing_jobs.update_one(
+        {"video_id": video_id, "status": VideoProcessingStatus.QUEUED.value},
+        {
+            "$set": {
+                "status": VideoProcessingStatus.PROCESSING.value,
+                "updated_at": now,
+                "started_at": now,
+            },
+            "$inc": {"attempts": 1},
+        },
+    )
+    if claim.modified_count == 0:
+        return
+    success, error_message = await analyze_video(
+        video_id=video_id,
+        file_path=job["file_path"],
+        teacher_id=job["teacher_id"],
+        user_id=job["user_id"],
+    )
+    finished_at = datetime.now(timezone.utc).isoformat()
+    await db.video_processing_jobs.update_one(
+        {"video_id": video_id},
+        {
+            "$set": {
+                "status": (
+                    VideoProcessingStatus.COMPLETED.value
+                    if success
+                    else VideoProcessingStatus.FAILED.value
+                ),
+                "updated_at": finished_at,
+                "finished_at": finished_at,
+                "last_error": error_message if not success else None,
+            }
+        },
+    )
+
+
+async def _video_processing_worker(worker_label: str) -> None:
+    logger.info(f"Video worker {worker_label} started")
+    try:
+        while True:
+            video_id = await VIDEO_JOB_QUEUE.get()
+            try:
+                await _run_video_job(video_id)
+            except Exception as exc:
+                logger.error(f"Video worker {worker_label} failed on {video_id}: {exc}")
+            finally:
+                VIDEO_JOB_QUEUE.task_done()
+    except asyncio.CancelledError:
+        logger.info(f"Video worker {worker_label} stopped")
+        raise
+
+
+async def _start_video_workers() -> None:
+    if VIDEO_WORKER_TASKS:
+        return
+    for index in range(VIDEO_WORKER_COUNT):
+        task = asyncio.create_task(
+            _video_processing_worker(f"video-worker-{index + 1}"),
+            name=f"video-worker-{index + 1}",
+        )
+        VIDEO_WORKER_TASKS.append(task)
+
+
+async def _rehydrate_video_processing_queue() -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    await db.video_processing_jobs.update_many(
+        {"status": VideoProcessingStatus.PROCESSING.value},
+        {
+            "$set": {
+                "status": VideoProcessingStatus.QUEUED.value,
+                "updated_at": now,
+            }
+        },
+    )
+    await db.videos.update_many(
+        {"status": VideoProcessingStatus.PROCESSING.value},
+        {
+            "$set": {
+                "status": VideoProcessingStatus.QUEUED.value,
+                "analysis_status": VideoProcessingStatus.QUEUED.value,
+                "status_updated_at": now,
+            }
+        },
+    )
+    pending_jobs = await db.video_processing_jobs.find(
+        {"status": VideoProcessingStatus.QUEUED.value},
+        {"_id": 0, "video_id": 1},
+    ).to_list(2000)
+    queued_ids = {job["video_id"] for job in pending_jobs if job.get("video_id")}
+    for video_id in queued_ids:
+        await VIDEO_JOB_QUEUE.put(video_id)
+    # Backfill jobs for queued/processing videos that predate job documents.
+    pending_videos = await db.videos.find(
+        {"status": {"$in": [VideoProcessingStatus.QUEUED.value, VideoProcessingStatus.PROCESSING.value]}},
+        {"_id": 0, "id": 1, "teacher_id": 1, "uploaded_by": 1, "file_path": 1},
+    ).to_list(2000)
+    for video in pending_videos:
+        video_id = video.get("id")
+        file_path = video.get("file_path")
+        teacher_id = video.get("teacher_id")
+        user_id = video.get("uploaded_by")
+        if not video_id or not file_path or not teacher_id or not user_id:
+            continue
+        if video_id in queued_ids:
+            continue
+        full_path = str(UPLOAD_DIR / str(file_path))
+        await _enqueue_video_processing_job(
+            video_id=video_id,
+            teacher_id=teacher_id,
+            user_id=user_id,
+            file_path=full_path,
+        )
+
+
 @api_router.post("/videos/upload", response_model=VideoUploadResponse)
 async def upload_video(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     teacher_id: str = Form(...),
     subject: Optional[str] = Form(None),
@@ -1411,8 +1659,13 @@ async def upload_video(
     except Exception:
         logger.warning("Unable to update recording compliance after upload")
     
-    # Queue video analysis in background
-    background_tasks.add_task(analyze_video, video_id, str(file_path), teacher_id, current_user["id"])
+    # Queue video analysis for worker processing
+    await _enqueue_video_processing_job(
+        video_id=video_id,
+        teacher_id=teacher_id,
+        user_id=current_user["id"],
+        file_path=str(file_path),
+    )
     
     return VideoUploadResponse(
         id=video_id,
@@ -1435,11 +1688,11 @@ async def get_videos(teacher_id: Optional[str] = None, current_user: dict = Depe
         await _get_teacher_or_404(teacher_id, current_user)
         query["teacher_id"] = teacher_id
     else:
-        query["uploaded_by"] = current_user["id"]
+        teacher_ids_for_user = await _list_teacher_ids_for_user(current_user)
+        query = _build_video_visibility_query(current_user, teacher_ids_for_user)
     videos = await db.videos.find(query, {"_id": 0, "uploaded_by": 0, "stored_filename": 0}).to_list(1000)
     for video in videos:
-        video["status"] = _normalize_video_status(video.get("status"))
-        video["analysis_status"] = _normalize_video_status(video.get("analysis_status"))
+        _apply_video_response_defaults(video)
     return videos
 
 
@@ -1450,9 +1703,7 @@ async def get_video_detail(video_id: str, current_user: dict = Depends(get_curre
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     await _get_teacher_or_404(video.get("teacher_id"), current_user)
-    video["status"] = _normalize_video_status(video.get("status"))
-    video["analysis_status"] = _normalize_video_status(video.get("analysis_status"))
-    return video
+    return _apply_video_response_defaults(video)
 
 @api_router.get("/videos/{video_id}/status")
 async def get_video_status(video_id: str, current_user: dict = Depends(get_current_user)):
@@ -1463,7 +1714,48 @@ async def get_video_status(video_id: str, current_user: dict = Depends(get_curre
     return {
         "status": _normalize_video_status(video.get("status")),
         "analysis_status": _normalize_video_status(video.get("analysis_status")),
+        "error_message": video.get("error_message"),
     }
+
+
+@api_router.post("/videos/{video_id}/retry")
+async def retry_video_processing(video_id: str, current_user: dict = Depends(get_current_user)):
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    current_status = _normalize_video_status(video.get("status"))
+    if current_status != VideoProcessingStatus.FAILED.value:
+        raise HTTPException(status_code=400, detail="Only failed videos can be retried")
+    relative_path = video.get("file_path")
+    if not relative_path:
+        raise HTTPException(status_code=409, detail="Retry unavailable for videos without local source")
+    full_path = UPLOAD_DIR / str(relative_path)
+    if not full_path.exists():
+        raise HTTPException(status_code=409, detail="Retry unavailable because the local video file is missing")
+    queued_at = datetime.now(timezone.utc).isoformat()
+    await db.videos.update_one(
+        {"id": video_id},
+        {
+            "$set": {
+                "status": VideoProcessingStatus.QUEUED.value,
+                "analysis_status": VideoProcessingStatus.QUEUED.value,
+                "status_updated_at": queued_at,
+                "error_message": None,
+            }
+        },
+    )
+    await db.video_evidence.update_one(
+        {"video_id": video_id},
+        {"$set": {"analysis_status": VideoProcessingStatus.QUEUED.value, "error_message": None}},
+    )
+    await _enqueue_video_processing_job(
+        video_id=video_id,
+        teacher_id=video.get("teacher_id"),
+        user_id=video.get("uploaded_by") or current_user["id"],
+        file_path=str(full_path),
+    )
+    return {"video_id": video_id, "status": VideoProcessingStatus.QUEUED.value}
 
 
 @app.websocket("/ws/videos/{video_id}")
@@ -1506,16 +1798,23 @@ async def video_status_ws(websocket: WebSocket, video_id: str):
     try:
         while True:
             video = await db.videos.find_one(
-                {"id": video_id, "uploaded_by": user_id},
+                {"id": video_id},
                 {"_id": 0},
             )
             if not video:
                 break
             status = _normalize_video_status(video.get("status"))
+            analysis_status = _normalize_video_status(video.get("analysis_status"))
             if status != last_status:
-                await websocket.send_json({"status": status})
+                await websocket.send_json(
+                    {
+                        "status": status,
+                        "analysis_status": analysis_status,
+                        "error_message": video.get("error_message"),
+                    }
+                )
                 last_status = status
-            if status in {"completed", "failed"}:
+            if _is_terminal_video_status(status):
                 break
             await asyncio.sleep(2)
     except WebSocketDisconnect:
@@ -4578,7 +4877,12 @@ async def _enqueue_notification(
     # Placeholder for email integration
     logger.info(f"[EmailQueue] {title} -> {current_user.get('email')}")
 
-async def analyze_video(video_id: str, file_path: str, teacher_id: str, user_id: str):
+async def analyze_video(
+    video_id: str,
+    file_path: str,
+    teacher_id: str,
+    user_id: str,
+) -> Tuple[bool, Optional[str]]:
     """Background task to analyze video using AI"""
     try:
         logger.info(f"Starting analysis for video {video_id}")
@@ -4606,6 +4910,34 @@ async def analyze_video(video_id: str, file_path: str, teacher_id: str, user_id:
                 }
             },
         )
+        thumbnail_relative_path = f"thumbnails/{teacher_id}/{video_id}.jpg"
+        thumbnail_full_path = UPLOAD_DIR / thumbnail_relative_path
+        thumbnail_created = await asyncio.to_thread(
+            _extract_video_thumbnail,
+            file_path,
+            str(thumbnail_full_path),
+        )
+        if thumbnail_created:
+            thumbnail_url = _to_public_backend_url(f"/uploads/{thumbnail_relative_path}")
+            try:
+                _, uploaded_thumb_url = _upload_path_to_s3(
+                    thumbnail_full_path,
+                    "thumbnails",
+                    f"{video_id}.jpg",
+                    "image/jpeg",
+                )
+                thumbnail_url = uploaded_thumb_url or thumbnail_url
+            except Exception as exc:
+                logger.warning(f"Thumbnail upload failed for {video_id}: {exc}")
+            await db.videos.update_one(
+                {"id": video_id},
+                {
+                    "$set": {
+                        "thumbnail_path": thumbnail_relative_path,
+                        "thumbnail_url": thumbnail_url,
+                    }
+                },
+            )
         
         # Get current framework selection
         selection = await db.framework_selections.find_one(
@@ -4691,6 +5023,7 @@ async def analyze_video(video_id: str, file_path: str, teacher_id: str, user_id:
         )
         
         logger.info(f"Completed analysis for video {video_id}")
+        return True, None
         
     except Exception as e:
         logger.error(f"Error analyzing video {video_id}: {str(e)}")
@@ -4716,13 +5049,15 @@ async def analyze_video(video_id: str, file_path: str, teacher_id: str, user_id:
                 }
             },
         )
+        return False, str(e)
     finally:
-        # Clean up video file (run in thread to avoid blocking event loop)
-        try:
-            if os.path.exists(file_path):
-                await asyncio.to_thread(os.remove, file_path)
-        except Exception as e:
-            logger.error(f"Error removing video file: {e}")
+        if CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS:
+            # Optional cleanup when source retention is not needed for playback/retries.
+            try:
+                if os.path.exists(file_path):
+                    await asyncio.to_thread(os.remove, file_path)
+            except Exception as e:
+                logger.error(f"Error removing video file: {e}")
 
 def extract_video_frames(video_path: str, max_frames: int = 5) -> List[str]:
     """Extract frames from video and return as base64 strings"""
@@ -5394,9 +5729,31 @@ app.add_middleware(
 )
 
 
+async def _ensure_database_indexes() -> None:
+    await db.videos.create_index([("uploaded_by", 1), ("upload_date", -1)])
+    await db.videos.create_index([("teacher_id", 1), ("upload_date", -1)])
+    await db.videos.create_index([("status", 1), ("upload_date", -1)])
+    await db.assessments.create_index([("teacher_id", 1), ("analyzed_at", -1)])
+    await db.observations.create_index([("video_id", 1), ("created_at", -1)])
+    await db.video_processing_jobs.create_index([("video_id", 1)], unique=True)
+    await db.video_processing_jobs.create_index([("status", 1), ("updated_at", -1)])
+
+
+async def _stop_video_workers() -> None:
+    if not VIDEO_WORKER_TASKS:
+        return
+    for task in VIDEO_WORKER_TASKS:
+        task.cancel()
+    await asyncio.gather(*VIDEO_WORKER_TASKS, return_exceptions=True)
+    VIDEO_WORKER_TASKS.clear()
+
+
 @app.on_event("startup")
 async def ensure_demo_users():
     _validate_s3_config()
+    await _ensure_database_indexes()
+    await _start_video_workers()
+    await _rehydrate_video_processing_queue()
     if not DEMO_MODE:
         return
     for demo in DEMO_USERS:
@@ -5425,4 +5782,5 @@ async def ensure_demo_users():
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
+    await _stop_video_workers()
     client.close()
