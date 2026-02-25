@@ -79,7 +79,7 @@ def _ensure_allowed_extension(filename: str) -> None:
 
 def _normalize_video_status(value: Optional[str]) -> str:
     raw = (value or "").strip().lower()
-    if raw in {"queued", "processing", "completed", "failed"}:
+    if raw in {"queued", "processing", "completed", "failed", "cancelled"}:
         return raw
     if raw in {"error", "errored"}:
         return "failed"
@@ -134,7 +134,11 @@ def _resolve_video_thumbnail_url(video: dict) -> Optional[str]:
 
 def _is_terminal_video_status(status: Optional[str]) -> bool:
     normalized = _normalize_video_status(status)
-    return normalized in {VideoProcessingStatus.COMPLETED.value, VideoProcessingStatus.FAILED.value}
+    return normalized in {
+        VideoProcessingStatus.COMPLETED.value,
+        VideoProcessingStatus.FAILED.value,
+        VideoProcessingStatus.CANCELLED.value,
+    }
 
 
 def _apply_video_response_defaults(video: dict) -> dict:
@@ -4852,6 +4856,179 @@ async def upsert_gradebook_integration(
     doc.pop("user_id", None)
     doc.pop("api_key", None)
     return GradebookIntegrationResponse(**doc)
+
+
+def _require_admin_ops_user(current_user: dict) -> None:
+    role = _get_user_role(current_user)
+    if not _is_admin_role(role):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
+@api_router.get("/admin/ops/readiness")
+async def get_admin_ops_readiness(current_user: dict = Depends(get_current_user)):
+    _require_admin_ops_user(current_user)
+    admin_id = current_user["id"]
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    video_scope = {"uploaded_by": admin_id}
+    teachers_count = await db.teachers.count_documents({"created_by": admin_id})
+    assessments_total = await db.assessments.count_documents({"user_id": admin_id})
+    policies_count = await db.recording_policies.count_documents({"created_by": admin_id})
+    schedules_upcoming = await db.schedules.count_documents(
+        {"user_id": admin_id, "start_time": {"$gte": now_iso}}
+    )
+    gradebook_connected = await db.gradebook_integrations.count_documents(
+        {"user_id": admin_id, "status": {"$in": ["connected", "active"]}}
+    )
+    videos_total = await db.videos.count_documents(video_scope)
+    videos_completed = await db.videos.count_documents(
+        {**video_scope, "status": VideoProcessingStatus.COMPLETED.value}
+    )
+    videos_processing = await db.videos.count_documents(
+        {**video_scope, "status": {"$in": [VideoProcessingStatus.QUEUED.value, VideoProcessingStatus.PROCESSING.value]}}
+    )
+    videos_failed = await db.videos.count_documents(
+        {**video_scope, "status": {"$in": [VideoProcessingStatus.FAILED.value, "error", "errored"]}}
+    )
+    blocking_items = []
+    warnings = []
+    if teachers_count == 0:
+        blocking_items.append("No teachers configured.")
+    if policies_count == 0:
+        blocking_items.append("Recording compliance policy is not configured.")
+    if gradebook_connected == 0:
+        warnings.append("No gradebook integration is connected.")
+    if assessments_total == 0:
+        warnings.append("No completed assessments exist for pilot validation.")
+    if videos_failed > 0:
+        warnings.append(f"{videos_failed} failed video(s) require retry or remediation.")
+    if schedules_upcoming == 0:
+        warnings.append("No upcoming recording schedules are set.")
+
+    return {
+        "generated_at": now_iso,
+        "go_no_go": "go" if not blocking_items else "hold",
+        "blocking_items": blocking_items,
+        "warnings": warnings,
+        "metrics": {
+            "teachers": teachers_count,
+            "videos_total": videos_total,
+            "videos_completed": videos_completed,
+            "videos_processing_or_queued": videos_processing,
+            "videos_failed": videos_failed,
+            "assessments_total": assessments_total,
+            "recording_policies": policies_count,
+            "upcoming_schedules": schedules_upcoming,
+            "gradebook_connected": gradebook_connected,
+        },
+    }
+
+
+@api_router.get("/admin/ops/launch-health")
+async def get_admin_ops_launch_health(current_user: dict = Depends(get_current_user)):
+    _require_admin_ops_user(current_user)
+    admin_id = current_user["id"]
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    cutoff_24h = (now - timedelta(hours=24)).isoformat()
+    cutoff_stale = (now - timedelta(minutes=45)).isoformat()
+    failed_jobs_24h = await db.video_processing_jobs.count_documents(
+        {
+            "user_id": admin_id,
+            "status": VideoProcessingStatus.FAILED.value,
+            "updated_at": {"$gte": cutoff_24h},
+        }
+    )
+    stale_processing_jobs = await db.video_processing_jobs.count_documents(
+        {
+            "user_id": admin_id,
+            "status": VideoProcessingStatus.PROCESSING.value,
+            "started_at": {"$lte": cutoff_stale},
+        }
+    )
+    failed_videos_24h = await db.videos.count_documents(
+        {
+            "uploaded_by": admin_id,
+            "status": {"$in": [VideoProcessingStatus.FAILED.value, "error", "errored"]},
+            "status_updated_at": {"$gte": cutoff_24h},
+        }
+    )
+    queued_notifications = await db.notifications.count_documents(
+        {"user_id": admin_id, "status": "queued", "read_at": None}
+    )
+    queue_depth = VIDEO_JOB_QUEUE.qsize()
+    if stale_processing_jobs > 0 or failed_jobs_24h >= 10:
+        incident_level = "red"
+    elif failed_jobs_24h > 0 or queue_depth > 25:
+        incident_level = "amber"
+    else:
+        incident_level = "green"
+    actions = []
+    if stale_processing_jobs > 0:
+        actions.append("Investigate stale processing jobs and restart workers if needed.")
+    if failed_jobs_24h > 0:
+        actions.append("Retry failed video jobs and inspect recent error messages.")
+    if queue_depth > 25:
+        actions.append("Scale worker count (`VIDEO_WORKER_COUNT`) to reduce queue latency.")
+    if queued_notifications > 50:
+        actions.append("Verify outbound notification delivery pipeline health.")
+    if not actions:
+        actions.append("No urgent actions. Continue normal monitoring cadence.")
+    return {
+        "generated_at": now_iso,
+        "incident_level": incident_level,
+        "metrics": {
+            "video_queue_depth": queue_depth,
+            "failed_jobs_24h": failed_jobs_24h,
+            "failed_videos_24h": failed_videos_24h,
+            "stale_processing_jobs": stale_processing_jobs,
+            "queued_notifications": queued_notifications,
+        },
+        "recommended_actions": actions,
+    }
+
+
+@api_router.get("/admin/ops/backlog-priorities")
+async def get_admin_ops_backlog_priorities(current_user: dict = Depends(get_current_user)):
+    _require_admin_ops_user(current_user)
+    admin_id = current_user["id"]
+    failed_videos = await db.videos.find(
+        {"uploaded_by": admin_id, "status": {"$in": [VideoProcessingStatus.FAILED.value, "error", "errored"]}},
+        {"_id": 0, "id": 1, "teacher_id": 1, "filename": 1, "error_message": 1, "status_updated_at": 1},
+    ).sort("status_updated_at", -1).to_list(20)
+    teachers_without_videos = await db.teachers.aggregate(
+        [
+            {"$match": {"created_by": admin_id}},
+            {
+                "$lookup": {
+                    "from": "videos",
+                    "localField": "id",
+                    "foreignField": "teacher_id",
+                    "as": "teacher_videos",
+                }
+            },
+            {"$project": {"id": 1, "name": 1, "video_count": {"$size": "$teacher_videos"}}},
+            {"$match": {"video_count": 0}},
+            {"$limit": 20},
+        ]
+    ).to_list(20)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "priorities": [
+            {
+                "priority": "high" if failed_videos else "medium",
+                "title": "Failed video recovery",
+                "count": len(failed_videos),
+                "items": failed_videos,
+            },
+            {
+                "priority": "medium" if teachers_without_videos else "low",
+                "title": "Teacher observation coverage",
+                "count": len(teachers_without_videos),
+                "items": teachers_without_videos,
+            },
+        ],
+    }
 
 
 async def _enqueue_notification(

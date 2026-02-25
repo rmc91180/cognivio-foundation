@@ -7,6 +7,7 @@ import {
   gradebookApi,
   teacherApi,
   recordingComplianceApi,
+  opsApi,
 } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { LeadershipInsightsCard } from "@/components/dashboard/LeadershipInsightsCard";
@@ -106,6 +107,18 @@ export function DashboardPage() {
     queryKey: ["recording-compliance-summary"],
     enabled: isAdmin,
     queryFn: () => recordingComplianceApi.summary().then((res) => res.data),
+  });
+  const { data: opsReadinessRes } = useQuery({
+    queryKey: ["ops-readiness"],
+    enabled: isAdmin,
+    queryFn: () => opsApi.readiness().then((res) => res.data),
+    refetchInterval: 30000,
+  });
+  const { data: opsLaunchHealthRes } = useQuery({
+    queryKey: ["ops-launch-health"],
+    enabled: isAdmin,
+    queryFn: () => opsApi.launchHealth().then((res) => res.data),
+    refetchInterval: 15000,
   });
   const trendQueryParams = useMemo(() => {
     const params = {
@@ -387,6 +400,12 @@ export function DashboardPage() {
       };
     });
   }, [roster, previousRoster]);
+  const opsIncidentTone = useMemo(() => {
+    const level = opsLaunchHealthRes?.incident_level;
+    if (level === "red") return "text-rose-700 bg-rose-100";
+    if (level === "amber") return "text-amber-700 bg-amber-100";
+    return "text-emerald-700 bg-emerald-100";
+  }, [opsLaunchHealthRes]);
 
   const departmentOptions = useMemo(() => {
     const set = new Set();
@@ -515,6 +534,37 @@ export function DashboardPage() {
                 </Link>
               </div>
             </section>
+
+            {isAdmin && (
+              <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <h2 className="text-sm font-semibold text-slate-900">Operations pulse</h2>
+                  <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${opsIncidentTone}`}>
+                    {opsLaunchHealthRes?.incident_level || "green"}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 gap-2 text-xs text-slate-600 md:grid-cols-2">
+                  <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                    <div className="text-[11px] text-slate-500">Pilot readiness</div>
+                    <div className="mt-0.5 font-semibold text-slate-900">
+                      {opsReadinessRes?.go_no_go === "go" ? "Go" : "Hold"}
+                    </div>
+                    <div className="mt-1 text-[11px] text-slate-500">
+                      Blocking items: {opsReadinessRes?.blocking_items?.length || 0}
+                    </div>
+                  </div>
+                  <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                    <div className="text-[11px] text-slate-500">Video processing</div>
+                    <div className="mt-0.5 font-semibold text-slate-900">
+                      Queue: {opsLaunchHealthRes?.metrics?.video_queue_depth ?? 0}
+                    </div>
+                    <div className="mt-1 text-[11px] text-slate-500">
+                      Failed jobs (24h): {opsLaunchHealthRes?.metrics?.failed_jobs_24h ?? 0}
+                    </div>
+                  </div>
+                </div>
+              </section>
+            )}
 
             <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
               {isDashboardV2Enabled ? (

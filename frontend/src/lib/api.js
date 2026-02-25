@@ -180,5 +180,11 @@ export const adminApi = {
     api.post("/api/admin/preferences/scoring-mode", { scoring_mode }),
 };
 
+export const opsApi = {
+  readiness: () => api.get("/api/admin/ops/readiness"),
+  launchHealth: () => api.get("/api/admin/ops/launch-health"),
+  backlogPriorities: () => api.get("/api/admin/ops/backlog-priorities"),
+};
+
 export default api;
 
