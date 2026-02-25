@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect, useCallback } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { assessmentApi, observationApi, videoApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { VideoTimeline } from "@/components/VideoTimeline";
@@ -9,6 +9,7 @@ import { Badge, Button, EmptyState, Field, PageHeader, Panel, Textarea } from "@
 
 export function VideoPlayerPage() {
   const { videoId } = useParams();
+  const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
   const videoRef = useRef(null);
   const [currentTime, setCurrentTime] = useState(0);
@@ -68,12 +69,19 @@ export function VideoPlayerPage() {
     queryKey: ["video", videoId],
     queryFn: () => videoApi.detail(videoId).then((r) => r.data),
   });
+  const { data: statusRes } = useQuery({
+    queryKey: ["video-status", videoId],
+    enabled: Boolean(videoId),
+    queryFn: () => videoApi.status(videoId).then((r) => r.data),
+    refetchInterval: 5000,
+  });
 
   useEffect(() => {
-    if (videoRes?.status) {
-      setVideoStatus(videoRes.status);
+    const nextStatus = statusRes?.status || videoRes?.status;
+    if (nextStatus) {
+      setVideoStatus(nextStatus);
     }
-  }, [videoRes]);
+  }, [statusRes, videoRes]);
 
   useEffect(() => {
     const token = localStorage.getItem("cognivio_token");
@@ -115,6 +123,17 @@ export function VideoPlayerPage() {
 
   const [summaryNotes, setSummaryNotes] = useState("");
   const [actionItems, setActionItems] = useState("");
+  const retryMutation = useMutation({
+    mutationFn: () => videoApi.retry(videoId),
+    onSuccess: () => {
+      toast.success("Video re-queued for analysis");
+      queryClient.invalidateQueries({ queryKey: ["video", videoId] });
+      queryClient.invalidateQueries({ queryKey: ["video-status", videoId] });
+    },
+    onError: (error) => {
+      toast.error(error?.response?.data?.detail || "Failed to retry processing");
+    },
+  });
 
   const handleSeek = (seconds) => {
     if (!videoRef.current || typeof seconds !== "number") return;
@@ -183,25 +202,50 @@ export function VideoPlayerPage() {
 
   const observations = observationsRes ?? [];
 
-  const videoUrl =
-    videoRes?.file_url ||
-    (videoRes && videoRes.file_path
-      ? `${process.env.REACT_APP_BACKEND_URL}/uploads/${videoRes.file_path}`
-      : videoRes && videoRes.stored_filename
-        ? `${process.env.REACT_APP_BACKEND_URL}/uploads/${videoRes.stored_filename}`
-        : null);
+  const videoUrl = videoRes?.playback_url
+    ? videoRes.playback_url.startsWith("http")
+      ? videoRes.playback_url
+      : `${process.env.REACT_APP_BACKEND_URL}${videoRes.playback_url}`
+    : videoRes?.file_url
+      ? videoRes.file_url
+      : videoRes?.file_path
+        ? `${process.env.REACT_APP_BACKEND_URL}/uploads/${videoRes.file_path}`
+        : videoRes?.stored_filename
+          ? `${process.env.REACT_APP_BACKEND_URL}/uploads/${videoRes.stored_filename}`
+          : null;
+  const thumbnailUrl =
+    videoRes?.thumbnail_url &&
+    (videoRes.thumbnail_url.startsWith("http")
+      ? videoRes.thumbnail_url
+      : `${process.env.REACT_APP_BACKEND_URL}${videoRes.thumbnail_url}`);
+  const statusVariant =
+    videoStatus === "completed"
+      ? "success"
+      : videoStatus === "failed" || videoStatus === "error"
+        ? "danger"
+        : videoStatus === "processing" || videoStatus === "queued"
+          ? "warning"
+          : "neutral";
 
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
         <PageHeader title="Lesson recording" compact className="mb-4" />
         <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-slate-600">
-          <Badge variant="neutral">
+          <Badge variant={statusVariant}>
             Status: {videoStatus || "unknown"}
           </Badge>
+          {(videoStatus === "failed" || videoStatus === "error") && (
+            <Button size="sm" variant="danger" onClick={() => retryMutation.mutate()} disabled={retryMutation.isPending}>
+              {retryMutation.isPending ? "Retrying..." : "Retry analysis"}
+            </Button>
+          )}
           <span className="text-[11px] text-slate-400">
             {wsConnected ? "Live updates connected" : "Live updates offline"}
           </span>
+          {statusRes?.error_message && (
+            <span className="text-[11px] text-rose-600">{statusRes.error_message}</span>
+          )}
         </div>
         <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
           <section className="md:col-span-7 space-y-3">
@@ -213,6 +257,7 @@ export function VideoPlayerPage() {
                     controls
                     className="h-full w-full bg-black"
                     src={videoUrl}
+                    poster={thumbnailUrl || undefined}
                     onTimeUpdate={handleTimeUpdate}
                     onLoadedMetadata={handleLoadedMetadata}
                   />
@@ -255,8 +300,16 @@ export function VideoPlayerPage() {
               ) : (
                 <EmptyState
                   className="m-4"
-                  title="Video file unavailable"
-                  message="This recording cannot be loaded right now."
+                  title={
+                    videoStatus === "queued" || videoStatus === "processing"
+                      ? "Video is processing"
+                      : "Video file unavailable"
+                  }
+                  message={
+                    videoStatus === "queued" || videoStatus === "processing"
+                      ? "Analysis is in progress. Playback will appear once processing is complete."
+                      : "This recording cannot be loaded right now."
+                  }
                 />
               )}
             </Panel>

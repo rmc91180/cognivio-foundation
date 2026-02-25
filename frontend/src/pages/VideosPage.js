@@ -18,7 +18,7 @@ import {
   Select,
 } from "@/components/ui";
 
-function VideoRow({ video, assessment, teacher, isAdmin }) {
+function VideoRow({ video, assessment, teacher, isAdmin, onRetry, isRetrying }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [selectedDomain, setSelectedDomain] = useState(
@@ -83,6 +83,16 @@ function VideoRow({ video, assessment, teacher, isAdmin }) {
               Score {assessment.overall_score?.toFixed(1) ?? "N/A"}
             </Badge>
           )}
+          {(video.status === "failed" || video.status === "error") && (
+            <Button
+              size="sm"
+              variant="danger"
+              onClick={() => onRetry(video.id)}
+              disabled={isRetrying}
+            >
+              {isRetrying ? "Retrying..." : "Retry analysis"}
+            </Button>
+          )}
           <Link
             to={`/teachers/${video.teacher_id}`}
             className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
@@ -123,6 +133,11 @@ function VideoRow({ video, assessment, teacher, isAdmin }) {
           )}
         </div>
       </div>
+      {video.error_message && (
+        <div className="mt-2 rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-[11px] text-rose-700">
+          {video.error_message}
+        </div>
+      )}
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}
@@ -344,6 +359,17 @@ export function VideosPage() {
       );
     },
   });
+  const retryMutation = useMutation({
+    mutationFn: (videoId) => videoApi.retry(videoId),
+    onSuccess: () => {
+      toast.success("Video re-queued for analysis");
+      queryClient.invalidateQueries({ queryKey: ["videos"] });
+      queryClient.invalidateQueries({ queryKey: ["assessments"] });
+    },
+    onError: (error) => {
+      toast.error(error?.response?.data?.detail || "Failed to retry video analysis");
+    },
+  });
 
   const onSubmit = (e) => {
     e.preventDefault();
@@ -511,6 +537,8 @@ export function VideosPage() {
                         assessment={assessment}
                         teacher={teacher}
                         isAdmin={isAdmin}
+                        onRetry={(videoId) => retryMutation.mutate(videoId)}
+                        isRetrying={retryMutation.isPending && retryMutation.variables === v.id}
                       />
                     );
                   })}

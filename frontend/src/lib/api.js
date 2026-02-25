@@ -49,6 +49,7 @@ export const videoApi = {
   list: (params) => api.get("/api/videos", { params }),
   status: (videoId) => api.get(`/api/videos/${videoId}/status`),
   detail: (videoId) => api.get(`/api/videos/${videoId}`),
+  retry: (videoId) => api.post(`/api/videos/${videoId}/retry`),
 };
 
 export const recordingPolicyApi = {
