@@ -23,6 +23,12 @@ See the baseline lock and program plan:
 - [Week 6 Processing + Playback Reliability](./docs/WEEK6_PROCESSING_PLAYBACK_RELIABILITY.md)
 - [Week 7 MVP Integration Pass](./docs/WEEK7_MVP_INTEGRATION_PASS.md)
 - [Week 8 QA, Security, and Performance](./docs/WEEK8_QA_SECURITY_PERFORMANCE.md)
+- [Week 9 Pilot Readiness](./docs/WEEK9_PILOT_READINESS.md)
+- [Week 10 Launch + Stabilization](./docs/WEEK10_LAUNCH_STABILIZATION.md)
+- [Pilot UAT Checklist](./docs/PILOT_UAT_CHECKLIST.md)
+- [Deployment + Rollback Runbook](./docs/DEPLOYMENT_ROLLBACK_RUNBOOK.md)
+- [Post-Launch Triage](./docs/POST_LAUNCH_TRIAGE.md)
+- [MVP Plan Audit (2026-02-25)](./docs/MVP_PLAN_AUDIT_2026-02-25.md)
 
 ## Quick Start (MVP Stack)
 

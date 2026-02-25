@@ -48,6 +48,7 @@ server = _load_server_module()
 
 def test_normalize_video_status_maps_legacy_and_unknown_values():
     assert server._normalize_video_status("processing") == "processing"
+    assert server._normalize_video_status("cancelled") == "cancelled"
     assert server._normalize_video_status("error") == "failed"
     assert server._normalize_video_status("errored") == "failed"
     assert server._normalize_video_status("mystery") == "queued"
