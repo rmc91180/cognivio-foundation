@@ -17,6 +17,9 @@ See the baseline lock and program plan:
 - [MVP Delivery Plan](./docs/MVP_DELIVERY_PLAN.md)
 - [Brand Identity v1](./docs/BRAND_IDENTITY_V1.md)
 - [Week 2 Design System](./docs/WEEK2_DESIGN_SYSTEM.md)
+- [Week 3 Dashboard + Teachers UX](./docs/WEEK3_DASHBOARD_TEACHERS_UX.md)
+- [Week 4 Videos + School Setup UX](./docs/WEEK4_VIDEOS_SCHOOL_SETUP_UX.md)
+- [Week 5 Video Pipeline Foundation](./docs/WEEK5_VIDEO_PIPELINE_FOUNDATION.md)
 
 ## Quick Start (MVP Stack)
 

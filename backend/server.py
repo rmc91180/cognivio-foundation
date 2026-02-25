@@ -77,6 +77,27 @@ def _ensure_allowed_extension(filename: str) -> None:
         )
 
 
+def _normalize_video_status(value: Optional[str]) -> str:
+    raw = (value or "").strip().lower()
+    if raw in {"queued", "processing", "completed", "failed"}:
+        return raw
+    if raw in {"error", "errored"}:
+        return "failed"
+    return "queued"
+
+
+def _parse_optional_iso_datetime(value: Optional[str], field_name: str) -> Optional[str]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid {field_name}. Expected ISO-8601 datetime.")
+
+
 async def _save_upload_file(upload: UploadFile, target_path: Path) -> None:
     size = 0
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -388,6 +409,15 @@ DEMO_USERS = [
 # Upload constraints
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10MB
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".jpeg", ".jpg"}
+VIDEO_ALLOWED_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+VIDEO_ALLOWED_CONTENT_TYPES = {
+    "video/mp4",
+    "video/quicktime",
+    "video/x-msvideo",
+    "video/x-matroska",
+    "video/webm",
+}
+VIDEO_MAX_UPLOAD_BYTES = int(os.getenv("MAX_VIDEO_BYTES", str(1024 * 1024 * 1024)))
 ADHERENCE_WEIGHT = float(os.getenv("ADHERENCE_WEIGHT", "0.15"))
 
 # S3 configuration (required for file uploads)
@@ -668,10 +698,13 @@ class VideoUploadResponse(BaseModel):
     filename: str
     teacher_id: str
     status: str
+    analysis_status: str
     upload_date: str
     subject: Optional[str] = None
     recorded_at: Optional[str] = None
     file_path: Optional[str] = None
+    file_size_bytes: Optional[int] = None
+    content_type: Optional[str] = None
 
 
 class CurriculumUploadResponse(BaseModel):
@@ -788,6 +821,13 @@ class ScheduleStatus(str, Enum):
     PLANNED = "planned"
     RECORDING = "recording"
     COMPLETED = "completed"
+
+
+class VideoProcessingStatus(str, Enum):
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
     CANCELLED = "cancelled"
 
 
@@ -1258,13 +1298,22 @@ async def upload_video(
     recorded_at: Optional[str] = Form(None),
     current_user: dict = Depends(get_current_user)
 ):
-    # Validate file type and basic content-type
-    allowed_types = [".mp4", ".mov", ".avi", ".mkv", ".webm"]
+    if not (file.filename or "").strip():
+        raise HTTPException(status_code=400, detail="Filename is required")
     file_ext = Path(file.filename or "").suffix.lower()
-    if file_ext not in allowed_types:
-        raise HTTPException(status_code=400, detail=f"Invalid file type. Allowed: {allowed_types}")
-    if file.content_type not in ["video/mp4", "video/quicktime", "video/x-msvideo", "video/x-matroska", "video/webm"]:
-        raise HTTPException(status_code=400, detail="Invalid content type for video upload")
+    if file_ext not in VIDEO_ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type. Allowed: {sorted(VIDEO_ALLOWED_EXTENSIONS)}",
+        )
+    content_type = (file.content_type or "").lower()
+    if content_type and content_type not in VIDEO_ALLOWED_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid content type. Allowed: {sorted(VIDEO_ALLOWED_CONTENT_TYPES)}",
+        )
+    normalized_recorded_at = _parse_optional_iso_datetime(recorded_at, "recorded_at")
+    upload_time = datetime.now(timezone.utc).isoformat()
     
     # Verify teacher exists (admins can upload for their roster; teachers can upload for themselves)
     teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
@@ -1286,9 +1335,7 @@ async def upload_video(
     file_path = teacher_dir / filename
     relative_path = f"videos/{teacher_id}/{filename}"
     
-    # Save file (optional size guard via env)
-    MAX_BYTES = os.getenv("MAX_VIDEO_BYTES")
-    max_bytes_value = int(MAX_BYTES) if MAX_BYTES and MAX_BYTES.isdigit() else None
+    # Save file with strict byte limit
     size = 0
     async with aiofiles.open(file_path, "wb") as f:
         while True:
@@ -1296,10 +1343,16 @@ async def upload_video(
             if not chunk:
                 break
             size += len(chunk)
-            if max_bytes_value and size > max_bytes_value:
+            if VIDEO_MAX_UPLOAD_BYTES and size > VIDEO_MAX_UPLOAD_BYTES:
                 await f.close()
                 os.remove(file_path)
-                raise HTTPException(status_code=400, detail="File too large")
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"File too large. Maximum allowed is "
+                        f"{VIDEO_MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
+                    ),
+                )
             await f.write(chunk)
     
     s3_key = None
@@ -1309,7 +1362,7 @@ async def upload_video(
             file_path,
             "videos",
             filename,
-            file.content_type or "video/mp4",
+            content_type or "video/mp4",
         )
     except Exception as exc:
         logger.warning(f"S3 upload failed for video {video_id}: {exc}")
@@ -1321,13 +1374,19 @@ async def upload_video(
         "s3_key": s3_key,
         "file_url": file_url,
         "file_path": relative_path,
+        "content_type": content_type or "video/mp4",
+        "file_size_bytes": size,
         "teacher_id": teacher_id,
         "uploaded_by": current_user["id"],
-        "status": "processing",
-        "analysis_status": "processing",
+        "status": VideoProcessingStatus.QUEUED.value,
+        "analysis_status": VideoProcessingStatus.QUEUED.value,
+        "status_updated_at": upload_time,
+        "processing_started_at": None,
+        "processing_completed_at": None,
+        "processing_failed_at": None,
         "subject": subject,
-        "recorded_at": recorded_at,
-        "upload_date": datetime.now(timezone.utc).isoformat()
+        "recorded_at": normalized_recorded_at,
+        "upload_date": upload_time,
     }
     await db.videos.insert_one(video_doc)
 
@@ -1337,10 +1396,10 @@ async def upload_video(
         "teacher_id": teacher_id,
         "file_path": relative_path,
         "subject": subject,
-        "recorded_at": recorded_at,
-        "analysis_status": "processing",
+        "recorded_at": normalized_recorded_at,
+        "analysis_status": VideoProcessingStatus.QUEUED.value,
         "uploaded_by": current_user["id"],
-        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "uploaded_at": upload_time,
     })
 
     try:
@@ -1359,11 +1418,14 @@ async def upload_video(
         id=video_id,
         filename=file.filename,
         teacher_id=teacher_id,
-        status="processing",
+        status=VideoProcessingStatus.QUEUED.value,
+        analysis_status=VideoProcessingStatus.QUEUED.value,
         upload_date=video_doc["upload_date"],
         subject=subject,
-        recorded_at=recorded_at,
+        recorded_at=normalized_recorded_at,
         file_path=relative_path,
+        file_size_bytes=size,
+        content_type=content_type or "video/mp4",
     )
 
 @api_router.get("/videos")
@@ -1375,6 +1437,9 @@ async def get_videos(teacher_id: Optional[str] = None, current_user: dict = Depe
     else:
         query["uploaded_by"] = current_user["id"]
     videos = await db.videos.find(query, {"_id": 0, "uploaded_by": 0, "stored_filename": 0}).to_list(1000)
+    for video in videos:
+        video["status"] = _normalize_video_status(video.get("status"))
+        video["analysis_status"] = _normalize_video_status(video.get("analysis_status"))
     return videos
 
 
@@ -1385,6 +1450,8 @@ async def get_video_detail(video_id: str, current_user: dict = Depends(get_curre
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    video["status"] = _normalize_video_status(video.get("status"))
+    video["analysis_status"] = _normalize_video_status(video.get("analysis_status"))
     return video
 
 @api_router.get("/videos/{video_id}/status")
@@ -1393,7 +1460,10 @@ async def get_video_status(video_id: str, current_user: dict = Depends(get_curre
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     await _get_teacher_or_404(video.get("teacher_id"), current_user)
-    return {"status": video.get("status", "unknown")}
+    return {
+        "status": _normalize_video_status(video.get("status")),
+        "analysis_status": _normalize_video_status(video.get("analysis_status")),
+    }
 
 
 @app.websocket("/ws/videos/{video_id}")
@@ -1441,7 +1511,7 @@ async def video_status_ws(websocket: WebSocket, video_id: str):
             )
             if not video:
                 break
-            status = video.get("status", "unknown")
+            status = _normalize_video_status(video.get("status"))
             if status != last_status:
                 await websocket.send_json({"status": status})
                 last_status = status
@@ -4512,6 +4582,30 @@ async def analyze_video(video_id: str, file_path: str, teacher_id: str, user_id:
     """Background task to analyze video using AI"""
     try:
         logger.info(f"Starting analysis for video {video_id}")
+        started_at = datetime.now(timezone.utc).isoformat()
+        await db.videos.update_one(
+            {"id": video_id},
+            {
+                "$set": {
+                    "status": VideoProcessingStatus.PROCESSING.value,
+                    "analysis_status": VideoProcessingStatus.PROCESSING.value,
+                    "status_updated_at": started_at,
+                    "processing_started_at": started_at,
+                    "processing_failed_at": None,
+                    "error_message": None,
+                },
+                "$inc": {"processing_attempts": 1},
+            },
+        )
+        await db.video_evidence.update_one(
+            {"video_id": video_id, "uploaded_by": user_id},
+            {
+                "$set": {
+                    "analysis_status": VideoProcessingStatus.PROCESSING.value,
+                    "error_message": None,
+                }
+            },
+        )
         
         # Get current framework selection
         selection = await db.framework_selections.find_one(
@@ -4577,26 +4671,50 @@ async def analyze_video(video_id: str, file_path: str, teacher_id: str, user_id:
         await _ensure_mock_evidence(assessment_doc, {"id": user_id})
         
         # Update video status
+        completed_at = datetime.now(timezone.utc).isoformat()
         await db.videos.update_one(
             {"id": video_id},
-            {"$set": {"status": "completed", "analysis_status": "completed", "assessment_id": assessment_doc["id"]}}
+            {
+                "$set": {
+                    "status": VideoProcessingStatus.COMPLETED.value,
+                    "analysis_status": VideoProcessingStatus.COMPLETED.value,
+                    "assessment_id": assessment_doc["id"],
+                    "status_updated_at": completed_at,
+                    "processing_completed_at": completed_at,
+                    "processing_failed_at": None,
+                }
+            },
         )
         await db.video_evidence.update_one(
             {"video_id": video_id, "uploaded_by": user_id},
-            {"$set": {"analysis_status": "completed"}},
+            {"$set": {"analysis_status": VideoProcessingStatus.COMPLETED.value}},
         )
         
         logger.info(f"Completed analysis for video {video_id}")
         
     except Exception as e:
         logger.error(f"Error analyzing video {video_id}: {str(e)}")
+        failed_at = datetime.now(timezone.utc).isoformat()
         await db.videos.update_one(
             {"id": video_id},
-            {"$set": {"status": "error", "analysis_status": "error", "error_message": str(e)}}
+            {
+                "$set": {
+                    "status": VideoProcessingStatus.FAILED.value,
+                    "analysis_status": VideoProcessingStatus.FAILED.value,
+                    "status_updated_at": failed_at,
+                    "processing_failed_at": failed_at,
+                    "error_message": str(e),
+                }
+            },
         )
         await db.video_evidence.update_one(
             {"video_id": video_id, "uploaded_by": user_id},
-            {"$set": {"analysis_status": "error", "error_message": str(e)}},
+            {
+                "$set": {
+                    "analysis_status": VideoProcessingStatus.FAILED.value,
+                    "error_message": str(e),
+                }
+            },
         )
     finally:
         # Clean up video file (run in thread to avoid blocking event loop)
