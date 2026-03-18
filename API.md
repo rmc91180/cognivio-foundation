@@ -448,18 +448,22 @@ Get all pending AI observations.
 
 ### POST /api/videos/upload
 
-Upload a video for AI analysis (stub).
+Upload a video for privacy processing and AI analysis.
 
 **Request:**
 - Content-Type: `multipart/form-data`
-- Body: `file` (video file), `teacherId` (uuid)
+- Body: `file` (video file), `teacher_id` (uuid), optional `subject`, optional `recorded_at`
 
-**Response (202):**
+**Response (200):**
 ```json
 {
-  "videoId": "uuid",
-  "status": "processing",
-  "message": "Video queued for AI analysis"
+  "id": "uuid",
+  "filename": "period-3.mp4",
+  "teacher_id": "teacher_123",
+  "status": "queued",
+  "privacy_status": "queued",
+  "analysis_status": "queued",
+  "upload_date": "2026-03-18T10:15:00Z"
 }
 ```
 
@@ -470,12 +474,95 @@ Check video processing status.
 **Response (200):**
 ```json
 {
-  "videoId": "uuid",
-  "status": "completed" | "processing" | "failed",
-  "progress": 100,
-  "observationCount": 5
+  "status": "completed",
+  "privacy_status": "completed",
+  "analysis_status": "completed",
+  "privacy_review_required": false,
+  "privacy_review_reason": null,
+  "error_message": null,
+  "privacy_error": null
 }
 ```
+
+### GET /api/videos/:id/raw-access
+
+Admin-only raw asset access. Every access is written to the privacy audit log.
+
+**Response (200):**
+```json
+{
+  "video_id": "uuid",
+  "access_url": "https://private-bucket.example.com/raw/video.mp4",
+  "expires_at": null,
+  "retention_expires_at": "2026-04-17T10:15:00Z"
+}
+```
+
+### POST /api/videos/:id/privacy/retry
+
+Re-queue privacy processing for a failed or manually resolved video.
+
+**Response (200):**
+```json
+{
+  "video_id": "uuid",
+  "privacy_status": "queued",
+  "analysis_status": "queued",
+  "requeued_at": "2026-03-18T10:40:00Z"
+}
+```
+
+### GET /api/privacy/review-queue
+
+Admin-only queue of videos requiring manual privacy review.
+
+### POST /api/videos/:id/privacy/review
+
+Admin-only privacy review action.
+
+**Request Body:**
+```json
+{
+  "decision": "approve_teacher_track",
+  "approved_track_id": "track_01",
+  "reason": "Reviewer confirmed teacher track."
+}
+```
+
+### GET /api/privacy/audit
+
+Admin-only privacy audit log.
+
+**Response (200):**
+```json
+[
+  {
+    "id": "audit_001",
+    "actor_user_id": "user_admin_001",
+    "event_type": "privacy_review_resolved",
+    "target_type": "video",
+    "target_id": "video_123",
+    "details": {
+      "decision": "blur_all_and_continue"
+    },
+    "created_at": "2026-03-18T10:48:00Z"
+  }
+]
+```
+
+## Teacher Privacy Profile Endpoints
+
+### GET /api/teachers/:id/privacy-profile
+
+Get privacy enrollment status for a teacher.
+
+### POST /api/teachers/:id/privacy-profile
+
+Upload `3-5` teacher reference images used to identify the teacher during privacy processing.
+
+### DELETE /api/teachers/:id/privacy-profile
+
+Delete the active teacher privacy profile and expire retained references.
 
 ---
 

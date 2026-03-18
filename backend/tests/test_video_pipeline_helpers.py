@@ -93,12 +93,77 @@ def test_build_video_visibility_query_by_role():
 def test_apply_video_response_defaults_adds_playback_and_thumbnail_urls():
     video = {
         "status": "error",
+        "privacy_status": "completed",
         "analysis_status": "processing",
         "file_path": "videos/t1/v1.mp4",
         "thumbnail_path": "thumbnails/t1/v1.jpg",
     }
     normalized = server._apply_video_response_defaults(video)
     assert normalized["status"] == "failed"
+    assert normalized["privacy_status"] == "completed"
     assert normalized["analysis_status"] == "processing"
     assert normalized["playback_url"].endswith("/uploads/videos/t1/v1.mp4")
     assert normalized["thumbnail_url"].endswith("/uploads/thumbnails/t1/v1.jpg")
+
+
+def test_normalize_privacy_status_maps_unknown_and_errors():
+    assert server._normalize_privacy_status("review_required") == "review_required"
+    assert server._normalize_privacy_status("error") == "failed"
+    assert server._normalize_privacy_status("mystery") == "queued"
+    assert server._normalize_privacy_status(None) == "queued"
+
+
+def test_apply_video_response_defaults_prefers_redacted_assets():
+    video = {
+        "status": "completed",
+        "privacy_status": "completed",
+        "analysis_status": "completed",
+        "file_url": "https://cdn.example.com/raw.mp4",
+        "redacted_file_url": "https://cdn.example.com/redacted.mp4",
+        "thumbnail_url": "https://cdn.example.com/raw.jpg",
+        "redacted_thumbnail_url": "https://cdn.example.com/redacted.jpg",
+    }
+    normalized = server._apply_video_response_defaults(video)
+    assert normalized["playback_url"] == "https://cdn.example.com/redacted.mp4"
+    assert normalized["thumbnail_url"] == "https://cdn.example.com/redacted.jpg"
+
+
+def test_apply_video_response_defaults_hides_playback_until_privacy_complete():
+    video = {
+        "status": "processing",
+        "privacy_status": "processing",
+        "analysis_status": "queued",
+        "file_url": "https://cdn.example.com/raw.mp4",
+        "thumbnail_url": "https://cdn.example.com/raw.jpg",
+    }
+    normalized = server._apply_video_response_defaults(video)
+    assert normalized["playback_url"] is None
+    assert normalized["thumbnail_url"] is None
+
+
+def test_sanitize_video_response_removes_raw_and_storage_fields():
+    sanitized = server._sanitize_video_response(
+        {
+            "id": "vid_1",
+            "playback_url": "https://cdn.example.com/redacted.mp4",
+            "thumbnail_url": "https://cdn.example.com/redacted.jpg",
+            "raw_file_url": "https://cdn.example.com/raw.mp4",
+            "file_url": "https://cdn.example.com/internal.mp4",
+            "file_path": "videos/t1/raw.mp4",
+            "raw_file_path": "videos/t1/raw.mp4",
+            "s3_key": "uploads/videos/internal.mp4",
+        }
+    )
+    assert sanitized["playback_url"] == "https://cdn.example.com/redacted.mp4"
+    assert "raw_file_url" not in sanitized
+    assert "file_url" not in sanitized
+    assert "file_path" not in sanitized
+    assert "s3_key" not in sanitized
+
+
+def test_build_privacy_profile_summary_returns_missing_defaults():
+    profile = server._build_privacy_profile_summary("teacher_1", None)
+    assert profile.teacher_id == "teacher_1"
+    assert profile.status == "missing"
+    assert profile.reference_count == 0
+    assert profile.needs_refresh is True

@@ -7,6 +7,8 @@ import {
   gradebookApi,
   teacherApi,
   recordingComplianceApi,
+  recognitionApi,
+  opsApi,
 } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { LeadershipInsightsCard } from "@/components/dashboard/LeadershipInsightsCard";
@@ -24,7 +26,7 @@ import {
 import { toast } from "sonner";
 import { subDays, format } from "date-fns";
 import { useAuth } from "@/hooks/useAuth";
-import { Button, EmptyState, LoadingState, PageHeader } from "@/components/ui";
+import { Button, EmptyState, LoadingState, PageHeader, Panel } from "@/components/ui";
 import { Link } from "react-router-dom";
 
 export function DashboardPage() {
@@ -125,6 +127,24 @@ export function DashboardPage() {
     queryFn: () =>
       assessmentApi.dashboardLeadershipInsights(trendQueryParams).then((res) => res.data),
     enabled: isDashboardV2Enabled && Boolean(currentData?.roster?.length),
+  });
+  const { data: opsReadinessRes } = useQuery({
+    queryKey: ["ops-readiness"],
+    enabled: isAdmin,
+    queryFn: () => opsApi.readiness().then((res) => res.data),
+    refetchInterval: 30000,
+  });
+  const { data: opsHealthRes } = useQuery({
+    queryKey: ["ops-launch-health"],
+    enabled: isAdmin,
+    queryFn: () => opsApi.launchHealth().then((res) => res.data),
+    refetchInterval: 30000,
+  });
+  const { data: recognitionQueueRes } = useQuery({
+    queryKey: ["recognition-review-queue"],
+    enabled: isAdmin,
+    queryFn: () => recognitionApi.reviewQueue().then((res) => res.data),
+    refetchInterval: 30000,
   });
 
   const roster = useMemo(() => currentData?.roster ?? [], [currentData]);
@@ -449,6 +469,10 @@ export function DashboardPage() {
     if (!Array.isArray(recordingComplianceRes?.summary)) return [];
     return recordingComplianceRes.summary;
   }, [recordingComplianceRes]);
+  const recognitionQueueItems = useMemo(
+    () => recognitionQueueRes?.items || [],
+    [recognitionQueueRes]
+  );
   const behindComplianceRows = useMemo(
     () => complianceSummaryRows.filter((row) => (row.missing_subjects?.length || 0) > 0),
     [complianceSummaryRows]
@@ -500,6 +524,94 @@ export function DashboardPage() {
             </Button>
           }
         />
+
+        {isAdmin && (
+          <div className="mb-6 grid gap-4 xl:grid-cols-2">
+            <Panel>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">
+                    Privacy Operations
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Review queue, privacy failures, and teacher enrollment readiness.
+                  </p>
+                </div>
+                <Link
+                  to="/privacy-review"
+                  className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                >
+                  Open privacy review
+                </Link>
+              </div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">Pending Reviews</div>
+                  <div className="mt-1 text-xl font-semibold text-slate-900">
+                    {opsHealthRes?.metrics?.privacy_reviews_pending ?? 0}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">Privacy Queue</div>
+                  <div className="mt-1 text-xl font-semibold text-slate-900">
+                    {opsHealthRes?.metrics?.privacy_queue_depth ?? 0}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">Privacy Failures 24h</div>
+                  <div className="mt-1 text-xl font-semibold text-slate-900">
+                    {opsHealthRes?.metrics?.failed_privacy_jobs_24h ?? 0}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">Missing Profiles</div>
+                  <div className="mt-1 text-xl font-semibold text-slate-900">
+                    {opsReadinessRes?.metrics?.teachers_missing_privacy_profiles ?? 0}
+                  </div>
+                </div>
+              </div>
+            </Panel>
+
+            <Panel>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">
+                    Recognition Operations
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Review 5-star candidates and keep exemplar approvals moving.
+                  </p>
+                </div>
+                <Link
+                  to="/recognition-review"
+                  className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                >
+                  Open recognition review
+                </Link>
+              </div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">Pending Reviews</div>
+                  <div className="mt-1 text-xl font-semibold text-slate-900">
+                    {recognitionQueueItems.length}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">Library Scope</div>
+                  <div className="mt-1 text-xl font-semibold text-slate-900">
+                    {recognitionQueueItems.filter((item) => item.sharing_scope === "cognivio_library").length}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">School Scope</div>
+                  <div className="mt-1 text-xl font-semibold text-slate-900">
+                    {recognitionQueueItems.filter((item) => item.sharing_scope === "school_only").length}
+                  </div>
+                </div>
+              </div>
+            </Panel>
+          </div>
+        )}
 
         {isLoading ? (
           <LoadingState className="mt-8" message="Loading roster..." />

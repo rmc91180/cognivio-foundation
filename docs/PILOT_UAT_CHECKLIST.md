@@ -2,6 +2,11 @@
 
 Date: 2026-02-25
 
+See also:
+
+- [Pilot Privacy Validation Pack](./PILOT_PRIVACY_VALIDATION_PACK.md)
+- [Privacy Go-Live Checklist](./PRIVACY_GO_LIVE_CHECKLIST.md)
+
 ## Data Setup
 
 1. Create at least 1 school and 8+ teachers across 3 departments.
@@ -20,6 +25,7 @@ Date: 2026-02-25
 3. Videos:
   - Upload a recording and observe queued -> processing -> completed.
   - Force a failed analysis and verify retry action works.
+  - Force a privacy review scenario and verify review queue handling works.
 4. School Setup:
   - Save framework selections.
   - Save recording compliance policy and confirm dashboard updates.
@@ -36,3 +42,4 @@ Date: 2026-02-25
 2. Video processing transitions are reliable.
 3. Permission boundaries (admin vs teacher) are correct.
 4. Export/report endpoints produce expected files.
+5. Privacy validation pack signoff is complete for pilot rollout.

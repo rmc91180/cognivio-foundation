@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { assessmentApi, teacherApi, videoApi, evidenceApi } from "@/lib/api";
+import { assessmentApi, teacherApi, videoApi, evidenceApi, privacyProfileApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { toast } from "sonner";
 import { Link, useLocation } from "react-router-dom";
@@ -18,7 +18,16 @@ import {
   Select,
 } from "@/components/ui";
 
-function VideoRow({ video, assessment, teacher, isAdmin, onRetry, isRetrying }) {
+function VideoRow({
+  video,
+  assessment,
+  teacher,
+  isAdmin,
+  onRetry,
+  onRetryPrivacy,
+  isRetrying,
+  isRetryingPrivacy,
+}) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [selectedDomain, setSelectedDomain] = useState(
@@ -78,10 +87,41 @@ function VideoRow({ video, assessment, teacher, isAdmin, onRetry, isRetrying }) 
         </div>
         <div className="flex items-center gap-2 text-[11px] text-slate-600">
           <Badge variant={statusVariant}>{video.status || "unknown"}</Badge>
+          <Badge
+            variant={
+              video.privacy_status === "completed"
+                ? "success"
+                : video.privacy_status === "failed"
+                  ? "danger"
+                  : video.privacy_status === "review_required"
+                    ? "warning"
+                    : "neutral"
+            }
+          >
+            Privacy {video.privacy_status || "queued"}
+          </Badge>
           {assessment && (
             <Badge variant="success">
               Score {assessment.overall_score?.toFixed(1) ?? "N/A"}
             </Badge>
+          )}
+          {video.privacy_status === "review_required" && (
+            <Link
+              to="/privacy-review"
+              className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-700 hover:bg-amber-100"
+            >
+              Review privacy
+            </Link>
+          )}
+          {video.privacy_status === "failed" && (
+            <Button
+              size="sm"
+              variant="danger"
+              onClick={() => onRetryPrivacy(video.id)}
+              disabled={isRetryingPrivacy}
+            >
+              {isRetryingPrivacy ? "Retrying..." : "Retry privacy"}
+            </Button>
           )}
           {(video.status === "failed" || video.status === "error") && (
             <Button
@@ -340,6 +380,13 @@ export function VideosPage() {
     });
   }, [videos, statusFilter, subjectFilter, search, timeRange]);
 
+  const { data: selectedTeacherPrivacyProfile } = useQuery({
+    queryKey: ["teacher-privacy-profile", selectedTeacher],
+    enabled: Boolean(selectedTeacher),
+    queryFn: () => privacyProfileApi.get(selectedTeacher).then((r) => r.data),
+  });
+  const selectedTeacherPrivacyReady = selectedTeacherPrivacyProfile?.status === "active";
+
   const uploadMutation = useMutation({
     mutationFn: (payload) => {
       const formData = new FormData();
@@ -354,8 +401,9 @@ export function VideosPage() {
       setFile(null);
     },
     onError: (error) => {
+      const detail = error?.response?.data?.detail;
       toast.error(
-        error?.response?.data?.detail || "Failed to upload video for analysis"
+        typeof detail === "string" ? detail : detail?.message || "Failed to upload video for analysis"
       );
     },
   });
@@ -370,11 +418,27 @@ export function VideosPage() {
       toast.error(error?.response?.data?.detail || "Failed to retry video analysis");
     },
   });
+  const retryPrivacyMutation = useMutation({
+    mutationFn: (videoId) => videoApi.retryPrivacy(videoId),
+    onSuccess: () => {
+      toast.success("Privacy processing re-queued");
+      queryClient.invalidateQueries({ queryKey: ["videos"] });
+      queryClient.invalidateQueries({ queryKey: ["assessments"] });
+    },
+    onError: (error) => {
+      const detail = error?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : detail?.message || "Failed to retry privacy processing");
+    },
+  });
 
   const onSubmit = (e) => {
     e.preventDefault();
     if (!file || !selectedTeacher) {
       toast.error("Select a teacher and video file");
+      return;
+    }
+    if (!selectedTeacherPrivacyReady) {
+      toast.error("Complete the teacher privacy profile before uploading recordings.");
       return;
     }
     uploadMutation.mutate({ file, teacherId: selectedTeacher });
@@ -466,6 +530,11 @@ export function VideosPage() {
               <p className="mb-3 text-[11px] text-slate-500">
                 Accepted: MP4, MOV, AVI, MKV, WEBM. Large files may take several minutes to process.
               </p>
+              {selectedTeacher && (
+                <div className="mb-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-600">
+                  Privacy profile: {selectedTeacherPrivacyReady ? "Ready" : "Required before upload"}
+                </div>
+              )}
               <form onSubmit={onSubmit} className="space-y-3 text-sm">
                 <Field label="Teacher">
                   <Select
@@ -489,10 +558,17 @@ export function VideosPage() {
                     className="mt-1 w-full text-xs text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
                   />
                 </Field>
-                <Button type="submit" disabled={uploadMutation.isPending} fullWidth className="mt-2">
+                <Button
+                  type="submit"
+                  disabled={uploadMutation.isPending || (Boolean(selectedTeacher) && !selectedTeacherPrivacyReady)}
+                  fullWidth
+                  className="mt-2"
+                >
                   {uploadMutation.isPending
                     ? "Uploading..."
-                    : "Upload & analyze"}
+                    : Boolean(selectedTeacher) && !selectedTeacherPrivacyReady
+                      ? "Privacy profile required"
+                      : "Upload & analyze"}
                 </Button>
               </form>
             </Panel>
@@ -538,7 +614,11 @@ export function VideosPage() {
                         teacher={teacher}
                         isAdmin={isAdmin}
                         onRetry={(videoId) => retryMutation.mutate(videoId)}
+                        onRetryPrivacy={(videoId) => retryPrivacyMutation.mutate(videoId)}
                         isRetrying={retryMutation.isPending && retryMutation.variables === v.id}
+                        isRetryingPrivacy={
+                          retryPrivacyMutation.isPending && retryPrivacyMutation.variables === v.id
+                        }
                       />
                     );
                   })}

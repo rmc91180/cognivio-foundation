@@ -15,6 +15,8 @@ import {
   adminApi,
   actionPlanApi,
   videoApi,
+  privacyProfileApi,
+  recognitionApi,
 } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { MonthlySummary } from "@/components/MonthlySummary";
@@ -240,6 +242,7 @@ export function TeacherProfilePage() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [videoSubject, setVideoSubject] = useState("");
   const [videoTab, setVideoTab] = useState("record");
+  const [privacyReferenceFiles, setPrivacyReferenceFiles] = useState([]);
 
   const makeGoalId = () => {
     if (typeof crypto !== "undefined" && crypto.randomUUID) {
@@ -320,6 +323,18 @@ export function TeacherProfilePage() {
       assessmentApi.listAdminOverrides(latestAssessmentId).then((r) => r.data),
   });
 
+  const { data: privacyProfileRes } = useQuery({
+    queryKey: ["teacher-privacy-profile", teacherId],
+    enabled: Boolean(teacherId),
+    queryFn: () => privacyProfileApi.get(teacherId).then((r) => r.data),
+  });
+
+  const { data: recognitionSummaryRes } = useQuery({
+    queryKey: ["teacher-recognition-summary", teacherId],
+    enabled: Boolean(teacherId),
+    queryFn: () => recognitionApi.teacherSummary(teacherId).then((r) => r.data),
+  });
+
   const [selectedEvidenceElement, setSelectedEvidenceElement] = useState(null);
 
   const evidenceByElement = useMemo(() => {
@@ -369,6 +384,13 @@ export function TeacherProfilePage() {
     }
     return items;
   }, [actionPlanGoals, nextStepsNote]);
+
+  const privacyProfileReady = privacyProfileRes?.status === "active";
+  const privacyProfileLabel = privacyProfileReady
+    ? `Ready • ${privacyProfileRes?.reference_count || 0} references`
+    : "Not configured";
+  const recognitionSummary = recognitionSummaryRes?.summary || {};
+  const recognitionBadges = recognitionSummaryRes?.badges || [];
 
   const handleSaveReflection = (e) => {
     e.preventDefault();
@@ -425,16 +447,47 @@ export function TeacherProfilePage() {
     onSuccess: () => {
       toast.success("Uploaded. Queued for analysis.");
       setUploadProgress(0);
+      setRecordedBlob(null);
+      setRecordedUrl("");
       queryClient.invalidateQueries({ queryKey: ["teacher-dashboard", teacherId] });
       queryClient.invalidateQueries({ queryKey: ["videos"] });
     },
     onError: (error) => {
-      toast.error(error?.response?.data?.detail || "Failed to upload video");
+      const detail = error?.response?.data?.detail;
+      toast.error(
+        typeof detail === "string" ? detail : detail?.message || "Failed to upload video"
+      );
       setUploadProgress(0);
     },
   });
 
+  const savePrivacyProfileMutation = useMutation({
+    mutationFn: (files) => {
+      const formData = new FormData();
+      files.forEach((selectedFile) => {
+        formData.append("files", selectedFile);
+      });
+      formData.append("replace_existing", "true");
+      return privacyProfileApi.upload(teacherId, formData);
+    },
+    onSuccess: () => {
+      toast.success("Privacy profile saved");
+      setPrivacyReferenceFiles([]);
+      queryClient.invalidateQueries({ queryKey: ["teacher-privacy-profile", teacherId] });
+    },
+    onError: (error) => {
+      const detail = error?.response?.data?.detail;
+      toast.error(
+        typeof detail === "string" ? detail : detail?.message || "Failed to save privacy profile"
+      );
+    },
+  });
+
   const handleUploadRecorded = () => {
+    if (!privacyProfileReady) {
+      toast.error("Complete the teacher privacy profile before uploading recordings.");
+      return;
+    }
     if (!recordedBlob || !teacherId) {
       toast.error("Record a video first.");
       return;
@@ -449,6 +502,14 @@ export function TeacherProfilePage() {
       subjectValue: videoSubject,
       recordedAt: new Date().toISOString(),
     });
+  };
+
+  const handleSavePrivacyProfile = () => {
+    if (!teacherId || privacyReferenceFiles.length === 0) {
+      toast.error("Add 3 to 5 reference photos first.");
+      return;
+    }
+    savePrivacyProfileMutation.mutate(privacyReferenceFiles);
   };
 
   const handleSaveActionPlan = () => {
@@ -940,12 +1001,14 @@ export function TeacherProfilePage() {
                   <button
                     type="button"
                     onClick={handleUploadRecorded}
-                    disabled={uploadRecordedMutation.isPending}
+                    disabled={uploadRecordedMutation.isPending || !privacyProfileReady}
                     className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90 disabled:opacity-60"
                   >
                     {uploadRecordedMutation.isPending
                       ? "Uploading..."
-                      : "Upload recording"}
+                      : privacyProfileReady
+                        ? "Upload recording"
+                        : "Privacy profile required"}
                   </button>
                 )}
               </div>
@@ -972,6 +1035,38 @@ export function TeacherProfilePage() {
                 >
                   Video library
                 </button>
+              </div>
+              <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="font-medium text-slate-800">
+                      Privacy identity profile
+                    </div>
+                    <div className="mt-1 text-[11px] text-slate-500">
+                      Status: {privacyProfileLabel}. Upload 3 to 5 clear teacher photos before recording uploads.
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleSavePrivacyProfile}
+                    disabled={savePrivacyProfileMutation.isPending}
+                    className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-60"
+                  >
+                    {savePrivacyProfileMutation.isPending ? "Saving..." : "Save privacy profile"}
+                  </button>
+                </div>
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  multiple
+                  onChange={(e) => setPrivacyReferenceFiles(Array.from(e.target.files || []))}
+                  className="mt-3 w-full text-xs text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-white file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
+                />
+                <div className="mt-2 text-[11px] text-slate-500">
+                  {privacyReferenceFiles.length > 0
+                    ? `${privacyReferenceFiles.length} reference files selected`
+                    : "No new reference photos selected."}
+                </div>
               </div>
               {videoTab === "record" ? (
                 <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -1471,6 +1566,92 @@ export function TeacherProfilePage() {
           </div>
 
           <div className="lg:col-span-4 space-y-6 lg:sticky lg:top-6 self-start">
+            <section className="rounded-xl border border-slate-200 bg-white p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="mb-2 text-sm font-semibold text-slate-900">
+                    Recognition
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Track 5-star lesson badges and readiness for exemplar publication.
+                  </p>
+                </div>
+                <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+                  {recognitionSummary.five_star_lessons || 0} awarded
+                </span>
+              </div>
+              <div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs">
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-2 py-3">
+                  <div className="text-lg font-semibold text-slate-900">
+                    {recognitionSummary.five_star_lessons || 0}
+                  </div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-500">
+                    5-Star Lessons
+                  </div>
+                </div>
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-2 py-3">
+                  <div className="text-lg font-semibold text-slate-900">
+                    {recognitionSummary.published_exemplars || 0}
+                  </div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-500">
+                    Exemplars
+                  </div>
+                </div>
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-2 py-3">
+                  <div className="text-lg font-semibold text-slate-900">
+                    {recognitionSummary.active_streak || 0}
+                  </div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-500">
+                    Active Streak
+                  </div>
+                </div>
+              </div>
+              <div className="mt-4 space-y-2">
+                {recognitionBadges.length === 0 ? (
+                  <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-500">
+                    No recognition badges have been awarded yet. Qualifying lessons will appear here once privacy and analysis are complete and admin review confirms the lesson.
+                  </div>
+                ) : (
+                  recognitionBadges.slice(0, 4).map((badge) => (
+                    <div
+                      key={badge.id}
+                      className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-xs font-semibold text-slate-800">
+                          {badge.badge_type === "five_star_lesson"
+                            ? "5-Star Lesson"
+                            : badge.badge_type.replace(/_/g, " ")}
+                        </div>
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                            badge.status === "awarded"
+                              ? "bg-emerald-100 text-emerald-700"
+                              : "bg-slate-200 text-slate-600"
+                          }`}
+                        >
+                          {badge.status}
+                        </span>
+                      </div>
+                      <div className="mt-1 text-[11px] text-slate-500">
+                        {badge.awarded_at
+                          ? `Awarded ${String(badge.awarded_at).slice(0, 10)}`
+                          : "Awaiting award date"}
+                      </div>
+                      {badge.video_id && (
+                        <Link
+                          to={`/videos/${badge.video_id}`}
+                          className="mt-2 inline-flex text-[11px] font-medium text-primary hover:underline"
+                        >
+                          Open recognized recording
+                        </Link>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 Recording compliance

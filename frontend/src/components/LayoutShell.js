@@ -1,11 +1,12 @@
 import React from "react";
 import { NavLink } from "react-router-dom";
-import { Layers, LayoutDashboard, PlayCircle, Users } from "lucide-react";
+import { BookOpen, Layers, LayoutDashboard, PlayCircle, ShieldCheck, Trophy, Users } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { BrandMark } from "@/components/BrandMark";
 
 export function LayoutShell({ children }) {
   const { user, logout } = useAuth();
+  const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
 
   return (
     <div className="flex h-screen bg-slate-50 text-slate-900">
@@ -17,6 +18,9 @@ export function LayoutShell({ children }) {
           <NavItem to="/dashboard" icon={LayoutDashboard} label="Dashboard" />
           <NavItem to="/teachers" icon={Users} label="Teachers" />
           <NavItem to="/videos" icon={PlayCircle} label="Videos & Assessments" />
+          <NavItem to="/all-star-library" icon={BookOpen} label="All-Star Library" />
+          {isAdmin && <NavItem to="/privacy-review" icon={ShieldCheck} label="Privacy Review" />}
+          {isAdmin && <NavItem to="/recognition-review" icon={Trophy} label="Recognition Review" />}
           <NavItem to="/school-setup" icon={Layers} label="School Setup" />
         </nav>
         <div className="mt-auto border-t border-slate-200 px-4 py-3 text-xs text-slate-500 bg-slate-50/70">

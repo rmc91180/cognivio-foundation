@@ -10,6 +10,9 @@ import { TeacherProfilePage } from "@/pages/TeacherProfilePage";
 import { MasterSchedulePage } from "@/pages/MasterSchedulePage";
 import { VideoPlayerPage } from "@/pages/VideoPlayerPage";
 import { FrameworksPage } from "@/pages/FrameworksPage";
+import { PrivacyReviewQueuePage } from "@/pages/PrivacyReviewQueuePage";
+import { RecognitionReviewPage } from "@/pages/RecognitionReviewPage";
+import { ExemplarLibraryPage } from "@/pages/ExemplarLibraryPage";
 
 function App() {
   return (
@@ -53,6 +56,30 @@ function App() {
           element={
             <ProtectedRoute>
               <VideoPlayerPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/privacy-review"
+          element={
+            <ProtectedRoute>
+              <PrivacyReviewQueuePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/recognition-review"
+          element={
+            <ProtectedRoute>
+              <RecognitionReviewPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/all-star-library"
+          element={
+            <ProtectedRoute>
+              <ExemplarLibraryPage />
             </ProtectedRoute>
           }
         />

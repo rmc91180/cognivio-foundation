@@ -19,6 +19,7 @@ import io
 import csv
 import hashlib
 import math
+import sys
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 try:
@@ -36,6 +37,20 @@ except Exception:
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
+if str(ROOT_DIR) not in sys.path:
+    sys.path.append(str(ROOT_DIR))
+from privacy_pipeline import analyze_video_privacy, render_redacted_video
+from recognition_engine import (
+    DEFAULT_FIVE_STAR_SCORE_MIN,
+    FIVE_STAR_BADGE,
+    build_recognition_eligibility,
+    calculate_active_streak,
+)
+from share_assets import (
+    build_email_signature_html,
+    render_email_signature_badge,
+    render_social_share_card,
+)
 
 
 def _get_required_env(name: str) -> str:
@@ -86,6 +101,15 @@ def _normalize_video_status(value: Optional[str]) -> str:
     return "queued"
 
 
+def _normalize_privacy_status(value: Optional[str]) -> str:
+    raw = (value or "").strip().lower()
+    if raw in {"not_required", "queued", "processing", "review_required", "completed", "failed"}:
+        return raw
+    if raw in {"error", "errored"}:
+        return "failed"
+    return "queued"
+
+
 def _parse_optional_iso_datetime(value: Optional[str], field_name: str) -> Optional[str]:
     if not value:
         return None
@@ -111,6 +135,16 @@ def _to_public_backend_url(path: str) -> str:
 
 
 def _resolve_video_playback_url(video: dict) -> Optional[str]:
+    privacy_status = _normalize_privacy_status(video.get("privacy_status"))
+    redacted_url = video.get("redacted_file_url")
+    if redacted_url:
+        return redacted_url
+    redacted_path = video.get("redacted_file_path")
+    if redacted_path:
+        safe_path = str(redacted_path).replace("\\", "/").lstrip("/")
+        return _to_public_backend_url(f"/uploads/{safe_path}")
+    if video.get("privacy_status") is not None and privacy_status != PrivacyProcessingStatus.COMPLETED.value:
+        return None
     file_url = video.get("file_url")
     if file_url:
         return file_url
@@ -122,6 +156,16 @@ def _resolve_video_playback_url(video: dict) -> Optional[str]:
 
 
 def _resolve_video_thumbnail_url(video: dict) -> Optional[str]:
+    privacy_status = _normalize_privacy_status(video.get("privacy_status"))
+    redacted_thumb_url = video.get("redacted_thumbnail_url")
+    if redacted_thumb_url:
+        return redacted_thumb_url
+    redacted_thumb_path = video.get("redacted_thumbnail_path")
+    if redacted_thumb_path:
+        safe_path = str(redacted_thumb_path).replace("\\", "/").lstrip("/")
+        return _to_public_backend_url(f"/uploads/{safe_path}")
+    if video.get("privacy_status") is not None and privacy_status != PrivacyProcessingStatus.COMPLETED.value:
+        return None
     thumb_url = video.get("thumbnail_url")
     if thumb_url:
         return thumb_url
@@ -144,9 +188,31 @@ def _is_terminal_video_status(status: Optional[str]) -> bool:
 def _apply_video_response_defaults(video: dict) -> dict:
     video["status"] = _normalize_video_status(video.get("status"))
     video["analysis_status"] = _normalize_video_status(video.get("analysis_status"))
+    video["privacy_status"] = _normalize_privacy_status(video.get("privacy_status"))
+    video["privacy_review_required"] = bool(video.get("privacy_review_required", False))
     video["playback_url"] = _resolve_video_playback_url(video)
     video["thumbnail_url"] = _resolve_video_thumbnail_url(video)
     return video
+
+
+def _sanitize_video_response(video: dict) -> dict:
+    sanitized = dict(video)
+    for field in {
+        "stored_filename",
+        "s3_key",
+        "file_url",
+        "file_path",
+        "raw_file_url",
+        "raw_file_path",
+        "raw_s3_key",
+        "raw_thumbnail_path",
+        "raw_thumbnail_url",
+        "redacted_file_path",
+        "redacted_thumbnail_path",
+        "privacy_manual_override",
+    }:
+        sanitized.pop(field, None)
+    return sanitized
 
 
 async def _save_upload_file(upload: UploadFile, target_path: Path) -> None:
@@ -241,6 +307,16 @@ def _upload_path_to_s3(file_path: Path, category: str, filename: str, content_ty
     return key, _get_s3_public_url(key)
 
 
+def _delete_s3_key(key: Optional[str]) -> None:
+    if not key or not S3_BUCKET:
+        return
+    try:
+        client = _get_s3_client()
+        client.delete_object(Bucket=S3_BUCKET, Key=key)
+    except Exception as exc:
+        logger.warning(f"Unable to delete S3 object {key}: {exc}")
+
+
 async def _get_teacher_or_404(teacher_id: str, current_user: dict) -> dict:
     teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
     if not teacher:
@@ -256,6 +332,348 @@ async def _get_teacher_or_404(teacher_id: str, current_user: dict) -> dict:
     if teacher.get("created_by") == current_user["id"]:
         return teacher
     raise HTTPException(status_code=403, detail="Not authorized for this teacher")
+
+
+def _build_privacy_profile_summary(teacher_id: str, profile: Optional[dict]) -> "TeacherPrivacyProfileResponse":
+    if not profile:
+        return TeacherPrivacyProfileResponse(
+            teacher_id=teacher_id,
+            status="missing",
+            profile_version=0,
+            reference_count=0,
+            quality_score=0.0,
+            embedding_model="opencv-sface",
+            last_enrolled_at=None,
+            needs_refresh=True,
+            warnings=["Teacher privacy profile has not been configured."],
+        )
+
+    return TeacherPrivacyProfileResponse(
+        teacher_id=teacher_id,
+        status=profile.get("status", "missing"),
+        profile_version=int(profile.get("profile_version", 0) or 0),
+        reference_count=int(profile.get("reference_count", 0) or 0),
+        quality_score=float(profile.get("quality_score", 0.0) or 0.0),
+        embedding_model=profile.get("embedding_model") or "opencv-sface",
+        last_enrolled_at=profile.get("last_enrolled_at"),
+        needs_refresh=bool(profile.get("needs_refresh", False)),
+        warnings=list(profile.get("warnings") or []),
+    )
+
+
+async def _get_active_privacy_profile(teacher_id: str) -> Optional[dict]:
+    return await db.teacher_face_profiles.find_one(
+        {"teacher_id": teacher_id, "status": "active"},
+        {"_id": 0},
+    )
+
+
+async def _log_privacy_audit_event(
+    event_type: str,
+    target_type: str,
+    target_id: str,
+    actor_user_id: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    try:
+        await db.privacy_audit_events.insert_one(
+            {
+                "id": str(uuid.uuid4()),
+                "actor_user_id": actor_user_id,
+                "event_type": event_type,
+                "target_type": target_type,
+                "target_id": target_id,
+                "details": details or {},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    except Exception as exc:
+        logger.warning(f"Unable to write privacy audit event {event_type} for {target_type}:{target_id}: {exc}")
+
+
+async def _log_recognition_audit_event(
+    event_type: str,
+    target_type: str,
+    target_id: str,
+    actor_user_id: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    try:
+        await db.recognition_audit_events.insert_one(
+            {
+                "id": str(uuid.uuid4()),
+                "actor_user_id": actor_user_id,
+                "event_type": event_type,
+                "target_type": target_type,
+                "target_id": target_id,
+                "details": details or {},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    except Exception as exc:
+        logger.warning(f"Unable to write recognition audit event {event_type} for {target_type}:{target_id}: {exc}")
+
+
+async def _get_assessment_for_video(video_id: str) -> Optional[dict]:
+    return await db.assessments.find_one(
+        {"video_id": video_id},
+        {"_id": 0},
+        sort=[("analyzed_at", -1)],
+    )
+
+
+def _build_teacher_recognition_summary(teacher_id: str, badges: List[dict]) -> "TeacherRecognitionSummaryResponse":
+    awarded_badges = [badge for badge in badges if badge.get("status") == "awarded"]
+    published_exemplars = [
+        badge for badge in badges
+        if badge.get("status") == "published" or badge.get("badge_type") == "exemplar_published"
+    ]
+    return TeacherRecognitionSummaryResponse(
+        teacher_id=teacher_id,
+        badges=[
+            RecognitionBadgeResponse(
+                id=badge["id"],
+                badge_type=badge.get("badge_type") or FIVE_STAR_BADGE,
+                status=badge.get("status") or "awarded",
+                video_id=badge.get("video_id"),
+                awarded_at=badge.get("awarded_at"),
+                awarded_by=badge.get("awarded_by"),
+                criteria_snapshot=badge.get("criteria_snapshot") or {},
+            )
+            for badge in badges
+        ],
+        summary={
+            "five_star_lessons": len(
+                [badge for badge in awarded_badges if badge.get("badge_type") == FIVE_STAR_BADGE]
+            ),
+            "published_exemplars": len(published_exemplars),
+            "active_streak": calculate_active_streak(awarded_badges),
+        },
+    )
+
+
+def _build_video_recognition_response(video: dict, event: Optional[dict]) -> "VideoRecognitionResponse":
+    event = event or {}
+    eligibility = event.get("eligibility") or {
+        "is_eligible": False,
+        "badge_type": None,
+        "reasons": ["recognition_not_evaluated"],
+    }
+    return VideoRecognitionResponse(
+        video_id=video["id"],
+        teacher_id=video.get("teacher_id"),
+        eligibility=eligibility,
+        recognition={
+            "status": event.get("recognition_status") or "not_evaluated",
+            "badge_id": event.get("badge_id"),
+            "admin_review_required": bool(event.get("recognition_status") == "pending_admin_review"),
+        },
+        publication={
+            "teacher_opt_in": bool(event.get("teacher_opt_in", False)),
+            "sharing_scope": event.get("sharing_scope"),
+            "allow_social_share": bool(event.get("allow_social_share", False)),
+            "allow_email_signature": bool(event.get("allow_email_signature", False)),
+            "submission_id": event.get("submission_id"),
+            "submission_status": event.get("submission_status") or "not_submitted",
+            "library_item_id": event.get("library_item_id"),
+        },
+    )
+
+
+async def _sync_video_recognition_state(video: dict) -> dict:
+    assessment = await _get_assessment_for_video(video["id"])
+    eligibility = build_recognition_eligibility(
+        video,
+        assessment,
+        score_threshold=RECOGNITION_FIVE_STAR_SCORE_MIN,
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    existing = await db.lesson_recognition_events.find_one({"video_id": video["id"]}, {"_id": 0})
+    recognition_status = "pending_admin_review" if eligibility["is_eligible"] else "ineligible"
+    if existing and existing.get("recognition_status") in {"awarded", "rejected", "revoked"}:
+        recognition_status = existing.get("recognition_status")
+    badge_type = eligibility.get("badge_type")
+    if not badge_type and existing and existing.get("badge_type"):
+        badge_type = existing.get("badge_type")
+    update_doc = {
+        "teacher_id": video.get("teacher_id"),
+        "video_id": video["id"],
+        "eligibility_status": "eligible" if eligibility["is_eligible"] else "ineligible",
+        "eligibility": eligibility,
+        "recognition_status": recognition_status,
+        "badge_type": badge_type,
+        "updated_at": now,
+    }
+    if existing:
+        preserved_fields = {
+            "teacher_opt_in": existing.get("teacher_opt_in", False),
+            "sharing_scope": existing.get("sharing_scope"),
+            "allow_social_share": existing.get("allow_social_share", False),
+            "allow_email_signature": existing.get("allow_email_signature", False),
+            "submission_status": existing.get("submission_status", "not_submitted"),
+            "submission_id": existing.get("submission_id"),
+            "library_item_id": existing.get("library_item_id"),
+            "badge_id": existing.get("badge_id"),
+            "reviewed_at": existing.get("reviewed_at"),
+            "reviewed_by": existing.get("reviewed_by"),
+            "review_reason": existing.get("review_reason"),
+        }
+        update_doc.update(preserved_fields)
+        await db.lesson_recognition_events.update_one({"id": existing["id"]}, {"$set": update_doc})
+        existing.update(update_doc)
+        return existing
+    doc = {
+        "id": str(uuid.uuid4()),
+        **update_doc,
+        "teacher_opt_in": False,
+        "sharing_scope": None,
+        "allow_social_share": False,
+        "allow_email_signature": False,
+        "submission_status": "not_submitted",
+        "submission_id": None,
+        "library_item_id": None,
+        "created_at": now,
+        "badge_id": None,
+        "reviewed_at": None,
+        "reviewed_by": None,
+        "review_reason": None,
+    }
+    await db.lesson_recognition_events.insert_one(doc)
+    return doc
+
+
+async def _get_or_sync_video_recognition_event(video: dict) -> dict:
+    existing = await db.lesson_recognition_events.find_one({"video_id": video["id"]}, {"_id": 0})
+    if _normalize_video_status(video.get("analysis_status")) == VideoProcessingStatus.COMPLETED.value:
+        return await _sync_video_recognition_state(video)
+    if existing:
+        return existing
+    return await _sync_video_recognition_state(video)
+
+
+async def _get_latest_exemplar_submission(video_id: str) -> Optional[dict]:
+    return await db.exemplar_submissions.find_one(
+        {"video_id": video_id},
+        {"_id": 0},
+        sort=[("submitted_at", -1)],
+    )
+
+
+def _resolve_public_asset_url(relative_path: Optional[str]) -> Optional[str]:
+    if not relative_path:
+        return None
+    safe_path = str(relative_path).replace("\\", "/").lstrip("/")
+    return _to_public_backend_url(f"/uploads/{safe_path}")
+
+
+def _build_exemplar_library_item_response(doc: dict) -> "ExemplarLibraryItemResponse":
+    playback_url = doc.get("playback_url") or doc.get("redacted_asset_url")
+    thumbnail_url = doc.get("thumbnail_url")
+    if not playback_url:
+        playback_url = _resolve_public_asset_url(doc.get("redacted_asset_path"))
+    if not thumbnail_url:
+        thumbnail_url = _resolve_public_asset_url(doc.get("thumbnail_path"))
+    return ExemplarLibraryItemResponse(
+        id=doc["id"],
+        video_id=doc["video_id"],
+        teacher_id=doc["teacher_id"],
+        teacher_display_name=doc.get("teacher_display_name"),
+        title=doc.get("title") or "Exemplar lesson",
+        summary=doc.get("summary") or "",
+        subject=doc.get("subject"),
+        grade_level=doc.get("grade_level"),
+        badge_type=doc.get("badge_type") or FIVE_STAR_BADGE,
+        tags=list(doc.get("tags") or []),
+        thumbnail_url=thumbnail_url,
+        playback_url=playback_url,
+        published_at=doc.get("published_at"),
+        status=doc.get("status") or "published",
+    )
+
+
+async def _create_share_asset_record(
+    *,
+    teacher_id: str,
+    video_id: str,
+    asset_type: str,
+    file_path: Optional[str],
+    file_url: Optional[str],
+    actor_user_id: str,
+    details: Optional[Dict[str, Any]] = None,
+) -> dict:
+    created_at = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "teacher_id": teacher_id,
+        "video_id": video_id,
+        "asset_type": asset_type,
+        "file_path": file_path,
+        "file_url": file_url,
+        "created_at": created_at,
+        "created_by": actor_user_id,
+        "details": details or {},
+    }
+    await db.share_assets.insert_one(doc)
+    return doc
+
+
+def _ensure_privacy_reference_upload(upload: UploadFile) -> None:
+    filename = (upload.filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="Privacy reference filename is required")
+    suffix = Path(filename).suffix.lower()
+    if suffix not in PRIVACY_REFERENCE_ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unsupported privacy reference file type. Allowed: "
+                f"{', '.join(sorted(PRIVACY_REFERENCE_ALLOWED_EXTENSIONS))}"
+            ),
+        )
+    content_type = (upload.content_type or "").lower()
+    if content_type and content_type not in PRIVACY_REFERENCE_ALLOWED_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unsupported privacy reference content type. Allowed: "
+                f"{', '.join(sorted(PRIVACY_REFERENCE_ALLOWED_CONTENT_TYPES))}"
+            ),
+        )
+
+
+async def _save_privacy_reference_file(
+    upload: UploadFile,
+    teacher_id: str,
+    profile_id: str,
+) -> Tuple[str, Optional[str], Optional[str]]:
+    _ensure_privacy_reference_upload(upload)
+    suffix = Path(upload.filename or "").suffix.lower()
+    stored_filename = f"{uuid.uuid4()}{suffix}"
+    relative_path = f"privacy/profiles/{teacher_id}/{profile_id}/{stored_filename}"
+    file_path = UPLOAD_DIR / relative_path
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    size = 0
+    async with aiofiles.open(file_path, "wb") as out:
+        while True:
+            chunk = await upload.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="Privacy reference exceeds upload limit")
+            await out.write(chunk)
+    s3_key = None
+    file_url = None
+    try:
+        s3_key, file_url = _upload_path_to_s3(
+            file_path,
+            "privacy-profiles",
+            stored_filename,
+            upload.content_type or "image/jpeg",
+        )
+    except Exception as exc:
+        logger.warning(f"Privacy profile reference upload failed for {teacher_id}: {exc}")
+    return relative_path, file_url, s3_key
 
 
 def _build_video_visibility_query(
@@ -492,10 +910,29 @@ VIDEO_ALLOWED_CONTENT_TYPES = {
     "video/x-matroska",
     "video/webm",
 }
+PRIVACY_REFERENCE_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+PRIVACY_REFERENCE_ALLOWED_CONTENT_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
 VIDEO_MAX_UPLOAD_BYTES = int(os.getenv("MAX_VIDEO_BYTES", str(1024 * 1024 * 1024)))
 VIDEO_WORKER_COUNT = max(1, int(os.getenv("VIDEO_WORKER_COUNT", "1")))
 CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS = os.getenv("CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS", "false").lower() == "true"
 ADHERENCE_WEIGHT = float(os.getenv("ADHERENCE_WEIGHT", "0.15"))
+PRIVACY_REQUIRE_PROFILE = os.getenv("PRIVACY_REQUIRE_PROFILE", "true").lower() == "true"
+PRIVACY_PROFILE_MIN_REFERENCES = max(1, int(os.getenv("PRIVACY_PROFILE_MIN_REFERENCES", "3")))
+PRIVACY_PROFILE_MAX_REFERENCES = max(PRIVACY_PROFILE_MIN_REFERENCES, int(os.getenv("PRIVACY_PROFILE_MAX_REFERENCES", "5")))
+PRIVACY_MANUAL_REVIEW_ENABLED = os.getenv("PRIVACY_MANUAL_REVIEW_ENABLED", "true").lower() == "true"
+PRIVACY_ALLOW_BLUR_ALL_FALLBACK = os.getenv("PRIVACY_ALLOW_BLUR_ALL_FALLBACK", "true").lower() == "true"
+PRIVACY_WORKER_COUNT = max(1, int(os.getenv("PRIVACY_WORKER_COUNT", "1")))
+PRIVACY_MAX_RETRIES = max(1, int(os.getenv("PRIVACY_MAX_RETRIES", "3")))
+PRIVACY_TEACHER_MATCH_THRESHOLD = float(os.getenv("PRIVACY_TEACHER_MATCH_THRESHOLD", "0.9"))
+PRIVACY_AMBIGUOUS_MATCH_THRESHOLD = float(os.getenv("PRIVACY_AMBIGUOUS_MATCH_THRESHOLD", "0.8"))
+PRIVACY_RAW_VIDEO_RETENTION_DAYS = max(1, int(os.getenv("PRIVACY_RAW_VIDEO_RETENTION_DAYS", "30")))
+PRIVACY_PROFILE_IMAGE_RETENTION_DAYS = max(1, int(os.getenv("PRIVACY_PROFILE_IMAGE_RETENTION_DAYS", "30")))
+PRIVACY_PURGE_INTERVAL_MINUTES = max(5, int(os.getenv("PRIVACY_PURGE_INTERVAL_MINUTES", "60")))
+RECOGNITION_FIVE_STAR_SCORE_MIN = float(os.getenv("RECOGNITION_FIVE_STAR_SCORE_MIN", str(DEFAULT_FIVE_STAR_SCORE_MIN)))
 
 # S3 configuration (required for file uploads)
 S3_BUCKET = os.getenv("S3_BUCKET")
@@ -521,6 +958,9 @@ api_router = APIRouter(prefix="/api")
 security = HTTPBearer()
 VIDEO_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 VIDEO_WORKER_TASKS: List[asyncio.Task] = []
+VIDEO_PRIVACY_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
+VIDEO_PRIVACY_WORKER_TASKS: List[asyncio.Task] = []
+PRIVACY_MAINTENANCE_TASKS: List[asyncio.Task] = []
 
 # Health check endpoint (at root level for Railway)
 @app.get("/health")
@@ -778,6 +1218,7 @@ class VideoUploadResponse(BaseModel):
     filename: str
     teacher_id: str
     status: str
+    privacy_status: str
     analysis_status: str
     upload_date: str
     subject: Optional[str] = None
@@ -909,6 +1350,238 @@ class VideoProcessingStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class PrivacyProcessingStatus(str, Enum):
+    NOT_REQUIRED = "not_required"
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    REVIEW_REQUIRED = "review_required"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class TeacherPrivacyProfileResponse(BaseModel):
+    teacher_id: str
+    status: str
+    profile_version: int
+    reference_count: int
+    quality_score: float
+    embedding_model: str
+    last_enrolled_at: Optional[str] = None
+    needs_refresh: bool = False
+    warnings: List[str] = []
+
+
+class TeacherPrivacyProfileDeleteResponse(BaseModel):
+    teacher_id: str
+    deleted: bool
+    status: str
+    deleted_at: str
+
+
+class PrivacyReviewCandidateTrack(BaseModel):
+    track_id: str
+    teacher_match_score: float
+    sample_frame_url: Optional[str] = None
+
+
+class PrivacyReviewQueueItem(BaseModel):
+    video_id: str
+    teacher_id: str
+    teacher_name: Optional[str] = None
+    filename: str
+    privacy_status: str
+    privacy_review_reason: Optional[str] = None
+    upload_date: str
+    candidate_tracks: List[PrivacyReviewCandidateTrack] = []
+
+
+class PrivacyReviewQueueResponse(BaseModel):
+    items: List[PrivacyReviewQueueItem]
+
+
+class PrivacyReviewDecisionRequest(BaseModel):
+    decision: str
+    approved_track_id: Optional[str] = None
+    reason: str
+
+
+class PrivacyReviewDecisionResponse(BaseModel):
+    video_id: str
+    privacy_status: str
+    analysis_status: str
+    review_resolved_by: str
+    review_resolved_at: str
+
+
+class PrivacyAuditEvent(BaseModel):
+    id: str
+    actor_user_id: Optional[str] = None
+    event_type: str
+    target_type: str
+    target_id: str
+    details: Dict[str, Any] = {}
+    created_at: str
+
+
+class RecognitionBadgeResponse(BaseModel):
+    id: str
+    badge_type: str
+    status: str
+    video_id: str
+    awarded_at: Optional[str] = None
+    awarded_by: Optional[str] = None
+    criteria_snapshot: Dict[str, Any] = {}
+
+
+class TeacherRecognitionSummaryResponse(BaseModel):
+    teacher_id: str
+    badges: List[RecognitionBadgeResponse]
+    summary: Dict[str, Any]
+
+
+class VideoRecognitionResponse(BaseModel):
+    video_id: str
+    teacher_id: str
+    eligibility: Dict[str, Any]
+    recognition: Dict[str, Any]
+    publication: Dict[str, Any]
+
+
+class RecognitionOptInRequest(BaseModel):
+    teacher_opt_in: bool
+    sharing_scope: Optional[str] = None
+    allow_social_share: bool = False
+    allow_email_signature: bool = False
+
+
+class RecognitionOptInResponse(BaseModel):
+    video_id: str
+    teacher_opt_in: bool
+    sharing_scope: Optional[str] = None
+    allow_social_share: bool
+    allow_email_signature: bool
+    updated_at: str
+
+
+class RecognitionReviewRequest(BaseModel):
+    decision: str
+    badge_type: Optional[str] = FIVE_STAR_BADGE
+    reason: str
+
+
+class RecognitionReviewResponse(BaseModel):
+    video_id: str
+    recognition_status: str
+    badge: Optional[RecognitionBadgeResponse] = None
+
+
+class RecognitionReviewQueueItem(BaseModel):
+    video_id: str
+    teacher_id: str
+    teacher_name: Optional[str] = None
+    recognition_status: str
+    publication_status: str
+    badge_type: Optional[str] = None
+    sharing_scope: Optional[str] = None
+    submitted_at: Optional[str] = None
+
+
+class RecognitionReviewQueueResponse(BaseModel):
+    items: List[RecognitionReviewQueueItem]
+
+
+class ExemplarSubmissionRequest(BaseModel):
+    title: str
+    summary: str
+    sharing_scope: str
+    tags: List[str] = []
+
+
+class ExemplarSubmissionResponse(BaseModel):
+    submission_id: str
+    video_id: str
+    submission_status: str
+    submitted_at: str
+
+
+class ExemplarReviewQueueItem(BaseModel):
+    submission_id: str
+    video_id: str
+    teacher_id: str
+    teacher_name: Optional[str] = None
+    title: str
+    summary: str
+    sharing_scope: Optional[str] = None
+    submission_status: str
+    submitted_at: Optional[str] = None
+    tags: List[str] = []
+
+
+class ExemplarReviewQueueResponse(BaseModel):
+    items: List[ExemplarReviewQueueItem]
+
+
+class ExemplarLibraryReviewRequest(BaseModel):
+    decision: str
+    reason: str
+
+
+class ExemplarLibraryItemResponse(BaseModel):
+    id: str
+    video_id: str
+    teacher_id: str
+    teacher_display_name: Optional[str] = None
+    title: str
+    summary: str
+    subject: Optional[str] = None
+    grade_level: Optional[str] = None
+    badge_type: str
+    tags: List[str] = []
+    thumbnail_url: Optional[str] = None
+    playback_url: Optional[str] = None
+    published_at: Optional[str] = None
+    status: str
+
+
+class ExemplarLibraryReviewResponse(BaseModel):
+    submission_id: str
+    publication_status: str
+    library_item: Optional[ExemplarLibraryItemResponse] = None
+
+
+class ExemplarLibraryResponse(BaseModel):
+    items: List[ExemplarLibraryItemResponse]
+    count: int
+
+
+class SocialCardRequest(BaseModel):
+    platform: str = "linkedin"
+    include_subject: bool = True
+    include_grade: bool = False
+    include_summary: bool = True
+
+
+class SocialCardResponse(BaseModel):
+    asset_id: str
+    asset_type: str
+    file_url: str
+    caption: str
+    created_at: str
+
+
+class EmailSignatureRequest(BaseModel):
+    format: str = "html"
+    badge_style: str = "compact"
+
+
+class EmailSignatureResponse(BaseModel):
+    asset_id: str
+    asset_type: str
+    html: str
+    image_url: str
+    created_at: str
 
 
 class Schedule(BaseModel):
@@ -1361,6 +2034,149 @@ async def get_teacher(teacher_id: str, current_user: dict = Depends(get_current_
     teacher.pop("created_by", None)
     return TeacherResponse(**teacher)
 
+
+@api_router.get("/teachers/{teacher_id}/privacy-profile", response_model=TeacherPrivacyProfileResponse)
+async def get_teacher_privacy_profile(
+    teacher_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_teacher_or_404(teacher_id, current_user)
+    profile = await _get_active_privacy_profile(teacher_id)
+    return _build_privacy_profile_summary(teacher_id, profile)
+
+
+@api_router.post("/teachers/{teacher_id}/privacy-profile", response_model=TeacherPrivacyProfileResponse)
+async def upsert_teacher_privacy_profile(
+    teacher_id: str,
+    files: List[UploadFile] = File(...),
+    replace_existing: bool = Form(False),
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_teacher_or_404(teacher_id, current_user)
+    uploads = [upload for upload in files if (upload.filename or "").strip()]
+    if len(uploads) < PRIVACY_PROFILE_MIN_REFERENCES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Teacher privacy profile requires at least "
+                f"{PRIVACY_PROFILE_MIN_REFERENCES} reference images."
+            ),
+        )
+    if len(uploads) > PRIVACY_PROFILE_MAX_REFERENCES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Teacher privacy profile supports at most "
+                f"{PRIVACY_PROFILE_MAX_REFERENCES} reference images."
+            ),
+        )
+
+    active_profile = await _get_active_privacy_profile(teacher_id)
+    if active_profile and replace_existing:
+        await db.teacher_face_profiles.update_one(
+            {"id": active_profile["id"]},
+            {"$set": {"status": "replaced", "updated_at": datetime.now(timezone.utc).isoformat()}},
+        )
+
+    existing_versions = await db.teacher_face_profiles.find(
+        {"teacher_id": teacher_id},
+        {"_id": 0, "profile_version": 1},
+    ).to_list(100)
+    next_version = max([int(item.get("profile_version", 0) or 0) for item in existing_versions] + [0]) + 1
+    now = datetime.now(timezone.utc).isoformat()
+    profile_id = str(uuid.uuid4())
+    reference_docs = []
+    for upload in uploads:
+        relative_path, file_url, s3_key = await _save_privacy_reference_file(upload, teacher_id, profile_id)
+        reference_docs.append(
+            {
+                "id": str(uuid.uuid4()),
+                "teacher_id": teacher_id,
+                "profile_id": profile_id,
+                "reference_type": "image",
+                "filename": upload.filename,
+                "file_path": relative_path,
+                "file_url": file_url,
+                "s3_key": s3_key,
+                "embedding": [],
+                "quality_checks": {
+                    "validation_mode": "contract_only",
+                    "content_type": upload.content_type,
+                },
+                "created_at": now,
+                "retention_expires_at": (datetime.now(timezone.utc) + timedelta(days=PRIVACY_PROFILE_IMAGE_RETENTION_DAYS)).isoformat(),
+            }
+        )
+    if reference_docs:
+        await db.teacher_face_references.insert_many(reference_docs)
+    if active_profile and not replace_existing:
+        await db.teacher_face_profiles.update_many(
+            {"teacher_id": teacher_id, "status": "active"},
+            {"$set": {"status": "superseded", "updated_at": now}},
+        )
+
+    profile_doc = {
+        "id": profile_id,
+        "teacher_id": teacher_id,
+        "status": "active",
+        "profile_version": next_version,
+        "reference_count": len(reference_docs),
+        "quality_score": 1.0,
+        "embedding_model": "opencv-sface",
+        "embedding_version": "contract-v1",
+        "created_at": now,
+        "updated_at": now,
+        "last_enrolled_at": now,
+        "needs_refresh": False,
+        "warnings": [],
+    }
+    await db.teacher_face_profiles.insert_one(profile_doc)
+    await _log_privacy_audit_event(
+        "privacy_profile_upserted",
+        "teacher",
+        teacher_id,
+        actor_user_id=current_user["id"],
+        details={
+            "profile_id": profile_id,
+            "profile_version": next_version,
+            "reference_count": len(reference_docs),
+        },
+    )
+    return _build_privacy_profile_summary(teacher_id, profile_doc)
+
+
+@api_router.delete("/teachers/{teacher_id}/privacy-profile", response_model=TeacherPrivacyProfileDeleteResponse)
+async def delete_teacher_privacy_profile(
+    teacher_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_teacher_or_404(teacher_id, current_user)
+    deleted_at = datetime.now(timezone.utc).isoformat()
+    result = await db.teacher_face_profiles.update_many(
+        {"teacher_id": teacher_id, "status": "active"},
+        {"$set": {"status": "deleted", "updated_at": deleted_at}},
+    )
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Teacher privacy profile not found")
+    await db.teacher_face_references.update_many(
+        {"teacher_id": teacher_id},
+        {"$set": {"retention_expires_at": deleted_at}},
+    )
+    await _log_privacy_audit_event(
+        "privacy_profile_deleted",
+        "teacher",
+        teacher_id,
+        actor_user_id=current_user["id"],
+        details={"deleted_at": deleted_at},
+    )
+    return TeacherPrivacyProfileDeleteResponse(
+        teacher_id=teacher_id,
+        deleted=True,
+        status="deleted",
+        deleted_at=deleted_at,
+    )
+
+
 @api_router.delete("/teachers/{teacher_id}")
 async def delete_teacher(teacher_id: str, current_user: dict = Depends(get_current_user)):
     result = await db.teachers.delete_one({"id": teacher_id, "created_by": current_user["id"]})
@@ -1388,6 +2204,302 @@ def _extract_video_thumbnail(video_path: str, output_path: str) -> bool:
         return bool(cv2.imwrite(str(output), frame, [cv2.IMWRITE_JPEG_QUALITY, 72]))
     except Exception:
         return False
+
+
+async def _enqueue_video_privacy_job(
+    video_id: str,
+    teacher_id: str,
+    user_id: str,
+    file_path: str,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    await db.video_privacy_jobs.update_one(
+        {"video_id": video_id},
+        {
+            "$set": {
+                "video_id": video_id,
+                "teacher_id": teacher_id,
+                "user_id": user_id,
+                "file_path": file_path,
+                "status": PrivacyProcessingStatus.QUEUED.value,
+                "updated_at": now,
+                "last_error": None,
+                "review_required": False,
+                "review_reason": None,
+            },
+            "$setOnInsert": {
+                "id": str(uuid.uuid4()),
+                "created_at": now,
+                "attempts": 0,
+            },
+        },
+        upsert=True,
+    )
+    await VIDEO_PRIVACY_JOB_QUEUE.put(video_id)
+
+
+async def _run_video_privacy_job(video_id: str) -> None:
+    job = await db.video_privacy_jobs.find_one({"video_id": video_id}, {"_id": 0})
+    if not job:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    claim = await db.video_privacy_jobs.update_one(
+        {
+            "video_id": video_id,
+            "status": {"$in": [PrivacyProcessingStatus.QUEUED.value, PrivacyProcessingStatus.FAILED.value]},
+            "attempts": {"$lt": PRIVACY_MAX_RETRIES},
+        },
+        {
+            "$set": {
+                "status": PrivacyProcessingStatus.PROCESSING.value,
+                "updated_at": now,
+                "started_at": now,
+                "last_error": None,
+            },
+            "$inc": {"attempts": 1},
+        },
+    )
+    if claim.modified_count == 0:
+        return
+
+    finished_at = datetime.now(timezone.utc).isoformat()
+    success = False
+    error_message: Optional[str] = None
+    job_final_status = PrivacyProcessingStatus.FAILED.value
+    try:
+        video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+        if not video:
+            raise RuntimeError("Video not found")
+        manual_override = video.get("privacy_manual_override") or {}
+        reference_docs = await db.teacher_face_references.find(
+            {"teacher_id": job["teacher_id"]},
+            {"_id": 0, "file_path": 1},
+        ).to_list(50)
+        reference_paths = [
+            str(UPLOAD_DIR / doc["file_path"])
+            for doc in reference_docs
+            if doc.get("file_path") and (UPLOAD_DIR / doc["file_path"]).exists()
+        ]
+        if not reference_paths:
+            raise RuntimeError("Teacher privacy profile has no usable references")
+
+        await db.videos.update_one(
+            {"id": video_id},
+            {
+                "$set": {
+                    "status": VideoProcessingStatus.PROCESSING.value,
+                    "privacy_status": PrivacyProcessingStatus.PROCESSING.value,
+                    "privacy_started_at": now,
+                    "privacy_failed_at": None,
+                    "privacy_completed_at": None,
+                    "privacy_error": None,
+                    "privacy_review_required": False,
+                    "privacy_review_reason": None,
+                    "status_updated_at": now,
+                }
+            },
+        )
+        await db.video_evidence.update_one(
+            {"video_id": video_id, "uploaded_by": job["user_id"]},
+            {"$set": {"privacy_status": PrivacyProcessingStatus.PROCESSING.value, "error_message": None}},
+        )
+        analysis = await asyncio.to_thread(
+            analyze_video_privacy,
+            job["file_path"],
+            reference_paths,
+            PRIVACY_TEACHER_MATCH_THRESHOLD,
+            PRIVACY_AMBIGUOUS_MATCH_THRESHOLD,
+        )
+
+        if analysis["review_reason"] and manual_override.get("decision") == "blur_all_and_continue":
+            analysis["review_reason"] = None
+            analysis["fallback_mode"] = "blur_all"
+        if analysis["review_reason"] and manual_override.get("decision") == "approve_teacher_track":
+            analysis["review_reason"] = None
+        if analysis["review_reason"] and PRIVACY_MANUAL_REVIEW_ENABLED:
+            finished_at = datetime.now(timezone.utc).isoformat()
+            await db.videos.update_one(
+                {"id": video_id},
+                {
+                    "$set": {
+                        "privacy_status": PrivacyProcessingStatus.REVIEW_REQUIRED.value,
+                        "privacy_review_required": True,
+                        "privacy_review_reason": analysis["review_reason"],
+                        "privacy_candidate_tracks": analysis["candidate_tracks"],
+                        "privacy_manifest": {
+                            "manifest_version": 1,
+                            "created_at": finished_at,
+                            "tracks": analysis["manifest_tracks"],
+                            "fallback_mode": analysis["fallback_mode"],
+                            "teacher_track_id": analysis["teacher_track_id"],
+                        },
+                        "status_updated_at": finished_at,
+                    }
+                },
+            )
+            await db.video_privacy_jobs.update_one(
+                {"video_id": video_id},
+                {
+                    "$set": {
+                        "status": PrivacyProcessingStatus.REVIEW_REQUIRED.value,
+                        "updated_at": finished_at,
+                        "finished_at": finished_at,
+                        "review_required": True,
+                        "review_reason": analysis["review_reason"],
+                        "last_error": None,
+                    }
+                },
+            )
+            await _log_privacy_audit_event(
+                "privacy_review_required",
+                "video",
+                video_id,
+                actor_user_id=job["user_id"],
+                details={"reason": analysis["review_reason"], "candidate_tracks": analysis["candidate_tracks"]},
+            )
+            await db.video_evidence.update_one(
+                {"video_id": video_id, "uploaded_by": job["user_id"]},
+                {
+                    "$set": {
+                        "privacy_status": PrivacyProcessingStatus.REVIEW_REQUIRED.value,
+                        "error_message": None,
+                    }
+                },
+            )
+            job_final_status = PrivacyProcessingStatus.REVIEW_REQUIRED.value
+            return
+
+        redacted_relative_path = f"redacted/{job['teacher_id']}/{video_id}.mp4"
+        redacted_full_path = UPLOAD_DIR / redacted_relative_path
+        redacted_thumbnail_relative_path = f"thumbnails/redacted/{job['teacher_id']}/{video_id}.jpg"
+        redacted_thumbnail_full_path = UPLOAD_DIR / redacted_thumbnail_relative_path
+        render_stats = await asyncio.to_thread(
+            render_redacted_video,
+            job["file_path"],
+            str(redacted_full_path),
+            str(redacted_thumbnail_full_path),
+            reference_paths,
+            PRIVACY_TEACHER_MATCH_THRESHOLD,
+            PRIVACY_AMBIGUOUS_MATCH_THRESHOLD,
+            analysis["teacher_track_id"],
+            manual_override.get("decision") == "blur_all_and_continue" or analysis["fallback_mode"] == "blur_all",
+        )
+
+        redacted_file_url = _to_public_backend_url(f"/uploads/{redacted_relative_path}")
+        redacted_thumbnail_url = _to_public_backend_url(f"/uploads/{redacted_thumbnail_relative_path}")
+        try:
+            _, uploaded_video_url = _upload_path_to_s3(
+                redacted_full_path,
+                "redacted-videos",
+                f"{video_id}.mp4",
+                video.get("content_type") or "video/mp4",
+            )
+            redacted_file_url = uploaded_video_url or redacted_file_url
+        except Exception as exc:
+            logger.warning(f"Redacted video upload failed for {video_id}: {exc}")
+        try:
+            _, uploaded_thumb_url = _upload_path_to_s3(
+                redacted_thumbnail_full_path,
+                "redacted-thumbnails",
+                f"{video_id}.jpg",
+                "image/jpeg",
+            )
+            redacted_thumbnail_url = uploaded_thumb_url or redacted_thumbnail_url
+        except Exception as exc:
+            logger.warning(f"Redacted thumbnail upload failed for {video_id}: {exc}")
+
+        finished_at = datetime.now(timezone.utc).isoformat()
+        await db.videos.update_one(
+            {"id": video_id},
+            {
+                "$set": {
+                    "privacy_status": PrivacyProcessingStatus.COMPLETED.value,
+                    "analysis_status": VideoProcessingStatus.QUEUED.value,
+                    "privacy_completed_at": finished_at,
+                    "privacy_error": None,
+                    "privacy_review_required": False,
+                    "privacy_review_reason": None,
+                    "privacy_candidate_tracks": analysis["candidate_tracks"],
+                    "privacy_manual_override": None,
+                    "privacy_manifest": {
+                        "manifest_version": 1,
+                        "created_at": finished_at,
+                        "tracks": analysis["manifest_tracks"],
+                        "fallback_mode": analysis["fallback_mode"],
+                        "teacher_track_id": analysis["teacher_track_id"],
+                        "render_stats": render_stats,
+                    },
+                    "redacted_file_path": redacted_relative_path,
+                    "redacted_file_url": redacted_file_url,
+                    "redacted_thumbnail_path": redacted_thumbnail_relative_path,
+                    "redacted_thumbnail_url": redacted_thumbnail_url,
+                    "status_updated_at": finished_at,
+                }
+            },
+        )
+        await _log_privacy_audit_event(
+            "privacy_processing_completed",
+            "video",
+            video_id,
+            actor_user_id=job["user_id"],
+            details={
+                "redacted_file_path": redacted_relative_path,
+                "redacted_thumbnail_path": redacted_thumbnail_relative_path,
+                "fallback_mode": analysis["fallback_mode"],
+                "teacher_track_id": analysis["teacher_track_id"],
+            },
+        )
+        await db.video_evidence.update_one(
+            {"video_id": video_id, "uploaded_by": job["user_id"]},
+            {"$set": {"privacy_status": PrivacyProcessingStatus.COMPLETED.value, "error_message": None}},
+        )
+        await _enqueue_video_processing_job(
+            video_id=video_id,
+            teacher_id=job["teacher_id"],
+            user_id=job["user_id"],
+            file_path=str(redacted_full_path),
+        )
+        success = True
+        job_final_status = PrivacyProcessingStatus.COMPLETED.value
+    except Exception as exc:
+        error_message = str(exc)
+        finished_at = datetime.now(timezone.utc).isoformat()
+        await db.videos.update_one(
+            {"id": video_id},
+            {
+                "$set": {
+                    "status": VideoProcessingStatus.FAILED.value,
+                    "privacy_status": PrivacyProcessingStatus.FAILED.value,
+                    "privacy_failed_at": finished_at,
+                    "privacy_error": error_message,
+                    "status_updated_at": finished_at,
+                }
+            },
+        )
+        await db.video_evidence.update_one(
+            {"video_id": video_id, "uploaded_by": job.get("user_id")},
+            {"$set": {"privacy_status": PrivacyProcessingStatus.FAILED.value, "error_message": error_message}},
+        )
+        await _log_privacy_audit_event(
+            "privacy_processing_failed",
+            "video",
+            video_id,
+            actor_user_id=job.get("user_id"),
+            details={"error": error_message},
+        )
+        logger.error(f"Privacy worker failed for {video_id}: {error_message}")
+    finally:
+        await db.video_privacy_jobs.update_one(
+            {"video_id": video_id},
+            {
+                "$set": {
+                    "status": job_final_status,
+                    "updated_at": finished_at,
+                    "finished_at": finished_at,
+                    "last_error": error_message if not success else None,
+                }
+            },
+        )
 
 
 async def _enqueue_video_processing_job(
@@ -1480,6 +2592,22 @@ async def _video_processing_worker(worker_label: str) -> None:
         raise
 
 
+async def _video_privacy_worker(worker_label: str) -> None:
+    logger.info(f"Privacy worker {worker_label} started")
+    try:
+        while True:
+            video_id = await VIDEO_PRIVACY_JOB_QUEUE.get()
+            try:
+                await _run_video_privacy_job(video_id)
+            except Exception as exc:
+                logger.error(f"Privacy worker {worker_label} failed on {video_id}: {exc}")
+            finally:
+                VIDEO_PRIVACY_JOB_QUEUE.task_done()
+    except asyncio.CancelledError:
+        logger.info(f"Privacy worker {worker_label} stopped")
+        raise
+
+
 async def _start_video_workers() -> None:
     if VIDEO_WORKER_TASKS:
         return
@@ -1489,6 +2617,17 @@ async def _start_video_workers() -> None:
             name=f"video-worker-{index + 1}",
         )
         VIDEO_WORKER_TASKS.append(task)
+
+
+async def _start_privacy_workers() -> None:
+    if VIDEO_PRIVACY_WORKER_TASKS:
+        return
+    for index in range(PRIVACY_WORKER_COUNT):
+        task = asyncio.create_task(
+            _video_privacy_worker(f"privacy-worker-{index + 1}"),
+            name=f"privacy-worker-{index + 1}",
+        )
+        VIDEO_PRIVACY_WORKER_TASKS.append(task)
 
 
 async def _rehydrate_video_processing_queue() -> None:
@@ -1521,12 +2660,15 @@ async def _rehydrate_video_processing_queue() -> None:
         await VIDEO_JOB_QUEUE.put(video_id)
     # Backfill jobs for queued/processing videos that predate job documents.
     pending_videos = await db.videos.find(
-        {"status": {"$in": [VideoProcessingStatus.QUEUED.value, VideoProcessingStatus.PROCESSING.value]}},
-        {"_id": 0, "id": 1, "teacher_id": 1, "uploaded_by": 1, "file_path": 1},
+        {
+            "analysis_status": {"$in": [VideoProcessingStatus.QUEUED.value, VideoProcessingStatus.PROCESSING.value]},
+            "privacy_status": PrivacyProcessingStatus.COMPLETED.value,
+        },
+        {"_id": 0, "id": 1, "teacher_id": 1, "uploaded_by": 1, "redacted_file_path": 1, "file_path": 1},
     ).to_list(2000)
     for video in pending_videos:
         video_id = video.get("id")
-        file_path = video.get("file_path")
+        file_path = video.get("redacted_file_path") or video.get("file_path")
         teacher_id = video.get("teacher_id")
         user_id = video.get("uploaded_by")
         if not video_id or not file_path or not teacher_id or not user_id:
@@ -1540,6 +2682,147 @@ async def _rehydrate_video_processing_queue() -> None:
             user_id=user_id,
             file_path=full_path,
         )
+
+
+async def _rehydrate_video_privacy_queue() -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    await db.video_privacy_jobs.update_many(
+        {"status": PrivacyProcessingStatus.PROCESSING.value},
+        {
+            "$set": {
+                "status": PrivacyProcessingStatus.QUEUED.value,
+                "updated_at": now,
+            }
+        },
+    )
+    await db.videos.update_many(
+        {"privacy_status": PrivacyProcessingStatus.PROCESSING.value},
+        {
+            "$set": {
+                "privacy_status": PrivacyProcessingStatus.QUEUED.value,
+                "status_updated_at": now,
+            }
+        },
+    )
+    pending_jobs = await db.video_privacy_jobs.find(
+        {"status": PrivacyProcessingStatus.QUEUED.value},
+        {"_id": 0, "video_id": 1},
+    ).to_list(2000)
+    queued_ids = {job["video_id"] for job in pending_jobs if job.get("video_id")}
+    for video_id in queued_ids:
+        await VIDEO_PRIVACY_JOB_QUEUE.put(video_id)
+    pending_videos = await db.videos.find(
+        {"privacy_status": {"$in": [PrivacyProcessingStatus.QUEUED.value, PrivacyProcessingStatus.PROCESSING.value]}},
+        {"_id": 0, "id": 1, "teacher_id": 1, "uploaded_by": 1, "raw_file_path": 1, "file_path": 1},
+    ).to_list(2000)
+    for video in pending_videos:
+        video_id = video.get("id")
+        file_path = video.get("raw_file_path") or video.get("file_path")
+        teacher_id = video.get("teacher_id")
+        user_id = video.get("uploaded_by")
+        if not video_id or not file_path or not teacher_id or not user_id:
+            continue
+        if video_id in queued_ids:
+            continue
+        full_path = str(UPLOAD_DIR / str(file_path))
+        await _enqueue_video_privacy_job(
+            video_id=video_id,
+            teacher_id=teacher_id,
+            user_id=user_id,
+            file_path=full_path,
+        )
+
+
+async def _purge_expired_privacy_artifacts() -> None:
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    expired_refs = await db.teacher_face_references.find(
+        {"retention_expires_at": {"$ne": None, "$lte": now_iso}},
+        {"_id": 0},
+    ).to_list(500)
+    for ref in expired_refs:
+        file_path = ref.get("file_path")
+        if file_path:
+            try:
+                full_path = UPLOAD_DIR / str(file_path)
+                if full_path.exists():
+                    await asyncio.to_thread(os.remove, full_path)
+            except Exception as exc:
+                logger.warning(f"Failed to remove expired privacy reference {ref.get('id')}: {exc}")
+        _delete_s3_key(ref.get("s3_key"))
+        await db.teacher_face_references.update_one(
+            {"id": ref["id"]},
+            {
+                "$set": {
+                    "file_path": None,
+                    "file_url": None,
+                    "s3_key": None,
+                    "purged_at": now_iso,
+                }
+            },
+        )
+        await _log_privacy_audit_event(
+            "privacy_reference_purged",
+            "teacher_reference",
+            ref["id"],
+            details={"teacher_id": ref.get("teacher_id")},
+        )
+
+    expired_videos = await db.videos.find(
+        {
+            "raw_retention_expires_at": {"$ne": None, "$lte": now_iso},
+            "privacy_status": {"$in": [PrivacyProcessingStatus.COMPLETED.value, PrivacyProcessingStatus.FAILED.value]},
+        },
+        {"_id": 0},
+    ).to_list(500)
+    for video in expired_videos:
+        raw_path = video.get("raw_file_path")
+        if raw_path:
+            try:
+                full_path = UPLOAD_DIR / str(raw_path)
+                if full_path.exists():
+                    await asyncio.to_thread(os.remove, full_path)
+            except Exception as exc:
+                logger.warning(f"Failed to remove expired raw video {video.get('id')}: {exc}")
+        _delete_s3_key(video.get("raw_s3_key") or video.get("s3_key"))
+        await db.videos.update_one(
+            {"id": video["id"]},
+            {
+                "$set": {
+                    "raw_file_path": None,
+                    "raw_file_url": None,
+                    "raw_s3_key": None,
+                    "raw_purged_at": now_iso,
+                }
+            },
+        )
+        await _log_privacy_audit_event(
+            "raw_video_purged",
+            "video",
+            video["id"],
+            details={"teacher_id": video.get("teacher_id")},
+        )
+
+
+async def _privacy_maintenance_worker() -> None:
+    logger.info("Privacy maintenance worker started")
+    try:
+        while True:
+            try:
+                await _purge_expired_privacy_artifacts()
+            except Exception as exc:
+                logger.error(f"Privacy maintenance worker failed: {exc}")
+            await asyncio.sleep(PRIVACY_PURGE_INTERVAL_MINUTES * 60)
+    except asyncio.CancelledError:
+        logger.info("Privacy maintenance worker stopped")
+        raise
+
+
+async def _start_privacy_maintenance_tasks() -> None:
+    if PRIVACY_MAINTENANCE_TASKS:
+        return
+    task = asyncio.create_task(_privacy_maintenance_worker(), name="privacy-maintenance-worker")
+    PRIVACY_MAINTENANCE_TASKS.append(task)
 
 
 @api_router.post("/videos/upload", response_model=VideoUploadResponse)
@@ -1578,6 +2861,16 @@ async def upload_video(
     else:
         if teacher.get("email", "").lower() != current_user.get("email", "").lower():
             raise HTTPException(status_code=403, detail="Not authorized for this teacher")
+    active_profile = await _get_active_privacy_profile(teacher_id)
+    if PRIVACY_REQUIRE_PROFILE and not active_profile:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PRIVACY_PROFILE_REQUIRED",
+                "message": "Teacher privacy profile must be completed before video upload.",
+                "teacher_id": teacher_id,
+            },
+        )
     
     subject = subject or teacher.get("subject")
     video_id = str(uuid.uuid4())
@@ -1624,14 +2917,26 @@ async def upload_video(
         "filename": file.filename,
         "stored_filename": filename,
         "s3_key": s3_key,
+        "raw_s3_key": s3_key,
         "file_url": file_url,
+        "raw_file_url": file_url,
         "file_path": relative_path,
+        "raw_file_path": relative_path,
         "content_type": content_type or "video/mp4",
         "file_size_bytes": size,
         "teacher_id": teacher_id,
         "uploaded_by": current_user["id"],
         "status": VideoProcessingStatus.QUEUED.value,
+        "privacy_status": PrivacyProcessingStatus.QUEUED.value,
         "analysis_status": VideoProcessingStatus.QUEUED.value,
+        "privacy_review_required": False,
+        "privacy_review_reason": None,
+        "privacy_started_at": None,
+        "privacy_completed_at": None,
+        "privacy_failed_at": None,
+        "privacy_error": None,
+        "privacy_profile_version": active_profile.get("profile_version") if active_profile else None,
+        "raw_retention_expires_at": (datetime.now(timezone.utc) + timedelta(days=PRIVACY_RAW_VIDEO_RETENTION_DAYS)).isoformat(),
         "status_updated_at": upload_time,
         "processing_started_at": None,
         "processing_completed_at": None,
@@ -1649,6 +2954,7 @@ async def upload_video(
         "file_path": relative_path,
         "subject": subject,
         "recorded_at": normalized_recorded_at,
+        "privacy_status": PrivacyProcessingStatus.QUEUED.value,
         "analysis_status": VideoProcessingStatus.QUEUED.value,
         "uploaded_by": current_user["id"],
         "uploaded_at": upload_time,
@@ -1663,12 +2969,23 @@ async def upload_video(
     except Exception:
         logger.warning("Unable to update recording compliance after upload")
     
-    # Queue video analysis for worker processing
-    await _enqueue_video_processing_job(
+    # Queue privacy processing before AI analysis.
+    await _enqueue_video_privacy_job(
         video_id=video_id,
         teacher_id=teacher_id,
         user_id=current_user["id"],
         file_path=str(file_path),
+    )
+    await _log_privacy_audit_event(
+        "privacy_video_uploaded",
+        "video",
+        video_id,
+        actor_user_id=current_user["id"],
+        details={
+            "teacher_id": teacher_id,
+            "privacy_status": PrivacyProcessingStatus.QUEUED.value,
+            "raw_retention_expires_at": video_doc["raw_retention_expires_at"],
+        },
     )
     
     return VideoUploadResponse(
@@ -1676,6 +2993,7 @@ async def upload_video(
         filename=file.filename,
         teacher_id=teacher_id,
         status=VideoProcessingStatus.QUEUED.value,
+        privacy_status=PrivacyProcessingStatus.QUEUED.value,
         analysis_status=VideoProcessingStatus.QUEUED.value,
         upload_date=video_doc["upload_date"],
         subject=subject,
@@ -1697,7 +3015,7 @@ async def get_videos(teacher_id: Optional[str] = None, current_user: dict = Depe
     videos = await db.videos.find(query, {"_id": 0, "uploaded_by": 0, "stored_filename": 0}).to_list(1000)
     for video in videos:
         _apply_video_response_defaults(video)
-    return videos
+    return [_sanitize_video_response(video) for video in videos]
 
 
 @api_router.get("/videos/{video_id}")
@@ -1707,7 +3025,39 @@ async def get_video_detail(video_id: str, current_user: dict = Depends(get_curre
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     await _get_teacher_or_404(video.get("teacher_id"), current_user)
-    return _apply_video_response_defaults(video)
+    return _sanitize_video_response(_apply_video_response_defaults(video))
+
+
+@api_router.get("/videos/{video_id}/raw-access")
+async def get_video_raw_access(video_id: str, current_user: dict = Depends(get_current_user)):
+    role = _get_user_role(current_user)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    raw_url = video.get("raw_file_url")
+    raw_path = video.get("raw_file_path")
+    access_url = raw_url
+    if not access_url and raw_path:
+        safe_path = str(raw_path).replace("\\", "/").lstrip("/")
+        access_url = _to_public_backend_url(f"/uploads/{safe_path}")
+    if not access_url:
+        raise HTTPException(status_code=404, detail="Raw asset is no longer available")
+    await _log_privacy_audit_event(
+        "raw_asset_accessed",
+        "video",
+        video_id,
+        actor_user_id=current_user["id"],
+        details={"reason": "admin_raw_access_endpoint"},
+    )
+    return {
+        "video_id": video_id,
+        "access_url": access_url,
+        "expires_at": None,
+        "retention_expires_at": video.get("raw_retention_expires_at"),
+    }
 
 @api_router.get("/videos/{video_id}/status")
 async def get_video_status(video_id: str, current_user: dict = Depends(get_current_user)):
@@ -1717,8 +3067,12 @@ async def get_video_status(video_id: str, current_user: dict = Depends(get_curre
     await _get_teacher_or_404(video.get("teacher_id"), current_user)
     return {
         "status": _normalize_video_status(video.get("status")),
+        "privacy_status": _normalize_privacy_status(video.get("privacy_status")),
         "analysis_status": _normalize_video_status(video.get("analysis_status")),
+        "privacy_review_required": bool(video.get("privacy_review_required", False)),
+        "privacy_review_reason": video.get("privacy_review_reason"),
         "error_message": video.get("error_message"),
+        "privacy_error": video.get("privacy_error"),
     }
 
 
@@ -1731,7 +3085,9 @@ async def retry_video_processing(video_id: str, current_user: dict = Depends(get
     current_status = _normalize_video_status(video.get("status"))
     if current_status != VideoProcessingStatus.FAILED.value:
         raise HTTPException(status_code=400, detail="Only failed videos can be retried")
-    relative_path = video.get("file_path")
+    if _normalize_privacy_status(video.get("privacy_status")) != PrivacyProcessingStatus.COMPLETED.value:
+        raise HTTPException(status_code=409, detail="Retry unavailable until privacy processing is complete")
+    relative_path = video.get("redacted_file_path") or video.get("file_path")
     if not relative_path:
         raise HTTPException(status_code=409, detail="Retry unavailable for videos without local source")
     full_path = UPLOAD_DIR / str(relative_path)
@@ -1760,6 +3116,807 @@ async def retry_video_processing(video_id: str, current_user: dict = Depends(get
         file_path=str(full_path),
     )
     return {"video_id": video_id, "status": VideoProcessingStatus.QUEUED.value}
+
+
+@api_router.post("/videos/{video_id}/privacy/retry")
+async def retry_video_privacy(video_id: str, current_user: dict = Depends(get_current_user)):
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    relative_path = video.get("raw_file_path") or video.get("file_path")
+    if not relative_path:
+        raise HTTPException(status_code=409, detail="Retry unavailable for videos without local source")
+    full_path = UPLOAD_DIR / str(relative_path)
+    if not full_path.exists():
+        raise HTTPException(status_code=409, detail="Retry unavailable because the local video file is missing")
+    queued_at = datetime.now(timezone.utc).isoformat()
+    await db.videos.update_one(
+        {"id": video_id},
+        {
+            "$set": {
+                "status": VideoProcessingStatus.QUEUED.value,
+                "privacy_status": PrivacyProcessingStatus.QUEUED.value,
+                "analysis_status": VideoProcessingStatus.QUEUED.value,
+                "privacy_review_required": False,
+                "privacy_review_reason": None,
+                "privacy_error": None,
+                "privacy_started_at": None,
+                "privacy_completed_at": None,
+                "privacy_failed_at": None,
+                "status_updated_at": queued_at,
+            }
+        },
+    )
+    await _enqueue_video_privacy_job(
+        video_id=video_id,
+        teacher_id=video.get("teacher_id"),
+        user_id=video.get("uploaded_by") or current_user["id"],
+        file_path=str(full_path),
+    )
+    await _log_privacy_audit_event(
+        "privacy_retry_queued",
+        "video",
+        video_id,
+        actor_user_id=current_user["id"],
+        details={"requeued_at": queued_at},
+    )
+    return {
+        "video_id": video_id,
+        "privacy_status": PrivacyProcessingStatus.QUEUED.value,
+        "analysis_status": VideoProcessingStatus.QUEUED.value,
+        "requeued_at": queued_at,
+    }
+
+
+@api_router.get("/privacy/review-queue", response_model=PrivacyReviewQueueResponse)
+async def get_privacy_review_queue(current_user: dict = Depends(get_current_user)):
+    role = _get_user_role(current_user)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    videos = await db.videos.find(
+        {"uploaded_by": current_user["id"], "privacy_status": PrivacyProcessingStatus.REVIEW_REQUIRED.value},
+        {"_id": 0},
+    ).sort("upload_date", -1).to_list(200)
+    items: List[PrivacyReviewQueueItem] = []
+    for video in videos:
+        teacher = await db.teachers.find_one({"id": video.get("teacher_id")}, {"_id": 0, "name": 1})
+        candidates = [
+            PrivacyReviewCandidateTrack(**candidate)
+            for candidate in (video.get("privacy_candidate_tracks") or [])
+            if candidate.get("track_id")
+        ]
+        items.append(
+            PrivacyReviewQueueItem(
+                video_id=video["id"],
+                teacher_id=video.get("teacher_id"),
+                teacher_name=(teacher or {}).get("name"),
+                filename=video.get("filename") or "recording",
+                privacy_status=_normalize_privacy_status(video.get("privacy_status")),
+                privacy_review_reason=video.get("privacy_review_reason"),
+                upload_date=video.get("upload_date") or datetime.now(timezone.utc).isoformat(),
+                candidate_tracks=candidates,
+            )
+        )
+    return PrivacyReviewQueueResponse(items=items)
+
+
+@api_router.get("/privacy/audit", response_model=List[PrivacyAuditEvent])
+async def get_privacy_audit_events(
+    target_type: Optional[str] = None,
+    target_id: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=500),
+    current_user: dict = Depends(get_current_user),
+):
+    role = _get_user_role(current_user)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    query: Dict[str, Any] = {}
+    if target_type:
+        query["target_type"] = target_type
+    if target_id:
+        query["target_id"] = target_id
+    docs = await db.privacy_audit_events.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    return [PrivacyAuditEvent(**doc) for doc in docs]
+
+
+@api_router.post("/videos/{video_id}/privacy/review", response_model=PrivacyReviewDecisionResponse)
+async def resolve_video_privacy_review(
+    video_id: str,
+    payload: PrivacyReviewDecisionRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    role = _get_user_role(current_user)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    if _normalize_privacy_status(video.get("privacy_status")) != PrivacyProcessingStatus.REVIEW_REQUIRED.value:
+        raise HTTPException(status_code=400, detail="Video is not awaiting privacy review")
+    resolved_at = datetime.now(timezone.utc).isoformat()
+    update_fields: Dict[str, Any] = {
+        "privacy_review_required": False,
+        "privacy_review_reason": None,
+        "privacy_review_resolved_by": current_user["id"],
+        "privacy_review_resolved_at": resolved_at,
+    }
+    if payload.decision in {"approve_teacher_track", "blur_all_and_continue"}:
+        update_fields["status"] = VideoProcessingStatus.QUEUED.value
+        update_fields["privacy_status"] = PrivacyProcessingStatus.QUEUED.value
+        update_fields["privacy_completed_at"] = None
+        update_fields["analysis_status"] = VideoProcessingStatus.QUEUED.value
+        update_fields["privacy_error"] = None
+        update_fields["privacy_manual_override"] = {
+            "decision": payload.decision,
+            "approved_track_id": payload.approved_track_id,
+            "reason": payload.reason,
+            "resolved_by": current_user["id"],
+            "resolved_at": resolved_at,
+        }
+    elif payload.decision == "rerun":
+        update_fields["status"] = VideoProcessingStatus.QUEUED.value
+        update_fields["privacy_status"] = PrivacyProcessingStatus.QUEUED.value
+        update_fields["privacy_manual_override"] = None
+    elif payload.decision == "reject_video":
+        update_fields["status"] = VideoProcessingStatus.FAILED.value
+        update_fields["privacy_status"] = PrivacyProcessingStatus.FAILED.value
+        update_fields["privacy_failed_at"] = resolved_at
+        update_fields["privacy_error"] = payload.reason
+        update_fields["privacy_manual_override"] = None
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported privacy review decision")
+    await db.videos.update_one({"id": video_id}, {"$set": update_fields})
+    if payload.decision in {"approve_teacher_track", "blur_all_and_continue", "rerun"}:
+        relative_path = video.get("raw_file_path") or video.get("file_path")
+        if relative_path:
+            await _enqueue_video_privacy_job(
+                video_id=video_id,
+                teacher_id=video.get("teacher_id"),
+                user_id=video.get("uploaded_by") or current_user["id"],
+                file_path=str(UPLOAD_DIR / str(relative_path)),
+            )
+    await _log_privacy_audit_event(
+        "privacy_review_resolved",
+        "video",
+        video_id,
+        actor_user_id=current_user["id"],
+        details={
+            "decision": payload.decision,
+            "approved_track_id": payload.approved_track_id,
+            "reason": payload.reason,
+        },
+    )
+    return PrivacyReviewDecisionResponse(
+        video_id=video_id,
+        privacy_status=_normalize_privacy_status(update_fields.get("privacy_status")),
+        analysis_status=_normalize_video_status(update_fields.get("analysis_status", video.get("analysis_status"))),
+        review_resolved_by=current_user["id"],
+        review_resolved_at=resolved_at,
+    )
+
+
+@api_router.get("/teachers/{teacher_id}/recognition", response_model=TeacherRecognitionSummaryResponse)
+async def get_teacher_recognition_summary(
+    teacher_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_teacher_or_404(teacher_id, current_user)
+    badges = await db.recognition_badges.find(
+        {"teacher_id": teacher_id},
+        {"_id": 0},
+    ).sort("awarded_at", -1).to_list(200)
+    return _build_teacher_recognition_summary(teacher_id, badges)
+
+
+@api_router.get("/videos/{video_id}/recognition", response_model=VideoRecognitionResponse)
+async def get_video_recognition(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    event = await _get_or_sync_video_recognition_event(video)
+    return _build_video_recognition_response(video, event)
+
+
+@api_router.post("/videos/{video_id}/recognition/opt-in", response_model=RecognitionOptInResponse)
+async def update_video_recognition_opt_in(
+    video_id: str,
+    payload: RecognitionOptInRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    event = await _get_or_sync_video_recognition_event(video)
+    updated_at = datetime.now(timezone.utc).isoformat()
+    teacher_opt_in = bool(payload.teacher_opt_in)
+    sharing_scope = payload.sharing_scope if teacher_opt_in else None
+    allow_social_share = bool(payload.allow_social_share) if teacher_opt_in else False
+    allow_email_signature = bool(payload.allow_email_signature) if teacher_opt_in else False
+    await db.lesson_recognition_events.update_one(
+        {"id": event["id"]},
+        {
+            "$set": {
+                "teacher_opt_in": teacher_opt_in,
+                "sharing_scope": sharing_scope,
+                "allow_social_share": allow_social_share,
+                "allow_email_signature": allow_email_signature,
+                "updated_at": updated_at,
+            }
+        },
+    )
+    await _log_recognition_audit_event(
+        "recognition_opt_in_updated",
+        "video",
+        video_id,
+        actor_user_id=current_user["id"],
+        details={
+            "teacher_opt_in": teacher_opt_in,
+            "sharing_scope": sharing_scope,
+            "allow_social_share": allow_social_share,
+            "allow_email_signature": allow_email_signature,
+        },
+    )
+    return RecognitionOptInResponse(
+        video_id=video_id,
+        teacher_opt_in=teacher_opt_in,
+        sharing_scope=sharing_scope,
+        allow_social_share=allow_social_share,
+        allow_email_signature=allow_email_signature,
+        updated_at=updated_at,
+    )
+
+
+@api_router.get("/recognition/review-queue", response_model=RecognitionReviewQueueResponse)
+async def get_recognition_review_queue(current_user: dict = Depends(get_current_user)):
+    role = _get_user_role(current_user)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    events = await db.lesson_recognition_events.find(
+        {"recognition_status": "pending_admin_review"},
+        {"_id": 0},
+    ).sort("updated_at", -1).to_list(200)
+    items: List[RecognitionReviewQueueItem] = []
+    for event in events:
+        video = await db.videos.find_one({"id": event.get("video_id")}, {"_id": 0})
+        if not video or video.get("uploaded_by") != current_user["id"]:
+            continue
+        teacher = await db.teachers.find_one({"id": video.get("teacher_id")}, {"_id": 0, "name": 1})
+        items.append(
+            RecognitionReviewQueueItem(
+                video_id=video["id"],
+                teacher_id=video.get("teacher_id"),
+                teacher_name=(teacher or {}).get("name"),
+                recognition_status=event.get("recognition_status") or "not_evaluated",
+                publication_status=event.get("submission_status") or "not_submitted",
+                badge_type=event.get("badge_type"),
+                sharing_scope=event.get("sharing_scope"),
+                submitted_at=event.get("updated_at") or event.get("created_at"),
+            )
+        )
+    return RecognitionReviewQueueResponse(items=items)
+
+
+@api_router.post("/videos/{video_id}/recognition/review", response_model=RecognitionReviewResponse)
+async def review_video_recognition(
+    video_id: str,
+    payload: RecognitionReviewRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    role = _get_user_role(current_user)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    event = await _get_or_sync_video_recognition_event(video)
+    decision = (payload.decision or "").strip().lower()
+    reviewed_at = datetime.now(timezone.utc).isoformat()
+    badge_doc: Optional[dict] = None
+
+    if decision == "approve":
+        if not (event.get("eligibility") or {}).get("is_eligible"):
+            raise HTTPException(status_code=400, detail="Video is not eligible for recognition approval")
+        badge_type = payload.badge_type or event.get("badge_type") or FIVE_STAR_BADGE
+        existing_badge = await db.recognition_badges.find_one(
+            {"video_id": video_id, "badge_type": badge_type},
+            {"_id": 0},
+        )
+        if existing_badge:
+            badge_doc = {
+                **existing_badge,
+                "status": "awarded",
+                "awarded_at": existing_badge.get("awarded_at") or reviewed_at,
+                "awarded_by": current_user["id"],
+                "criteria_snapshot": (event.get("eligibility") or {}).get("criteria_snapshot") or {},
+            }
+            await db.recognition_badges.update_one(
+                {"id": existing_badge["id"]},
+                {"$set": badge_doc},
+            )
+        else:
+            badge_doc = {
+                "id": str(uuid.uuid4()),
+                "teacher_id": video.get("teacher_id"),
+                "video_id": video_id,
+                "badge_type": badge_type,
+                "status": "awarded",
+                "awarded_at": reviewed_at,
+                "awarded_by": current_user["id"],
+                "criteria_snapshot": (event.get("eligibility") or {}).get("criteria_snapshot") or {},
+                "created_at": reviewed_at,
+                "updated_at": reviewed_at,
+            }
+            await db.recognition_badges.insert_one(badge_doc)
+        await db.lesson_recognition_events.update_one(
+            {"id": event["id"]},
+            {
+                "$set": {
+                    "recognition_status": "awarded",
+                    "badge_id": badge_doc["id"],
+                    "badge_type": badge_doc["badge_type"],
+                    "reviewed_at": reviewed_at,
+                    "reviewed_by": current_user["id"],
+                    "review_reason": payload.reason,
+                    "updated_at": reviewed_at,
+                }
+            },
+        )
+        await _log_recognition_audit_event(
+            "recognition_awarded",
+            "video",
+            video_id,
+            actor_user_id=current_user["id"],
+            details={
+                "badge_type": badge_doc["badge_type"],
+                "badge_id": badge_doc["id"],
+                "reason": payload.reason,
+            },
+        )
+        return RecognitionReviewResponse(
+            video_id=video_id,
+            recognition_status="awarded",
+            badge=RecognitionBadgeResponse(
+                id=badge_doc["id"],
+                badge_type=badge_doc["badge_type"],
+                status=badge_doc["status"],
+                video_id=badge_doc["video_id"],
+                awarded_at=badge_doc.get("awarded_at"),
+                awarded_by=badge_doc.get("awarded_by"),
+                criteria_snapshot=badge_doc.get("criteria_snapshot") or {},
+            ),
+        )
+
+    if decision not in {"reject", "revoke"}:
+        raise HTTPException(status_code=400, detail="Unsupported recognition review decision")
+
+    existing_badge = await db.recognition_badges.find_one({"video_id": video_id}, {"_id": 0})
+    if decision == "revoke" and existing_badge:
+        await db.recognition_badges.update_one(
+            {"id": existing_badge["id"]},
+            {
+                "$set": {
+                    "status": "revoked",
+                    "updated_at": reviewed_at,
+                    "revoked_at": reviewed_at,
+                    "revoked_by": current_user["id"],
+                }
+            },
+        )
+    await db.lesson_recognition_events.update_one(
+        {"id": event["id"]},
+        {
+            "$set": {
+                "recognition_status": "rejected" if decision == "reject" else "revoked",
+                "reviewed_at": reviewed_at,
+                "reviewed_by": current_user["id"],
+                "review_reason": payload.reason,
+                "updated_at": reviewed_at,
+            }
+        },
+    )
+    await _log_recognition_audit_event(
+        "recognition_rejected" if decision == "reject" else "recognition_revoked",
+        "video",
+        video_id,
+        actor_user_id=current_user["id"],
+        details={"reason": payload.reason},
+    )
+    return RecognitionReviewResponse(
+        video_id=video_id,
+        recognition_status="rejected" if decision == "reject" else "revoked",
+        badge=None,
+    )
+
+
+@api_router.post("/videos/{video_id}/exemplar/submit", response_model=ExemplarSubmissionResponse)
+async def submit_video_exemplar(
+    video_id: str,
+    payload: ExemplarSubmissionRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    teacher = await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    event = await _get_or_sync_video_recognition_event(video)
+    if event.get("recognition_status") != "awarded":
+        raise HTTPException(status_code=400, detail="Lesson must be awarded recognition before exemplar submission")
+    if not event.get("teacher_opt_in"):
+        raise HTTPException(status_code=400, detail="Teacher opt-in is required before exemplar submission")
+    if _normalize_privacy_status(video.get("privacy_status")) != PrivacyProcessingStatus.COMPLETED.value:
+        raise HTTPException(status_code=400, detail="Privacy processing must be completed before exemplar submission")
+
+    submitted_at = datetime.now(timezone.utc).isoformat()
+    title = (payload.title or "").strip()
+    summary = (payload.summary or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Exemplar title is required")
+    if not summary:
+        raise HTTPException(status_code=400, detail="Exemplar summary is required")
+    sharing_scope = (payload.sharing_scope or event.get("sharing_scope") or "private").strip()
+    tags = [str(tag).strip().lower() for tag in (payload.tags or []) if str(tag).strip()]
+
+    existing_submission = await _get_latest_exemplar_submission(video_id)
+    if existing_submission:
+        submission_id = existing_submission["id"]
+        submission_doc = {
+            **existing_submission,
+            "title": title,
+            "summary": summary,
+            "sharing_scope": sharing_scope,
+            "teacher_opt_in": True,
+            "submission_status": "pending_admin_review",
+            "admin_review_status": "pending",
+            "tags": tags,
+            "submitted_at": submitted_at,
+            "reviewed_at": None,
+            "published_at": None,
+            "teacher_display_name": teacher.get("name"),
+        }
+        await db.exemplar_submissions.update_one({"id": submission_id}, {"$set": submission_doc})
+    else:
+        submission_id = str(uuid.uuid4())
+        submission_doc = {
+            "id": submission_id,
+            "teacher_id": video.get("teacher_id"),
+            "video_id": video_id,
+            "teacher_display_name": teacher.get("name"),
+            "title": title,
+            "summary": summary,
+            "sharing_scope": sharing_scope,
+            "teacher_opt_in": True,
+            "submission_status": "pending_admin_review",
+            "admin_review_status": "pending",
+            "tags": tags,
+            "submitted_at": submitted_at,
+            "reviewed_at": None,
+            "published_at": None,
+            "created_at": submitted_at,
+        }
+        await db.exemplar_submissions.insert_one(submission_doc)
+
+    await db.lesson_recognition_events.update_one(
+        {"id": event["id"]},
+        {
+            "$set": {
+                "submission_id": submission_id,
+                "submission_status": "pending_admin_review",
+                "sharing_scope": sharing_scope,
+                "updated_at": submitted_at,
+            }
+        },
+    )
+    await _log_recognition_audit_event(
+        "exemplar_submitted",
+        "video",
+        video_id,
+        actor_user_id=current_user["id"],
+        details={"submission_id": submission_id, "sharing_scope": sharing_scope, "tags": tags},
+    )
+    return ExemplarSubmissionResponse(
+        submission_id=submission_id,
+        video_id=video_id,
+        submission_status="pending_admin_review",
+        submitted_at=submitted_at,
+    )
+
+
+@api_router.get("/exemplar-library/review-queue", response_model=ExemplarReviewQueueResponse)
+async def get_exemplar_review_queue(current_user: dict = Depends(get_current_user)):
+    role = _get_user_role(current_user)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    submissions = await db.exemplar_submissions.find(
+        {"submission_status": "pending_admin_review"},
+        {"_id": 0},
+    ).sort("submitted_at", -1).to_list(200)
+    items: List[ExemplarReviewQueueItem] = []
+    for submission in submissions:
+        video = await db.videos.find_one({"id": submission.get("video_id")}, {"_id": 0, "uploaded_by": 1})
+        if not video or video.get("uploaded_by") != current_user["id"]:
+            continue
+        items.append(
+            ExemplarReviewQueueItem(
+                submission_id=submission["id"],
+                video_id=submission.get("video_id"),
+                teacher_id=submission.get("teacher_id"),
+                teacher_name=submission.get("teacher_display_name"),
+                title=submission.get("title") or "Exemplar lesson",
+                summary=submission.get("summary") or "",
+                sharing_scope=submission.get("sharing_scope"),
+                submission_status=submission.get("submission_status") or "pending_admin_review",
+                submitted_at=submission.get("submitted_at"),
+                tags=list(submission.get("tags") or []),
+            )
+        )
+    return ExemplarReviewQueueResponse(items=items)
+
+
+@api_router.post("/exemplar-library/{submission_id}/review", response_model=ExemplarLibraryReviewResponse)
+async def review_exemplar_submission(
+    submission_id: str,
+    payload: ExemplarLibraryReviewRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    role = _get_user_role(current_user)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    submission = await db.exemplar_submissions.find_one({"id": submission_id}, {"_id": 0})
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    video = await db.videos.find_one({"id": submission.get("video_id")}, {"_id": 0})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    teacher = await _get_teacher_or_404(submission.get("teacher_id"), current_user)
+    decision = (payload.decision or "").strip().lower()
+    reviewed_at = datetime.now(timezone.utc).isoformat()
+
+    if decision == "approve":
+        existing_item = await db.exemplar_library_items.find_one({"video_id": submission["video_id"]}, {"_id": 0})
+        library_item_id = existing_item["id"] if existing_item else str(uuid.uuid4())
+        playback_url = video.get("redacted_file_url") or _resolve_public_asset_url(video.get("redacted_file_path"))
+        thumbnail_url = video.get("redacted_thumbnail_url") or _resolve_public_asset_url(video.get("redacted_thumbnail_path"))
+        if not playback_url:
+            raise HTTPException(status_code=400, detail="Redacted playback asset is required before publishing to the library")
+        library_item_doc = {
+            "id": library_item_id,
+            "video_id": submission["video_id"],
+            "teacher_id": submission["teacher_id"],
+            "teacher_display_name": teacher.get("name"),
+            "title": submission.get("title") or "Exemplar lesson",
+            "summary": submission.get("summary") or "",
+            "subject": video.get("subject"),
+            "grade_level": teacher.get("grade_level"),
+            "badge_type": FIVE_STAR_BADGE,
+            "tags": list(submission.get("tags") or []),
+            "redacted_asset_url": playback_url,
+            "redacted_asset_path": video.get("redacted_file_path"),
+            "thumbnail_url": thumbnail_url,
+            "thumbnail_path": video.get("redacted_thumbnail_path"),
+            "published_at": reviewed_at,
+            "status": "published",
+            "updated_at": reviewed_at,
+        }
+        if existing_item:
+            await db.exemplar_library_items.update_one({"id": library_item_id}, {"$set": library_item_doc})
+        else:
+            library_item_doc["created_at"] = reviewed_at
+            await db.exemplar_library_items.insert_one(library_item_doc)
+        await db.exemplar_submissions.update_one(
+            {"id": submission_id},
+            {
+                "$set": {
+                    "submission_status": "published",
+                    "admin_review_status": "approved",
+                    "review_reason": payload.reason,
+                    "reviewed_at": reviewed_at,
+                    "published_at": reviewed_at,
+                    "library_item_id": library_item_id,
+                }
+            },
+        )
+        await db.lesson_recognition_events.update_one(
+            {"video_id": submission["video_id"]},
+            {
+                "$set": {
+                    "submission_status": "published",
+                    "library_item_id": library_item_id,
+                    "updated_at": reviewed_at,
+                }
+            },
+        )
+        await _log_recognition_audit_event(
+            "exemplar_published",
+            "submission",
+            submission_id,
+            actor_user_id=current_user["id"],
+            details={"video_id": submission["video_id"], "library_item_id": library_item_id, "reason": payload.reason},
+        )
+        return ExemplarLibraryReviewResponse(
+            submission_id=submission_id,
+            publication_status="published",
+            library_item=_build_exemplar_library_item_response(library_item_doc),
+        )
+    if decision != "reject":
+        raise HTTPException(status_code=400, detail="Unsupported exemplar review decision")
+
+    await db.exemplar_submissions.update_one(
+        {"id": submission_id},
+        {
+            "$set": {
+                "submission_status": "rejected",
+                "admin_review_status": "rejected",
+                "review_reason": payload.reason,
+                "reviewed_at": reviewed_at,
+            }
+        },
+    )
+    await db.lesson_recognition_events.update_one(
+        {"video_id": submission["video_id"]},
+        {"$set": {"submission_status": "rejected", "updated_at": reviewed_at}},
+    )
+    await _log_recognition_audit_event(
+        "exemplar_rejected",
+        "submission",
+        submission_id,
+        actor_user_id=current_user["id"],
+        details={"video_id": submission["video_id"], "reason": payload.reason},
+    )
+    return ExemplarLibraryReviewResponse(submission_id=submission_id, publication_status="rejected", library_item=None)
+
+
+@api_router.get("/exemplar-library", response_model=ExemplarLibraryResponse)
+async def get_exemplar_library(
+    subject: Optional[str] = None,
+    tag: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    query: Dict[str, Any] = {"status": "published"}
+    if subject:
+        query["subject"] = subject
+    if tag:
+        query["tags"] = str(tag).strip().lower()
+    docs = await db.exemplar_library_items.find(query, {"_id": 0}).sort("published_at", -1).to_list(200)
+    items = [_build_exemplar_library_item_response(doc) for doc in docs]
+    return ExemplarLibraryResponse(items=items, count=len(items))
+
+
+@api_router.post("/videos/{video_id}/share/social-card", response_model=SocialCardResponse)
+async def generate_social_card(
+    video_id: str,
+    payload: SocialCardRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    teacher = await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    event = await _get_or_sync_video_recognition_event(video)
+    if event.get("recognition_status") != "awarded":
+        raise HTTPException(status_code=400, detail="Recognition must be awarded before generating a social card")
+    if not event.get("allow_social_share"):
+        raise HTTPException(status_code=400, detail="Social sharing has not been enabled for this lesson")
+    created_at = datetime.now(timezone.utc).isoformat()
+    relative_path = f"share-assets/social/{video['teacher_id']}/{video_id}_{uuid.uuid4().hex[:8]}.png"
+    full_path = UPLOAD_DIR / relative_path
+    subject = video.get("subject") if payload.include_subject else None
+    grade_level = teacher.get("grade_level") if payload.include_grade else None
+    summary = (
+        (await _get_assessment_for_video(video_id) or {}).get("summary")
+        if payload.include_summary
+        else ""
+    ) or "Recognized for excellent classroom instruction and reflective practice."
+    await asyncio.to_thread(
+        render_social_share_card,
+        str(full_path),
+        teacher_name=teacher.get("name") or "Teacher",
+        badge_label="5-Star Lesson",
+        lesson_title=video.get("filename") or "Recognized Lesson",
+        summary=summary,
+        subject=subject,
+        grade_level=grade_level,
+    )
+    file_url = _resolve_public_asset_url(relative_path)
+    try:
+        _, uploaded_url = _upload_path_to_s3(full_path, "share-assets", f"{video_id}_social_card.png", "image/png")
+        file_url = uploaded_url or file_url
+    except Exception as exc:
+        logger.warning(f"Social card upload failed for {video_id}: {exc}")
+    asset = await _create_share_asset_record(
+        teacher_id=video["teacher_id"],
+        video_id=video_id,
+        asset_type="social_card",
+        file_path=relative_path,
+        file_url=file_url,
+        actor_user_id=current_user["id"],
+        details={"platform": payload.platform},
+    )
+    await _log_recognition_audit_event(
+        "social_card_generated",
+        "video",
+        video_id,
+        actor_user_id=current_user["id"],
+        details={"asset_id": asset["id"], "platform": payload.platform},
+    )
+    return SocialCardResponse(
+        asset_id=asset["id"],
+        asset_type="social_card",
+        file_url=file_url,
+        caption="Proud to have earned a 5-Star Lesson recognition in Cognivio.",
+        created_at=created_at,
+    )
+
+
+@api_router.post("/videos/{video_id}/share/email-signature", response_model=EmailSignatureResponse)
+async def generate_email_signature(
+    video_id: str,
+    payload: EmailSignatureRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    teacher = await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    event = await _get_or_sync_video_recognition_event(video)
+    if event.get("recognition_status") != "awarded":
+        raise HTTPException(status_code=400, detail="Recognition must be awarded before generating an email signature badge")
+    if not event.get("allow_email_signature"):
+        raise HTTPException(status_code=400, detail="Email signature sharing has not been enabled for this lesson")
+    created_at = datetime.now(timezone.utc).isoformat()
+    relative_path = f"share-assets/email-signatures/{video['teacher_id']}/{video_id}_{uuid.uuid4().hex[:8]}.png"
+    full_path = UPLOAD_DIR / relative_path
+    featured_label = "Featured in Cognivio All-Star Library" if event.get("library_item_id") else None
+    await asyncio.to_thread(
+        render_email_signature_badge,
+        str(full_path),
+        teacher_name=teacher.get("name") or "Teacher",
+        badge_label="5-Star Lesson",
+        featured_label=featured_label,
+    )
+    image_url = _resolve_public_asset_url(relative_path)
+    try:
+        _, uploaded_url = _upload_path_to_s3(full_path, "share-assets", f"{video_id}_email_signature.png", "image/png")
+        image_url = uploaded_url or image_url
+    except Exception as exc:
+        logger.warning(f"Email signature badge upload failed for {video_id}: {exc}")
+    link_url = f"{FRONTEND_URL.rstrip('/')}/videos/{video_id}" if FRONTEND_URL else image_url
+    html = build_email_signature_html(
+        image_url=image_url,
+        teacher_name=teacher.get("name") or "Teacher",
+        badge_label="5-Star Lesson",
+        link_url=link_url,
+    )
+    asset = await _create_share_asset_record(
+        teacher_id=video["teacher_id"],
+        video_id=video_id,
+        asset_type="email_signature",
+        file_path=relative_path,
+        file_url=image_url,
+        actor_user_id=current_user["id"],
+        details={"format": payload.format, "badge_style": payload.badge_style},
+    )
+    await _log_recognition_audit_event(
+        "email_signature_generated",
+        "video",
+        video_id,
+        actor_user_id=current_user["id"],
+        details={"asset_id": asset["id"]},
+    )
+    return EmailSignatureResponse(
+        asset_id=asset["id"],
+        asset_type="email_signature",
+        html=html,
+        image_url=image_url,
+        created_at=created_at,
+    )
 
 
 @app.websocket("/ws/videos/{video_id}")
@@ -1798,7 +3955,7 @@ async def video_status_ws(websocket: WebSocket, video_id: str):
         return
 
     await websocket.accept()
-    last_status = None
+    last_signature = None
     try:
         while True:
             video = await db.videos.find_one(
@@ -1809,15 +3966,29 @@ async def video_status_ws(websocket: WebSocket, video_id: str):
                 break
             status = _normalize_video_status(video.get("status"))
             analysis_status = _normalize_video_status(video.get("analysis_status"))
-            if status != last_status:
+            privacy_status = _normalize_privacy_status(video.get("privacy_status"))
+            signature = (
+                status,
+                privacy_status,
+                analysis_status,
+                bool(video.get("privacy_review_required", False)),
+                video.get("privacy_review_reason"),
+                video.get("error_message"),
+                video.get("privacy_error"),
+            )
+            if signature != last_signature:
                 await websocket.send_json(
                     {
                         "status": status,
+                        "privacy_status": privacy_status,
                         "analysis_status": analysis_status,
+                        "privacy_review_required": bool(video.get("privacy_review_required", False)),
+                        "privacy_review_reason": video.get("privacy_review_reason"),
                         "error_message": video.get("error_message"),
+                        "privacy_error": video.get("privacy_error"),
                     }
                 )
-                last_status = status
+                last_signature = signature
             if _is_terminal_video_status(status):
                 break
             await asyncio.sleep(2)
@@ -4874,6 +7045,7 @@ async def get_admin_ops_readiness(current_user: dict = Depends(get_current_user)
     teachers_count = await db.teachers.count_documents({"created_by": admin_id})
     assessments_total = await db.assessments.count_documents({"user_id": admin_id})
     policies_count = await db.recording_policies.count_documents({"created_by": admin_id})
+    privacy_profiles_active = await db.teacher_face_profiles.count_documents({"status": "active"})
     schedules_upcoming = await db.schedules.count_documents(
         {"user_id": admin_id, "start_time": {"$gte": now_iso}}
     )
@@ -4890,18 +7062,31 @@ async def get_admin_ops_readiness(current_user: dict = Depends(get_current_user)
     videos_failed = await db.videos.count_documents(
         {**video_scope, "status": {"$in": [VideoProcessingStatus.FAILED.value, "error", "errored"]}}
     )
+    privacy_review_required = await db.videos.count_documents(
+        {**video_scope, "privacy_status": PrivacyProcessingStatus.REVIEW_REQUIRED.value}
+    )
+    privacy_failed = await db.videos.count_documents(
+        {**video_scope, "privacy_status": PrivacyProcessingStatus.FAILED.value}
+    )
+    teachers_missing_privacy_profiles = max(0, teachers_count - privacy_profiles_active)
     blocking_items = []
     warnings = []
     if teachers_count == 0:
         blocking_items.append("No teachers configured.")
     if policies_count == 0:
         blocking_items.append("Recording compliance policy is not configured.")
+    if PRIVACY_REQUIRE_PROFILE and teachers_missing_privacy_profiles > 0:
+        blocking_items.append(f"{teachers_missing_privacy_profiles} teacher(s) are missing privacy profiles.")
     if gradebook_connected == 0:
         warnings.append("No gradebook integration is connected.")
     if assessments_total == 0:
         warnings.append("No completed assessments exist for pilot validation.")
     if videos_failed > 0:
         warnings.append(f"{videos_failed} failed video(s) require retry or remediation.")
+    if privacy_failed > 0:
+        warnings.append(f"{privacy_failed} video(s) failed privacy processing.")
+    if privacy_review_required > 0:
+        warnings.append(f"{privacy_review_required} video(s) require privacy review.")
     if schedules_upcoming == 0:
         warnings.append("No upcoming recording schedules are set.")
 
@@ -4918,6 +7103,10 @@ async def get_admin_ops_readiness(current_user: dict = Depends(get_current_user)
             "videos_failed": videos_failed,
             "assessments_total": assessments_total,
             "recording_policies": policies_count,
+            "privacy_profiles_active": privacy_profiles_active,
+            "teachers_missing_privacy_profiles": teachers_missing_privacy_profiles,
+            "privacy_review_required": privacy_review_required,
+            "privacy_failed": privacy_failed,
             "upcoming_schedules": schedules_upcoming,
             "gradebook_connected": gradebook_connected,
         },
@@ -4946,6 +7135,20 @@ async def get_admin_ops_launch_health(current_user: dict = Depends(get_current_u
             "started_at": {"$lte": cutoff_stale},
         }
     )
+    failed_privacy_jobs_24h = await db.video_privacy_jobs.count_documents(
+        {
+            "user_id": admin_id,
+            "status": PrivacyProcessingStatus.FAILED.value,
+            "updated_at": {"$gte": cutoff_24h},
+        }
+    )
+    stale_privacy_jobs = await db.video_privacy_jobs.count_documents(
+        {
+            "user_id": admin_id,
+            "status": PrivacyProcessingStatus.PROCESSING.value,
+            "started_at": {"$lte": cutoff_stale},
+        }
+    )
     failed_videos_24h = await db.videos.count_documents(
         {
             "uploaded_by": admin_id,
@@ -4953,23 +7156,38 @@ async def get_admin_ops_launch_health(current_user: dict = Depends(get_current_u
             "status_updated_at": {"$gte": cutoff_24h},
         }
     )
+    privacy_reviews_pending = await db.videos.count_documents(
+        {
+            "uploaded_by": admin_id,
+            "privacy_status": PrivacyProcessingStatus.REVIEW_REQUIRED.value,
+        }
+    )
     queued_notifications = await db.notifications.count_documents(
         {"user_id": admin_id, "status": "queued", "read_at": None}
     )
     queue_depth = VIDEO_JOB_QUEUE.qsize()
-    if stale_processing_jobs > 0 or failed_jobs_24h >= 10:
+    privacy_queue_depth = VIDEO_PRIVACY_JOB_QUEUE.qsize()
+    if stale_processing_jobs > 0 or stale_privacy_jobs > 0 or failed_jobs_24h >= 10 or failed_privacy_jobs_24h >= 10:
         incident_level = "red"
-    elif failed_jobs_24h > 0 or queue_depth > 25:
+    elif failed_jobs_24h > 0 or failed_privacy_jobs_24h > 0 or queue_depth > 25 or privacy_queue_depth > 25:
         incident_level = "amber"
     else:
         incident_level = "green"
     actions = []
     if stale_processing_jobs > 0:
         actions.append("Investigate stale processing jobs and restart workers if needed.")
+    if stale_privacy_jobs > 0:
+        actions.append("Investigate stale privacy jobs and restart privacy workers if needed.")
     if failed_jobs_24h > 0:
         actions.append("Retry failed video jobs and inspect recent error messages.")
+    if failed_privacy_jobs_24h > 0:
+        actions.append("Review failed privacy jobs and retry or manually review impacted videos.")
     if queue_depth > 25:
         actions.append("Scale worker count (`VIDEO_WORKER_COUNT`) to reduce queue latency.")
+    if privacy_queue_depth > 25:
+        actions.append("Scale privacy worker count (`PRIVACY_WORKER_COUNT`) to reduce privacy queue latency.")
+    if privacy_reviews_pending > 0:
+        actions.append("Work the privacy review queue before additional customer uploads pile up.")
     if queued_notifications > 50:
         actions.append("Verify outbound notification delivery pipeline health.")
     if not actions:
@@ -4979,9 +7197,13 @@ async def get_admin_ops_launch_health(current_user: dict = Depends(get_current_u
         "incident_level": incident_level,
         "metrics": {
             "video_queue_depth": queue_depth,
+            "privacy_queue_depth": privacy_queue_depth,
             "failed_jobs_24h": failed_jobs_24h,
+            "failed_privacy_jobs_24h": failed_privacy_jobs_24h,
             "failed_videos_24h": failed_videos_24h,
             "stale_processing_jobs": stale_processing_jobs,
+            "stale_privacy_jobs": stale_privacy_jobs,
+            "privacy_reviews_pending": privacy_reviews_pending,
             "queued_notifications": queued_notifications,
         },
         "recommended_actions": actions,
@@ -5012,9 +7234,26 @@ async def get_admin_ops_backlog_priorities(current_user: dict = Depends(get_curr
             {"$limit": 20},
         ]
     ).to_list(20)
+    privacy_reviews = await db.videos.find(
+        {"uploaded_by": admin_id, "privacy_status": PrivacyProcessingStatus.REVIEW_REQUIRED.value},
+        {
+            "_id": 0,
+            "id": 1,
+            "teacher_id": 1,
+            "filename": 1,
+            "privacy_review_reason": 1,
+            "status_updated_at": 1,
+        },
+    ).sort("status_updated_at", -1).to_list(20)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "priorities": [
+            {
+                "priority": "high" if privacy_reviews else "low",
+                "title": "Privacy review queue",
+                "count": len(privacy_reviews),
+                "items": privacy_reviews,
+            },
             {
                 "priority": "high" if failed_videos else "medium",
                 "title": "Failed video recovery",
@@ -5063,6 +7302,14 @@ async def analyze_video(
     """Background task to analyze video using AI"""
     try:
         logger.info(f"Starting analysis for video {video_id}")
+        video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+        if not video:
+            raise RuntimeError("Video not found")
+        if _normalize_privacy_status(video.get("privacy_status")) != PrivacyProcessingStatus.COMPLETED.value:
+            raise RuntimeError("Privacy processing must complete before analysis starts")
+        file_path = video.get("redacted_file_path") or file_path
+        if file_path and not os.path.isabs(str(file_path)):
+            file_path = str(UPLOAD_DIR / str(file_path))
         started_at = datetime.now(timezone.utc).isoformat()
         await db.videos.update_one(
             {"id": video_id},
@@ -5087,35 +7334,6 @@ async def analyze_video(
                 }
             },
         )
-        thumbnail_relative_path = f"thumbnails/{teacher_id}/{video_id}.jpg"
-        thumbnail_full_path = UPLOAD_DIR / thumbnail_relative_path
-        thumbnail_created = await asyncio.to_thread(
-            _extract_video_thumbnail,
-            file_path,
-            str(thumbnail_full_path),
-        )
-        if thumbnail_created:
-            thumbnail_url = _to_public_backend_url(f"/uploads/{thumbnail_relative_path}")
-            try:
-                _, uploaded_thumb_url = _upload_path_to_s3(
-                    thumbnail_full_path,
-                    "thumbnails",
-                    f"{video_id}.jpg",
-                    "image/jpeg",
-                )
-                thumbnail_url = uploaded_thumb_url or thumbnail_url
-            except Exception as exc:
-                logger.warning(f"Thumbnail upload failed for {video_id}: {exc}")
-            await db.videos.update_one(
-                {"id": video_id},
-                {
-                    "$set": {
-                        "thumbnail_path": thumbnail_relative_path,
-                        "thumbnail_url": thumbnail_url,
-                    }
-                },
-            )
-        
         # Get current framework selection
         selection = await db.framework_selections.find_one(
             {"user_id": user_id},
@@ -5198,6 +7416,9 @@ async def analyze_video(
             {"video_id": video_id, "uploaded_by": user_id},
             {"$set": {"analysis_status": VideoProcessingStatus.COMPLETED.value}},
         )
+        updated_video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+        if updated_video:
+            await _sync_video_recognition_state(updated_video)
         
         logger.info(f"Completed analysis for video {video_id}")
         return True, None
@@ -5934,26 +8155,58 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.videos, [("uploaded_by", 1), ("upload_date", -1)])
     await _safe_create_index(db.videos, [("teacher_id", 1), ("upload_date", -1)])
     await _safe_create_index(db.videos, [("status", 1), ("upload_date", -1)])
+    await _safe_create_index(db.videos, [("privacy_status", 1), ("upload_date", -1)])
     await _safe_create_index(db.assessments, [("teacher_id", 1), ("analyzed_at", -1)])
     await _safe_create_index(db.observations, [("video_id", 1), ("created_at", -1)])
     await _safe_create_index(db.video_processing_jobs, [("video_id", 1)], unique=True)
     await _safe_create_index(db.video_processing_jobs, [("status", 1), ("updated_at", -1)])
+    await _safe_create_index(db.video_privacy_jobs, [("video_id", 1)], unique=True)
+    await _safe_create_index(db.video_privacy_jobs, [("status", 1), ("updated_at", -1)])
+    await _safe_create_index(db.teacher_face_profiles, [("teacher_id", 1), ("status", 1)])
+    await _safe_create_index(db.teacher_face_references, [("teacher_id", 1), ("profile_id", 1)])
+    await _safe_create_index(db.teacher_face_references, [("retention_expires_at", 1)])
+    await _safe_create_index(db.privacy_audit_events, [("target_type", 1), ("target_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.recognition_badges, [("teacher_id", 1), ("awarded_at", -1)])
+    await _safe_create_index(db.recognition_badges, [("video_id", 1), ("status", 1)])
+    await _safe_create_index(db.lesson_recognition_events, [("teacher_id", 1), ("updated_at", -1)])
+    await _safe_create_index(db.lesson_recognition_events, [("video_id", 1), ("recognition_status", 1)])
+    await _safe_create_index(db.recognition_audit_events, [("target_type", 1), ("target_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.exemplar_submissions, [("submission_status", 1), ("submitted_at", -1)])
+    await _safe_create_index(db.exemplar_submissions, [("teacher_id", 1), ("video_id", 1)])
+    await _safe_create_index(db.exemplar_library_items, [("status", 1), ("published_at", -1)])
+    await _safe_create_index(db.exemplar_library_items, [("subject", 1), ("grade_level", 1)])
+    await _safe_create_index(db.share_assets, [("teacher_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.videos, [("raw_retention_expires_at", 1)])
 
 
 async def _stop_video_workers() -> None:
     if not VIDEO_WORKER_TASKS:
-        return
-    for task in VIDEO_WORKER_TASKS:
-        task.cancel()
-    await asyncio.gather(*VIDEO_WORKER_TASKS, return_exceptions=True)
-    VIDEO_WORKER_TASKS.clear()
+        pass
+    else:
+        for task in VIDEO_WORKER_TASKS:
+            task.cancel()
+        await asyncio.gather(*VIDEO_WORKER_TASKS, return_exceptions=True)
+        VIDEO_WORKER_TASKS.clear()
+    if VIDEO_PRIVACY_WORKER_TASKS:
+        for task in VIDEO_PRIVACY_WORKER_TASKS:
+            task.cancel()
+        await asyncio.gather(*VIDEO_PRIVACY_WORKER_TASKS, return_exceptions=True)
+        VIDEO_PRIVACY_WORKER_TASKS.clear()
+    if PRIVACY_MAINTENANCE_TASKS:
+        for task in PRIVACY_MAINTENANCE_TASKS:
+            task.cancel()
+        await asyncio.gather(*PRIVACY_MAINTENANCE_TASKS, return_exceptions=True)
+        PRIVACY_MAINTENANCE_TASKS.clear()
 
 
 @app.on_event("startup")
 async def ensure_demo_users():
     _validate_s3_config()
     await _ensure_database_indexes()
+    await _start_privacy_maintenance_tasks()
+    await _start_privacy_workers()
     await _start_video_workers()
+    await _rehydrate_video_privacy_queue()
     await _rehydrate_video_processing_queue()
     if not DEMO_MODE:
         return

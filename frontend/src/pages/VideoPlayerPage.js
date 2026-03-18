@@ -1,15 +1,17 @@
 import React, { useRef, useState, useEffect, useCallback } from "react";
-import { useParams, useSearchParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { assessmentApi, observationApi, videoApi } from "@/lib/api";
+import { assessmentApi, exemplarApi, observationApi, recognitionApi, shareAssetApi, videoApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { VideoTimeline } from "@/components/VideoTimeline";
+import { useAuth } from "@/hooks/useAuth";
 import { toast } from "sonner";
 import { Badge, Button, EmptyState, Field, PageHeader, Panel, Textarea } from "@/components/ui";
 
 export function VideoPlayerPage() {
   const { videoId } = useParams();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const [searchParams] = useSearchParams();
   const videoRef = useRef(null);
   const [currentTime, setCurrentTime] = useState(0);
@@ -83,6 +85,8 @@ export function VideoPlayerPage() {
     }
   }, [statusRes, videoRes]);
 
+  const privacyStatus = statusRes?.privacy_status || videoRes?.privacy_status || "queued";
+
   useEffect(() => {
     const token = localStorage.getItem("cognivio_token");
     if (!videoId || !token || !process.env.REACT_APP_BACKEND_URL) return;
@@ -120,9 +124,27 @@ export function VideoPlayerPage() {
     enabled: !!assessmentId,
     queryFn: () => assessmentApi.get(assessmentId).then((r) => r.data),
   });
+  const { data: recognitionRes } = useQuery({
+    queryKey: ["video-recognition", videoId],
+    enabled: Boolean(videoId),
+    queryFn: () => recognitionApi.video(videoId).then((r) => r.data),
+    refetchInterval: (query) => {
+      const status = query.state.data?.recognition?.status;
+      return status === "pending_admin_review" ? 10000 : false;
+    },
+  });
 
   const [summaryNotes, setSummaryNotes] = useState("");
   const [actionItems, setActionItems] = useState("");
+  const [teacherOptIn, setTeacherOptIn] = useState(false);
+  const [sharingScope, setSharingScope] = useState("private");
+  const [allowSocialShare, setAllowSocialShare] = useState(false);
+  const [allowEmailSignature, setAllowEmailSignature] = useState(false);
+  const [exemplarTitle, setExemplarTitle] = useState("");
+  const [exemplarSummary, setExemplarSummary] = useState("");
+  const [exemplarTags, setExemplarTags] = useState("");
+  const [socialCardResult, setSocialCardResult] = useState(null);
+  const [emailSignatureResult, setEmailSignatureResult] = useState(null);
   const retryMutation = useMutation({
     mutationFn: () => videoApi.retry(videoId),
     onSuccess: () => {
@@ -134,6 +156,94 @@ export function VideoPlayerPage() {
       toast.error(error?.response?.data?.detail || "Failed to retry processing");
     },
   });
+  const retryPrivacyMutation = useMutation({
+    mutationFn: () => videoApi.retryPrivacy(videoId),
+    onSuccess: () => {
+      toast.success("Privacy processing re-queued");
+      queryClient.invalidateQueries({ queryKey: ["video", videoId] });
+      queryClient.invalidateQueries({ queryKey: ["video-status", videoId] });
+    },
+    onError: (error) => {
+      const detail = error?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : detail?.message || "Failed to retry privacy processing");
+    },
+  });
+  const saveRecognitionOptInMutation = useMutation({
+    mutationFn: (payload) => recognitionApi.updateOptIn(videoId, payload),
+    onSuccess: () => {
+      toast.success("Recognition preferences saved");
+      queryClient.invalidateQueries({ queryKey: ["video-recognition", videoId] });
+      if (videoRes?.teacher_id) {
+        queryClient.invalidateQueries({ queryKey: ["teacher-recognition-summary", videoRes.teacher_id] });
+      }
+    },
+    onError: (error) => {
+      const detail = error?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : detail?.message || "Failed to save recognition preferences");
+    },
+  });
+  const submitExemplarMutation = useMutation({
+    mutationFn: (payload) => exemplarApi.submit(videoId, payload),
+    onSuccess: () => {
+      toast.success("Exemplar submission queued for admin review");
+      queryClient.invalidateQueries({ queryKey: ["video-recognition", videoId] });
+    },
+    onError: (error) => {
+      const detail = error?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : detail?.message || "Failed to submit exemplar");
+    },
+  });
+  const generateSocialCardMutation = useMutation({
+    mutationFn: () =>
+      shareAssetApi.createSocialCard(videoId, {
+        platform: "linkedin",
+        include_subject: true,
+        include_grade: false,
+        include_summary: true,
+      }),
+    onSuccess: (response) => {
+      setSocialCardResult(response.data);
+      toast.success("Social card generated");
+    },
+    onError: (error) => {
+      const detail = error?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : detail?.message || "Failed to generate social card");
+    },
+  });
+  const generateEmailSignatureMutation = useMutation({
+    mutationFn: () =>
+      shareAssetApi.createEmailSignature(videoId, {
+        format: "html",
+        badge_style: "compact",
+      }),
+    onSuccess: (response) => {
+      setEmailSignatureResult(response.data);
+      toast.success("Email signature badge generated");
+    },
+    onError: (error) => {
+      const detail = error?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : detail?.message || "Failed to generate email signature");
+    },
+  });
+
+  useEffect(() => {
+    const publication = recognitionRes?.publication;
+    if (!publication) return;
+    setTeacherOptIn(Boolean(publication.teacher_opt_in));
+    setSharingScope(publication.sharing_scope || "private");
+    setAllowSocialShare(Boolean(publication.teacher_opt_in && publication.allow_social_share));
+    setAllowEmailSignature(Boolean(publication.teacher_opt_in && publication.allow_email_signature));
+  }, [recognitionRes]);
+
+  useEffect(() => {
+    if (!videoRes?.filename || exemplarTitle) return;
+    setExemplarTitle(`5-Star Lesson: ${videoRes.filename.replace(/\.[^.]+$/, "")}`);
+  }, [videoRes, exemplarTitle]);
+
+  useEffect(() => {
+    if (!assessmentRes?.summary || exemplarSummary) return;
+    setExemplarSummary(assessmentRes.summary);
+  }, [assessmentRes, exemplarSummary]);
 
   const handleSeek = (seconds) => {
     if (!videoRef.current || typeof seconds !== "number") return;
@@ -201,18 +311,33 @@ export function VideoPlayerPage() {
   };
 
   const observations = observationsRes ?? [];
+  const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
+  const recognitionStatus = recognitionRes?.recognition?.status || "not_evaluated";
+  const recognitionEligible = Boolean(recognitionRes?.eligibility?.is_eligible);
+  const recognitionReasons = recognitionRes?.eligibility?.reasons || [];
+  const publicationStatus = recognitionRes?.publication?.submission_status || "not_submitted";
+  const canSubmitExemplar = recognitionStatus === "awarded" && teacherOptIn;
+  const recognitionBadgeLabel =
+    recognitionStatus === "awarded"
+      ? "5-Star Lesson"
+      : recognitionStatus === "pending_admin_review"
+        ? "Recognition pending admin review"
+        : recognitionEligible
+          ? "Recognition eligible"
+          : "Recognition not yet awarded";
+  const recognitionBadgeVariant =
+    recognitionStatus === "awarded"
+      ? "success"
+      : recognitionStatus === "pending_admin_review"
+        ? "warning"
+        : "neutral";
 
-  const videoUrl = videoRes?.playback_url
-    ? videoRes.playback_url.startsWith("http")
-      ? videoRes.playback_url
-      : `${process.env.REACT_APP_BACKEND_URL}${videoRes.playback_url}`
-    : videoRes?.file_url
-      ? videoRes.file_url
-      : videoRes?.file_path
-        ? `${process.env.REACT_APP_BACKEND_URL}/uploads/${videoRes.file_path}`
-        : videoRes?.stored_filename
-          ? `${process.env.REACT_APP_BACKEND_URL}/uploads/${videoRes.stored_filename}`
-          : null;
+  const videoUrl =
+    privacyStatus === "completed" && videoRes?.playback_url
+      ? (videoRes.playback_url.startsWith("http")
+          ? videoRes.playback_url
+          : `${process.env.REACT_APP_BACKEND_URL}${videoRes.playback_url}`)
+      : null;
   const thumbnailUrl =
     videoRes?.thumbnail_url &&
     (videoRes.thumbnail_url.startsWith("http")
@@ -235,10 +360,37 @@ export function VideoPlayerPage() {
           <Badge variant={statusVariant}>
             Status: {videoStatus || "unknown"}
           </Badge>
+          <Badge variant={privacyStatus === "completed" ? "success" : privacyStatus === "failed" ? "danger" : "warning"}>
+            Privacy: {privacyStatus}
+          </Badge>
+          <Badge variant={recognitionBadgeVariant}>
+            {recognitionBadgeLabel}
+          </Badge>
+          {privacyStatus === "review_required" && (
+            <Link
+              to="/privacy-review"
+              className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-700 hover:bg-amber-100"
+            >
+              Open privacy review
+            </Link>
+          )}
+          {privacyStatus === "failed" && (
+            <Button size="sm" variant="danger" onClick={() => retryPrivacyMutation.mutate()} disabled={retryPrivacyMutation.isPending}>
+              {retryPrivacyMutation.isPending ? "Retrying privacy..." : "Retry privacy"}
+            </Button>
+          )}
           {(videoStatus === "failed" || videoStatus === "error") && (
             <Button size="sm" variant="danger" onClick={() => retryMutation.mutate()} disabled={retryMutation.isPending}>
               {retryMutation.isPending ? "Retrying..." : "Retry analysis"}
             </Button>
+          )}
+          {isAdmin && recognitionStatus === "pending_admin_review" && (
+            <Link
+              to="/recognition-review"
+              className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-700 hover:bg-amber-100"
+            >
+              Open recognition review
+            </Link>
           )}
           <span className="text-[11px] text-slate-400">
             {wsConnected ? "Live updates connected" : "Live updates offline"}
@@ -315,6 +467,265 @@ export function VideoPlayerPage() {
             </Panel>
 
             <Panel className="p-4 text-xs text-slate-700">
+              <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold text-slate-900">
+                      Recognition & sharing
+                    </h2>
+                    <p className="mt-1 text-xs text-slate-600">
+                      Recognition is only available after privacy-safe analysis completes and admin review confirms the lesson.
+                    </p>
+                  </div>
+                  <Badge variant={recognitionBadgeVariant}>{recognitionStatus}</Badge>
+                </div>
+                <div className="mt-3 text-xs text-slate-700">
+                  {recognitionEligible ? (
+                    <div className="rounded-md border border-emerald-200 bg-white px-3 py-2 text-emerald-700">
+                      This lesson currently qualifies for 5-star review based on completed privacy processing and its analysis score.
+                    </div>
+                  ) : (
+                    <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-slate-600">
+                      {recognitionReasons.length
+                        ? `Not yet eligible: ${recognitionReasons.join(", ")}.`
+                        : "Recognition will be evaluated when analysis is complete."}
+                    </div>
+                  )}
+                </div>
+                <div className="mt-4 grid gap-3 md:grid-cols-2">
+                  <label className="rounded-md border border-slate-200 bg-white px-3 py-3 text-xs text-slate-700">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={teacherOptIn}
+                        onChange={(e) => setTeacherOptIn(e.target.checked)}
+                      />
+                      <span className="font-medium">Opt this lesson into recognition</span>
+                    </div>
+                    <div className="mt-1 text-[11px] text-slate-500">
+                      Allow Cognivio to hold this lesson for 5-star recognition and exemplar review if it qualifies.
+                    </div>
+                  </label>
+                  <div className="rounded-md border border-slate-200 bg-white px-3 py-3 text-xs text-slate-700">
+                    <label className="mb-1 block text-[11px] font-medium text-slate-600">
+                      Sharing scope
+                    </label>
+                    <select
+                      value={sharingScope}
+                      onChange={(e) => setSharingScope(e.target.value)}
+                      disabled={!teacherOptIn}
+                      className="w-full rounded-md border border-slate-200 bg-white px-2 py-2 text-xs text-slate-700 disabled:bg-slate-100"
+                    >
+                      <option value="private">Private recognition only</option>
+                      <option value="school_only">School-only exemplar</option>
+                      <option value="cognivio_library">Cognivio-wide exemplar</option>
+                    </select>
+                    <div className="mt-2 text-[11px] text-slate-500">
+                      Publication still requires admin review and only redacted assets may be used.
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-3 grid gap-2 md:grid-cols-2">
+                  <label className="rounded-md border border-slate-200 bg-white px-3 py-3 text-xs text-slate-700">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={allowSocialShare}
+                        disabled={!teacherOptIn}
+                        onChange={(e) => setAllowSocialShare(e.target.checked)}
+                      />
+                      <span className="font-medium">Allow social achievement card</span>
+                    </div>
+                    <div className="mt-1 text-[11px] text-slate-500">
+                      Enables a shareable recognition card later. Classroom video is not posted by default.
+                    </div>
+                  </label>
+                  <label className="rounded-md border border-slate-200 bg-white px-3 py-3 text-xs text-slate-700">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={allowEmailSignature}
+                        disabled={!teacherOptIn}
+                        onChange={(e) => setAllowEmailSignature(e.target.checked)}
+                      />
+                      <span className="font-medium">Allow email signature badge</span>
+                    </div>
+                    <div className="mt-1 text-[11px] text-slate-500">
+                      Prepares this lesson for a Cognivio recognition badge in email signature exports.
+                    </div>
+                  </label>
+                </div>
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    onClick={() =>
+                      saveRecognitionOptInMutation.mutate({
+                        teacher_opt_in: teacherOptIn,
+                        sharing_scope: teacherOptIn ? sharingScope : null,
+                        allow_social_share: teacherOptIn && allowSocialShare,
+                        allow_email_signature: teacherOptIn && allowEmailSignature,
+                      })
+                    }
+                    disabled={saveRecognitionOptInMutation.isPending}
+                  >
+                    {saveRecognitionOptInMutation.isPending ? "Saving..." : "Save recognition preferences"}
+                  </Button>
+                  {recognitionStatus === "awarded" && (
+                    <span className="text-[11px] text-emerald-700">
+                      Recognition awarded. Next steps can move into exemplar submission and share assets.
+                    </span>
+                  )}
+                </div>
+                {recognitionStatus === "awarded" && (
+                  <>
+                    <div className="mt-5 rounded-md border border-slate-200 bg-white px-3 py-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="text-xs font-semibold text-slate-800">
+                            All-Star Library submission
+                          </div>
+                          <div className="mt-1 text-[11px] text-slate-500">
+                            Current status: {publicationStatus}
+                          </div>
+                        </div>
+                        {publicationStatus === "published" && (
+                          <Link
+                            to="/all-star-library"
+                            className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
+                          >
+                            Open library
+                          </Link>
+                        )}
+                      </div>
+                      <div className="mt-3 grid gap-3">
+                        <div>
+                          <label className="mb-1 block text-[11px] font-medium text-slate-600">
+                            Exemplar title
+                          </label>
+                          <input
+                            type="text"
+                            value={exemplarTitle}
+                            onChange={(e) => setExemplarTitle(e.target.value)}
+                            className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-[11px] font-medium text-slate-600">
+                            Exemplar summary
+                          </label>
+                          <Textarea
+                            rows={3}
+                            value={exemplarSummary}
+                            onChange={(e) => setExemplarSummary(e.target.value)}
+                            size="sm"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-[11px] font-medium text-slate-600">
+                            Tags
+                          </label>
+                          <input
+                            type="text"
+                            value={exemplarTags}
+                            onChange={(e) => setExemplarTags(e.target.value)}
+                            placeholder="questioning, pacing, checks_for_understanding"
+                            className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700"
+                          />
+                        </div>
+                      </div>
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <Button
+                          size="sm"
+                          disabled={!canSubmitExemplar || submitExemplarMutation.isPending}
+                          onClick={() =>
+                            submitExemplarMutation.mutate({
+                              title: exemplarTitle,
+                              summary: exemplarSummary,
+                              sharing_scope: sharingScope,
+                              tags: exemplarTags
+                                .split(",")
+                                .map((item) => item.trim())
+                                .filter(Boolean),
+                            })
+                          }
+                        >
+                          {submitExemplarMutation.isPending ? "Submitting..." : "Submit to All-Star Library"}
+                        </Button>
+                        {!teacherOptIn && (
+                          <span className="text-[11px] text-amber-700">
+                            Save recognition preferences with opt-in enabled before submitting.
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="mt-4 rounded-md border border-slate-200 bg-white px-3 py-3">
+                      <div className="text-xs font-semibold text-slate-800">
+                        Share assets
+                      </div>
+                      <div className="mt-1 text-[11px] text-slate-500">
+                        Generate privacy-safe recognition assets for social posting and email signatures.
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={!allowSocialShare || generateSocialCardMutation.isPending}
+                          onClick={() => generateSocialCardMutation.mutate()}
+                        >
+                          {generateSocialCardMutation.isPending ? "Generating..." : "Generate social card"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={!allowEmailSignature || generateEmailSignatureMutation.isPending}
+                          onClick={() => generateEmailSignatureMutation.mutate()}
+                        >
+                          {generateEmailSignatureMutation.isPending ? "Generating..." : "Generate email signature"}
+                        </Button>
+                      </div>
+                      {socialCardResult && (
+                        <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-[11px] text-slate-600">
+                          <div className="font-medium text-slate-800">Social card ready</div>
+                          <a
+                            href={socialCardResult.file_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-2 inline-flex text-primary hover:underline"
+                          >
+                            Open social card
+                          </a>
+                          <div className="mt-2 text-slate-500">{socialCardResult.caption}</div>
+                        </div>
+                      )}
+                      {emailSignatureResult && (
+                        <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-[11px] text-slate-600">
+                          <div className="font-medium text-slate-800">Email signature ready</div>
+                          <a
+                            href={emailSignatureResult.image_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-2 inline-flex text-primary hover:underline"
+                          >
+                            Open signature badge
+                          </a>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard.writeText(emailSignatureResult.html);
+                              toast.success("Email signature HTML copied");
+                            }}
+                            className="ml-3 inline-flex text-primary hover:underline"
+                          >
+                            Copy HTML
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 Summary & action items
               </h2>

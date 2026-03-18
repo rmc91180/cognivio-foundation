@@ -50,6 +50,41 @@ export const videoApi = {
   status: (videoId) => api.get(`/api/videos/${videoId}/status`),
   detail: (videoId) => api.get(`/api/videos/${videoId}`),
   retry: (videoId) => api.post(`/api/videos/${videoId}/retry`),
+  retryPrivacy: (videoId) => api.post(`/api/videos/${videoId}/privacy/retry`),
+};
+
+export const privacyProfileApi = {
+  get: (teacherId) => api.get(`/api/teachers/${teacherId}/privacy-profile`),
+  upload: (teacherId, formData) =>
+    api.post(`/api/teachers/${teacherId}/privacy-profile`, formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+    }),
+  remove: (teacherId) => api.delete(`/api/teachers/${teacherId}/privacy-profile`),
+};
+
+export const privacyReviewApi = {
+  queue: () => api.get("/api/privacy/review-queue"),
+  resolve: (videoId, payload) => api.post(`/api/videos/${videoId}/privacy/review`, payload),
+};
+
+export const recognitionApi = {
+  teacherSummary: (teacherId) => api.get(`/api/teachers/${teacherId}/recognition`),
+  video: (videoId) => api.get(`/api/videos/${videoId}/recognition`),
+  updateOptIn: (videoId, payload) => api.post(`/api/videos/${videoId}/recognition/opt-in`, payload),
+  reviewQueue: () => api.get("/api/recognition/review-queue"),
+  review: (videoId, payload) => api.post(`/api/videos/${videoId}/recognition/review`, payload),
+};
+
+export const exemplarApi = {
+  submit: (videoId, payload) => api.post(`/api/videos/${videoId}/exemplar/submit`, payload),
+  reviewQueue: () => api.get("/api/exemplar-library/review-queue"),
+  review: (submissionId, payload) => api.post(`/api/exemplar-library/${submissionId}/review`, payload),
+  list: (params) => api.get("/api/exemplar-library", { params }),
+};
+
+export const shareAssetApi = {
+  createSocialCard: (videoId, payload) => api.post(`/api/videos/${videoId}/share/social-card`, payload),
+  createEmailSignature: (videoId, payload) => api.post(`/api/videos/${videoId}/share/email-signature`, payload),
 };
 
 export const recordingPolicyApi = {
