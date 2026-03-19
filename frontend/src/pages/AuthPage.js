@@ -1,15 +1,25 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { useAuth } from "@/hooks/useAuth";
 import { BrandMark } from "@/components/BrandMark";
+import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { Button, Field, Input, Panel } from "@/components/ui";
+import { runtimeConfig } from "@/lib/runtimeConfig";
 
 export function AuthPage() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
-  const { login, register, loggingIn, registering } = useAuth();
-  const isDemo = process.env.REACT_APP_DEMO_MODE === "true";
+  const { user, login, register, loggingIn, registering } = useAuth();
+  const isDemo = runtimeConfig.demoMode;
   const [mode, setMode] = useState("login");
   const [form, setForm] = useState({ email: "", password: "", name: "" });
+
+  useEffect(() => {
+    if (user) {
+      navigate("/dashboard", { replace: true });
+    }
+  }, [navigate, user]);
 
   const onSubmit = (e) => {
     e.preventDefault();
@@ -28,7 +38,6 @@ export function AuthPage() {
     const fn = mode === "register" ? register : login;
 
     fn(payload);
-    navigate("/dashboard");
   };
 
   const busy = loggingIn || registering;
@@ -37,14 +46,17 @@ export function AuthPage() {
     <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-8">
       <Panel as="div" className="w-full max-w-md p-8">
         <div className="mb-6 text-center">
+          <div className="mb-4 flex justify-center">
+            <LanguageSwitcher />
+          </div>
           <div className="mb-2 inline-flex">
             <BrandMark compact />
           </div>
           <h1 className="font-heading text-2xl font-semibold tracking-tight text-slate-900">
-            Cognivio
+            {t("auth.title")}
           </h1>
           <p className="mt-1 text-sm text-slate-500">
-            AI-guided teacher development workspace
+            {t("auth.subtitle")}
           </p>
         </div>
 
@@ -58,7 +70,7 @@ export function AuthPage() {
                 : "text-slate-500 hover:text-slate-700"
             }`}
           >
-            Login
+            {t("auth.loginTab")}
           </button>
           {!isDemo && (
             <button
@@ -70,24 +82,24 @@ export function AuthPage() {
                   : "text-slate-500 hover:text-slate-700"
               }`}
             >
-              Register
+              {t("auth.registerTab")}
             </button>
           )}
         </div>
 
         {isDemo && (
           <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
-            <div className="font-semibold text-slate-700">Demo logins</div>
+            <div className="font-semibold text-slate-700">{t("auth.demoLogins")}</div>
             <div className="mt-1">
-              Principal: principal@demo.cognivio.app / DemoAccess2026!
+              {t("auth.principalDemo")}
             </div>
-            <div>Teacher: teacher@demo.cognivio.app / DemoAccess2026!</div>
+            <div>{t("auth.teacherDemo")}</div>
           </div>
         )}
 
         <form onSubmit={onSubmit} className="space-y-4">
           {mode === "register" && !isDemo && (
-            <Field label="Name">
+            <Field label={t("auth.name")}>
               <Input
                 type="text"
                 value={form.name}
@@ -97,7 +109,7 @@ export function AuthPage() {
               />
             </Field>
           )}
-          <Field label="Email">
+          <Field label={t("auth.email")}>
             <Input
               type="email"
               required
@@ -107,7 +119,7 @@ export function AuthPage() {
               }
             />
           </Field>
-          <Field label="Password">
+          <Field label={t("auth.password")}>
             <Input
               type="password"
               required
@@ -119,10 +131,10 @@ export function AuthPage() {
           </Field>
           <Button type="submit" disabled={busy} fullWidth className="mt-2 shadow-brand">
             {busy
-              ? "Signing in..."
+              ? t("auth.signingIn")
               : mode === "login"
-              ? "Sign in"
-              : "Create account"}
+              ? t("auth.signIn")
+              : t("auth.createAccount")}
           </Button>
         </form>
       </Panel>

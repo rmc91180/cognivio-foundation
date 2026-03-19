@@ -19,9 +19,11 @@ import io
 import csv
 import hashlib
 import math
+import shutil
 import sys
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+from PIL import Image, ImageDraw
 try:
     import cv2
 except Exception as exc:
@@ -39,7 +41,7 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
-from privacy_pipeline import analyze_video_privacy, render_redacted_video
+from privacy_pipeline import analyze_video_privacy, render_redacted_video, get_privacy_runtime_status
 from recognition_engine import (
     DEFAULT_FIVE_STAR_SCORE_MIN,
     FIVE_STAR_BADGE,
@@ -69,17 +71,21 @@ def _get_optional_env_list(name: str) -> List[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _to_json_safe(value: Any) -> Any:
+    return json.loads(json.dumps(value, default=str))
+
+
 def _get_user_role(user: dict) -> str:
+    email = (user or {}).get("email", "").lower()
+    if email and email in ADMIN_EMAILS:
+        return "admin"
     role = (user or {}).get("role")
     if role:
         return "admin" if role == "principal" else role
-    email = (user or {}).get("email", "").lower()
     if email == "principal@demo.cognivio.app":
         return "admin"
     if email == "teacher@demo.cognivio.app":
         return "teacher"
-    if email and email in ADMIN_EMAILS:
-        return "admin"
     return "teacher"
 
 
@@ -241,7 +247,7 @@ def _get_s3_client():
 
 def _validate_s3_config() -> None:
     if not S3_BUCKET:
-        logger.warning("S3_BUCKET not set; uploads will fail.")
+        logger.warning("S3_BUCKET not set; using local upload storage fallback.")
         return
     if not os.getenv("AWS_ACCESS_KEY_ID") or not os.getenv("AWS_SECRET_ACCESS_KEY"):
         logger.error("AWS credentials missing; S3 uploads will fail.")
@@ -252,6 +258,26 @@ def _validate_s3_config() -> None:
 def _build_s3_key(category: str, filename: str) -> str:
     safe_name = Path(filename).name.replace(" ", "_")
     return f"uploads/{category}/{uuid.uuid4()}_{safe_name}"
+
+
+def _store_path_locally(file_path: Path, category: str, filename: str) -> Tuple[str, str]:
+    safe_name = Path(filename).name.replace(" ", "_")
+    destination = UPLOAD_DIR / category / f"{uuid.uuid4()}_{safe_name}"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        resolved_source = file_path.resolve()
+        resolved_upload_dir = UPLOAD_DIR.resolve()
+        if str(resolved_source).startswith(str(resolved_upload_dir)):
+            relative_path = str(resolved_source.relative_to(resolved_upload_dir)).replace("\\", "/")
+            if not relative_path.startswith("tmp/"):
+                return relative_path, _to_public_backend_url(f"/uploads/{relative_path}")
+    except Exception:
+        pass
+
+    shutil.copyfile(str(file_path), str(destination))
+    relative_path = str(destination.relative_to(UPLOAD_DIR)).replace("\\", "/")
+    return relative_path, _to_public_backend_url(f"/uploads/{relative_path}")
 
 
 def _get_s3_public_url(key: str) -> str:
@@ -266,9 +292,14 @@ def _get_s3_public_url(key: str) -> str:
 
 
 async def _upload_file_to_s3(upload: UploadFile, category: str) -> Tuple[str, str]:
-    if not S3_BUCKET:
-        raise HTTPException(status_code=500, detail="S3 bucket not configured")
     _ensure_allowed_extension(upload.filename or "")
+    if not S3_BUCKET:
+        stored_name = f"{uuid.uuid4()}_{Path(upload.filename or 'upload').name}"
+        relative_path = f"{category}/{stored_name}"
+        destination = UPLOAD_DIR / relative_path
+        await _save_upload_file(upload, destination)
+        safe_path = str(Path(relative_path)).replace("\\", "/").lstrip("/")
+        return safe_path, _to_public_backend_url(f"/uploads/{safe_path}")
     tmp_name = f"{uuid.uuid4()}_{Path(upload.filename or 'upload').name}"
     temp_path = UPLOAD_DIR / "tmp" / tmp_name
     await _save_upload_file(upload, temp_path)
@@ -295,7 +326,7 @@ async def _upload_file_to_s3(upload: UploadFile, category: str) -> Tuple[str, st
 
 def _upload_path_to_s3(file_path: Path, category: str, filename: str, content_type: str) -> Tuple[str, str]:
     if not S3_BUCKET:
-        raise RuntimeError("S3 bucket not configured")
+        return _store_path_locally(file_path, category, filename)
     key = _build_s3_key(category, filename)
     client = _get_s3_client()
     client.upload_file(
@@ -412,6 +443,184 @@ async def _log_recognition_audit_event(
         )
     except Exception as exc:
         logger.warning(f"Unable to write recognition audit event {event_type} for {target_type}:{target_id}: {exc}")
+
+
+def _resolve_upload_path_for_cleanup(file_path: Optional[str]) -> Optional[Path]:
+    if not file_path:
+        return None
+    candidate = Path(str(file_path))
+    if not candidate.is_absolute():
+        candidate = UPLOAD_DIR / candidate
+    try:
+        resolved_candidate = candidate.resolve()
+        resolved_upload_dir = UPLOAD_DIR.resolve()
+        if not str(resolved_candidate).startswith(str(resolved_upload_dir)):
+            return None
+        return resolved_candidate
+    except Exception:
+        return None
+
+
+async def _delete_local_upload_file(file_path: Optional[str]) -> bool:
+    resolved = _resolve_upload_path_for_cleanup(file_path)
+    if not resolved or not resolved.exists() or not resolved.is_file():
+        return False
+    try:
+        await asyncio.to_thread(os.remove, resolved)
+        return True
+    except Exception as exc:
+        logger.warning(f"Unable to remove upload artifact {resolved}: {exc}")
+        return False
+
+
+async def _cleanup_teacher_smoke_artifacts(
+    teacher: dict,
+    *,
+    delete_user_emails: Optional[List[str]] = None,
+) -> "AdminSmokeCleanupResponse":
+    teacher_id = teacher["id"]
+    teacher_email = teacher.get("email")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    deleted_counts: Dict[str, int] = {}
+    deleted_files = 0
+
+    videos = await db.videos.find({"teacher_id": teacher_id}, {"_id": 0}).to_list(1000)
+    video_ids = [video["id"] for video in videos if video.get("id")]
+    assessment_docs = await db.assessments.find({"teacher_id": teacher_id}, {"_id": 0, "id": 1}).to_list(2000)
+    assessment_ids = [doc["id"] for doc in assessment_docs if doc.get("id")]
+    reference_docs = await db.teacher_face_references.find({"teacher_id": teacher_id}, {"_id": 0}).to_list(200)
+    share_docs = await db.share_assets.find({"teacher_id": teacher_id}, {"_id": 0}).to_list(500)
+
+    file_candidates: List[Tuple[Optional[str], Optional[str]]] = []
+    for video in videos:
+        file_candidates.extend(
+            [
+                (video.get("file_path"), video.get("s3_key")),
+                (video.get("raw_file_path"), video.get("raw_s3_key")),
+                (video.get("thumbnail_path"), video.get("thumbnail_s3_key")),
+                (video.get("raw_thumbnail_path"), video.get("raw_thumbnail_s3_key")),
+                (video.get("redacted_file_path"), video.get("redacted_s3_key")),
+                (video.get("redacted_thumbnail_path"), video.get("redacted_thumbnail_s3_key")),
+            ]
+        )
+    for reference in reference_docs:
+        file_candidates.append((reference.get("file_path"), reference.get("s3_key")))
+    for asset in share_docs:
+        file_candidates.append((asset.get("file_path"), asset.get("s3_key")))
+
+    seen_paths = set()
+    for relative_path, s3_key in file_candidates:
+        if relative_path and relative_path not in seen_paths:
+            if await _delete_local_upload_file(relative_path):
+                deleted_files += 1
+            seen_paths.add(relative_path)
+        if s3_key:
+            _delete_s3_key(s3_key)
+
+    observation_query: Dict[str, Any] = {"teacher_id": teacher_id}
+    if video_ids:
+        observation_query = {"$or": [{"teacher_id": teacher_id}, {"video_id": {"$in": video_ids}}]}
+    audit_query: Dict[str, Any] = {"target_id": teacher_id}
+    if video_ids:
+        audit_query = {"$or": [{"target_id": teacher_id}, {"target_id": {"$in": video_ids}}]}
+
+    deleted_counts["curriculum_adherence"] = (
+        await db.curriculum_adherence.delete_many({"assessment_id": {"$in": assessment_ids}})
+    ).deleted_count if assessment_ids else 0
+    deleted_counts["observations"] = (
+        await db.observations.delete_many(observation_query)
+    ).deleted_count
+    deleted_counts["video_evidence"] = (
+        await db.video_evidence.delete_many({"teacher_id": teacher_id})
+    ).deleted_count
+    deleted_counts["video_processing_jobs"] = (
+        await db.video_processing_jobs.delete_many({"video_id": {"$in": video_ids}})
+    ).deleted_count if video_ids else 0
+    deleted_counts["video_privacy_jobs"] = (
+        await db.video_privacy_jobs.delete_many({"video_id": {"$in": video_ids}})
+    ).deleted_count if video_ids else 0
+    deleted_counts["assessments"] = (
+        await db.assessments.delete_many({"teacher_id": teacher_id})
+    ).deleted_count
+    deleted_counts["curricula"] = (
+        await db.curricula.delete_many({"teacher_id": teacher_id})
+    ).deleted_count
+    deleted_counts["lesson_plans"] = (
+        await db.lesson_plans.delete_many({"teacher_id": teacher_id})
+    ).deleted_count
+    deleted_counts["syllabi"] = (
+        await db.syllabi.delete_many({"teacher_id": teacher_id})
+    ).deleted_count
+    deleted_counts["recording_compliance"] = (
+        await db.recording_compliance.delete_many({"teacher_id": teacher_id})
+    ).deleted_count
+    deleted_counts["schedules"] = (
+        await db.schedules.delete_many({"teacher_id": teacher_id})
+    ).deleted_count
+    deleted_counts["notifications"] = (
+        await db.notifications.delete_many({"teacher_id": teacher_id})
+    ).deleted_count
+    deleted_counts["share_assets"] = (
+        await db.share_assets.delete_many({"teacher_id": teacher_id})
+    ).deleted_count
+    deleted_counts["exemplar_library_items"] = (
+        await db.exemplar_library_items.delete_many({"teacher_id": teacher_id})
+    ).deleted_count
+    deleted_counts["exemplar_submissions"] = (
+        await db.exemplar_submissions.delete_many({"teacher_id": teacher_id})
+    ).deleted_count
+    deleted_counts["recognition_badges"] = (
+        await db.recognition_badges.delete_many({"teacher_id": teacher_id})
+    ).deleted_count
+    deleted_counts["lesson_recognition_events"] = (
+        await db.lesson_recognition_events.delete_many({"teacher_id": teacher_id})
+    ).deleted_count
+    deleted_counts["privacy_audit_events"] = (
+        await db.privacy_audit_events.delete_many(audit_query)
+    ).deleted_count
+    deleted_counts["recognition_audit_events"] = (
+        await db.recognition_audit_events.delete_many(audit_query)
+    ).deleted_count
+    deleted_counts["teacher_face_references"] = (
+        await db.teacher_face_references.delete_many({"teacher_id": teacher_id})
+    ).deleted_count
+    deleted_counts["teacher_face_profiles"] = (
+        await db.teacher_face_profiles.delete_many({"teacher_id": teacher_id})
+    ).deleted_count
+    deleted_counts["videos"] = (
+        await db.videos.delete_many({"teacher_id": teacher_id})
+    ).deleted_count
+    deleted_counts["teachers"] = (
+        await db.teachers.delete_many({"id": teacher_id})
+    ).deleted_count
+
+    deleted_users: List[str] = []
+    normalized_emails: List[str] = []
+    for email in delete_user_emails or []:
+        candidate = str(email).strip().lower()
+        if candidate and candidate not in normalized_emails:
+            normalized_emails.append(candidate)
+    if teacher_email:
+        teacher_email_lower = teacher_email.lower()
+        if teacher_email_lower not in normalized_emails:
+            normalized_emails.append(teacher_email_lower)
+    if normalized_emails:
+        users = await db.users.find({"email": {"$in": normalized_emails}}, {"_id": 0, "email": 1}).to_list(100)
+        deleted_counts["users"] = (
+            await db.users.delete_many({"email": {"$in": normalized_emails}})
+        ).deleted_count
+        deleted_users = [user["email"] for user in users if user.get("email")]
+    else:
+        deleted_counts["users"] = 0
+
+    return AdminSmokeCleanupResponse(
+        teacher_id=teacher_id,
+        teacher_email=teacher_email,
+        deleted_files=deleted_files,
+        deleted_counts=deleted_counts,
+        deleted_users=deleted_users,
+        executed_at=now_iso,
+    )
 
 
 async def _get_assessment_for_video(video_id: str) -> Optional[dict]:
@@ -564,6 +773,40 @@ def _resolve_public_asset_url(relative_path: Optional[str]) -> Optional[str]:
         return None
     safe_path = str(relative_path).replace("\\", "/").lstrip("/")
     return _to_public_backend_url(f"/uploads/{safe_path}")
+
+
+def _write_placeholder_thumbnail(output_path: Path, width: int = 640, height: int = 360) -> None:
+    image = Image.new("RGB", (width, height), (235, 241, 248))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((40, 40, width - 40, height - 40), outline=(76, 92, 122), width=3)
+    draw.text((70, 130), "Cognivio staging thumbnail", fill=(45, 62, 80))
+    draw.text((70, 170), "Privacy runtime fallback active", fill=(45, 62, 80))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(output_path, format="JPEG", quality=84)
+
+
+def _render_degraded_privacy_assets(source_video_path: str, output_video_path: str, thumbnail_output_path: str) -> Dict[str, Any]:
+    output_path = Path(output_video_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(str(source_video_path), str(output_path))
+    _write_placeholder_thumbnail(Path(thumbnail_output_path))
+    return {
+        "frames_processed": 0,
+        "frames_with_teacher_visible": 0,
+        "faces_detected_total": 0,
+        "faces_blurred_total": 0,
+        "runtime_fallback": "worker_copy_only",
+    }
+
+
+def _should_use_degraded_privacy_runtime(exc: Exception) -> bool:
+    if not PRIVACY_ALLOW_DEGRADED_RUNTIME:
+        return False
+    message = str(exc or "")
+    return (
+        "OpenCV is unavailable" in message
+        or "Teacher privacy profile has no usable references" in message
+    )
 
 
 def _build_exemplar_library_item_response(doc: dict) -> "ExemplarLibraryItemResponse":
@@ -933,6 +1176,7 @@ PRIVACY_RAW_VIDEO_RETENTION_DAYS = max(1, int(os.getenv("PRIVACY_RAW_VIDEO_RETEN
 PRIVACY_PROFILE_IMAGE_RETENTION_DAYS = max(1, int(os.getenv("PRIVACY_PROFILE_IMAGE_RETENTION_DAYS", "30")))
 PRIVACY_PURGE_INTERVAL_MINUTES = max(5, int(os.getenv("PRIVACY_PURGE_INTERVAL_MINUTES", "60")))
 RECOGNITION_FIVE_STAR_SCORE_MIN = float(os.getenv("RECOGNITION_FIVE_STAR_SCORE_MIN", str(DEFAULT_FIVE_STAR_SCORE_MIN)))
+PRIVACY_ALLOW_DEGRADED_RUNTIME = os.getenv("PRIVACY_ALLOW_DEGRADED_RUNTIME", "false").lower() == "true"
 
 # S3 configuration (required for file uploads)
 S3_BUCKET = os.getenv("S3_BUCKET")
@@ -945,9 +1189,9 @@ LEADERSHIP_INSIGHTS_CACHE_TTL_SECONDS = max(
     0, int(os.getenv("LEADERSHIP_INSIGHTS_CACHE_TTL_SECONDS", "1800"))
 )
 
-# Create uploads directory (used for temp storage)
-UPLOAD_DIR = ROOT_DIR / 'uploads'
-UPLOAD_DIR.mkdir(exist_ok=True)
+# Create uploads directory (used for temp storage or mounted persistent storage)
+UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(ROOT_DIR / "uploads"))).expanduser()
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # Create the main app
 app = FastAPI(title="Cognivio API", description="Teacher Assessment Platform")
@@ -1584,6 +1828,21 @@ class EmailSignatureResponse(BaseModel):
     created_at: str
 
 
+class AdminSmokeCleanupRequest(BaseModel):
+    teacher_id: Optional[str] = None
+    teacher_email: Optional[EmailStr] = None
+    delete_user_emails: List[EmailStr] = []
+
+
+class AdminSmokeCleanupResponse(BaseModel):
+    teacher_id: str
+    teacher_email: Optional[str] = None
+    deleted_files: int
+    deleted_counts: Dict[str, int]
+    deleted_users: List[str] = []
+    executed_at: str
+
+
 class Schedule(BaseModel):
     """Upcoming class session scheduled for recording."""
 
@@ -1732,8 +1991,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         user = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
-        if "role" not in user:
-            user["role"] = _get_user_role(user)
+        user["role"] = _get_user_role(user)
         return user
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
@@ -1756,7 +2014,7 @@ async def register(user: UserCreate):
         "name": user.name,
         "password": hash_password(user.password),
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "role": "teacher",
+        "role": "admin" if user.email.lower() in ADMIN_EMAILS else "teacher",
     }
     await db.users.insert_one(user_doc)
     
@@ -1768,7 +2026,7 @@ async def register(user: UserCreate):
             email=user.email,
             name=user.name,
             created_at=user_doc["created_at"],
-            role=user_doc.get("role"),
+            role=_get_user_role(user_doc),
         )
     )
 
@@ -1786,7 +2044,7 @@ async def login(user: UserLogin):
             email=db_user["email"],
             name=db_user["name"],
             created_at=db_user["created_at"],
-            role=db_user.get("role") or _get_user_role(db_user),
+            role=_get_user_role(db_user),
         )
     )
 
@@ -2281,7 +2539,12 @@ async def _run_video_privacy_job(video_id: str) -> None:
             if doc.get("file_path") and (UPLOAD_DIR / doc["file_path"]).exists()
         ]
         if not reference_paths:
-            raise RuntimeError("Teacher privacy profile has no usable references")
+            if PRIVACY_ALLOW_DEGRADED_RUNTIME:
+                logger.warning(
+                    f"Privacy reference fallback activated for {video_id}: no usable teacher references found"
+                )
+            else:
+                raise RuntimeError("Teacher privacy profile has no usable references")
 
         await db.videos.update_one(
             {"id": video_id},
@@ -2303,13 +2566,30 @@ async def _run_video_privacy_job(video_id: str) -> None:
             {"video_id": video_id, "uploaded_by": job["user_id"]},
             {"$set": {"privacy_status": PrivacyProcessingStatus.PROCESSING.value, "error_message": None}},
         )
-        analysis = await asyncio.to_thread(
-            analyze_video_privacy,
-            job["file_path"],
-            reference_paths,
-            PRIVACY_TEACHER_MATCH_THRESHOLD,
-            PRIVACY_AMBIGUOUS_MATCH_THRESHOLD,
-        )
+        try:
+            analysis = await asyncio.to_thread(
+                analyze_video_privacy,
+                job["file_path"],
+                reference_paths,
+                PRIVACY_TEACHER_MATCH_THRESHOLD,
+                PRIVACY_AMBIGUOUS_MATCH_THRESHOLD,
+            )
+        except RuntimeError as exc:
+            if _should_use_degraded_privacy_runtime(exc):
+                logger.warning(
+                    f"Privacy analysis runtime fallback activated for {video_id}: {exc}"
+                )
+                analysis = {
+                    "frames_analyzed": 0,
+                    "teacher_track_id": None,
+                    "review_reason": None,
+                    "candidate_tracks": [],
+                    "fallback_mode": "blur_all",
+                    "manifest_tracks": [],
+                    "runtime_fallback": "worker_analysis_fallback",
+                }
+            else:
+                raise
 
         if analysis["review_reason"] and manual_override.get("decision") == "blur_all_and_continue":
             analysis["review_reason"] = None
@@ -2373,17 +2653,31 @@ async def _run_video_privacy_job(video_id: str) -> None:
         redacted_full_path = UPLOAD_DIR / redacted_relative_path
         redacted_thumbnail_relative_path = f"thumbnails/redacted/{job['teacher_id']}/{video_id}.jpg"
         redacted_thumbnail_full_path = UPLOAD_DIR / redacted_thumbnail_relative_path
-        render_stats = await asyncio.to_thread(
-            render_redacted_video,
-            job["file_path"],
-            str(redacted_full_path),
-            str(redacted_thumbnail_full_path),
-            reference_paths,
-            PRIVACY_TEACHER_MATCH_THRESHOLD,
-            PRIVACY_AMBIGUOUS_MATCH_THRESHOLD,
-            analysis["teacher_track_id"],
-            manual_override.get("decision") == "blur_all_and_continue" or analysis["fallback_mode"] == "blur_all",
-        )
+        try:
+            render_stats = await asyncio.to_thread(
+                render_redacted_video,
+                job["file_path"],
+                str(redacted_full_path),
+                str(redacted_thumbnail_full_path),
+                reference_paths,
+                PRIVACY_TEACHER_MATCH_THRESHOLD,
+                PRIVACY_AMBIGUOUS_MATCH_THRESHOLD,
+                analysis["teacher_track_id"],
+                manual_override.get("decision") == "blur_all_and_continue" or analysis["fallback_mode"] == "blur_all",
+            )
+        except RuntimeError as exc:
+            if _should_use_degraded_privacy_runtime(exc):
+                logger.warning(
+                    f"Privacy render runtime fallback activated for {video_id}: {exc}"
+                )
+                render_stats = await asyncio.to_thread(
+                    _render_degraded_privacy_assets,
+                    job["file_path"],
+                    str(redacted_full_path),
+                    str(redacted_thumbnail_full_path),
+                )
+            else:
+                raise
 
         redacted_file_url = _to_public_backend_url(f"/uploads/{redacted_relative_path}")
         redacted_thumbnail_url = _to_public_backend_url(f"/uploads/{redacted_thumbnail_relative_path}")
@@ -4224,7 +4518,7 @@ async def create_admin_override(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.admin_assessment_overrides.insert_one(doc)
-    return {"override": doc}
+    return _to_json_safe({"override": doc})
 
 
 @api_router.get("/assessments/{assessment_id}/admin-overrides")
@@ -6021,7 +6315,7 @@ async def get_teacher_roster(
     
     return {
         "selected_elements": selected_elements,
-        "roster": roster,
+        "roster": _to_json_safe(roster),
         "scoring_mode": scoring_mode
     }
 
@@ -6230,7 +6524,7 @@ async def get_teacher_dashboard(
     except Exception:
         logger.warning("Unable to attach recording compliance for dashboard")
     
-    return {
+    return _to_json_safe({
         "teacher": teacher,
         "element_summary": element_summary,
         "trend_data": trend_data,
@@ -6245,7 +6539,7 @@ async def get_teacher_dashboard(
             "start": assessments[0]["analyzed_at"] if assessments else None,
             "end": assessments[-1]["analyzed_at"] if assessments else None
         }
-    }
+    })
 
 
 @api_router.get("/teachers/{teacher_id}/action-plan", response_model=ActionPlan)
@@ -7035,6 +7329,47 @@ def _require_admin_ops_user(current_user: dict) -> None:
         raise HTTPException(status_code=403, detail="Admin access required")
 
 
+@api_router.post("/admin/ops/smoke-cleanup", response_model=AdminSmokeCleanupResponse)
+async def run_admin_smoke_cleanup(
+    payload: AdminSmokeCleanupRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_admin_ops_user(current_user)
+    teacher = None
+    if payload.teacher_id:
+        teacher = await db.teachers.find_one(
+            {"id": payload.teacher_id, "created_by": current_user["id"]},
+            {"_id": 0},
+        )
+    elif payload.teacher_email:
+        teacher = await db.teachers.find_one(
+            {"email": str(payload.teacher_email).lower(), "created_by": current_user["id"]},
+            {"_id": 0},
+        )
+    else:
+        raise HTTPException(status_code=400, detail="teacher_id or teacher_email is required")
+
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+
+    result = await _cleanup_teacher_smoke_artifacts(
+        teacher,
+        delete_user_emails=[str(email).lower() for email in payload.delete_user_emails],
+    )
+    await _log_privacy_audit_event(
+        "admin_smoke_cleanup_executed",
+        "teacher",
+        result.teacher_id,
+        actor_user_id=current_user["id"],
+        details={
+            "deleted_counts": result.deleted_counts,
+            "deleted_files": result.deleted_files,
+            "deleted_users": result.deleted_users,
+        },
+    )
+    return result
+
+
 @api_router.get("/admin/ops/readiness")
 async def get_admin_ops_readiness(current_user: dict = Depends(get_current_user)):
     _require_admin_ops_user(current_user)
@@ -7207,6 +7542,41 @@ async def get_admin_ops_launch_health(current_user: dict = Depends(get_current_u
             "queued_notifications": queued_notifications,
         },
         "recommended_actions": actions,
+    }
+
+
+@api_router.get("/admin/ops/privacy-runtime")
+async def get_admin_ops_privacy_runtime(current_user: dict = Depends(get_current_user)):
+    _require_admin_ops_user(current_user)
+    upload_dir_exists = UPLOAD_DIR.exists()
+    upload_dir_writable = False
+    probe_error = None
+    probe_file = UPLOAD_DIR / ".runtime-write-check"
+    try:
+        probe_file.parent.mkdir(parents=True, exist_ok=True)
+        probe_file.write_text("ok", encoding="utf-8")
+        probe_file.unlink(missing_ok=True)
+        upload_dir_writable = True
+    except Exception as exc:
+        probe_error = str(exc)
+
+    server_cv2_available = cv2 is not None
+    server_cv2_error = None if server_cv2_available else str(_cv2_import_error)
+    privacy_runtime = get_privacy_runtime_status()
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "upload_dir": str(UPLOAD_DIR),
+        "upload_dir_exists": upload_dir_exists,
+        "upload_dir_writable": upload_dir_writable,
+        "upload_dir_probe_error": probe_error,
+        "s3_configured": bool(S3_BUCKET),
+        "server_runtime": {
+            "cv2_available": server_cv2_available,
+            "cv2_error": server_cv2_error,
+        },
+        "privacy_runtime": privacy_runtime,
+        "degraded_runtime_enabled": PRIVACY_ALLOW_DEGRADED_RUNTIME,
     }
 
 
