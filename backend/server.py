@@ -19,11 +19,16 @@ import io
 import csv
 import hashlib
 import math
+import re
 import shutil
 import sys
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from PIL import Image, ImageDraw
+try:
+    from openai import AsyncOpenAI
+except Exception:
+    AsyncOpenAI = None
 try:
     import cv2
 except Exception as exc:
@@ -1164,6 +1169,9 @@ VIDEO_WORKER_COUNT = max(1, int(os.getenv("VIDEO_WORKER_COUNT", "1")))
 CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS = os.getenv("CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS", "false").lower() == "true"
 ADHERENCE_WEIGHT = float(os.getenv("ADHERENCE_WEIGHT", "0.15"))
 PRIVACY_REQUIRE_PROFILE = os.getenv("PRIVACY_REQUIRE_PROFILE", "true").lower() == "true"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4.1-mini").strip()
+VIDEO_ANALYSIS_MAX_FRAMES = max(3, int(os.getenv("VIDEO_ANALYSIS_MAX_FRAMES", "6")))
 PRIVACY_PROFILE_MIN_REFERENCES = max(1, int(os.getenv("PRIVACY_PROFILE_MIN_REFERENCES", "3")))
 PRIVACY_PROFILE_MAX_REFERENCES = max(PRIVACY_PROFILE_MIN_REFERENCES, int(os.getenv("PRIVACY_PROFILE_MAX_REFERENCES", "5")))
 PRIVACY_MANUAL_REVIEW_ENABLED = os.getenv("PRIVACY_MANUAL_REVIEW_ENABLED", "true").lower() == "true"
@@ -7657,6 +7665,59 @@ async def _enqueue_notification(
     # Placeholder for email integration
     logger.info(f"[EmailQueue] {title} -> {current_user.get('email')}")
 
+
+async def _persist_assessment_evidence_from_scores(
+    assessment: dict,
+    current_user: dict,
+) -> List[dict]:
+    framework = _get_framework_by_type(assessment.get("framework_type", "danielson"))
+    created_at = datetime.now(timezone.utc).isoformat()
+    evidence_docs: List[dict] = []
+    element_scores = assessment.get("element_scores", [])
+
+    for element_score in element_scores:
+        segments = element_score.get("evidence_segments") or []
+        if not segments:
+            continue
+        domain = _find_domain_for_element(framework, element_score["element_id"])
+        for segment in segments:
+            summary = str(segment.get("summary") or "").strip()
+            if not summary:
+                continue
+            start_sec = float(segment.get("start_sec", 0))
+            end_sec = float(segment.get("end_sec", max(1.0, start_sec + 20.0)))
+            evidence_docs.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "assessment_id": assessment["id"],
+                    "teacher_id": assessment["teacher_id"],
+                    "video_id": assessment.get("video_id"),
+                    "element_id": element_score["element_id"],
+                    "element_name": element_score.get("element_name"),
+                    "domain_id": domain.get("id") if domain else None,
+                    "domain_name": domain.get("name") if domain else None,
+                    "evidence_text": summary,
+                    "timestamp_start": round(start_sec, 1),
+                    "timestamp_end": round(end_sec, 1),
+                    "assessment_date": assessment.get("analyzed_at"),
+                    "source": segment.get("rationale") or "ai",
+                    "created_at": created_at,
+                    "user_id": current_user["id"],
+                }
+            )
+
+    if evidence_docs:
+        await db.assessment_evidence.insert_many(evidence_docs)
+        await db.assessments.update_one(
+            {"id": assessment["id"], "user_id": current_user["id"]},
+            {"$set": {"element_scores": element_scores}},
+        )
+        for doc in evidence_docs:
+            doc.pop("user_id", None)
+        return evidence_docs
+
+    return await _ensure_mock_evidence(assessment, current_user)
+
 async def analyze_video(
     video_id: str,
     file_path: str,
@@ -7718,31 +7779,27 @@ async def analyze_video(
             }
         
         # Extract frames from video (run in thread to avoid blocking event loop)
-        frames = await asyncio.to_thread(extract_video_frames, file_path, 5)
+        frames = await asyncio.to_thread(extract_video_frames, file_path, VIDEO_ANALYSIS_MAX_FRAMES)
         logger.info(f"Extracted {len(frames)} frames from video")
         
         # Analyze with AI
-        element_scores = await analyze_frames_with_ai(frames, framework, selected_elements)
-        # Attach placeholder evidence segments for demo traceability
-        for idx, es in enumerate(element_scores):
-            start_sec = 60 + idx * 35
-            end_sec = start_sec + 20
-            es.setdefault("evidence_segments", [])
-            es["evidence_segments"].append(
-                {
-                    "start_sec": start_sec,
-                    "end_sec": end_sec,
-                    "summary": f"Evidence aligned to {es.get('element_name', 'domain')} observed.",
-                    "rationale": "ai",
-                }
-            )
+        analysis_payload = await analyze_frames_with_ai(frames, framework, selected_elements)
+        element_scores = analysis_payload.get("element_scores", [])
         
         # Calculate overall score (1-10 gradient mapped from underlying 1-4 scale if needed)
         valid_scores = [es["score"] for es in element_scores if es["score"] > 0]
         overall_score = round(sum(valid_scores) / len(valid_scores), 2) if valid_scores else 0
         
         # Generate recommendations
-        recommendations = generate_recommendations(element_scores)
+        recommendations = generate_recommendations(
+            element_scores,
+            provided_recommendations=analysis_payload.get("recommendations"),
+        )
+        summary_text = generate_summary(
+            element_scores,
+            overall_score,
+            provided_summary=analysis_payload.get("summary"),
+        )
         
         # Create assessment document
         assessment_doc = {
@@ -7753,13 +7810,14 @@ async def analyze_video(
             "framework_type": framework_type,
             "element_scores": element_scores,
             "overall_score": overall_score,
-            "summary": generate_summary(element_scores, overall_score),
+            "summary": summary_text,
             "recommendations": recommendations,
-            "analyzed_at": datetime.now(timezone.utc).isoformat()
+            "analyzed_at": datetime.now(timezone.utc).isoformat(),
+            "analysis_mode": analysis_payload.get("analysis_mode", "fallback"),
         }
         
         await db.assessments.insert_one(assessment_doc)
-        await _ensure_mock_evidence(assessment_doc, {"id": user_id})
+        await _persist_assessment_evidence_from_scores(assessment_doc, {"id": user_id})
         
         # Update video status
         completed_at = datetime.now(timezone.utc).isoformat()
@@ -7770,6 +7828,7 @@ async def analyze_video(
                     "status": VideoProcessingStatus.COMPLETED.value,
                     "analysis_status": VideoProcessingStatus.COMPLETED.value,
                     "assessment_id": assessment_doc["id"],
+                    "analysis_mode": analysis_payload.get("analysis_mode", "fallback"),
                     "status_updated_at": completed_at,
                     "processing_completed_at": completed_at,
                     "processing_failed_at": None,
@@ -7821,187 +7880,389 @@ async def analyze_video(
             except Exception as e:
                 logger.error(f"Error removing video file: {e}")
 
-def extract_video_frames(video_path: str, max_frames: int = 5) -> List[str]:
-    """Extract frames from video and return as base64 strings"""
-    frames = []
+def _build_elements_to_analyze(framework: dict, selected_elements: List[str]) -> List[dict]:
+    elements_to_analyze: List[dict] = []
+    for domain in framework.get("domains", []):
+        for element in domain.get("elements", []):
+            if selected_elements and element["id"] not in selected_elements:
+                continue
+            elements_to_analyze.append(
+                {
+                    "id": element["id"],
+                    "name": element["name"],
+                    "domain": domain["name"],
+                }
+            )
+    return elements_to_analyze
+
+
+def extract_video_frames(video_path: str, max_frames: int = VIDEO_ANALYSIS_MAX_FRAMES) -> List[dict]:
+    """Extract evenly spaced video frames with timestamps."""
+    frames: List[dict] = []
     try:
         if cv2 is None:
             logger.error(f"OpenCV not available: {_cv2_import_error}")
             return frames
         cap = cv2.VideoCapture(video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
         if total_frames == 0:
+            cap.release()
             return frames
-        
-        # Calculate frame interval
+
         interval = max(1, total_frames // max_frames)
-        
-        for i in range(0, total_frames, interval):
+        for frame_idx in range(0, total_frames, interval):
             if len(frames) >= max_frames:
                 break
-            
-            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, frame = cap.read()
-            
-            if ret:
-                # Resize for API efficiency
-                frame = cv2.resize(frame, (640, 480))
-                _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-                base64_frame = base64.b64encode(buffer).decode('utf-8')
-                frames.append(base64_frame)
-        
+            if not ret:
+                continue
+            frame = cv2.resize(frame, (640, 480))
+            ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if not ok:
+                continue
+            timestamp_sec = round(frame_idx / fps, 2) if fps > 0 else float(len(frames) * 30)
+            frames.append(
+                {
+                    "timestamp_sec": timestamp_sec,
+                    "image_b64": base64.b64encode(buffer).decode("utf-8"),
+                }
+            )
         cap.release()
     except Exception as e:
         logger.error(f"Error extracting frames: {e}")
-    
     return frames
 
-async def analyze_frames_with_ai(frames: List[str], framework: dict, selected_elements: List[str]) -> List[dict]:
-    """Analyze video frames using GPT-5.2 vision via Emergent LLM API"""
+
+def _extract_json_object(text: str) -> Optional[dict]:
+    if not text:
+        return None
     try:
-        from emergentintegrations.llm.chat import chat, Message
-    except ImportError:
-        logger.warning("emergentintegrations package not installed; using mock scores")
-        # Build element list for fallback
-        elements_to_analyze = []
-        for domain in framework.get("domains", []):
-            for element in domain.get("elements", []):
-                if not selected_elements or element["id"] in selected_elements:
-                    elements_to_analyze.append({
-                        "id": element["id"],
-                        "name": element["name"],
-                        "domain": domain["name"]
-                    })
-        return generate_mock_scores(elements_to_analyze)
+        return json.loads(text)
+    except Exception:
+        pass
+    match = re.search(r"\{[\s\S]*\}", text)
+    if not match:
+        return None
+    try:
+        return json.loads(match.group())
+    except Exception:
+        return None
 
-    # Build element list for analysis
-    elements_to_analyze = []
-    for domain in framework.get("domains", []):
-        for element in domain.get("elements", []):
-            if not selected_elements or element["id"] in selected_elements:
-                elements_to_analyze.append({
-                    "id": element["id"],
-                    "name": element["name"],
-                    "domain": domain["name"]
-                })
-    
-    # Create analysis prompt
-    elements_text = "\n".join([f"- {e['id']}: {e['name']} (Domain: {e['domain']})" for e in elements_to_analyze])
-    
-    prompt = f"""You are an expert educator analyzing classroom video footage to evaluate teacher performance.
 
-Analyze the provided classroom images and evaluate the teacher on the following framework elements:
+def _normalize_analysis_score(raw_score: Any) -> float:
+    try:
+        score = float(raw_score)
+    except Exception:
+        return 5.0
+    if score <= 4.0:
+        score = round((score / 4.0) * 10.0, 1)
+    return max(1.0, min(10.0, round(score, 1)))
 
+
+def _normalize_confidence(raw_confidence: Any) -> float:
+    try:
+        confidence = float(raw_confidence)
+    except Exception:
+        return 50.0
+    return max(0.0, min(100.0, round(confidence, 1)))
+
+
+def _normalize_evidence_segments(raw_segments: Any, fallback_timestamp: float) -> List[dict]:
+    segments: List[dict] = []
+    if not isinstance(raw_segments, list):
+        raw_segments = []
+    for raw in raw_segments[:2]:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            start_sec = max(0.0, float(raw.get("start_sec", fallback_timestamp)))
+        except Exception:
+            start_sec = float(fallback_timestamp)
+        try:
+            end_sec = max(start_sec + 1.0, float(raw.get("end_sec", start_sec + 20.0)))
+        except Exception:
+            end_sec = start_sec + 20.0
+        summary = str(raw.get("summary") or "").strip()
+        rationale = str(raw.get("rationale") or "").strip()
+        if not summary:
+            continue
+        segments.append(
+            {
+                "start_sec": round(start_sec, 1),
+                "end_sec": round(end_sec, 1),
+                "summary": summary,
+                "rationale": rationale or "model-observed",
+            }
+        )
+    return segments
+
+
+def _normalize_model_recommendations(raw_recommendations: Any) -> List[dict]:
+    normalized: List[dict] = []
+    if not isinstance(raw_recommendations, list):
+        return normalized
+    for idx, item in enumerate(raw_recommendations[:4]):
+        if isinstance(item, str):
+            normalized.append(
+                {
+                    "start_sec": float(90 + idx * 150),
+                    "end_sec": float(120 + idx * 150),
+                    "text": item.strip(),
+                    "linked_element_id": None,
+                }
+            )
+            continue
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or item.get("recommendation") or "").strip()
+        if not text:
+            continue
+        try:
+            start_sec = max(0.0, float(item.get("start_sec", 90 + idx * 150)))
+        except Exception:
+            start_sec = float(90 + idx * 150)
+        try:
+            end_sec = max(start_sec + 1.0, float(item.get("end_sec", start_sec + 30)))
+        except Exception:
+            end_sec = start_sec + 30.0
+        normalized.append(
+            {
+                "start_sec": round(start_sec, 1),
+                "end_sec": round(end_sec, 1),
+                "text": text,
+                "linked_element_id": item.get("linked_element_id"),
+            }
+        )
+    return normalized
+
+
+def _build_placeholder_element_score(element: dict, timestamp_sec: float) -> dict:
+    return {
+        "element_id": element["id"],
+        "element_name": element["name"],
+        "score": 5.0,
+        "level": get_performance_level(5.0),
+        "observations": ["Insufficient visible evidence in the sampled frames for a stronger judgment."],
+        "confidence": 25.0,
+        "evidence_segments": [
+            {
+                "start_sec": round(timestamp_sec, 1),
+                "end_sec": round(timestamp_sec + 20.0, 1),
+                "summary": f"Limited visible evidence was available for {element['name'].lower()} in the sampled frames.",
+                "rationale": "fallback",
+            }
+        ],
+    }
+
+
+def _normalize_model_analysis(
+    raw_payload: Optional[dict],
+    elements_to_analyze: List[dict],
+    frames: List[dict],
+    analysis_mode: str,
+) -> dict:
+    frame_timestamps = [float(frame.get("timestamp_sec", 0.0)) for frame in frames] or [0.0]
+    element_by_id = {element["id"]: element for element in elements_to_analyze}
+    raw_scores = raw_payload.get("element_scores") if isinstance(raw_payload, dict) else []
+    raw_scores = raw_scores if isinstance(raw_scores, list) else []
+    normalized_scores: List[dict] = []
+    seen_ids = set()
+
+    for idx, raw_score in enumerate(raw_scores):
+        if not isinstance(raw_score, dict):
+            continue
+        element_id = str(raw_score.get("element_id") or "").strip()
+        element = element_by_id.get(element_id)
+        if not element or element_id in seen_ids:
+            continue
+        seen_ids.add(element_id)
+        observations = [
+            str(item).strip()
+            for item in (raw_score.get("observations") or [])
+            if str(item).strip()
+        ][:3]
+        fallback_timestamp = frame_timestamps[min(idx, len(frame_timestamps) - 1)]
+        evidence_segments = _normalize_evidence_segments(
+            raw_score.get("evidence_segments"),
+            fallback_timestamp=fallback_timestamp,
+        )
+        if not observations and evidence_segments:
+            observations = [evidence_segments[0]["summary"]]
+        if not observations:
+            observations = ["Evidence was limited in the sampled frames."]
+        if not evidence_segments:
+            evidence_segments = [
+                {
+                    "start_sec": round(fallback_timestamp, 1),
+                    "end_sec": round(fallback_timestamp + 20.0, 1),
+                    "summary": observations[0],
+                    "rationale": "fallback-observed",
+                }
+            ]
+        score = _normalize_analysis_score(raw_score.get("score"))
+        normalized_scores.append(
+            {
+                "element_id": element_id,
+                "element_name": element["name"],
+                "score": score,
+                "level": get_performance_level(score),
+                "observations": observations,
+                "confidence": _normalize_confidence(raw_score.get("confidence")),
+                "evidence_segments": evidence_segments,
+            }
+        )
+
+    for idx, element in enumerate(elements_to_analyze):
+        if element["id"] in seen_ids:
+            continue
+        fallback_timestamp = frame_timestamps[min(idx, len(frame_timestamps) - 1)]
+        normalized_scores.append(_build_placeholder_element_score(element, fallback_timestamp))
+
+    return {
+        "analysis_mode": analysis_mode,
+        "summary": (raw_payload or {}).get("summary") if isinstance(raw_payload, dict) else None,
+        "recommendations": _normalize_model_recommendations(
+            (raw_payload or {}).get("recommendations") if isinstance(raw_payload, dict) else None
+        ),
+        "element_scores": normalized_scores,
+    }
+
+
+async def _analyze_frames_with_openai(frames: List[dict], elements_to_analyze: List[dict]) -> Optional[dict]:
+    if not OPENAI_API_KEY or AsyncOpenAI is None:
+        return None
+
+    system_prompt = (
+        "You are an expert instructional coach evaluating sampled classroom video frames. "
+        "Use only visible evidence from the provided frames. Do not infer audio, curriculum intent, or unseen behavior. "
+        "Return only valid JSON."
+    )
+    elements_text = "\n".join(
+        f"- {element['id']}: {element['name']} (Domain: {element['domain']})"
+        for element in elements_to_analyze
+    )
+    prompt = f"""
+Analyze the classroom frames below and score the teacher on a 1-10 scale for each rubric element.
+
+Rubric elements:
 {elements_text}
 
-For each element, provide:
-1. A score from 1-4 (1=Unsatisfactory, 2=Basic, 3=Proficient, 4=Distinguished)
-2. Key observations that support your score
-3. Your confidence level (0-100%)
+Requirements:
+- Use the timestamps provided with each frame.
+- Base every observation on visible evidence only.
+- Keep observations concrete and specific to what is visible.
+- For each element, include 1-2 timestamped evidence segments tied to the sampled frames when possible.
+- Include 2-3 targeted recommendations tied to timestamps and linked elements.
 
-Focus on observable behaviors, classroom management, student engagement, and instructional quality visible in the images.
-
-Respond in JSON format:
+Return JSON with this exact shape:
 {{
+  "summary": "2-4 sentence lesson summary grounded in the sampled frames.",
+  "recommendations": [
+    {{
+      "start_sec": 90,
+      "end_sec": 120,
+      "text": "Concrete coaching recommendation grounded in visible evidence.",
+      "linked_element_id": "2b"
+    }}
+  ],
   "element_scores": [
     {{
-      "element_id": "element_id",
-      "element_name": "Element Name",
-      "score": 3.0,
+      "element_id": "2b",
+      "score": 6.8,
+      "confidence": 82,
       "observations": ["Observation 1", "Observation 2"],
-      "confidence": 85
+      "evidence_segments": [
+        {{
+          "start_sec": 90,
+          "end_sec": 120,
+          "summary": "What is visible in that moment.",
+          "rationale": "Why it supports the score."
+        }}
+      ]
     }}
   ]
-}}"""
+}}
+""".strip()
 
-    api_key = os.getenv("EMERGENT_LLM_KEY")
-    if not api_key:
-        logger.error("EMERGENT_LLM_KEY is not set; skipping real AI analysis and using mock scores")
-        return generate_mock_scores(elements_to_analyze)
+    user_content: List[dict] = [{"type": "input_text", "text": prompt}]
+    for frame in frames:
+        timestamp_sec = round(float(frame.get("timestamp_sec", 0.0)), 1)
+        user_content.append({"type": "input_text", "text": f"Frame timestamp: {timestamp_sec} seconds"})
+        user_content.append(
+            {
+                "type": "input_image",
+                "image_url": f"data:image/jpeg;base64,{frame['image_b64']}",
+            }
+        )
 
-    try:
-        # Prepare image content for GPT-5.2 vision
-        image_content = []
-        for i, frame in enumerate(frames[:3]):  # Limit to 3 frames for API efficiency
-            image_content.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/jpeg;base64,{frame}"
-                }
-            })
-        
-        messages = [
-            Message(role="user", content=[
-                {"type": "text", "text": prompt},
-                *image_content
-            ])
-        ]
-        
-        response = await chat(api_key=api_key, messages=messages, model="gpt-5.2")
-        
-        # Parse response
-        response_text = response.content if hasattr(response, 'content') else str(response)
-        
-        # Extract JSON from response
-        import re
-        json_match = re.search(r'\{[\s\S]*\}', response_text)
-        if json_match:
-            result = json.loads(json_match.group())
-            element_scores = result.get("element_scores", [])
-            
-            # Add performance level to each score
-            for es in element_scores:
-                es["level"] = get_performance_level(es.get("score", 0))
-            
-            return element_scores
-    
-    except Exception as e:
-        logger.error(f"Error in AI analysis: {e}")
-    
-    # Fallback: return mock scores for demo
-    return generate_mock_scores(elements_to_analyze)
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    response = await client.responses.create(
+        model=OPENAI_VISION_MODEL,
+        input=[
+            {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
+            {"role": "user", "content": user_content},
+        ],
+        max_output_tokens=4000,
+    )
+    response_text = getattr(response, "output_text", None) or ""
+    payload = _extract_json_object(response_text)
+    if not payload:
+        raise RuntimeError("OpenAI analysis did not return valid JSON.")
+    return payload
+
+
+async def analyze_frames_with_ai(frames: List[dict], framework: dict, selected_elements: List[str]) -> dict:
+    """Analyze extracted video frames and return normalized assessment output."""
+    elements_to_analyze = _build_elements_to_analyze(framework, selected_elements)
+    if not elements_to_analyze:
+        return {"analysis_mode": "empty_selection", "summary": None, "recommendations": [], "element_scores": []}
+
+    if OPENAI_API_KEY and AsyncOpenAI is not None:
+        try:
+            payload = await _analyze_frames_with_openai(frames, elements_to_analyze)
+            return _normalize_model_analysis(payload, elements_to_analyze, frames, analysis_mode="openai")
+        except Exception as exc:
+            logger.error(f"OpenAI video analysis failed; falling back to heuristic analysis: {exc}")
+
+    logger.warning("Real analysis model is not configured; using fallback analysis output")
+    return _normalize_model_analysis(
+        {"summary": None, "recommendations": [], "element_scores": generate_mock_scores(elements_to_analyze)},
+        elements_to_analyze,
+        frames,
+        analysis_mode="fallback",
+    )
+
 
 def generate_mock_scores(elements: List[dict]) -> List[dict]:
-    """Generate mock scores for demonstration"""
+    """Generate bounded fallback scores when no live model is configured."""
     import random
-    
+
     scores = []
-    for element in elements:
-        # Generate a 1-10 gradient score for richer visualizations
-        score = round(random.uniform(4.0, 9.5), 1)
-        scores.append({
-            "element_id": element["id"],
-            "element_name": element["name"],
-            "score": score,
-            "level": get_performance_level(score),
-            "observations": [
-                f"Teacher demonstrates {element['name'].lower()} effectively" if score >= 3 else f"Room for improvement in {element['name'].lower()}",
-                "Student engagement observed" if score >= 2.5 else "Consider strategies to increase engagement"
-            ],
-            "confidence": random.randint(70, 95)
-        })
-    
+    fallback_actions = [
+        "Teacher modeling was visible, but checks for understanding were not consistently evident in sampled frames.",
+        "Student participation cues were visible, though broader engagement routines were not consistently clear.",
+        "Classroom routines appeared stable, but transitions and response checks need stronger visual evidence.",
+        "Instructional pacing looked steady, though opportunities for deeper student thinking were not clearly visible.",
+    ]
+    for idx, element in enumerate(elements):
+        score = round(random.uniform(5.2, 7.4), 1)
+        observation = fallback_actions[idx % len(fallback_actions)]
+        scores.append(
+            {
+                "element_id": element["id"],
+                "element_name": element["name"],
+                "score": score,
+                "observations": [
+                    f"Visible evidence for {element['name'].lower()} was limited to sampled frames.",
+                    observation,
+                ],
+                "confidence": random.randint(35, 60),
+            }
+        )
     return scores
 
-def generate_summary(element_scores: List[dict], overall_score: float) -> str:
-    """Generate a summary of the assessment"""
-    level = get_performance_level(overall_score)
-    
-    strengths = [es["element_name"] for es in element_scores if es.get("score", 0) >= 3]
-    areas_for_growth = [es["element_name"] for es in element_scores if es.get("score", 0) < 2.5]
-    
-    summary_parts = [
-        f"Overall performance: {level.replace('_', ' ').title()} (Score: {overall_score}/10)."
-    ]
-    
-    if strengths:
-        summary_parts.append(f"Key strengths include: {', '.join(strengths[:3])}.")
-    
-    if areas_for_growth:
-        summary_parts.append(f"Areas for professional growth: {', '.join(areas_for_growth[:3])}.")
-    
-    return " ".join(summary_parts)
 
 def _format_timestamp(seconds: int) -> str:
     minutes = max(0, seconds) // 60
@@ -8009,38 +8270,106 @@ def _format_timestamp(seconds: int) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def generate_recommendations(element_scores: List[dict]) -> List[str]:
-    """Generate concrete, time-stamped recommendations based on scores."""
-    recommendations = []
-    low_scores = sorted(
-        [es for es in element_scores if es.get("score", 0) < 3],
-        key=lambda x: x.get("score", 0)
+def _build_recommendation_text(element_name: str, observation: str) -> str:
+    observation_lower = observation.lower()
+    element_lower = element_name.lower()
+    if "question" in observation_lower or "question" in element_lower:
+        return f"Increase probing questions and wait time to strengthen {element_name.lower()}."
+    if "engagement" in observation_lower or "participation" in observation_lower:
+        return f"Broaden participation routines so more students contribute during {element_name.lower()}."
+    if "routine" in observation_lower or "transition" in observation_lower:
+        return f"Tighten transitions and reinforce routines to improve {element_name.lower()}."
+    if "feedback" in observation_lower:
+        return f"Make feedback more explicit and actionable to strengthen {element_name.lower()}."
+    return f"Strengthen {element_name.lower()} with clearer modeling, checks for understanding, and visible student response routines."
+
+
+def generate_summary(
+    element_scores: List[dict],
+    overall_score: float,
+    provided_summary: Optional[str] = None,
+) -> str:
+    """Generate an evidence-grounded summary of the assessment."""
+    if provided_summary:
+        return provided_summary.strip()
+
+    level = get_performance_level(overall_score)
+    strengths = sorted(
+        [es for es in element_scores if es.get("score", 0) >= 7.5],
+        key=lambda item: item.get("score", 0),
+        reverse=True,
     )[:3]
-    action_pool = [
-        "Ask more probing questions and pause before giving answers",
-        "Cold-call a wider mix of students to increase participation equity",
-        "Use quick checks for understanding before moving to the next task",
-        "Circulate and provide targeted feedback to off-task students",
-        "Model a worked example, then release to guided practice",
-        "Restate student responses and connect them to the learning objective",
-        "Increase wait time after asking higher-order questions",
-    ]
+    growth_areas = sorted(
+        [es for es in element_scores if es.get("score", 0) < 6.5],
+        key=lambda item: item.get("score", 0),
+    )[:2]
+
+    summary_parts = [f"Overall performance: {level.replace('_', ' ').title()} (Score: {overall_score}/10)."]
+
+    if strengths:
+        strength_notes = []
+        for item in strengths:
+            observation = (item.get("observations") or [""])[0].strip()
+            note = item["element_name"]
+            if observation:
+                note = f"{note} ({observation.rstrip('.')})"
+            strength_notes.append(note)
+        summary_parts.append(f"Strongest visible practices were {', '.join(strength_notes)}.")
+
+    if growth_areas:
+        growth_notes = []
+        for item in growth_areas:
+            observation = (item.get("observations") or [""])[0].strip()
+            note = item["element_name"]
+            if observation:
+                note = f"{note} ({observation.rstrip('.')})"
+            growth_notes.append(note)
+        summary_parts.append(f"Priority growth areas are {', '.join(growth_notes)}.")
+
+    return " ".join(summary_parts)
+
+
+def generate_recommendations(
+    element_scores: List[dict],
+    provided_recommendations: Optional[List[dict]] = None,
+) -> List[str]:
+    """Generate timestamped, evidence-grounded recommendations."""
+    if provided_recommendations:
+        rendered = []
+        for item in provided_recommendations:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            start_sec = int(float(item.get("start_sec", 0)))
+            end_sec = int(float(item.get("end_sec", start_sec + 30)))
+            rendered.append(f"[{_format_timestamp(start_sec)}–{_format_timestamp(end_sec)}] {text}")
+        if rendered:
+            return rendered[:3]
+
+    recommendations: List[str] = []
+    low_scores = sorted(
+        [es for es in element_scores if es.get("score", 0) < 7.0],
+        key=lambda x: x.get("score", 0),
+    )[:3]
 
     for idx, es in enumerate(low_scores):
-        name = es["element_name"]
-        start_sec = 120 + (idx * 180)
-        end_sec = start_sec + 45
-        action = action_pool[idx % len(action_pool)]
+        segments = es.get("evidence_segments") or []
+        first_segment = segments[0] if segments else None
+        start_sec = int(float(first_segment.get("start_sec", 90 + idx * 150))) if first_segment else 90 + idx * 150
+        end_sec = int(float(first_segment.get("end_sec", start_sec + 30))) if first_segment else start_sec + 30
+        observation = str((es.get("observations") or ["Visible evidence was limited."])[0]).strip()
+        action = _build_recommendation_text(es["element_name"], observation)
         recommendations.append(
-            f"[{_format_timestamp(start_sec)}–{_format_timestamp(end_sec)}] {action}. "
-            f"Evidence suggests improvement needed in {name}."
+            f"[{_format_timestamp(start_sec)}–{_format_timestamp(end_sec)}] {action} "
+            f"Observed evidence: {observation.rstrip('.')}."
         )
 
     if not recommendations:
-        recommendations.extend([
-            "[00:40–01:20] Continue modeling strong routines and ask two more higher-order questions before providing examples.",
-            "[06:10–06:55] Invite quieter students to share their thinking and paraphrase their responses for clarity.",
-        ])
+        recommendations.append(
+            "[00:30–01:00] Maintain the strongest routines visible in the lesson and reinforce them with explicit checks for understanding."
+        )
 
     return recommendations
 
