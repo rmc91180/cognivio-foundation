@@ -101,3 +101,22 @@ def test_normalize_analysis_score_scales_legacy_four_point_scores():
     assert server._normalize_analysis_score(4) == 10.0
     assert server._normalize_analysis_score(3) == 7.5
     assert server._normalize_analysis_score(6.8) == 6.8
+
+
+def test_paid_analysis_gate_requires_feature_flag_and_allowlist(monkeypatch):
+    monkeypatch.setattr(server, "PAID_ANALYSIS_ENABLED", True)
+    monkeypatch.setattr(
+        server,
+        "PAID_ANALYSIS_ALLOWLIST_EMAILS",
+        {"principal@demo.cognivio.app", "teacher@demo.cognivio.app"},
+    )
+
+    assert server._is_paid_analysis_allowed_for_user({"email": "teacher@demo.cognivio.app"}) is True
+    assert server._is_paid_analysis_allowed_for_user({"email": "other@example.com"}) is False
+
+
+def test_paid_analysis_gate_blocks_when_disabled(monkeypatch):
+    monkeypatch.setattr(server, "PAID_ANALYSIS_ENABLED", False)
+    monkeypatch.setattr(server, "PAID_ANALYSIS_ALLOWLIST_EMAILS", {"teacher@demo.cognivio.app"})
+
+    assert server._is_paid_analysis_allowed_for_user({"email": "teacher@demo.cognivio.app"}) is False

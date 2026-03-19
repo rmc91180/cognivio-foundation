@@ -94,6 +94,15 @@ def _get_user_role(user: dict) -> str:
     return "teacher"
 
 
+def _is_paid_analysis_allowed_for_user(user: Optional[dict]) -> bool:
+    if not PAID_ANALYSIS_ENABLED or not user:
+        return False
+    email = str((user or {}).get("email") or "").strip().lower()
+    if not email:
+        return False
+    return email in PAID_ANALYSIS_ALLOWLIST_EMAILS
+
+
 def _ensure_allowed_extension(filename: str) -> None:
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS:
@@ -1172,6 +1181,10 @@ PRIVACY_REQUIRE_PROFILE = os.getenv("PRIVACY_REQUIRE_PROFILE", "true").lower() =
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4.1-mini").strip()
 VIDEO_ANALYSIS_MAX_FRAMES = max(3, int(os.getenv("VIDEO_ANALYSIS_MAX_FRAMES", "6")))
+PAID_ANALYSIS_ENABLED = os.getenv("PAID_ANALYSIS_ENABLED", "false").lower() == "true"
+PAID_ANALYSIS_ALLOWLIST_EMAILS = {
+    email.lower() for email in _get_optional_env_list("PAID_ANALYSIS_ALLOWLIST_EMAILS")
+}
 PRIVACY_PROFILE_MIN_REFERENCES = max(1, int(os.getenv("PRIVACY_PROFILE_MIN_REFERENCES", "3")))
 PRIVACY_PROFILE_MAX_REFERENCES = max(PRIVACY_PROFILE_MIN_REFERENCES, int(os.getenv("PRIVACY_PROFILE_MAX_REFERENCES", "5")))
 PRIVACY_MANUAL_REVIEW_ENABLED = os.getenv("PRIVACY_MANUAL_REVIEW_ENABLED", "true").lower() == "true"
@@ -7777,13 +7790,19 @@ async def analyze_video(
             framework = {
                 "domains": DANIELSON_FRAMEWORK["domains"] + MARSHALL_FRAMEWORK["domains"]
             }
+        analysis_user = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
         
         # Extract frames from video (run in thread to avoid blocking event loop)
         frames = await asyncio.to_thread(extract_video_frames, file_path, VIDEO_ANALYSIS_MAX_FRAMES)
         logger.info(f"Extracted {len(frames)} frames from video")
         
         # Analyze with AI
-        analysis_payload = await analyze_frames_with_ai(frames, framework, selected_elements)
+        analysis_payload = await analyze_frames_with_ai(
+            frames,
+            framework,
+            selected_elements,
+            current_user=analysis_user,
+        )
         element_scores = analysis_payload.get("element_scores", [])
         
         # Calculate overall score (1-10 gradient mapped from underlying 1-4 scale if needed)
@@ -8213,25 +8232,42 @@ Return JSON with this exact shape:
     return payload
 
 
-async def analyze_frames_with_ai(frames: List[dict], framework: dict, selected_elements: List[str]) -> dict:
+async def analyze_frames_with_ai(
+    frames: List[dict],
+    framework: dict,
+    selected_elements: List[str],
+    current_user: Optional[dict] = None,
+) -> dict:
     """Analyze extracted video frames and return normalized assessment output."""
     elements_to_analyze = _build_elements_to_analyze(framework, selected_elements)
     if not elements_to_analyze:
         return {"analysis_mode": "empty_selection", "summary": None, "recommendations": [], "element_scores": []}
 
-    if OPENAI_API_KEY and AsyncOpenAI is not None:
+    paid_analysis_allowed = _is_paid_analysis_allowed_for_user(current_user)
+    if OPENAI_API_KEY and AsyncOpenAI is not None and paid_analysis_allowed:
         try:
             payload = await _analyze_frames_with_openai(frames, elements_to_analyze)
             return _normalize_model_analysis(payload, elements_to_analyze, frames, analysis_mode="openai")
         except Exception as exc:
             logger.error(f"OpenAI video analysis failed; falling back to heuristic analysis: {exc}")
+            fallback_mode = "fallback_model_error"
+    elif not PAID_ANALYSIS_ENABLED:
+        fallback_mode = "fallback_paid_analysis_disabled"
+    elif not paid_analysis_allowed:
+        fallback_mode = "fallback_paid_analysis_not_allowed"
+    elif not OPENAI_API_KEY or AsyncOpenAI is None:
+        fallback_mode = "fallback_model_unconfigured"
+    else:
+        fallback_mode = "fallback"
 
-    logger.warning("Real analysis model is not configured; using fallback analysis output")
+    logger.warning(
+        f"Real analysis model path unavailable ({fallback_mode}); using fallback analysis output"
+    )
     return _normalize_model_analysis(
         {"summary": None, "recommendations": [], "element_scores": generate_mock_scores(elements_to_analyze)},
         elements_to_analyze,
         frames,
-        analysis_mode="fallback",
+        analysis_mode=fallback_mode,
     )
 
 
