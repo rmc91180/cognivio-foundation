@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { LayoutShell } from "@/components/LayoutShell";
 import { frameworkApi, recordingPolicyApi, teacherApi } from "@/lib/api";
 import { toast } from "sonner";
@@ -17,15 +18,81 @@ import {
   Select,
 } from "@/components/ui";
 
-const FRAMEWORK_LABELS = {
-  danielson: "Danielson Framework",
-  marshall: "Marshall Rubrics",
-  custom: "Custom (Mix of Both)",
+const HEBREW_FRAMEWORK_LABELS = {
+  danielson: {
+    d1: "תחום 1: תכנון והיערכות",
+    d1a: "הפגנת ידע בתוכן ובהוראה",
+    d1b: "היכרות עם התלמידים",
+    d1c: "הגדרת יעדי הוראה",
+    d1d: "היכרות עם משאבים",
+    d1e: "תכנון הוראה קוהרנטי",
+    d1f: "תכנון הערכות תלמידים",
+    d2: "תחום 2: אקלים כיתתי",
+    d2a: "יצירת אקלים של כבוד ויחסי אמון",
+    d2b: "ביסוס תרבות של למידה",
+    d2c: "ניהול נהלים ושגרות בכיתה",
+    d2d: "ניהול התנהגות תלמידים",
+    d2e: "ארגון המרחב הפיזי",
+    d3: "תחום 3: הוראה",
+    d3a: "תקשורת עם תלמידים",
+    d3b: "שימוש בשאלות ובדיון",
+    d3c: "מעורבות תלמידים בלמידה",
+    d3d: "שימוש בהערכה בתוך ההוראה",
+    d3e: "גמישות והיענות",
+    d4: "תחום 4: אחריות מקצועית",
+    d4a: "רפלקציה על ההוראה",
+    d4b: "שמירה על תיעוד מדויק",
+    d4c: "תקשורת עם משפחות",
+    d4d: "השתתפות בקהילה המקצועית",
+    d4e: "צמיחה והתפתחות מקצועית",
+    d4f: "מקצועיות",
+  },
+  marshall: {
+    m1: "א. תכנון והיערכות ללמידה",
+    m1a: "שליטה בתחום הדעת",
+    m1b: "תכנון אסטרטגי",
+    m1c: "יישור לתוכנית הלימודים",
+    m1d: "תכנון ההערכה",
+    m1e: "היערכות לצורכי התלמידים",
+    m1f: "הכנת השיעור",
+    m1g: "תכנון מעורבות תלמידים",
+    m1h: "הכנת חומרים",
+    m1i: "תכנון דיפרנציאלי",
+    m1j: "היערכות המרחב",
+    m2: "ב. ניהול כיתה",
+    m2a: "ציפיות ונורמות",
+    m2b: "יחסים עם תלמידים",
+    m2c: "שגרות ונהלים",
+    m2d: "ניהול התנהגות",
+    m2e: "ארגון המרחב הפיזי",
+    m3: "ג. העברת ההוראה",
+    m3a: "תקשורת בהירה",
+    m3b: "טכניקות שאילה",
+    m3c: "מעורבות תלמידים",
+    m3d: "קצב וגמישות",
+    m3e: "הוראה דיפרנציאלית",
+    m4: "ד. ניטור, הערכה ומעקב",
+    m4a: "הערכה מתמשכת",
+    m4b: "איכות המשוב",
+    m4c: "קבלת החלטות מבוססת נתונים",
+    m4d: "מעקב אחר התקדמות תלמידים",
+    m5: "ה. קשר עם משפחה וקהילה",
+    m5a: "תקשורת עם המשפחה",
+    m5b: "מעורבות קהילתית",
+    m5c: "רגישות תרבותית",
+    m6: "ו. אחריות מקצועית",
+    m6a: "רפלקציה עצמית",
+    m6b: "פיתוח מקצועי",
+    m6c: "שיתופי פעולה מקצועיים",
+    m6d: "מעורבות בקהילת בית הספר",
+  },
 };
 
 export function FrameworksPage() {
+  const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const isHebrew = i18n.resolvedLanguage === "he";
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
   const { data: frameworksRes, isLoading: frameworksLoading, isError: frameworksError } = useQuery({
     queryKey: ["frameworks"],
@@ -125,23 +192,23 @@ export function FrameworksPage() {
         selected_elements: selectedElements,
       }),
     onSuccess: () => {
-      toast.success("Framework selection saved");
+      toast.success(t("frameworksPage.selectionSaved"));
       queryClient.invalidateQueries({ queryKey: ["framework-selection"] });
       queryClient.invalidateQueries({ queryKey: ["roster"] });
     },
     onError: () => {
-      toast.error("Failed to save selection");
+      toast.error(t("frameworksPage.selectionSaveFailed"));
     },
   });
   const saveRecordingPolicyMutation = useMutation({
     mutationFn: (payload) => recordingPolicyApi.create(payload),
     onSuccess: () => {
-      toast.success("Recording policy saved");
+      toast.success(t("frameworksPage.recordingPolicySaved"));
       queryClient.invalidateQueries({ queryKey: ["recording-policies"] });
       queryClient.invalidateQueries({ queryKey: ["recording-compliance-summary"] });
     },
     onError: () => {
-      toast.error("Failed to save recording policy");
+      toast.error(t("frameworksPage.recordingPolicySaveFailed"));
     },
   });
 
@@ -156,7 +223,7 @@ export function FrameworksPage() {
           .map((name) => ({ name })),
       }),
     onSuccess: () => {
-      toast.success("Custom domain created");
+      toast.success(t("frameworksPage.customDomainCreated"));
       setCustomDomainName("");
       setCustomElementsInput("");
       queryClient.invalidateQueries({ queryKey: ["custom-domains"] });
@@ -164,20 +231,20 @@ export function FrameworksPage() {
       queryClient.invalidateQueries({ queryKey: ["frameworks"] });
     },
     onError: () => {
-      toast.error("Failed to create custom domain");
+      toast.error(t("frameworksPage.customDomainCreateFailed"));
     },
   });
 
   const deleteCustomDomainMutation = useMutation({
     mutationFn: (domainId) => frameworkApi.deleteCustomDomain(domainId),
     onSuccess: () => {
-      toast.success("Custom domain deleted");
+      toast.success(t("frameworksPage.customDomainDeleted"));
       queryClient.invalidateQueries({ queryKey: ["custom-domains"] });
       queryClient.invalidateQueries({ queryKey: ["framework-detail", "custom"] });
       queryClient.invalidateQueries({ queryKey: ["frameworks"] });
     },
     onError: () => {
-      toast.error("Failed to delete custom domain");
+      toast.error(t("frameworksPage.customDomainDeleteFailed"));
     },
   });
 
@@ -185,12 +252,12 @@ export function FrameworksPage() {
     mutationFn: ({ domainId, name }) =>
       frameworkApi.addCustomElement(domainId, { name }),
     onSuccess: () => {
-      toast.success("Custom element added");
+      toast.success(t("frameworksPage.customElementAdded"));
       queryClient.invalidateQueries({ queryKey: ["custom-domains"] });
       queryClient.invalidateQueries({ queryKey: ["framework-detail", "custom"] });
     },
     onError: () => {
-      toast.error("Failed to add element");
+      toast.error(t("frameworksPage.customElementAddFailed"));
     },
   });
 
@@ -231,27 +298,32 @@ export function FrameworksPage() {
   };
 
   const selectedCount = selectedElements.length;
+  const localizeFrameworkNode = (id, fallback) => {
+    if (!isHebrew || frameworkType === "custom") {
+      return fallback;
+    }
+    return HEBREW_FRAMEWORK_LABELS[frameworkType]?.[id] || fallback;
+  };
 
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
         <PageHeader
-          title="School Setup"
-          description="Configure school-level frameworks and recording compliance settings."
+          title={t("frameworksPage.title")}
+          description={t("frameworksPage.description")}
         />
 
         <Panel className="mb-6 bg-sky-50/60">
-          <h2 className="text-sm font-semibold text-slate-900">Curriculum ownership</h2>
+          <h2 className="text-sm font-semibold text-slate-900">{t("frameworksPage.curriculumOwnership")}</h2>
           <p className="mt-1 text-xs text-slate-600">
-            Admins upload school-wide curriculum in School Setup. Teachers upload class curriculum,
-            lesson plans, and syllabi on their own profile pages.
+            {t("frameworksPage.curriculumOwnershipDescription")}
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
             <Link
               to="/teachers"
               className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
             >
-              Open teachers
+              {t("frameworksPage.openTeachers")}
             </Link>
           </div>
         </Panel>
@@ -261,10 +333,10 @@ export function FrameworksPage() {
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-sm font-semibold text-slate-900">
-                  Recording compliance policy
+                  {t("frameworksPage.recordingCompliancePolicy")}
                 </h2>
                 <p className="text-xs text-slate-500">
-                  Define the recording cadence and reminder schedule.
+                  {t("frameworksPage.recordingComplianceDescription")}
                 </p>
               </div>
               <Button
@@ -279,17 +351,19 @@ export function FrameworksPage() {
                 disabled={saveRecordingPolicyMutation.isPending}
                 size="sm"
               >
-                {saveRecordingPolicyMutation.isPending ? "Saving..." : "Save policy"}
+                {saveRecordingPolicyMutation.isPending
+                  ? t("frameworksPage.saving")
+                  : t("frameworksPage.savePolicy")}
               </Button>
             </div>
             <div className="grid grid-cols-1 gap-4 text-xs md:grid-cols-4">
-              <Field label="Assign to teacher" className="text-[11px] text-slate-600">
+              <Field label={t("frameworksPage.assignToTeacher")} className="text-[11px] text-slate-600">
                 <Select
                   value={policyTeacherId}
                   onChange={(e) => setPolicyTeacherId(e.target.value)}
                   size="sm"
                 >
-                  <option value="">All teachers (default)</option>
+                  <option value="">{t("frameworksPage.allTeachersDefault")}</option>
                   {teacherOptions.map((teacher) => (
                     <option key={teacher.id} value={teacher.id}>
                       {teacher.name}
@@ -297,7 +371,7 @@ export function FrameworksPage() {
                   ))}
                 </Select>
               </Field>
-              <Field label="Period length" className="text-[11px] text-slate-600">
+              <Field label={t("frameworksPage.periodLength")} className="text-[11px] text-slate-600">
                 <Select
                   value={policyPeriodDays}
                   onChange={(e) => setPolicyPeriodDays(Number(e.target.value))}
@@ -310,7 +384,7 @@ export function FrameworksPage() {
                   <option value={90}>90 days</option>
                 </Select>
               </Field>
-              <Field label="Min recordings" className="text-[11px] text-slate-600">
+              <Field label={t("frameworksPage.minRecordings")} className="text-[11px] text-slate-600">
                 <Select
                   value={policyMinRecordings}
                   onChange={(e) => setPolicyMinRecordings(Number(e.target.value))}
@@ -324,7 +398,7 @@ export function FrameworksPage() {
                 </Select>
               </Field>
               <div className="flex flex-col gap-1 text-[11px] text-slate-600">
-                Reminder timing
+                {t("frameworksPage.reminderTiming")}
                 <div className="flex flex-wrap gap-2 text-[11px] text-slate-600">
                   {[14, 7, 3, 2, 1].map((day) => (
                     <label key={day} className="flex items-center gap-1">
@@ -339,26 +413,26 @@ export function FrameworksPage() {
                           );
                         }}
                       />
-                      {day}d before
+                      {t("frameworksPage.daysBefore", { count: day })}
                     </label>
                   ))}
                 </div>
               </div>
             </div>
             <div className="mt-3 text-[11px] text-slate-500">
-              Required subjects are automatically taken from each teacher&apos;s subject field.
+              {t("frameworksPage.requiredSubjects")}
             </div>
           </Panel>
         )}
 
         <Panel className="mb-6">
           <h2 className="mb-3 text-sm font-semibold text-slate-900">
-            Framework selection
+            {t("frameworksPage.frameworkSelection")}
           </h2>
           {frameworksLoading ? (
-            <LoadingState message="Loading frameworks..." />
+            <LoadingState message={t("frameworksPage.loadingFrameworks")} />
           ) : frameworksError ? (
-            <ErrorState message="Failed to load frameworks. Please refresh." />
+            <ErrorState message={t("frameworksPage.frameworksLoadFailed")} />
           ) : (
             <div className="flex flex-wrap gap-2">
               {(frameworksRes?.frameworks || []).map((f) => (
@@ -368,9 +442,9 @@ export function FrameworksPage() {
                   size="sm"
                   variant={frameworkType === f.type ? "primary" : "secondary"}
                 >
-                  {FRAMEWORK_LABELS[f.type] || f.name}
+                  {t(`frameworksPage.frameworkLabels.${f.type}`, { defaultValue: f.name })}
                   <span className="ml-2 text-[10px] text-slate-500">
-                    {f.domain_count} domains
+                    {t("frameworksPage.domainsCount", { count: f.domain_count })}
                   </span>
                 </Button>
               ))}
@@ -382,48 +456,49 @@ export function FrameworksPage() {
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-sm font-semibold text-slate-900">
-                Focus domains
+                {t("frameworksPage.focusDomains")}
               </h2>
               <p className="text-xs text-slate-500">
-                Selected elements: {selectedCount}
+                {t("frameworksPage.selectedElements", { count: selectedCount })}
               </p>
             </div>
             <Button
               onClick={() => saveSelectionMutation.mutate()}
               disabled={saveSelectionMutation.isPending}
             >
-              {saveSelectionMutation.isPending ? "Saving..." : "Save selection"}
+              {saveSelectionMutation.isPending
+                ? t("frameworksPage.saving")
+                : t("frameworksPage.saveSelection")}
             </Button>
           </div>
 
           {frameworkLoading ? (
-            <LoadingState message="Loading framework..." />
+            <LoadingState message={t("frameworksPage.loadingFramework")} />
           ) : frameworkError ? (
-            <ErrorState message="Failed to load framework details. Please refresh." />
+            <ErrorState message={t("frameworksPage.frameworkLoadFailed")} />
           ) : (
             <div className="space-y-4">
               {frameworkType === "custom" && (
                 <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4">
                   <h3 className="text-sm font-semibold text-slate-900">
-                    Create custom domain
+                    {t("frameworksPage.createCustomDomain")}
                   </h3>
                   <p className="mt-1 text-[11px] text-slate-500">
-                    Add your own focus domains and elements. Elements are
-                    comma-separated.
+                    {t("frameworksPage.createCustomDomainDescription")}
                   </p>
                   <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
                     <Input
                       type="text"
                       value={customDomainName}
                       onChange={(e) => setCustomDomainName(e.target.value)}
-                      placeholder="Domain name"
+                      placeholder={t("frameworksPage.domainNamePlaceholder")}
                       size="sm"
                     />
                     <Input
                       type="text"
                       value={customElementsInput}
                       onChange={(e) => setCustomElementsInput(e.target.value)}
-                      placeholder="Element 1, Element 2, Element 3"
+                      placeholder={t("frameworksPage.elementsPlaceholder")}
                       size="sm"
                       className="md:col-span-2"
                     />
@@ -440,14 +515,14 @@ export function FrameworksPage() {
                       size="sm"
                     >
                       {createCustomDomainMutation.isPending
-                        ? "Creating..."
-                        : "Add custom domain"}
+                        ? t("frameworksPage.creating")
+                        : t("frameworksPage.addCustomDomain")}
                     </Button>
                   </div>
                   {customDomainsLoading ? (
-                    <LoadingState className="mt-4" message="Loading custom domains..." />
+                    <LoadingState className="mt-4" message={t("frameworksPage.loadingCustomDomains")} />
                   ) : customDomainsError ? (
-                    <ErrorState className="mt-4" message="Unable to load custom domains right now." />
+                    <ErrorState className="mt-4" message={t("frameworksPage.customDomainsLoadFailed")} />
                   ) : customDomains.length > 0 ? (
                     <div className="mt-4 space-y-2">
                       {customDomains.map((domain) => (
@@ -472,7 +547,7 @@ export function FrameworksPage() {
                                     [domain.id]: e.target.value,
                                   }))
                                 }
-                                placeholder="Add new element"
+                                placeholder={t("frameworksPage.addNewElementPlaceholder")}
                                 size="sm"
                               />
                               <Button
@@ -491,7 +566,7 @@ export function FrameworksPage() {
                                 variant="success"
                                 size="sm"
                               >
-                                Add element
+                                {t("frameworksPage.addElement")}
                               </Button>
                             </div>
                           </div>
@@ -502,13 +577,13 @@ export function FrameworksPage() {
                             variant="danger"
                             size="sm"
                           >
-                            Delete
+                            {t("frameworksPage.delete")}
                           </Button>
                         </div>
                       ))}
                     </div>
                   ) : (
-                    <EmptyState className="mt-4" title="No custom domains yet" />
+                    <EmptyState className="mt-4" title={t("frameworksPage.noCustomDomains")} />
                   )}
                 </div>
               )}
@@ -523,10 +598,13 @@ export function FrameworksPage() {
                     <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                       <div>
                         <h3 className="text-sm font-semibold text-slate-900">
-                          {domain.name}
+                          {localizeFrameworkNode(domain.id, domain.name)}
                         </h3>
                         <p className="text-[11px] text-slate-500">
-                          {stats?.selected || 0} of {stats?.total || 0} selected
+                          {t("frameworksPage.selectedOfTotal", {
+                            selected: stats?.selected || 0,
+                            total: stats?.total || 0,
+                          })}
                         </p>
                       </div>
                       <Button
@@ -534,7 +612,9 @@ export function FrameworksPage() {
                         size="sm"
                         variant="secondary"
                       >
-                        {allSelected ? "Clear domain" : "Select domain"}
+                        {allSelected
+                          ? t("frameworksPage.clearDomain")
+                          : t("frameworksPage.selectDomain")}
                       </Button>
                     </div>
                     <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -554,7 +634,7 @@ export function FrameworksPage() {
                             <div>
                               <div className="text-slate-800">{el.id.toUpperCase()}</div>
                               <div className="text-[11px] text-slate-500">
-                                {el.name}
+                                {localizeFrameworkNode(el.id, el.name)}
                               </div>
                             </div>
                           </label>

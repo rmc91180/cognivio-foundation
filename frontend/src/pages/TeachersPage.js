@@ -12,11 +12,14 @@ import { toast } from "sonner";
 import { Link } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { Button, EmptyState, LoadingState, PageHeader, Panel } from "@/components/ui";
+import { useTranslation } from "react-i18next";
 
 export function TeachersPage() {
+  const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
+  const isRtl = i18n.dir() === "rtl";
   const { data: teachersData, isLoading } = useQuery({
     queryKey: ["teachers"],
     queryFn: () => teacherApi.list().then((res) => res.data),
@@ -53,7 +56,7 @@ export function TeachersPage() {
   const createMutation = useMutation({
     mutationFn: teacherApi.create,
     onSuccess: () => {
-      toast.success("Teacher created");
+      toast.success(t("teachersPage.teacherCreated"));
       queryClient.invalidateQueries({ queryKey: ["teachers"] });
       setForm({
         name: "",
@@ -67,30 +70,30 @@ export function TeachersPage() {
       });
     },
     onError: (error) => {
-      toast.error(error?.response?.data?.detail || "Failed to create teacher");
+      toast.error(error?.response?.data?.detail || t("teachersPage.teacherCreateFailed"));
     },
   });
 
   const updateCategoryMutation = useMutation({
     mutationFn: ({ id, payload }) => teacherApi.update(id, payload),
     onSuccess: () => {
-      toast.success("Category updated");
+      toast.success(t("teachersPage.categoryUpdated"));
       queryClient.invalidateQueries({ queryKey: ["teachers"] });
     },
     onError: (error) => {
-      toast.error(error?.response?.data?.detail || "Failed to update category");
+      toast.error(error?.response?.data?.detail || t("teachersPage.categoryUpdateFailed"));
     },
   });
 
   const createSchoolMutation = useMutation({
     mutationFn: schoolApi.create,
     onSuccess: () => {
-      toast.success("School added");
+      toast.success(t("teachersPage.schoolAdded"));
       setNewSchoolName("");
       queryClient.invalidateQueries({ queryKey: ["schools"] });
     },
     onError: () => {
-      toast.error("Failed to add school");
+      toast.error(t("teachersPage.schoolAddFailed"));
     },
   });
 
@@ -185,12 +188,12 @@ export function TeachersPage() {
   }, [teachers]);
 
   const categorySelectOptions = [
-    { value: "first_year", label: "First year" },
-    { value: "second_year", label: "Second year" },
-    { value: "third_year", label: "Third year" },
-    { value: "tenure", label: "Tenure" },
-    { value: "dept_head", label: "Dept head" },
-    { value: "custom", label: "Custom" },
+    { value: "first_year", label: t("teachersPage.firstYear") },
+    { value: "second_year", label: t("teachersPage.secondYear") },
+    { value: "third_year", label: t("teachersPage.thirdYear") },
+    { value: "tenure", label: t("teachersPage.tenure") },
+    { value: "dept_head", label: t("teachersPage.deptHead") },
+    { value: "custom", label: t("teachersPage.custom") },
   ];
 
   const departmentOptions = useMemo(() => {
@@ -306,7 +309,7 @@ export function TeachersPage() {
       a.remove();
       window.URL.revokeObjectURL(url);
     } catch (error) {
-      toast.error("Failed to export report");
+      toast.error(t("teachersPage.reportExportFailed"));
     }
   };
 
@@ -314,15 +317,15 @@ export function TeachersPage() {
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
         <PageHeader
-          title="Teachers"
-          description="Manage the teachers in your evaluation roster."
+          title={t("teachersPage.title")}
+          description={t("teachersPage.description")}
           actions={
             <Button
               variant="secondary"
               size="sm"
               onClick={() => setShowAddTeacher((prev) => !prev)}
             >
-              {showAddTeacher ? "Hide add teacher" : "Add teacher"}
+              {showAddTeacher ? t("teachersPage.hideAddTeacher") : t("teachersPage.addTeacher")}
             </Button>
           }
         />
@@ -332,11 +335,11 @@ export function TeachersPage() {
             <div className="md:col-span-4">
               <Panel>
                 <h2 className="mb-3 text-sm font-semibold text-slate-900">
-                  Add teacher
+                  {t("teachersPage.addTeacherPanel")}
                 </h2>
                 <form onSubmit={onSubmit} className="space-y-3 text-sm">
                   <Input
-                    label="Name"
+                    label={t("teachersPage.name")}
                     required
                     value={form.name}
                     onChange={(e) =>
@@ -344,7 +347,7 @@ export function TeachersPage() {
                     }
                   />
                   <Input
-                    label="Email"
+                    label={t("teachersPage.email")}
                     type="email"
                     required
                     value={form.email}
@@ -353,21 +356,21 @@ export function TeachersPage() {
                     }
                   />
                   <Input
-                    label="Subject"
+                    label={t("teachersPage.subject")}
                     value={form.subject}
                     onChange={(e) =>
                       setForm((f) => ({ ...f, subject: e.target.value }))
                     }
                   />
                   <Input
-                    label="Grade level"
+                    label={t("teachersPage.gradeLevel")}
                     value={form.grade_level}
                     onChange={(e) =>
                       setForm((f) => ({ ...f, grade_level: e.target.value }))
                     }
                   />
                   <Input
-                    label="Department"
+                    label={t("teachersPage.department")}
                     value={form.department}
                     onChange={(e) =>
                       setForm((f) => ({ ...f, department: e.target.value }))
@@ -375,7 +378,7 @@ export function TeachersPage() {
                   />
                   <div>
                     <label className="block text-xs font-medium text-slate-600">
-                      Category
+                      {t("teachersPage.category")}
                     </label>
                     <select
                       className="mt-1 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
@@ -388,7 +391,7 @@ export function TeachersPage() {
                         }))
                       }
                     >
-                      <option value="">Select category</option>
+                      <option value="">{t("teachersPage.selectCategory")}</option>
                       {categorySelectOptions.map((opt) => (
                         <option key={opt.value} value={opt.value}>
                           {opt.label}
@@ -398,7 +401,7 @@ export function TeachersPage() {
                   </div>
                   {form.category === "custom" && (
                     <Input
-                      label="Custom category"
+                      label={t("teachersPage.customCategory")}
                       value={form.category_custom}
                       onChange={(e) =>
                         setForm((f) => ({ ...f, category_custom: e.target.value }))
@@ -407,7 +410,7 @@ export function TeachersPage() {
                   )}
                   <div>
                     <label className="block text-xs font-medium text-slate-600">
-                      School
+                      {t("teachersPage.school")}
                     </label>
                     <select
                       className="mt-1 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
@@ -416,7 +419,7 @@ export function TeachersPage() {
                         setForm((f) => ({ ...f, school_id: e.target.value }))
                       }
                     >
-                      <option value="">Select school</option>
+                      <option value="">{t("teachersPage.selectSchool")}</option>
                       {(schoolsData || []).map((school) => (
                         <option key={school.id} value={school.id}>
                           {school.name}
@@ -428,7 +431,7 @@ export function TeachersPage() {
                         type="text"
                         value={newSchoolName}
                         onChange={(e) => setNewSchoolName(e.target.value)}
-                        placeholder="Add new school"
+                        placeholder={t("teachersPage.addNewSchool")}
                         className="flex-1 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
                       />
                       <button
@@ -439,12 +442,12 @@ export function TeachersPage() {
                         }}
                         className="rounded-md border border-slate-200 px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
                       >
-                        Add
+                        {t("teachersPage.add")}
                       </button>
                     </div>
                   </div>
                   <Button type="submit" disabled={createMutation.isPending} fullWidth className="mt-2">
-                    {createMutation.isPending ? "Saving..." : "Save teacher"}
+                    {createMutation.isPending ? t("teachersPage.saving") : t("teachersPage.saveTeacher")}
                   </Button>
                 </form>
               </Panel>
@@ -454,16 +457,16 @@ export function TeachersPage() {
           <div className={showAddTeacher ? "md:col-span-8" : "md:col-span-12"}>
             <Panel>
               <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <h2 className="text-sm font-semibold text-slate-900">Roster</h2>
+                <h2 className="text-sm font-semibold text-slate-900">{t("teachersPage.roster")}</h2>
                 <div className="flex flex-wrap items-center gap-2 text-xs">
                   <div className="flex items-center gap-1">
-                    <span className="text-slate-500">Department</span>
+                    <span className="text-slate-500">{t("teachersPage.department")}</span>
                     <select
                       className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
                       value={departmentFilter}
                       onChange={(e) => setDepartmentFilter(e.target.value)}
                     >
-                      <option value="">All</option>
+                      <option value="">{t("teachersPage.all")}</option>
                       {departmentOptions.map((dept) => (
                         <option key={dept} value={dept}>
                           {dept}
@@ -472,13 +475,13 @@ export function TeachersPage() {
                     </select>
                   </div>
                   <div className="flex items-center gap-1">
-                    <span className="text-slate-500">Category</span>
+                    <span className="text-slate-500">{t("teachersPage.category")}</span>
                     <select
                       className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
                       value={categoryFilter}
                       onChange={(e) => setCategoryFilter(e.target.value)}
                     >
-                      <option value="">All</option>
+                      <option value="">{t("teachersPage.all")}</option>
                       {categoryOptions.map((cat) => (
                         <option key={cat} value={cat}>
                           {cat.replace("_", " ")}
@@ -487,43 +490,43 @@ export function TeachersPage() {
                     </select>
                   </div>
                   <div className="flex items-center gap-1">
-                    <span className="text-slate-500">Performance</span>
+                    <span className="text-slate-500">{t("teachersPage.performance")}</span>
                     <select
                       className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
                       value={performanceLevelFilter}
                       onChange={(e) => setPerformanceLevelFilter(e.target.value)}
                     >
-                      <option value="">All</option>
-                      <option value="distinguished">Distinguished</option>
-                      <option value="proficient">Proficient</option>
-                      <option value="basic">Basic</option>
-                      <option value="unsatisfactory">Unsatisfactory</option>
+                      <option value="">{t("teachersPage.all")}</option>
+                      <option value="distinguished">{t("teachersPage.distinguished")}</option>
+                      <option value="proficient">{t("teachersPage.proficient")}</option>
+                      <option value="basic">{t("teachersPage.basic")}</option>
+                      <option value="unsatisfactory">{t("teachersPage.unsatisfactory")}</option>
                     </select>
                   </div>
                   <div className="flex items-center gap-1">
-                    <span className="text-slate-500">Trend</span>
+                    <span className="text-slate-500">{t("teachersPage.trend")}</span>
                     <select
                       className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
                       value={trendFilter}
                       onChange={(e) => setTrendFilter(e.target.value)}
                     >
-                      <option value="">All</option>
-                      <option value="improving">Improving</option>
-                      <option value="stable">Stable</option>
-                      <option value="declining">Declining</option>
+                      <option value="">{t("teachersPage.all")}</option>
+                      <option value="improving">{t("teachersPage.improving")}</option>
+                      <option value="stable">{t("teachersPage.stable")}</option>
+                      <option value="declining">{t("teachersPage.declining")}</option>
                     </select>
                   </div>
                   <div className="flex items-center gap-1">
-                    <span className="text-slate-500">Sort by</span>
+                    <span className="text-slate-500">{t("teachersPage.sortBy")}</span>
                     <select
                       className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
                       value={sortBy}
                       onChange={(e) => setSortBy(e.target.value)}
                     >
-                      <option value="name">Name</option>
-                      <option value="concern">Flag severity</option>
-                      <option value="score_high">Highest score</option>
-                      <option value="trend">Trend</option>
+                      <option value="name">{t("teachersPage.nameSort")}</option>
+                      <option value="concern">{t("teachersPage.concern")}</option>
+                      <option value="score_high">{t("teachersPage.highestScore")}</option>
+                      <option value="trend">{t("teachersPage.trend")}</option>
                     </select>
                   </div>
                   <div className="flex items-center gap-1">
@@ -630,29 +633,29 @@ export function TeachersPage() {
 
               <div className="mb-4 grid grid-cols-2 gap-2 md:grid-cols-4">
                 <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                  <div className="text-[10px] uppercase tracking-wide text-slate-500">Visible roster</div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-500">{t("teachersPage.visibleRoster")}</div>
                   <div className="text-lg font-semibold text-slate-900">{teacherFlowSummary.total}</div>
                 </div>
                 <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                  <div className="text-[10px] uppercase tracking-wide text-slate-500">Scored</div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-500">{t("teachersPage.scored")}</div>
                   <div className="text-lg font-semibold text-slate-900">{teacherFlowSummary.withScores}</div>
                 </div>
                 <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                  <div className="text-[10px] uppercase tracking-wide text-slate-500">Needs support</div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-500">{t("teachersPage.needsSupport")}</div>
                   <div className="text-lg font-semibold text-rose-700">{teacherFlowSummary.supportCount}</div>
                 </div>
                 <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                  <div className="text-[10px] uppercase tracking-wide text-slate-500">Improving trend</div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-500">{t("teachersPage.improvingTrend")}</div>
                   <div className="text-lg font-semibold text-emerald-700">{teacherFlowSummary.improvingCount}</div>
                 </div>
               </div>
 
               {isLoading ? (
-                <LoadingState message="Loading teachers..." />
+                <LoadingState message={t("labels.loadingTeachers")} />
               ) : tableRows.length === 0 ? (
                 <EmptyState
-                  title="No teachers yet"
-                  message="Add your first teacher using the form."
+                  title={t("teachersPage.noTeachersTitle")}
+                  message={t("teachersPage.noTeachersMessage")}
                 />
               ) : (
                 <>
@@ -660,22 +663,22 @@ export function TeachersPage() {
                     {tableRows.map(({ teacher, overallScore, trend, roster }) => {
                       const levelLabel =
                         typeof overallScore !== "number"
-                          ? "Needs data"
+                          ? t("teachersPage.flagNeedsData")
                           : overallScore >= 8
-                            ? "Distinguished"
+                            ? t("teachersPage.distinguished")
                             : overallScore >= 6
-                              ? "Proficient"
+                              ? t("teachersPage.proficient")
                               : overallScore >= 4
-                                ? "Basic"
-                                : "Support";
+                                ? t("teachersPage.basic")
+                                : t("teachersPage.flagSupport");
                       const levelColor =
-                        levelLabel === "Distinguished"
+                        levelLabel === t("teachersPage.distinguished")
                           ? "text-emerald-700 bg-emerald-100"
-                          : levelLabel === "Proficient"
+                          : levelLabel === t("teachersPage.proficient")
                             ? "text-blue-700 bg-blue-100"
-                            : levelLabel === "Basic"
+                            : levelLabel === t("teachersPage.basic")
                               ? "text-amber-700 bg-amber-100"
-                              : levelLabel === "Support"
+                              : levelLabel === t("teachersPage.flagSupport")
                                 ? "text-rose-700 bg-rose-100"
                                 : "text-slate-700 bg-slate-100";
                       return (
@@ -692,7 +695,7 @@ export function TeachersPage() {
                                 {teacher.name}
                               </Link>
                               <div className="text-[11px] text-slate-500">
-                                {teacher.subject || "No subject"} • {teacher.department || "No dept"}
+                                {teacher.subject || t("labels.noSubject")} • {teacher.department || t("labels.noDepartment")}
                               </div>
                             </div>
                             <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${levelColor}`}>
@@ -701,23 +704,23 @@ export function TeachersPage() {
                           </div>
                           <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-slate-600">
                             <span>
-                              Score: {typeof overallScore === "number" ? overallScore.toFixed(1) : "—"}
+                              {t("labels.score")}: {typeof overallScore === "number" ? overallScore.toFixed(1) : "—"}
                             </span>
-                            <span>Trend: {trend}</span>
-                            <span>Obs: {roster?.assessment_count ?? 0}</span>
+                            <span>{t("labels.trend")}: {trend}</span>
+                            <span>{t("labels.observationsShort")}: {roster?.assessment_count ?? 0}</span>
                           </div>
                           <div className="mt-2 flex flex-wrap gap-2">
                             <Link
                               to={`/teachers/${teacher.id}`}
                               className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700 hover:bg-slate-100"
                             >
-                              View profile
+                              {t("teachersPage.viewProfile")}
                             </Link>
                             <Link
                               to={`/videos?teacher_id=${teacher.id}`}
                               className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700 hover:bg-slate-100"
                             >
-                              View videos
+                              {t("teachersPage.viewVideos")}
                             </Link>
                           </div>
                         </div>
@@ -726,17 +729,17 @@ export function TeachersPage() {
                   </div>
 
                   <div className="hidden overflow-hidden rounded-lg border border-slate-200 bg-white md:block">
-                  <table className="min-w-full text-left text-xs">
+                  <table className={`min-w-full text-xs ${isRtl ? "text-right" : "text-left"}`}>
                     <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
                       <tr>
                         <th className="px-3 py-2 w-8"></th>
-                        <th className="px-3 py-2">Teacher</th>
-                        <th className="px-3 py-2">Dept</th>
-                        <th className="px-3 py-2">Flag</th>
-                        <th className="px-3 py-2">Recent observations</th>
-                        <th className="px-3 py-2">Trends (30/60/90)</th>
-                        <th className="px-3 py-2">Action items</th>
-                        <th className="px-3 py-2">Courses</th>
+                        <th className="px-3 py-2">{t("teachersPage.teacher")}</th>
+                        <th className="px-3 py-2">{t("teachersPage.dept")}</th>
+                        <th className="px-3 py-2">{t("teachersPage.flag")}</th>
+                        <th className="px-3 py-2">{t("teachersPage.recentObservations")}</th>
+                        <th className="px-3 py-2">{t("teachersPage.trends")}</th>
+                        <th className="px-3 py-2">{t("teachersPage.actionItems")}</th>
+                        <th className="px-3 py-2">{t("teachersPage.courses")}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -746,33 +749,33 @@ export function TeachersPage() {
                             ? overallScore
                             : null;
                         const assessmentCount = roster?.assessment_count ?? 0;
-                        let flagLabel = "Stable";
-                        let flagReason = "On track";
+                        let flagLabel = t("teachersPage.flagStable");
+                        let flagReason = t("teachersPage.flagOnTrack");
                         let flagColor = "bg-emerald-50 text-emerald-700 border-emerald-200";
                         const daysSinceInteraction = roster?.days_since_interaction;
                         const noInteraction =
                           typeof daysSinceInteraction === "number" &&
                           daysSinceInteraction >= 14;
                         if (level == null) {
-                          flagLabel = "Needs data";
-                          flagReason = "No observations yet";
+                          flagLabel = t("teachersPage.flagNeedsData");
+                          flagReason = t("teachersPage.noObservationsYet");
                           flagColor = "bg-slate-50 text-slate-600 border-slate-200";
                         } else if (assessmentCount < 2) {
-                          flagLabel = "Needs data";
-                          flagReason = "Low observation count";
+                          flagLabel = t("teachersPage.flagNeedsData");
+                          flagReason = t("teachersPage.lowObservationCount");
                           flagColor = "bg-slate-50 text-slate-600 border-slate-200";
                         } else if (level < 5) {
-                          flagLabel = "Support";
-                          flagReason = "Low overall score";
+                          flagLabel = t("teachersPage.flagSupport");
+                          flagReason = t("teachersPage.lowOverallScore");
                           flagColor = "bg-rose-50 text-rose-700 border-rose-200";
                         } else if (level < 8) {
-                          flagLabel = "Watch";
-                          flagReason = "Mixed performance";
+                          flagLabel = t("teachersPage.flagWatch");
+                          flagReason = t("teachersPage.mixedPerformance");
                           flagColor = "bg-amber-50 text-amber-700 border-amber-200";
                         }
                         if (noInteraction) {
-                          flagLabel = "No touch";
-                          flagReason = `${daysSinceInteraction} days since interaction`;
+                          flagLabel = t("teachersPage.flagNoTouch");
+                          flagReason = t("teachersPage.daysSinceInteraction", { count: daysSinceInteraction });
                           flagColor = "bg-amber-50 text-amber-700 border-amber-200";
                         }
       const courses = (schedulesByTeacher[teacher.id] || [])
@@ -798,7 +801,7 @@ export function TeachersPage() {
                                   type="button"
                                   onClick={() => toggleRowExpanded(teacher.id)}
                                   className="flex h-5 w-5 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-                                  title={isExpanded ? "Collapse" : "Expand"}
+                                  title={isExpanded ? t("teachersPage.collapse") : t("teachersPage.expand")}
                                 >
                                   <svg
                                     className={`h-3.5 w-3.5 transition-transform ${isExpanded ? "rotate-90" : ""}`}
@@ -852,7 +855,7 @@ export function TeachersPage() {
                                   <ul className="space-y-1">
                                     {roster.recent_observations.slice(0, 2).map((obs, idx) => (
                                       <li key={idx} className="rounded bg-slate-50 px-2 py-1">
-                                        {obs.summary || obs.admin_comment || "Observation recorded"}
+                                        {obs.summary || obs.admin_comment || t("teachersPage.observationRecorded")}
                                       </li>
                                     ))}
                                     <li>
@@ -860,13 +863,13 @@ export function TeachersPage() {
                                         to={`/teachers/${teacher.id}`}
                                         className="text-[10px] text-primary hover:underline"
                                       >
-                                        View all observations
+                                        {t("teachersPage.viewAllObservations")}
                                       </Link>
                                     </li>
                                   </ul>
                                 ) : (
                                   <span className="text-[10px] text-slate-400">
-                                    No recent observations
+                                    {t("teachersPage.noRecentObservations")}
                                   </span>
                                 )}
                               </td>
@@ -874,9 +877,9 @@ export function TeachersPage() {
                                 {roster?.trend_windows ? (
                                   <div className="flex flex-col gap-1 text-[10px]">
                                     {[
-                                      ["30d", "30d"],
-                                      ["60d", "60d"],
-                                      ["90d", "90d"],
+                                      ["30d", t("teachersPage.day30Short")],
+                                      ["60d", t("teachersPage.day60Short")],
+                                      ["90d", t("teachersPage.day90Short")],
                                     ].map(([key, label]) => {
                                       const trend = roster.trend_windows?.[key] || {};
                                       const delta = trend.delta;
@@ -901,7 +904,7 @@ export function TeachersPage() {
                                     })}
                                   </div>
                                 ) : (
-                                  <span className="text-[10px] text-slate-400">No trend data</span>
+                                  <span className="text-[10px] text-slate-400">{t("teachersPage.noTrendData")}</span>
                                 )}
                               </td>
                               <td className="px-3 py-2 align-top text-[11px] text-slate-600">
@@ -917,25 +920,25 @@ export function TeachersPage() {
                                         to={`/teachers/${teacher.id}`}
                                         className="text-[10px] text-primary hover:underline"
                                       >
-                                        View full action plan
+                                        {t("teachersPage.viewFullActionPlan")}
                                       </Link>
                                     </li>
                                   </ul>
                                 ) : (
                                   <span className="text-[10px] text-slate-400">
-                                    No action items
+                                    {t("teachersPage.noActionItems")}
                                   </span>
                                 )}
                               </td>
                               <td className="px-3 py-2 align-top text-[11px] text-slate-600">
                                 {courses.length === 0 ? (
                                   <span className="text-slate-500">
-                                    No upcoming
+                                    {t("teachersPage.noUpcoming")}
                                   </span>
                                 ) : (
                                   <details>
                                     <summary className="cursor-pointer text-slate-700">
-                                      {courses.length} upcoming
+                                      {t("teachersPage.upcoming", { count: courses.length })}
                                     </summary>
                                     <div className="mt-1 space-y-0.5 text-[11px]">
                                       {courses.map((c) => (
@@ -962,7 +965,7 @@ export function TeachersPage() {
                                   <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                                     <div>
                                       <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                                        30-day trend snapshot
+                                        {t("teachersPage.trendSnapshot")}
                                       </h4>
                                       {roster?.trend_30d?.length ? (
                                         <div className="grid gap-2">
@@ -994,7 +997,10 @@ export function TeachersPage() {
                                                   </span>
                                                 </div>
                                                 <div className="text-[10px] text-slate-500">
-                                                  Avg {trend.avg_score} • {trend.recent_count} obs
+                                                  {t("teachersPage.averageShort", {
+                                                    score: trend.avg_score,
+                                                    count: trend.recent_count,
+                                                  })}
                                                 </div>
                                               </div>
                                             );
@@ -1002,46 +1008,46 @@ export function TeachersPage() {
                                         </div>
                                       ) : (
                                         <p className="text-[11px] text-slate-500">
-                                          Not enough recent observations for a 30-day trend.
+                                          {t("teachersPage.notEnoughTrendData")}
                                         </p>
                                       )}
                                       <h4 className="mb-2 mt-4 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                                        Recent Observations
+                                        {t("teachersPage.recentObservationsTitle")}
                                       </h4>
                                       {roster?.recent_observations?.length ? (
                                         <ul className="space-y-1 text-[11px] text-slate-600">
                                           {roster.recent_observations.slice(0, 3).map((obs, i) => (
                                             <li key={i} className="rounded bg-white px-2 py-1 border border-slate-200">
-                                              {obs.summary || obs.admin_comment || "Observation recorded"}
+                                              {obs.summary || obs.admin_comment || t("teachersPage.observationRecorded")}
                                             </li>
                                           ))}
                                         </ul>
                                       ) : (
-                                        <p className="text-[11px] text-slate-500">No recent observations</p>
+                                        <p className="text-[11px] text-slate-500">{t("teachersPage.noRecentObservations")}</p>
                                       )}
                                     </div>
                                     <div>
                                       <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                                        Quick Actions
+                                        {t("teachersPage.quickActionsTitle")}
                                       </h4>
                                       <div className="flex flex-wrap gap-2">
                                         <Link
                                           to={`/teachers/${teacher.id}`}
                                           className="inline-flex items-center rounded bg-primary/10 px-2 py-1 text-[11px] text-primary hover:bg-primary/20"
                                         >
-                                          View Profile
+                                          {t("teachersPage.viewProfile")}
                                         </Link>
                                         <Link
                                           to={`/videos?teacher_id=${teacher.id}`}
                                           className="inline-flex items-center rounded bg-slate-100 px-2 py-1 text-[11px] text-slate-700 hover:bg-slate-200"
                                         >
-                                          View Videos
+                                          {t("teachersPage.viewVideos")}
                                         </Link>
                                       </div>
                                       {isAdmin && (
                                         <div className="mt-4">
                                           <h5 className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
-                                            Category
+                                            {t("teachersPage.categoryTitle")}
                                           </h5>
                                           <div className="flex flex-wrap items-center gap-2">
                                             <select
@@ -1062,7 +1068,7 @@ export function TeachersPage() {
                                                 }));
                                               }}
                                             >
-                                              <option value="">Select category</option>
+                                              <option value="">{t("teachersPage.selectCategory")}</option>
                                               {categorySelectOptions.map((opt) => (
                                                 <option key={opt.value} value={opt.value}>
                                                   {opt.label}
@@ -1072,7 +1078,7 @@ export function TeachersPage() {
                                             {isCustomCategory && (
                                               <input
                                                 className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
-                                                placeholder="Custom category"
+                                                placeholder={t("teachersPage.customCategory")}
                                                 value={categoryEdit.category_custom}
                                                 onChange={(e) =>
                                                   setCategoryEdits((prev) => ({
@@ -1092,7 +1098,7 @@ export function TeachersPage() {
                                                 if (categoryEdit.category === "custom") {
                                                   const customValue = categoryEdit.category_custom.trim();
                                                   if (!customValue) {
-                                                    toast.error("Enter a custom category");
+                                                    toast.error(t("teachersPage.enterCustomCategory"));
                                                     return;
                                                   }
                                                   updateCategoryMutation.mutate({
@@ -1114,7 +1120,7 @@ export function TeachersPage() {
                                               }}
                                               disabled={updateCategoryMutation.isPending}
                                             >
-                                              Save
+                                              {t("teachersPage.save")}
                                             </button>
                                           </div>
                                         </div>

@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 /**
  * VideoTimeline - A visual timeline with observation markers
@@ -8,7 +9,9 @@ import React, { useState } from "react";
  * @param {function} onSeek - Callback when user clicks to seek
  */
 export function VideoTimeline({ duration, currentTime, observations = [], onSeek }) {
+  const { t, i18n } = useTranslation();
   const [hoveredMarker, setHoveredMarker] = useState(null);
+  const isRtl = i18n.dir() === "rtl";
 
   if (!duration || duration <= 0) {
     return null;
@@ -70,12 +73,12 @@ export function VideoTimeline({ duration, currentTime, observations = [], onSeek
                   if (onSeek) onSeek(obs.timestamp_seconds);
                 }}
                 className={`-ml-1.5 h-3 w-3 rounded-full border-2 border-slate-950 transition-transform hover:scale-150 ${getScoreColor(obs.score)}`}
-                title={obs.admin_comment || "Observation"}
+                title={obs.admin_comment || t("videoTimeline.observation")}
               />
 
               {/* Hover tooltip */}
               {hoveredMarker === obs.id && (
-                <div className="pointer-events-none absolute bottom-full left-1/2 z-30 mb-2 w-56 -translate-x-1/2 rounded-lg border border-slate-700 bg-slate-900/95 p-3 text-xs shadow-xl">
+                <div className={`pointer-events-none absolute bottom-full z-30 mb-2 w-56 rounded-lg border border-slate-700 bg-slate-900/95 p-3 text-xs shadow-xl ${isRtl ? "right-1/2 translate-x-1/2" : "left-1/2 -translate-x-1/2"}`}>
                   <div className="mb-1.5 flex items-center justify-between">
                     <span className="font-semibold text-slate-100">
                       {formatTime(obs.timestamp_seconds)}
@@ -94,9 +97,9 @@ export function VideoTimeline({ duration, currentTime, observations = [], onSeek
                     </div>
                   )}
                   <p className="line-clamp-2 text-slate-300">
-                    {obs.admin_comment || "Observation recorded"}
+                    {obs.admin_comment || t("videoTimeline.observationRecorded")}
                   </p>
-                  <div className="absolute -bottom-1.5 left-1/2 h-3 w-3 -translate-x-1/2 rotate-45 border-b border-r border-slate-700 bg-slate-900" />
+                  <div className={`absolute -bottom-1.5 h-3 w-3 rotate-45 border-b border-r border-slate-700 bg-slate-900 ${isRtl ? "right-1/2 translate-x-1/2" : "left-1/2 -translate-x-1/2"}`} />
                 </div>
               )}
             </div>

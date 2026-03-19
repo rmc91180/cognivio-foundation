@@ -1,6 +1,7 @@
 [build]
-builder = "nixpacks"
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "npm run start:prod"
+startCommand = "sh /app/scripts/start-frontend.sh"
 restartPolicyType = "ON_FAILURE"

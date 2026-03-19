@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Source+Sans+3:wght@400;500;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;700;800&family=Sora:wght@500;600;700&family=Source+Sans+3:wght@400;500;600;700&display=swap");
 
 @tailwind base;
 @tailwind components;
@@ -32,6 +32,32 @@ html {
 body {
   @apply bg-slate-50 text-slate-900 antialiased font-body;
   text-rendering: optimizeLegibility;
+}
+
+html[dir="rtl"] body {
+  direction: rtl;
+  font-family: "Heebo", "Source Sans 3", sans-serif;
+}
+
+html[dir="rtl"] .rtl-flip {
+  transform: scaleX(-1);
+}
+
+html[dir="rtl"] .cv-table {
+  text-align: right;
+}
+
+.rtl-text-start {
+  text-align: left;
+}
+
+html[dir="rtl"] .rtl-text-start {
+  text-align: right;
+}
+
+html[dir="rtl"] input[type="file"]::file-selector-button {
+  margin-right: 0;
+  margin-left: 0.75rem;
 }
 
 h1,

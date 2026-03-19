@@ -1,11 +1,13 @@
 import React, { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { LayoutShell } from "@/components/LayoutShell";
 import { VideoRecorder } from "@/components/VideoRecorder";
 import { teacherApi, videoApi } from "@/lib/api";
 import { toast } from "sonner";
 
 export function VideoRecorderPage() {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [selectedTeacher, setSelectedTeacher] = useState("");
   const [subject, setSubject] = useState("");
@@ -41,21 +43,21 @@ export function VideoRecorderPage() {
       });
     },
     onSuccess: () => {
-      toast.success("Uploaded. Queued for analysis.");
+      toast.success(t("videoRecorderPage.uploadingQueued"));
       setQueued(true);
       setUploadProgress(0);
       queryClient.invalidateQueries({ queryKey: ["videos"] });
       queryClient.invalidateQueries({ queryKey: ["assessments"] });
     },
     onError: (error) => {
-      toast.error(error?.response?.data?.detail || "Upload failed");
+      toast.error(error?.response?.data?.detail || t("videoRecorderPage.uploadFailed"));
       setUploadProgress(0);
     },
   });
 
   const handleUpload = () => {
     if (!recordedBlob || !selectedTeacher) {
-      toast.error("Select a teacher and record a video first.");
+      toast.error(t("videoRecorderPage.selectTeacherAndRecordFirst"));
       return;
     }
     setQueued(false);
@@ -78,10 +80,10 @@ export function VideoRecorderPage() {
       <div className="mx-auto max-w-6xl px-6 py-6">
         <div className="mb-6">
           <h1 className="font-heading text-2xl font-semibold text-slate-900">
-            Record Classroom Video
+            {t("videoRecorderPage.title")}
           </h1>
           <p className="mt-1 text-sm text-slate-600">
-            Record directly in the browser, then upload for AI analysis.
+            {t("videoRecorderPage.description")}
           </p>
         </div>
 
@@ -97,12 +99,12 @@ export function VideoRecorderPage() {
           <div className="md:col-span-5">
             <div className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-3 text-sm font-semibold text-slate-900">
-                Recording metadata
+                {t("videoRecorderPage.metadata")}
               </h2>
               <div className="space-y-3 text-xs">
                 <div>
                   <label className="block text-xs font-medium text-slate-600">
-                    Teacher
+                    {t("videoRecorderPage.teacher")}
                   </label>
                   <select
                     className="mt-1 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
@@ -113,7 +115,7 @@ export function VideoRecorderPage() {
                       setSubject(teacher?.subject || "");
                     }}
                   >
-                    <option value="">Select a teacher</option>
+                    <option value="">{t("videoRecorderPage.selectTeacher")}</option>
                     {teachers.map((t) => (
                       <option key={t.id} value={t.id}>
                         {t.name} • {t.subject}
@@ -123,7 +125,7 @@ export function VideoRecorderPage() {
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-600">
-                    Subject
+                    {t("videoRecorderPage.subject")}
                   </label>
                   <input
                     type="text"
@@ -134,7 +136,7 @@ export function VideoRecorderPage() {
                 </div>
                 {recordedUrl && (
                   <div className="text-[11px] text-slate-500">
-                    Recording ready to upload.
+                    {t("videoRecorderPage.readyToUpload")}
                   </div>
                 )}
                 <button
@@ -143,7 +145,9 @@ export function VideoRecorderPage() {
                   disabled={uploadMutation.isPending}
                   className="mt-2 inline-flex w-full items-center justify-center rounded-md bg-primary px-4 py-2 text-xs font-medium text-white shadow-lg shadow-primary/30 hover:bg-primary/90 disabled:opacity-60"
                 >
-                  {uploadMutation.isPending ? "Uploading..." : "Upload & queue"}
+                  {uploadMutation.isPending
+                    ? t("videoRecorderPage.uploading")
+                    : t("videoRecorderPage.uploadQueue")}
                 </button>
                 {uploadProgress > 0 && (
                   <div className="mt-2">
@@ -154,13 +158,13 @@ export function VideoRecorderPage() {
                       />
                     </div>
                     <div className="mt-1 text-[11px] text-slate-500">
-                      Upload progress: {uploadProgress}%
+                      {t("videoRecorderPage.uploadProgress", { progress: uploadProgress })}
                     </div>
                   </div>
                 )}
                 {queued && (
                   <div className="mt-3 rounded-md bg-emerald-50 px-3 py-2 text-[11px] text-emerald-700">
-                    Queued for analysis. Check Videos & Assessments for status.
+                    {t("videoRecorderPage.queuedMessage")}
                   </div>
                 )}
               </div>

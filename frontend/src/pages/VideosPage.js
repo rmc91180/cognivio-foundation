@@ -5,6 +5,7 @@ import { LayoutShell } from "@/components/LayoutShell";
 import { toast } from "sonner";
 import { Link, useLocation } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
+import { useTranslation } from "react-i18next";
 import {
   Badge,
   Button,
@@ -28,7 +29,20 @@ function VideoRow({
   isRetrying,
   isRetryingPrivacy,
 }) {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const formatStatus = (value) => {
+    const map = {
+      queued: t("labels.queued"),
+      processing: t("labels.processing"),
+      completed: t("labels.completed"),
+      failed: t("labels.failed"),
+      error: t("labels.error"),
+      review_required: t("labels.reviewRequired"),
+      pending_admin_review: t("labels.pendingAdminReview"),
+    };
+    return map[value] || value || t("videosPage.unknown");
+  };
   const [open, setOpen] = useState(false);
   const [selectedDomain, setSelectedDomain] = useState(
     assessment?.element_scores?.[0]?.element_id || ""
@@ -56,11 +70,11 @@ function VideoRow({
   const overrideMutation = useMutation({
     mutationFn: (payload) => assessmentApi.createAdminOverride(assessment.id, payload),
     onSuccess: () => {
-      toast.success("Admin adjustment saved");
+      toast.success(t("videosPage.adminAdjustmentSaved"));
       queryClient.invalidateQueries({ queryKey: ["assessments"] });
     },
     onError: () => {
-      toast.error("Failed to save admin adjustment");
+      toast.error(t("videosPage.adminAdjustmentFailed"));
     },
   });
 
@@ -79,14 +93,14 @@ function VideoRow({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <div className="text-xs font-semibold text-slate-900">
-            {teacher?.name || "Teacher"} • {video.subject || "Subject"}
+            {teacher?.name || t("teachersPage.teacher")} • {video.subject || t("teachersPage.subject")}
           </div>
           <div className="text-[11px] text-slate-500">
             {video.recorded_at || video.upload_date}
           </div>
         </div>
         <div className="flex items-center gap-2 text-[11px] text-slate-600">
-          <Badge variant={statusVariant}>{video.status || "unknown"}</Badge>
+          <Badge variant={statusVariant}>{formatStatus(video.status)}</Badge>
           <Badge
             variant={
               video.privacy_status === "completed"
@@ -98,11 +112,13 @@ function VideoRow({
                     : "neutral"
             }
           >
-            Privacy {video.privacy_status || "queued"}
+            {t("videosPage.privacy")} {formatStatus(video.privacy_status)}
           </Badge>
           {assessment && (
             <Badge variant="success">
-              Score {assessment.overall_score?.toFixed(1) ?? "N/A"}
+              {t("videosPage.scoreLabel", {
+                score: assessment.overall_score?.toFixed(1) ?? "N/A",
+              })}
             </Badge>
           )}
           {video.privacy_status === "review_required" && (
@@ -110,7 +126,7 @@ function VideoRow({
               to="/privacy-review"
               className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-700 hover:bg-amber-100"
             >
-              Review privacy
+              {t("videosPage.reviewPrivacy")}
             </Link>
           )}
           {video.privacy_status === "failed" && (
@@ -120,7 +136,7 @@ function VideoRow({
               onClick={() => onRetryPrivacy(video.id)}
               disabled={isRetryingPrivacy}
             >
-              {isRetryingPrivacy ? "Retrying..." : "Retry privacy"}
+              {isRetryingPrivacy ? t("videosPage.retryingPrivacy") : t("videosPage.retryPrivacy")}
             </Button>
           )}
           {(video.status === "failed" || video.status === "error") && (
@@ -130,45 +146,45 @@ function VideoRow({
               onClick={() => onRetry(video.id)}
               disabled={isRetrying}
             >
-              {isRetrying ? "Retrying..." : "Retry analysis"}
+              {isRetrying ? t("videosPage.retrying") : t("videosPage.retryAnalysis")}
             </Button>
           )}
           <Link
             to={`/teachers/${video.teacher_id}`}
             className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
           >
-            Teacher page
+            {t("videosPage.teacherPage")}
           </Link>
           <Link
             to={`/videos/${video.id}`}
             className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
           >
-            View recording
+            {t("videosPage.viewRecording")}
           </Link>
         </div>
       </div>
       <div className="mt-2 grid gap-2 text-xs text-slate-600 md:grid-cols-2">
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-            Summary assessment
+            {t("videosPage.summaryAssessment")}
           </div>
           <div className="mt-1 line-clamp-2">
-            {assessment?.summary || "No assessment summary yet."}
+            {assessment?.summary || t("videosPage.noAssessmentSummary")}
           </div>
         </div>
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-            Recommendations
+            {t("videosPage.recommendations")}
           </div>
           {assessment?.recommendations?.length ? (
-            <ul className="mt-1 list-disc space-y-1 pl-4">
+            <ul className="mt-1 list-disc space-y-1 ps-4">
               {assessment.recommendations.slice(0, 2).map((rec, idx) => (
                 <li key={idx}>{rec}</li>
               ))}
             </ul>
           ) : (
             <div className="mt-1 text-xs text-slate-500">
-              No recommendations yet.
+              {t("videosPage.noRecommendations")}
             </div>
           )}
         </div>
@@ -183,12 +199,12 @@ function VideoRow({
         onClick={() => setOpen((prev) => !prev)}
         className="mt-3 inline-flex items-center rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
       >
-        {open ? "Hide detailed assessment" : "View detailed assessment"}
+        {open ? t("videosPage.hideDetailedAssessment") : t("videosPage.viewDetailedAssessment")}
       </button>
       {open && (
         <div className="mt-3 rounded-md border border-slate-200 bg-white p-3 text-xs text-slate-700">
           {elementOptions.length === 0 ? (
-            <div className="text-xs text-slate-500">No detailed scores yet.</div>
+            <div className="text-xs text-slate-500">{t("videosPage.noDetailedScores")}</div>
           ) : (
             <div className="space-y-2">
               {elementOptions.map((el) => (
@@ -213,7 +229,7 @@ function VideoRow({
                     </ul>
                   ) : (
                     <div className="mt-1 text-[11px] text-slate-500">
-                      No evidence yet.
+                      {t("videosPage.noEvidenceYet")}
                     </div>
                   )}
                 </div>
@@ -223,7 +239,7 @@ function VideoRow({
           {isAdmin && assessment && (
             <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-2 text-[11px]">
               <div className="mb-2 font-semibold text-slate-700">
-                Admin comment & adjustment
+                {t("videosPage.adminCommentAdjustment")}
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <select
@@ -231,7 +247,7 @@ function VideoRow({
                   value={selectedDomain}
                   onChange={(e) => setSelectedDomain(e.target.value)}
                 >
-                  <option value="">Select domain</option>
+                  <option value="">{t("videosPage.selectDomain")}</option>
                   {elementOptions.map((el) => (
                     <option key={el.element_id} value={el.element_id}>
                       {el.element_name}
@@ -245,7 +261,7 @@ function VideoRow({
                   max="10"
                   value={adjustedScore}
                   onChange={(e) => setAdjustedScore(e.target.value)}
-                  placeholder="Adjusted score"
+                  placeholder={t("videosPage.adjustedScore")}
                   className="w-24 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
                 />
               </div>
@@ -253,19 +269,19 @@ function VideoRow({
                 rows={2}
                 value={adminNote}
                 onChange={(e) => setAdminNote(e.target.value)}
-                placeholder="Admin comment or rationale"
+                placeholder={t("videosPage.adminCommentPlaceholder")}
                 className="mt-2 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
               />
               <button
                 type="button"
                 onClick={() => {
                   if (!selectedDomain || !adjustedScore) {
-                    toast.error("Select a domain and adjusted score");
+                    toast.error(t("videosPage.selectDomainAndScore"));
                     return;
                   }
                   const adjusted = parseFloat(adjustedScore);
                   if (Number.isNaN(adjusted)) {
-                    toast.error("Enter a valid score");
+                    toast.error(t("videosPage.enterValidScore"));
                     return;
                   }
                   const original =
@@ -280,7 +296,7 @@ function VideoRow({
                 }}
                 className="mt-2 inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90"
               >
-                Save adjustment
+                {t("videosPage.saveAdjustment")}
               </button>
             </div>
           )}
@@ -291,6 +307,7 @@ function VideoRow({
 }
 
 export function VideosPage() {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
@@ -395,7 +412,7 @@ export function VideosPage() {
       return videoApi.upload(formData);
     },
     onSuccess: () => {
-      toast.success("Video uploaded and queued for analysis");
+      toast.success(t("videosPage.uploadedQueued"));
       queryClient.invalidateQueries({ queryKey: ["videos"] });
       queryClient.invalidateQueries({ queryKey: ["assessments"] });
       setFile(null);
@@ -403,42 +420,42 @@ export function VideosPage() {
     onError: (error) => {
       const detail = error?.response?.data?.detail;
       toast.error(
-        typeof detail === "string" ? detail : detail?.message || "Failed to upload video for analysis"
+        typeof detail === "string" ? detail : detail?.message || t("videosPage.uploadFailed")
       );
     },
   });
   const retryMutation = useMutation({
     mutationFn: (videoId) => videoApi.retry(videoId),
     onSuccess: () => {
-      toast.success("Video re-queued for analysis");
+      toast.success(t("videosPage.analysisRequeued"));
       queryClient.invalidateQueries({ queryKey: ["videos"] });
       queryClient.invalidateQueries({ queryKey: ["assessments"] });
     },
     onError: (error) => {
-      toast.error(error?.response?.data?.detail || "Failed to retry video analysis");
+      toast.error(error?.response?.data?.detail || t("videosPage.analysisRetryFailed"));
     },
   });
   const retryPrivacyMutation = useMutation({
     mutationFn: (videoId) => videoApi.retryPrivacy(videoId),
     onSuccess: () => {
-      toast.success("Privacy processing re-queued");
+      toast.success(t("videosPage.privacyRequeued"));
       queryClient.invalidateQueries({ queryKey: ["videos"] });
       queryClient.invalidateQueries({ queryKey: ["assessments"] });
     },
     onError: (error) => {
       const detail = error?.response?.data?.detail;
-      toast.error(typeof detail === "string" ? detail : detail?.message || "Failed to retry privacy processing");
+      toast.error(typeof detail === "string" ? detail : detail?.message || t("videosPage.privacyRetryFailed"));
     },
   });
 
   const onSubmit = (e) => {
     e.preventDefault();
     if (!file || !selectedTeacher) {
-      toast.error("Select a teacher and video file");
+      toast.error(t("videosPage.selectTeacherAndFile"));
       return;
     }
     if (!selectedTeacherPrivacyReady) {
-      toast.error("Complete the teacher privacy profile before uploading recordings.");
+      toast.error(t("videosPage.completePrivacyProfile"));
       return;
     }
     uploadMutation.mutate({ file, teacherId: selectedTeacher });
@@ -449,24 +466,24 @@ export function VideosPage() {
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
         <PageHeader
-          title="Videos & Assessments"
-          description="Review recordings, filter by focus, and take action on insights."
+          title={t("videosPage.title")}
+          description={t("videosPage.description")}
         />
 
         <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
           <div className="md:col-span-3 space-y-6">
             <Panel>
               <h2 className="mb-3 text-sm font-semibold text-slate-900">
-                Filters
+                {t("videosPage.filters")}
               </h2>
               <div className="space-y-3 text-xs">
-                <Field label="Teacher">
+                <Field label={t("teachersPage.teacher")}>
                   <Select
                     value={selectedTeacher}
                     onChange={(e) => setSelectedTeacher(e.target.value)}
                     size="sm"
                   >
-                    <option value="">All teachers</option>
+                    <option value="">{t("videosPage.allTeachers")}</option>
                     {teachers.map((t) => (
                       <option key={t.id} value={t.id}>
                         {t.name} • {t.subject}
@@ -474,13 +491,13 @@ export function VideosPage() {
                     ))}
                   </Select>
                 </Field>
-                <Field label="Subject">
+                <Field label={t("teachersPage.subject")}>
                   <Select
                     value={subjectFilter}
                     onChange={(e) => setSubjectFilter(e.target.value)}
                     size="sm"
                   >
-                    <option value="all">All subjects</option>
+                    <option value="all">{t("videosPage.allSubjects")}</option>
                     {subjectOptions.map((subject) => (
                       <option key={subject} value={subject}>
                         {subject}
@@ -488,36 +505,36 @@ export function VideosPage() {
                     ))}
                   </Select>
                 </Field>
-                <Field label="Status">
+                <Field label={t("videosPage.status")}>
                   <Select
                     value={statusFilter}
                     onChange={(e) => setStatusFilter(e.target.value)}
                     size="sm"
                   >
-                    <option value="all">All</option>
-                    <option value="queued">Queued</option>
-                    <option value="processing">Processing</option>
-                    <option value="completed">Completed</option>
-                    <option value="failed">Failed</option>
+                    <option value="all">{t("teachersPage.all")}</option>
+                    <option value="queued">{t("videosPage.queued")}</option>
+                    <option value="processing">{t("videosPage.processing")}</option>
+                    <option value="completed">{t("videosPage.completed")}</option>
+                    <option value="failed">{t("videosPage.failed")}</option>
                   </Select>
                 </Field>
-                <Field label="Time range">
+                <Field label={t("videosPage.timeRange")}>
                   <Select
                     value={timeRange}
                     onChange={(e) => setTimeRange(e.target.value)}
                     size="sm"
                   >
-                    <option value="30">Last 30 days</option>
-                    <option value="60">Last 60 days</option>
-                    <option value="90">Last 90 days</option>
-                    <option value="365">Last 12 months</option>
+                    <option value="30">{t("videosPage.last30Days")}</option>
+                    <option value="60">{t("videosPage.last60Days")}</option>
+                    <option value="90">{t("videosPage.last90Days")}</option>
+                    <option value="365">{t("videosPage.last12Months")}</option>
                   </Select>
                 </Field>
-                <Field label="Search">
+                <Field label={t("videosPage.search")}>
                   <Input
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search by filename or subject"
+                    placeholder={t("videosPage.searchPlaceholder")}
                     size="sm"
                   />
                 </Field>
@@ -525,24 +542,26 @@ export function VideosPage() {
             </Panel>
             <Panel>
               <h2 className="mb-3 text-sm font-semibold text-slate-900">
-                Upload recording
+                {t("videosPage.uploadRecording")}
               </h2>
               <p className="mb-3 text-[11px] text-slate-500">
-                Accepted: MP4, MOV, AVI, MKV, WEBM. Large files may take several minutes to process.
+                {t("videosPage.uploadAccepted")}
               </p>
               {selectedTeacher && (
                 <div className="mb-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-600">
-                  Privacy profile: {selectedTeacherPrivacyReady ? "Ready" : "Required before upload"}
+                  {selectedTeacherPrivacyReady
+                    ? t("videosPage.privacyProfileReady")
+                    : t("videosPage.privacyProfileRequiredBeforeUpload")}
                 </div>
               )}
               <form onSubmit={onSubmit} className="space-y-3 text-sm">
-                <Field label="Teacher">
+                <Field label={t("teachersPage.teacher")}>
                   <Select
                     value={selectedTeacher}
                     onChange={(e) => setSelectedTeacher(e.target.value)}
                     size="sm"
                   >
-                    <option value="">Select a teacher</option>
+                    <option value="">{t("videosPage.selectTeacher")}</option>
                     {teachers.map((t) => (
                       <option key={t.id} value={t.id}>
                         {t.name} • {t.subject}
@@ -550,12 +569,12 @@ export function VideosPage() {
                     ))}
                   </Select>
                 </Field>
-                <Field label="Video file">
+                <Field label={t("videosPage.videoFile")}>
                   <input
                     type="file"
                     accept="video/*"
                     onChange={(e) => setFile(e.target.files?.[0] || null)}
-                    className="mt-1 w-full text-xs text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
+                    className="mt-1 w-full text-xs text-slate-600 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
                   />
                 </Field>
                 <Button
@@ -565,10 +584,10 @@ export function VideosPage() {
                   className="mt-2"
                 >
                   {uploadMutation.isPending
-                    ? "Uploading..."
+                    ? t("videosPage.uploading")
                     : Boolean(selectedTeacher) && !selectedTeacherPrivacyReady
-                      ? "Privacy profile required"
-                      : "Upload & analyze"}
+                      ? t("videosPage.privacyProfileRequired")
+                      : t("videosPage.uploadAnalyze")}
                 </Button>
               </form>
             </Panel>
@@ -579,27 +598,27 @@ export function VideosPage() {
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-900">
-                    Recordings library
+                    {t("videosPage.recordingsLibrary")}
                   </h2>
                   <p className="text-xs text-slate-500">
-                    Filter by topic, status, and time to review recordings that matter.
+                    {t("videosPage.recordingsLibraryDescription")}
                   </p>
                 </div>
                 <div className="text-xs text-slate-500">
-                  {filteredVideos.length} recordings
+                  {t("videosPage.recordingsCount", { count: filteredVideos.length })}
                 </div>
               </div>
               {loadingVideos || loadingAssessments ? (
-                <LoadingState message="Loading recordings..." />
+                <LoadingState message={t("videosPage.loadingRecordings")} />
               ) : hasLoadError ? (
                 <ErrorState
-                  title="Unable to load recordings"
-                  message="There was a problem loading teachers, recordings, or assessments. Refresh and try again."
+                  title={t("videosPage.unableToLoadTitle")}
+                  message={t("videosPage.unableToLoadMessage")}
                 />
               ) : filteredVideos.length === 0 ? (
                 <EmptyState
-                  title="No matching recordings"
-                  message="No recordings match the current filters."
+                  title={t("videosPage.noMatchingTitle")}
+                  message={t("videosPage.noMatchingMessage")}
                 />
               ) : (
                 <div className="space-y-3">

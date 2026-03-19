@@ -29,6 +29,7 @@ See the baseline lock and program plan:
 - [Pilot Privacy Validation Pack](./docs/PILOT_PRIVACY_VALIDATION_PACK.md)
 - [Privacy Go-Live Checklist](./docs/PRIVACY_GO_LIVE_CHECKLIST.md)
 - [Production Phase Checklist](./docs/PRODUCTION_PHASE_CHECKLIST.md)
+- [Hebrew Localization Plan](./docs/HEBREW_LOCALIZATION_PLAN.md)
 - [Staging Validation Report (2026-03-18)](./docs/STAGING_VALIDATION_REPORT_2026-03-18.md)
 - [Recognition / Library Staging Validation Report (2026-03-18)](./docs/STAGING_VALIDATION_RECOGNITION_LIBRARY_2026-03-18.md)
 - [Deployment + Rollback Runbook](./docs/DEPLOYMENT_ROLLBACK_RUNBOOK.md)

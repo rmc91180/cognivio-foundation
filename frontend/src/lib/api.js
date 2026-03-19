@@ -1,6 +1,7 @@
 import axios from "axios";
+import { runtimeConfig } from "@/lib/runtimeConfig";
 
-const API_BASE_URL = process.env.REACT_APP_BACKEND_URL;
+const API_BASE_URL = runtimeConfig.backendUrl;
 
 if (!API_BASE_URL) {
   // eslint-disable-next-line no-console

@@ -1,10 +1,13 @@
 import React from "react";
 import { NavLink } from "react-router-dom";
 import { BookOpen, Layers, LayoutDashboard, PlayCircle, ShieldCheck, Trophy, Users } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { useAuth } from "@/hooks/useAuth";
 import { BrandMark } from "@/components/BrandMark";
+import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 
 export function LayoutShell({ children }) {
+  const { t } = useTranslation();
   const { user, logout } = useAuth();
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
 
@@ -13,15 +16,16 @@ export function LayoutShell({ children }) {
       <aside className="w-72 border-r border-slate-200 bg-white/95 backdrop-blur-sm shadow-panel flex flex-col">
         <div className="flex h-16 items-center justify-between px-5 border-b border-slate-200">
           <BrandMark to="/" />
+          <LanguageSwitcher compact />
         </div>
         <nav className="mt-5 space-y-1.5 px-3 text-sm">
-          <NavItem to="/dashboard" icon={LayoutDashboard} label="Dashboard" />
-          <NavItem to="/teachers" icon={Users} label="Teachers" />
-          <NavItem to="/videos" icon={PlayCircle} label="Videos & Assessments" />
-          <NavItem to="/all-star-library" icon={BookOpen} label="All-Star Library" />
-          {isAdmin && <NavItem to="/privacy-review" icon={ShieldCheck} label="Privacy Review" />}
-          {isAdmin && <NavItem to="/recognition-review" icon={Trophy} label="Recognition Review" />}
-          <NavItem to="/school-setup" icon={Layers} label="School Setup" />
+          <NavItem to="/dashboard" icon={LayoutDashboard} label={t("nav.dashboard")} />
+          <NavItem to="/teachers" icon={Users} label={t("nav.teachers")} />
+          <NavItem to="/videos" icon={PlayCircle} label={t("nav.videos")} />
+          <NavItem to="/all-star-library" icon={BookOpen} label={t("nav.allStarLibrary")} />
+          {isAdmin && <NavItem to="/privacy-review" icon={ShieldCheck} label={t("nav.privacyReview")} />}
+          {isAdmin && <NavItem to="/recognition-review" icon={Trophy} label={t("nav.recognitionReview")} />}
+          <NavItem to="/school-setup" icon={Layers} label={t("nav.schoolSetup")} />
         </nav>
         <div className="mt-auto border-t border-slate-200 px-4 py-3 text-xs text-slate-500 bg-slate-50/70">
           {user ? (
@@ -37,11 +41,11 @@ export function LayoutShell({ children }) {
                 onClick={logout}
                 className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-white"
               >
-                Logout
+                {t("nav.logout")}
               </button>
             </div>
           ) : (
-            <span>Not authenticated</span>
+            <span>{t("nav.notAuthenticated")}</span>
           )}
         </div>
       </aside>

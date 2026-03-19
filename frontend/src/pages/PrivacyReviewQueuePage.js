@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { opsApi, privacyReviewApi, videoApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { useAuth } from "@/hooks/useAuth";
@@ -32,27 +33,39 @@ function OpsMetric({ label, value, tone = "neutral" }) {
 }
 
 function ReviewCard({ item, onResolve, onRetryPrivacy, resolving, retrying }) {
+  const { t } = useTranslation();
   const firstTrack = item.candidate_tracks?.[0];
+  const formatStatus = (value) => {
+    const map = {
+      review_required: t("labels.reviewRequired"),
+      pending_admin_review: t("labels.pendingAdminReview"),
+      queued: t("labels.queued"),
+      processing: t("labels.processing"),
+      completed: t("labels.completed"),
+      failed: t("labels.failed"),
+    };
+    return map[value] || value || t("privacyReview.unknown");
+  };
 
   return (
     <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="text-sm font-semibold text-slate-900">
-            {item.teacher_name || "Teacher"} • {item.filename}
+            {item.teacher_name || t("privacyReview.teacherFallback")} • {item.filename}
           </div>
           <div className="mt-1 text-[11px] text-slate-500">
-            Uploaded {item.upload_date}
+            {t("privacyReview.uploaded", { date: item.upload_date })}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="warning">Privacy review required</Badge>
-          <Badge variant="neutral">{item.privacy_review_reason || "manual_review"}</Badge>
+          <Badge variant="warning">{t("privacyReview.privacyReviewRequired")}</Badge>
+          <Badge variant="neutral">{formatStatus(item.privacy_review_reason) || t("privacyReview.manualReview")}</Badge>
           <Link
             to={`/videos/${item.video_id}`}
             className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
           >
-            Open recording
+            {t("privacyReview.openRecording")}
           </Link>
         </div>
       </div>
@@ -60,7 +73,7 @@ function ReviewCard({ item, onResolve, onRetryPrivacy, resolving, retrying }) {
       <div className="mt-4 grid gap-4 lg:grid-cols-[1.3fr_1fr]">
         <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
           <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-            Candidate tracks
+            {t("privacyReview.candidateTracks")}
           </div>
           {item.candidate_tracks?.length ? (
             <div className="mt-2 space-y-2">
@@ -70,13 +83,13 @@ function ReviewCard({ item, onResolve, onRetryPrivacy, resolving, retrying }) {
                   className="flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700"
                 >
                   <span>{track.track_id}</span>
-                  <span>Match {Math.round((track.teacher_match_score || 0) * 100)}%</span>
+                  <span>{t("privacyReview.matchPercent", { percent: Math.round((track.teacher_match_score || 0) * 100) })}</span>
                 </div>
               ))}
             </div>
           ) : (
             <div className="mt-2 text-xs text-slate-500">
-              No candidate tracks were captured. Use blur-all fallback or retry privacy processing.
+              {t("privacyReview.noCandidateTracks")}
             </div>
           )}
         </div>
@@ -94,7 +107,7 @@ function ReviewCard({ item, onResolve, onRetryPrivacy, resolving, retrying }) {
             }
             disabled={resolving}
           >
-            {resolving ? "Working..." : "Approve best teacher track"}
+            {resolving ? "..." : t("privacyReview.approveBestTrack")}
           </Button>
           <Button
             fullWidth
@@ -108,7 +121,7 @@ function ReviewCard({ item, onResolve, onRetryPrivacy, resolving, retrying }) {
             }
             disabled={resolving}
           >
-            Blur all and continue
+            {t("privacyReview.blurAll")}
           </Button>
           <Button
             fullWidth
@@ -122,7 +135,7 @@ function ReviewCard({ item, onResolve, onRetryPrivacy, resolving, retrying }) {
             }
             disabled={resolving}
           >
-            Rerun privacy analysis
+            {t("privacyReview.rerun")}
           </Button>
           <Button
             fullWidth
@@ -131,7 +144,7 @@ function ReviewCard({ item, onResolve, onRetryPrivacy, resolving, retrying }) {
             onClick={() => onRetryPrivacy(item.video_id)}
             disabled={retrying}
           >
-            {retrying ? "Retrying..." : "Queue privacy retry"}
+            {retrying ? "..." : t("privacyReview.retry")}
           </Button>
         </div>
       </div>
@@ -140,6 +153,7 @@ function ReviewCard({ item, onResolve, onRetryPrivacy, resolving, retrying }) {
 }
 
 export function PrivacyReviewQueuePage() {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
@@ -172,7 +186,7 @@ export function PrivacyReviewQueuePage() {
   const resolveMutation = useMutation({
     mutationFn: ({ videoId, payload }) => privacyReviewApi.resolve(videoId, payload),
     onSuccess: () => {
-      toast.success("Privacy review action saved");
+      toast.success(t("privacyReview.reviewActionSaved"));
       queryClient.invalidateQueries({ queryKey: ["privacy-review-queue"] });
       queryClient.invalidateQueries({ queryKey: ["ops-readiness"] });
       queryClient.invalidateQueries({ queryKey: ["ops-launch-health"] });
@@ -180,14 +194,14 @@ export function PrivacyReviewQueuePage() {
     },
     onError: (error) => {
       const detail = error?.response?.data?.detail;
-      toast.error(typeof detail === "string" ? detail : detail?.message || "Failed to resolve privacy review");
+      toast.error(typeof detail === "string" ? detail : detail?.message || t("privacyReview.reviewActionFailed"));
     },
   });
 
   const retryPrivacyMutation = useMutation({
     mutationFn: (videoId) => videoApi.retryPrivacy(videoId),
     onSuccess: () => {
-      toast.success("Privacy retry queued");
+      toast.success(t("privacyReview.retryQueued"));
       queryClient.invalidateQueries({ queryKey: ["privacy-review-queue"] });
       queryClient.invalidateQueries({ queryKey: ["ops-readiness"] });
       queryClient.invalidateQueries({ queryKey: ["ops-launch-health"] });
@@ -195,7 +209,7 @@ export function PrivacyReviewQueuePage() {
     },
     onError: (error) => {
       const detail = error?.response?.data?.detail;
-      toast.error(typeof detail === "string" ? detail : detail?.message || "Failed to queue privacy retry");
+      toast.error(typeof detail === "string" ? detail : detail?.message || t("privacyReview.retryQueueFailed"));
     },
   });
 
@@ -206,8 +220,8 @@ export function PrivacyReviewQueuePage() {
       <LayoutShell>
         <div className="mx-auto max-w-5xl px-6 py-6">
           <ErrorState
-            title="Admin Access Required"
-            message="Privacy review tools are only available to admins."
+            title={t("privacyReview.adminRequiredTitle")}
+            message={t("privacyReview.adminRequiredMessage")}
           />
         </div>
       </LayoutShell>
@@ -218,33 +232,33 @@ export function PrivacyReviewQueuePage() {
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
         <PageHeader
-          title="Privacy Review"
-          description="Work ambiguous recordings, monitor privacy queue health, and keep launches moving safely."
+          title={t("privacyReview.title")}
+          description={t("privacyReview.description")}
         />
 
         <div className="grid gap-6 lg:grid-cols-[1.2fr_2fr]">
           <Panel>
             <h2 className="mb-3 text-sm font-semibold text-slate-900">
-              Queue Health
+              {t("privacyReview.queueHealth")}
             </h2>
             <div className="grid gap-3 sm:grid-cols-2">
               <OpsMetric
-                label="Pending Reviews"
+                label={t("privacyReview.pendingReviews")}
                 value={launchHealthRes?.metrics?.privacy_reviews_pending ?? queueItems.length}
                 tone={(launchHealthRes?.metrics?.privacy_reviews_pending ?? queueItems.length) > 0 ? "warning" : "neutral"}
               />
               <OpsMetric
-                label="Privacy Queue"
+                label={t("privacyReview.privacyQueue")}
                 value={launchHealthRes?.metrics?.privacy_queue_depth ?? 0}
                 tone={(launchHealthRes?.metrics?.privacy_queue_depth ?? 0) > 10 ? "warning" : "neutral"}
               />
               <OpsMetric
-                label="Privacy Failures 24h"
+                label={t("dashboard.privacyFailures24h")}
                 value={launchHealthRes?.metrics?.failed_privacy_jobs_24h ?? 0}
                 tone={(launchHealthRes?.metrics?.failed_privacy_jobs_24h ?? 0) > 0 ? "danger" : "neutral"}
               />
               <OpsMetric
-                label="Missing Profiles"
+                label={t("dashboard.missingProfiles")}
                 value={readinessRes?.metrics?.teachers_missing_privacy_profiles ?? 0}
                 tone={(readinessRes?.metrics?.teachers_missing_privacy_profiles ?? 0) > 0 ? "warning" : "neutral"}
               />
@@ -252,7 +266,7 @@ export function PrivacyReviewQueuePage() {
 
             <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
               <div className="font-semibold text-slate-800">
-                Incident Level: {launchHealthRes?.incident_level || "unknown"}
+                {t("privacyReview.incidentLevel")}: {launchHealthRes?.incident_level || t("privacyReview.unknown")}
               </div>
               <div className="mt-2 space-y-1">
                 {(launchHealthRes?.recommended_actions || []).map((action) => (
@@ -266,28 +280,30 @@ export function PrivacyReviewQueuePage() {
             <div className="mb-4 flex items-center justify-between gap-3">
               <div>
                 <h2 className="text-sm font-semibold text-slate-900">
-                  Review Queue
+                  {t("privacyReview.reviewQueue")}
                 </h2>
                 <p className="text-xs text-slate-500">
-                  Resolve ambiguous matches before customers see the recording.
+                  {t("privacyReview.reviewQueueDescription")}
                 </p>
               </div>
               <div className="text-xs text-slate-500">
-                {queueItems.length} item{queueItems.length === 1 ? "" : "s"}
+                {queueItems.length === 1
+                  ? t("privacyReview.oneItemCount")
+                  : t("privacyReview.itemsCount", { count: queueItems.length })}
               </div>
             </div>
 
             {queueLoading ? (
-              <LoadingState message="Loading privacy review queue..." />
+              <LoadingState message={t("privacyReview.loadingQueue")} />
             ) : queueError ? (
               <ErrorState
-                title="Unable to load privacy review queue"
-                message="Refresh and try again. If this persists, inspect the backend ops metrics."
+                title={t("privacyReview.queueErrorTitle")}
+                message={t("privacyReview.queueErrorMessage")}
               />
             ) : queueItems.length === 0 ? (
               <EmptyState
-                title="Privacy queue is clear"
-                message="No recordings currently require manual privacy review."
+                title={t("privacyReview.emptyTitle")}
+                message={t("privacyReview.emptyMessage")}
               />
             ) : (
               <div className="space-y-4">

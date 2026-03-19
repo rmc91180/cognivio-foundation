@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   assessmentApi,
   frameworkApi,
@@ -28,17 +29,19 @@ import { subDays, format } from "date-fns";
 import { useAuth } from "@/hooks/useAuth";
 import { Button, EmptyState, LoadingState, PageHeader, Panel } from "@/components/ui";
 import { Link } from "react-router-dom";
+import { runtimeConfig } from "@/lib/runtimeConfig";
 
 export function DashboardPage() {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
-  const buildSha = process.env.REACT_APP_BUILD_SHA;
-  const buildTime = process.env.REACT_APP_BUILD_TIME;
+  const buildSha = runtimeConfig.buildSha;
+  const buildTime = runtimeConfig.buildTime;
   const buildStamp = buildSha
     ? `${buildSha}${buildTime ? ` • ${buildTime}` : ""}`
     : null;
-  const isDashboardV2Enabled = process.env.REACT_APP_DASHBOARD_V2 !== "false";
+  const isDashboardV2Enabled = runtimeConfig.dashboardV2Enabled;
   const now = useMemo(() => new Date(), []);
   const currentRange = useMemo(
     () => ({ start: subDays(now, 30), end: now }),
@@ -510,8 +513,8 @@ export function DashboardPage() {
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
         <PageHeader
-          title="Teacher Performance Overview"
-          description="Macro-level view of growth across priority focus areas and departments."
+          title={t("dashboard.title")}
+          description={t("dashboard.description")}
           meta={buildStamp ? `Build: ${buildStamp}` : null}
           actions={
             <Button
@@ -520,7 +523,7 @@ export function DashboardPage() {
               onClick={() => seedDemoMutation.mutate()}
               disabled={seedDemoMutation.isPending}
             >
-              {seedDemoMutation.isPending ? "Seeding data..." : "Seed demo data"}
+              {seedDemoMutation.isPending ? t("dashboard.seedingData") : t("dashboard.seedDemoData")}
             </Button>
           }
         />
@@ -531,40 +534,40 @@ export function DashboardPage() {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-900">
-                    Privacy Operations
+                    {t("dashboard.privacyOperationsTitle")}
                   </h2>
                   <p className="text-xs text-slate-500">
-                    Review queue, privacy failures, and teacher enrollment readiness.
+                    {t("dashboard.privacyOperationsDescription")}
                   </p>
                 </div>
                 <Link
                   to="/privacy-review"
                   className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
                 >
-                  Open privacy review
+                  {t("dashboard.openPrivacyReview")}
                 </Link>
               </div>
               <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-slate-500">Pending Reviews</div>
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.pendingReviews")}</div>
                   <div className="mt-1 text-xl font-semibold text-slate-900">
                     {opsHealthRes?.metrics?.privacy_reviews_pending ?? 0}
                   </div>
                 </div>
                 <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-slate-500">Privacy Queue</div>
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.privacyQueue")}</div>
                   <div className="mt-1 text-xl font-semibold text-slate-900">
                     {opsHealthRes?.metrics?.privacy_queue_depth ?? 0}
                   </div>
                 </div>
                 <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-slate-500">Privacy Failures 24h</div>
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.privacyFailures24h")}</div>
                   <div className="mt-1 text-xl font-semibold text-slate-900">
                     {opsHealthRes?.metrics?.failed_privacy_jobs_24h ?? 0}
                   </div>
                 </div>
                 <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-slate-500">Missing Profiles</div>
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.missingProfiles")}</div>
                   <div className="mt-1 text-xl font-semibold text-slate-900">
                     {opsReadinessRes?.metrics?.teachers_missing_privacy_profiles ?? 0}
                   </div>
@@ -576,34 +579,34 @@ export function DashboardPage() {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-900">
-                    Recognition Operations
+                    {t("dashboard.recognitionOperationsTitle")}
                   </h2>
                   <p className="text-xs text-slate-500">
-                    Review 5-star candidates and keep exemplar approvals moving.
+                    {t("dashboard.recognitionOperationsDescription")}
                   </p>
                 </div>
                 <Link
                   to="/recognition-review"
                   className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
                 >
-                  Open recognition review
+                  {t("dashboard.openRecognitionReview")}
                 </Link>
               </div>
               <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-slate-500">Pending Reviews</div>
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.pendingReviews")}</div>
                   <div className="mt-1 text-xl font-semibold text-slate-900">
                     {recognitionQueueItems.length}
                   </div>
                 </div>
                 <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-slate-500">Library Scope</div>
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.libraryScope")}</div>
                   <div className="mt-1 text-xl font-semibold text-slate-900">
                     {recognitionQueueItems.filter((item) => item.sharing_scope === "cognivio_library").length}
                   </div>
                 </div>
                 <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-slate-500">School Scope</div>
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.schoolScope")}</div>
                   <div className="mt-1 text-xl font-semibold text-slate-900">
                     {recognitionQueueItems.filter((item) => item.sharing_scope === "school_only").length}
                   </div>
@@ -614,12 +617,12 @@ export function DashboardPage() {
         )}
 
         {isLoading ? (
-          <LoadingState className="mt-8" message="Loading roster..." />
+          <LoadingState className="mt-8" message={t("dashboard.loadingRoster")} />
         ) : roster.length === 0 ? (
           <EmptyState
             className="mt-8"
-            title="No teachers found yet"
-            message="Start by adding teachers and uploading classroom videos."
+            title={t("dashboard.noTeachersTitle")}
+            message={t("dashboard.noTeachersMessage")}
           />
         ) : (
           <>

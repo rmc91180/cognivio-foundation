@@ -70,6 +70,7 @@ venv/
 *.tmp
 *.temp
 .cache/
+tmp/
 
 # Development tools
 chainlit.md

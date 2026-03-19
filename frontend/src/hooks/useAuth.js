@@ -1,11 +1,13 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { authApi } from "@/lib/api";
 
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
+  const { t } = useTranslation();
   const [user, setUser] = useState(null);
   const [initializing, setInitializing] = useState(true);
   const queryClient = useQueryClient();
@@ -32,11 +34,11 @@ export function AuthProvider({ children }) {
     onSuccess: (res) => {
       localStorage.setItem("cognivio_token", res.data.token);
       setUser(res.data.user);
-      toast.success("Logged in successfully");
+      toast.success(t("auth.loggedInSuccessfully"));
       queryClient.clear();
     },
     onError: (error) => {
-      toast.error(error?.response?.data?.detail || "Login failed");
+      toast.error(error?.response?.data?.detail || t("auth.loginFailed"));
     },
   });
 
@@ -45,11 +47,11 @@ export function AuthProvider({ children }) {
     onSuccess: (res) => {
       localStorage.setItem("cognivio_token", res.data.token);
       setUser(res.data.user);
-      toast.success("Account created");
+      toast.success(t("auth.accountCreated"));
       queryClient.clear();
     },
     onError: (error) => {
-      toast.error(error?.response?.data?.detail || "Registration failed");
+      toast.error(error?.response?.data?.detail || t("auth.registrationFailed"));
     },
   });
 

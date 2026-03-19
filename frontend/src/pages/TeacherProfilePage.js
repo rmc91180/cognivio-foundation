@@ -23,12 +23,15 @@ import { MonthlySummary } from "@/components/MonthlySummary";
 import { VideoRecorder } from "@/components/VideoRecorder";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
+import { useTranslation } from "react-i18next";
 
 export function TeacherProfilePage() {
+  const { t, i18n } = useTranslation();
   const { teacherId } = useParams();
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
+  const isRtl = i18n.dir() === "rtl";
   const [periodMonths, setPeriodMonths] = useState(3);
   const [nextCoachingConference, setNextCoachingConference] = useState("");
 
@@ -103,24 +106,24 @@ export function TeacherProfilePage() {
     mutationFn: (payload) =>
       assessmentApi.saveTeacherSummaryReflection(teacherId, payload),
     onSuccess: () => {
-      toast.success("Reflection saved");
+      toast.success(t("teacherProfile.reflectionSaved"));
       queryClient.invalidateQueries({
         queryKey: ["teacher-summary-reflection", teacherId],
       });
     },
     onError: () => {
-      toast.error("Failed to save reflection");
+      toast.error(t("teacherProfile.reflectionSaveFailed"));
     },
   });
 
   const saveNextCoachingConferenceMutation = useMutation({
     mutationFn: (payload) => teacherApi.update(teacherId, payload),
     onSuccess: () => {
-      toast.success("Next coaching conference updated");
+      toast.success(t("teacherProfile.nextConferenceUpdated"));
       queryClient.invalidateQueries({ queryKey: ["teacher", teacherId] });
     },
     onError: () => {
-      toast.error("Failed to update coaching conference");
+      toast.error(t("teacherProfile.nextConferenceFailed"));
     },
   });
 
@@ -138,87 +141,87 @@ export function TeacherProfilePage() {
     mutationFn: (payload) =>
       assessmentApi.createAdminOverride(latestAssessmentId, payload),
     onSuccess: () => {
-      toast.success("Admin adjustment saved");
+      toast.success(t("teacherProfile.adminAdjustmentSaved"));
       queryClient.invalidateQueries({ queryKey: ["teacher-dashboard", teacherId] });
       queryClient.invalidateQueries({ queryKey: ["roster"] });
     },
     onError: () => {
-      toast.error("Failed to save admin adjustment");
+      toast.error(t("teacherProfile.adminAdjustmentFailed"));
     },
   });
 
   const uploadCurriculumMutation = useMutation({
     mutationFn: (payload) => curriculumApi.upload(payload),
     onSuccess: () => {
-      toast.success("Curriculum uploaded");
+      toast.success(t("teacherProfile.curriculumUploaded"));
       queryClient.invalidateQueries({ queryKey: ["curricula", teacherId] });
       setCurriculumFile(null);
       setCurriculumTitle("");
     },
     onError: (error) => {
-      toast.error(error?.response?.data?.detail || "Failed to upload curriculum");
+      toast.error(error?.response?.data?.detail || t("teacherProfile.curriculumUploadFailed"));
     },
   });
 
   const uploadLessonPlanMutation = useMutation({
     mutationFn: (payload) => lessonPlanApi.upload(payload),
     onSuccess: () => {
-      toast.success("Lesson plan uploaded");
+      toast.success(t("teacherProfile.lessonPlanUploaded"));
       queryClient.invalidateQueries({ queryKey: ["lesson-plans", teacherId] });
       setLessonPlanFile(null);
       setLessonPlanTitle("");
       setLessonPlanDate("");
     },
     onError: (error) => {
-      toast.error(error?.response?.data?.detail || "Failed to upload lesson plan");
+      toast.error(error?.response?.data?.detail || t("teacherProfile.lessonPlanUploadFailed"));
     },
   });
 
   const uploadSyllabusMutation = useMutation({
     mutationFn: (payload) => syllabusApi.upload(payload),
     onSuccess: () => {
-      toast.success("Syllabus uploaded");
+      toast.success(t("teacherProfile.syllabusUploaded"));
       queryClient.invalidateQueries({ queryKey: ["syllabi", teacherId] });
       setSyllabusFile(null);
       setSyllabusTitle("");
     },
     onError: (error) => {
-      toast.error(error?.response?.data?.detail || "Failed to upload syllabus");
+      toast.error(error?.response?.data?.detail || t("teacherProfile.syllabusUploadFailed"));
     },
   });
 
   const scheduleConferenceMutation = useMutation({
     mutationFn: (payload) => scheduleApi.create(payload),
     onSuccess: () => {
-      toast.success("Coaching conference scheduled");
+      toast.success(t("teacherProfile.conferenceScheduled"));
       queryClient.invalidateQueries({ queryKey: ["schedules"] });
     },
     onError: () => {
-      toast.error("Failed to schedule conference");
+      toast.error(t("teacherProfile.conferenceScheduleFailed"));
     },
   });
 
   const scoringModeMutation = useMutation({
     mutationFn: (mode) => adminApi.setScoringMode(mode),
     onSuccess: () => {
-      toast.success("Scoring mode updated");
+      toast.success(t("teacherProfile.scoringModeUpdated"));
       queryClient.invalidateQueries({ queryKey: ["teacher-dashboard", teacherId] });
       queryClient.invalidateQueries({ queryKey: ["roster"] });
     },
     onError: () => {
-      toast.error("Failed to update scoring mode");
+      toast.error(t("teacherProfile.scoringModeFailed"));
     },
   });
 
   const saveActionPlanMutation = useMutation({
     mutationFn: (payload) => actionPlanApi.save(teacherId, payload),
     onSuccess: () => {
-      toast.success("Action plan saved");
+      toast.success(t("teacherProfile.actionPlanSaved"));
       queryClient.invalidateQueries({ queryKey: ["action-plan", teacherId] });
       queryClient.invalidateQueries({ queryKey: ["schedules", teacherId] });
     },
     onError: () => {
-      toast.error("Failed to save action plan");
+      toast.error(t("teacherProfile.actionPlanSaveFailed"));
     },
   });
 
@@ -387,8 +390,10 @@ export function TeacherProfilePage() {
 
   const privacyProfileReady = privacyProfileRes?.status === "active";
   const privacyProfileLabel = privacyProfileReady
-    ? `Ready • ${privacyProfileRes?.reference_count || 0} references`
-    : "Not configured";
+    ? t("teacherProfile.privacyReady", {
+        count: privacyProfileRes?.reference_count || 0,
+      })
+    : t("teacherProfile.notConfigured");
   const recognitionSummary = recognitionSummaryRes?.summary || {};
   const recognitionBadges = recognitionSummaryRes?.badges || [];
 
@@ -424,7 +429,7 @@ export function TeacherProfilePage() {
       a.remove();
       window.URL.revokeObjectURL(url);
     } catch (error) {
-      toast.error("Failed to export report");
+      toast.error(t("teacherProfile.reportExportFailed"));
     }
   };
 
@@ -445,7 +450,7 @@ export function TeacherProfilePage() {
       });
     },
     onSuccess: () => {
-      toast.success("Uploaded. Queued for analysis.");
+      toast.success(t("teacherProfile.recordingQueued"));
       setUploadProgress(0);
       setRecordedBlob(null);
       setRecordedUrl("");
@@ -455,7 +460,7 @@ export function TeacherProfilePage() {
     onError: (error) => {
       const detail = error?.response?.data?.detail;
       toast.error(
-        typeof detail === "string" ? detail : detail?.message || "Failed to upload video"
+        typeof detail === "string" ? detail : detail?.message || t("teacherProfile.videoUploadFailed")
       );
       setUploadProgress(0);
     },
@@ -471,25 +476,25 @@ export function TeacherProfilePage() {
       return privacyProfileApi.upload(teacherId, formData);
     },
     onSuccess: () => {
-      toast.success("Privacy profile saved");
+      toast.success(t("teacherProfile.privacyProfileSaved"));
       setPrivacyReferenceFiles([]);
       queryClient.invalidateQueries({ queryKey: ["teacher-privacy-profile", teacherId] });
     },
     onError: (error) => {
       const detail = error?.response?.data?.detail;
       toast.error(
-        typeof detail === "string" ? detail : detail?.message || "Failed to save privacy profile"
+        typeof detail === "string" ? detail : detail?.message || t("teacherProfile.privacyProfileSaveFailed")
       );
     },
   });
 
   const handleUploadRecorded = () => {
     if (!privacyProfileReady) {
-      toast.error("Complete the teacher privacy profile before uploading recordings.");
+      toast.error(t("teacherProfile.completePrivacyProfileFirst"));
       return;
     }
     if (!recordedBlob || !teacherId) {
-      toast.error("Record a video first.");
+      toast.error(t("teacherProfile.recordVideoFirst"));
       return;
     }
     const ext = recordedBlob.type?.includes("mp4") ? "mp4" : "webm";
@@ -506,7 +511,7 @@ export function TeacherProfilePage() {
 
   const handleSavePrivacyProfile = () => {
     if (!teacherId || privacyReferenceFiles.length === 0) {
-      toast.error("Add 3 to 5 reference photos first.");
+      toast.error(t("teacherProfile.addReferencePhotosFirst"));
       return;
     }
     savePrivacyProfileMutation.mutate(privacyReferenceFiles);
@@ -535,11 +540,12 @@ export function TeacherProfilePage() {
         <header className="mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
             <h1 className="font-heading text-2xl font-semibold text-slate-900">
-              Growth Insights: {teacherRes?.name || "Teacher"}
+              {t("teacherProfile.title", {
+                name: teacherRes?.name || t("teacherProfile.fallbackTeacher"),
+              })}
             </h1>
             <p className="mt-1 text-sm text-slate-600">
-              Growth-oriented insights, human observations, and actionable
-              coaching recommendations.
+              {t("teacherProfile.subtitle")}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -549,27 +555,27 @@ export function TeacherProfilePage() {
               disabled={scheduleConferenceMutation.isPending}
               className="inline-flex items-center rounded-md bg-primary px-4 py-2 text-xs font-medium text-white shadow-lg shadow-primary/30 hover:bg-primary/90 disabled:opacity-60"
             >
-              Schedule Coaching Conference
+              {t("teacherProfile.scheduleConference")}
             </button>
             <Link
               to="/master-schedule"
               className="text-xs text-slate-500 underline underline-offset-4"
             >
-              View master schedule
+              {t("teacherProfile.viewMasterSchedule")}
             </Link>
             <button
               type="button"
               onClick={() => handleExportReport("pdf", { teacher_id: teacherId })}
               className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
             >
-              Export PDF
+              {t("teacherProfile.exportPdf")}
             </button>
             <button
               type="button"
               onClick={() => handleExportReport("csv", { teacher_id: teacherId })}
               className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
             >
-              Export CSV
+              {t("teacherProfile.exportCsv")}
             </button>
           </div>
         </header>
@@ -577,7 +583,7 @@ export function TeacherProfilePage() {
         {scheduleReminders.length > 0 && (
           <details className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
             <summary className="cursor-pointer text-sm font-semibold text-emerald-900">
-              Upcoming reminders ({scheduleReminders.length})
+              {t("teacherProfile.upcomingReminders", { count: scheduleReminders.length })}
             </summary>
             <div className="mt-3 space-y-2 text-xs text-emerald-800">
               {scheduleReminders.map((r) => (
@@ -590,10 +596,10 @@ export function TeacherProfilePage() {
                       {r.course_name}
                     </div>
                     <div className="text-[11px] text-emerald-700">
-                      {r.reminder_type === "lesson_plan" && "Lesson plan"}
-                      {r.reminder_type === "action_plan" && "Action plan"}
+                      {r.reminder_type === "lesson_plan" && t("teacherProfile.reminderLessonPlan")}
+                      {r.reminder_type === "action_plan" && t("teacherProfile.reminderActionPlan")}
                       {r.reminder_type === "recording_compliance" &&
-                        "Recording compliance"}
+                        t("teacherProfile.reminderRecordingCompliance")}
                     </div>
                   </div>
                   <div className="text-[11px] text-emerald-700">
@@ -609,28 +615,28 @@ export function TeacherProfilePage() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="text-sm font-semibold text-slate-900">
-                Performance summary period
+                {t("teacherProfile.performanceSummaryPeriod")}
               </div>
               <div className="text-xs text-slate-500">
-                Adjust the review period to compare against historical performance.
+                {t("teacherProfile.performanceSummaryDescription")}
               </div>
             </div>
             <div className="flex items-center gap-2 text-xs">
-              <label className="text-slate-600">Period</label>
+              <label className="text-slate-600">{t("teacherProfile.period")}</label>
               <select
                 className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
                 value={periodMonths}
                 onChange={(e) => setPeriodMonths(Number(e.target.value))}
               >
-                <option value={1}>1 month</option>
-                <option value={3}>3 months</option>
-                <option value={6}>6 months</option>
-                <option value={12}>12 months</option>
+                <option value={1}>{t("teacherProfile.month1")}</option>
+                <option value={3}>{t("teacherProfile.month3")}</option>
+                <option value={6}>{t("teacherProfile.month6")}</option>
+                <option value={12}>{t("teacherProfile.month12")}</option>
               </select>
             </div>
             {isAdmin && (
               <div className="flex items-center gap-2 text-xs">
-                <label className="text-slate-600">Admin scoring</label>
+                <label className="text-slate-600">{t("teacherProfile.adminScoring")}</label>
                 <select
                   className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
                   value={scoringMode}
@@ -640,8 +646,8 @@ export function TeacherProfilePage() {
                     scoringModeMutation.mutate(mode);
                   }}
                 >
-                  <option value="override">Override AI</option>
-                  <option value="coexist">Coexist with AI</option>
+                  <option value="override">{t("teacherProfile.overrideAi")}</option>
+                  <option value="coexist">{t("teacherProfile.coexistWithAi")}</option>
                 </select>
               </div>
             )}
@@ -652,16 +658,16 @@ export function TeacherProfilePage() {
           <div className="lg:col-span-8 space-y-6">
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                AI Insights
+                {t("teacherProfile.aiInsights")}
               </h2>
               <p className="mb-3 text-xs text-slate-500">
-                Recent performance summary, growth recommendations, and highlights.
+                {t("teacherProfile.aiInsightsDescription")}
               </p>
               {summaryInsightsRes ? (
                 <div className="space-y-3 text-xs text-slate-700">
                   <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
                     <div className="text-[11px] uppercase tracking-wide text-slate-500">
-                      Recent performance summary
+                      {t("teacherProfile.recentPerformanceSummary")}
                     </div>
                     <div className="mt-1 text-xs text-slate-700">
                       {summaryInsightsRes.summary}
@@ -670,9 +676,9 @@ export function TeacherProfilePage() {
                   {summaryInsightsRes.recommendations?.length ? (
                     <div>
                       <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                        Long-term goals (semester and beyond)
+                        {t("teacherProfile.longTermGoals")}
                       </div>
-                      <ul className="list-disc space-y-1 pl-5 text-xs text-slate-700">
+                      <ul className={`list-disc space-y-1 text-xs text-slate-700 ${isRtl ? "pr-5" : "pl-5"}`}>
                         {summaryInsightsRes.recommendations.slice(0, 4).map((r, idx) => (
                           <li key={idx}>{r}</li>
                         ))}
@@ -681,7 +687,7 @@ export function TeacherProfilePage() {
                   ) : null}
                   <div>
                     <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                      Highlights from recent observations
+                      {t("teacherProfile.observationHighlights")}
                     </div>
                     {(dashboardRes?.recent_video_highlights || []).length ? (
                       <ul className="space-y-2 text-xs text-slate-700">
@@ -693,7 +699,7 @@ export function TeacherProfilePage() {
                             <div className="text-[11px] text-slate-500">
                               {h.created_at}
                               {typeof h.timestamp_seconds === "number" && (
-                                <span className="ml-2">
+                                <span className={isRtl ? "mr-2" : "ml-2"}>
                                   • {Math.round(h.timestamp_seconds)}s
                                 </span>
                               )}
@@ -706,7 +712,7 @@ export function TeacherProfilePage() {
                                 to={`/videos/${h.video_id}`}
                                 className="mt-1 inline-flex text-[11px] text-primary hover:underline"
                               >
-                                Watch clip
+                                {t("teacherProfile.watchClip")}
                               </Link>
                             )}
                           </li>
@@ -714,66 +720,66 @@ export function TeacherProfilePage() {
                       </ul>
                     ) : (
                       <div className="text-xs text-slate-500">
-                        No highlights from recent videos yet.
+                        {t("teacherProfile.noRecentHighlights")}
                       </div>
                     )}
                   </div>
                 </div>
               ) : (
                 <div className="text-xs text-slate-500">
-                  No summary data yet for this teacher.
+                  {t("teacherProfile.noSummaryData")}
                 </div>
               )}
             </section>
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                Professional insights
+                {t("teacherProfile.professionalInsights")}
               </h2>
               <p className="mb-3 text-xs text-slate-500">
-                Teacher and principal reflections (food for thought).
+                {t("teacherProfile.professionalInsightsDescription")}
               </p>
               <div className="space-y-3 text-xs text-slate-700">
                 <div>
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                    Teacher
+                    {t("teacherProfile.teacher")}
                   </div>
                   <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-                    {selfReflection || "No teacher reflection yet."}
+                    {selfReflection || t("teacherProfile.noTeacherReflection")}
                   </div>
                 </div>
                 <div>
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                    Principal
+                    {t("teacherProfile.principal")}
                   </div>
                   <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-                    {actionsTaken || "No principal reflection yet."}
+                    {actionsTaken || t("teacherProfile.noPrincipalReflection")}
                   </div>
                 </div>
               </div>
               <form onSubmit={handleSaveReflection} className="mt-3 space-y-3 text-xs">
                 <div>
                   <label className="mb-1 block text-[11px] font-medium text-slate-600">
-                    Teacher reflection
+                    {t("teacherProfile.teacherReflection")}
                   </label>
                   <textarea
                     rows={3}
                     value={selfReflection}
                     onChange={(e) => setSelfReflection(e.target.value)}
                     className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
-                    placeholder="How does the teacher interpret these insights? What patterns are they noticing?"
+                    placeholder={t("teacherProfile.teacherReflectionPlaceholder")}
                   />
                 </div>
                 <div>
                   <label className="mb-1 block text-[11px] font-medium text-slate-600">
-                    Administrator reflections
+                    {t("teacherProfile.principalReflection")}
                   </label>
                   <textarea
                     rows={2}
                     value={actionsTaken}
                     onChange={(e) => setActionsTaken(e.target.value)}
                     className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
-                    placeholder="Summarize admin observations, coaching direction, or agreed adjustments."
+                    placeholder={t("teacherProfile.principalReflectionPlaceholder")}
                   />
                 </div>
                 <button
@@ -781,7 +787,7 @@ export function TeacherProfilePage() {
                   disabled={saveReflectionMutation.isPending}
                   className="mt-1 inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90 disabled:opacity-60"
                 >
-                  Save reflections
+                  {saveReflectionMutation.isPending ? t("teachersPage.saving") : t("teacherProfile.saveReflection")}
                 </button>
               </form>
             </section>
@@ -790,13 +796,13 @@ export function TeacherProfilePage() {
           <div className="lg:col-span-4 space-y-6">
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                Next steps
+                {t("teacherProfile.nextSteps")}
               </h2>
               <p className="mb-3 text-xs text-slate-500">
-                Concrete action items for the teacher.
+                {t("teacherProfile.actionPlanNotes")}
               </p>
               {nextStepsItems.length > 0 ? (
-                <ul className="list-disc space-y-1 pl-5 text-xs text-slate-700">
+                <ul className={`list-disc space-y-1 text-xs text-slate-700 ${isRtl ? "pr-5" : "pl-5"}`}>
                   {nextStepsItems.map((item, idx) => (
                     <li key={idx}>{item}</li>
                   ))}
@@ -967,14 +973,14 @@ export function TeacherProfilePage() {
                 </button>
                 <div>
                   <label className="mb-1 block text-[11px] font-medium text-slate-600">
-                    Action plan notes
+                    {t("teacherProfile.actionPlanNotes")}
                   </label>
                   <textarea
                     rows={2}
                     value={actionPlanNotes}
                     onChange={(e) => setActionPlanNotes(e.target.value)}
                     className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800"
-                    placeholder="Summary notes, ownership, and follow-up cadence."
+                    placeholder={t("teacherProfile.actionPlanNotesPlaceholder")}
                   />
                 </div>
               </div>
@@ -985,17 +991,17 @@ export function TeacherProfilePage() {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-900">
-                    Lesson video hub
+                    {t("teacherProfile.lessonVideoHub")}
                   </h2>
                   <p className="text-xs text-slate-500">
-                    Record in-browser or review the teacher’s full video library.
+                    {t("teacherProfile.lessonVideoHubDescription")}
                   </p>
                 </div>
                 <Link
                   to={`/videos?teacher_id=${teacherId}`}
                   className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
                 >
-                  Open recordings page
+                  {t("teacherProfile.openRecordingsPage")}
                 </Link>
                 {videoTab === "record" && (
                   <button
@@ -1005,10 +1011,10 @@ export function TeacherProfilePage() {
                     className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90 disabled:opacity-60"
                   >
                     {uploadRecordedMutation.isPending
-                      ? "Uploading..."
+                      ? t("teacherProfile.uploading")
                       : privacyProfileReady
-                        ? "Upload recording"
-                        : "Privacy profile required"}
+                        ? t("teacherProfile.uploadRecording")
+                        : t("videosPage.privacyProfileRequired")}
                   </button>
                 )}
               </div>
@@ -1022,7 +1028,7 @@ export function TeacherProfilePage() {
                       : "border border-slate-200 text-slate-600 hover:bg-slate-100"
                   }`}
                 >
-                  Record & upload
+                  {t("teacherProfile.recordUpload")}
                 </button>
                 <button
                   type="button"
@@ -1033,17 +1039,17 @@ export function TeacherProfilePage() {
                       : "border border-slate-200 text-slate-600 hover:bg-slate-100"
                   }`}
                 >
-                  Video library
+                  {t("teacherProfile.videoLibrary")}
                 </button>
               </div>
               <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <div className="font-medium text-slate-800">
-                      Privacy identity profile
+                      {t("teacherProfile.privacyIdentityProfile")}
                     </div>
                     <div className="mt-1 text-[11px] text-slate-500">
-                      Status: {privacyProfileLabel}. Upload 3 to 5 clear teacher photos before recording uploads.
+                      {t("teacherProfile.privacyStatusLabel", { status: privacyProfileLabel })}
                     </div>
                   </div>
                   <button
@@ -1052,7 +1058,7 @@ export function TeacherProfilePage() {
                     disabled={savePrivacyProfileMutation.isPending}
                     className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-60"
                   >
-                    {savePrivacyProfileMutation.isPending ? "Saving..." : "Save privacy profile"}
+                    {savePrivacyProfileMutation.isPending ? t("teachersPage.saving") : t("teacherProfile.savePrivacyProfile")}
                   </button>
                 </div>
                 <input
@@ -1060,12 +1066,12 @@ export function TeacherProfilePage() {
                   accept="image/jpeg,image/png,image/webp"
                   multiple
                   onChange={(e) => setPrivacyReferenceFiles(Array.from(e.target.files || []))}
-                  className="mt-3 w-full text-xs text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-white file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
+                  className="mt-3 w-full text-xs text-slate-600 file:rounded-md file:border-0 file:bg-white file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
                 />
                 <div className="mt-2 text-[11px] text-slate-500">
                   {privacyReferenceFiles.length > 0
-                    ? `${privacyReferenceFiles.length} reference files selected`
-                    : "No new reference photos selected."}
+                    ? t("teacherProfile.referenceFilesSelected", { count: privacyReferenceFiles.length })
+                    : t("teacherProfile.noReferenceFiles")}
                 </div>
               </div>
               {videoTab === "record" ? (
@@ -1081,7 +1087,7 @@ export function TeacherProfilePage() {
                   <div className="space-y-3 text-xs text-slate-600">
                     <div>
                       <label className="block text-xs font-medium text-slate-600">
-                        Subject
+                        {t("teacherProfile.subject")}
                       </label>
                       <input
                         type="text"
@@ -1092,11 +1098,11 @@ export function TeacherProfilePage() {
                     </div>
                     {recordedUrl ? (
                       <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-600">
-                        Recording ready to upload.
+                        {t("teacherProfile.recordingReady")}
                       </div>
                     ) : (
                       <div className="rounded-md border border-dashed border-slate-200 px-3 py-2 text-[11px] text-slate-500">
-                        No recording yet.
+                        {t("teacherProfile.noRecordingYet")}
                       </div>
                     )}
                     {uploadProgress > 0 && (
@@ -1108,13 +1114,12 @@ export function TeacherProfilePage() {
                           />
                         </div>
                         <div className="mt-1 text-[11px] text-slate-500">
-                          Upload progress: {uploadProgress}%
+                          {t("teacherProfile.uploadProgress", { progress: uploadProgress })}
                         </div>
                       </div>
                     )}
                     <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-[11px] text-slate-500">
-                      Large recordings can take time to upload. Keep this tab open
-                      until the upload completes.
+                      {t("teacherProfile.keepTabOpen")}
                     </div>
                   </div>
                 </div>
@@ -1122,7 +1127,7 @@ export function TeacherProfilePage() {
                 <div className="mt-4 space-y-2 text-xs text-slate-600">
                   {videos.length === 0 ? (
                     <div className="rounded-md border border-dashed border-slate-200 px-3 py-3 text-[11px] text-slate-500">
-                      No videos uploaded yet for this teacher.
+                      {t("teacherProfile.noVideosForTeacher")}
                     </div>
                   ) : (
                     <div className="space-y-2">
@@ -1147,9 +1152,9 @@ export function TeacherProfilePage() {
                           </div>
                           <Link
                             to={`/videos/${video.id}`}
-                            className="text-[11px] font-medium text-primary hover:underline"
-                          >
-                            Open video
+                              className="text-[11px] font-medium text-primary hover:underline"
+                            >
+                            {t("teacherProfile.openVideo")}
                           </Link>
                         </div>
                       ))}
@@ -1161,20 +1166,20 @@ export function TeacherProfilePage() {
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                Curriculum, lesson plans, and syllabus
+                {t("teacherProfile.supportingMaterials")}
               </h2>
               <p className="mb-3 text-xs text-slate-500">
-                Upload supporting materials for curriculum adherence checks.
+                {t("teacherProfile.supportingMaterialsDescription")}
               </p>
               
 
               {(isAdmin || user?.role === "teacher") && (
                 <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs">
-                  <div className="mb-2 font-semibold text-slate-700">Curriculum (admin or teacher)</div>
+                  <div className="mb-2 font-semibold text-slate-700">{t("teacherProfile.curriculum")}</div>
                   <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
                     <input
                       type="text"
-                      placeholder="Curriculum title"
+                      placeholder={t("teacherProfile.curriculumTitle")}
                       value={curriculumTitle}
                       onChange={(e) => setCurriculumTitle(e.target.value)}
                       className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
@@ -1183,7 +1188,7 @@ export function TeacherProfilePage() {
                       type="file"
                       accept=".pdf,.docx,.pptx,.jpeg,.jpg"
                       onChange={(e) => setCurriculumFile(e.target.files?.[0] || null)}
-                      className="md:col-span-2 text-xs text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-slate-200 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
+                      className="md:col-span-2 text-xs text-slate-600 file:rounded-md file:border-0 file:bg-slate-200 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
                     />
                   </div>
                   <div className="mt-2 flex justify-end">
@@ -1191,7 +1196,7 @@ export function TeacherProfilePage() {
                       type="button"
                       onClick={() => {
                         if (!curriculumFile) {
-                          toast.error("Select a curriculum file");
+                          toast.error(t("teacherProfile.selectCurriculumFile"));
                           return;
                         }
                         const formData = new FormData();
@@ -1202,7 +1207,7 @@ export function TeacherProfilePage() {
                       }}
                       className="rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90"
                     >
-                      Upload curriculum
+                      {t("teacherProfile.uploadCurriculum")}
                     </button>
                   </div>
                 </div>
@@ -1211,11 +1216,11 @@ export function TeacherProfilePage() {
               {user?.role === "teacher" && (
                 <div className="space-y-4">
                   <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs">
-                    <div className="mb-2 font-semibold text-slate-700">Lesson plan (teacher only)</div>
+                    <div className="mb-2 font-semibold text-slate-700">{t("teacherProfile.lessonPlan")}</div>
                     <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
                       <input
                         type="text"
-                        placeholder="Lesson plan title"
+                        placeholder={t("teacherProfile.lessonPlanTitle")}
                         value={lessonPlanTitle}
                         onChange={(e) => setLessonPlanTitle(e.target.value)}
                         className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
@@ -1230,7 +1235,7 @@ export function TeacherProfilePage() {
                         type="file"
                         accept=".pdf,.docx,.pptx,.jpeg,.jpg"
                         onChange={(e) => setLessonPlanFile(e.target.files?.[0] || null)}
-                        className="text-xs text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-slate-200 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
+                        className="text-xs text-slate-600 file:rounded-md file:border-0 file:bg-slate-200 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
                       />
                     </div>
                     <div className="mt-2 flex justify-end">
@@ -1238,7 +1243,7 @@ export function TeacherProfilePage() {
                         type="button"
                         onClick={() => {
                           if (!lessonPlanFile || !lessonPlanDate) {
-                            toast.error("Select a lesson plan file and date");
+                            toast.error(t("teacherProfile.selectLessonPlanFileDate"));
                             return;
                           }
                           const formData = new FormData();
@@ -1250,17 +1255,17 @@ export function TeacherProfilePage() {
                         }}
                         className="rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90"
                       >
-                        Upload lesson plan
+                        {t("teacherProfile.uploadLessonPlan")}
                       </button>
                     </div>
                   </div>
 
                   <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs">
-                    <div className="mb-2 font-semibold text-slate-700">Syllabus (teacher only)</div>
+                    <div className="mb-2 font-semibold text-slate-700">{t("teacherProfile.syllabus")}</div>
                     <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
                       <input
                         type="text"
-                        placeholder="Syllabus title"
+                        placeholder={t("teacherProfile.syllabusTitle")}
                         value={syllabusTitle}
                         onChange={(e) => setSyllabusTitle(e.target.value)}
                         className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
@@ -1269,7 +1274,7 @@ export function TeacherProfilePage() {
                         type="file"
                         accept=".pdf,.docx,.pptx,.jpeg,.jpg"
                         onChange={(e) => setSyllabusFile(e.target.files?.[0] || null)}
-                        className="md:col-span-2 text-xs text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-slate-200 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
+                        className="md:col-span-2 text-xs text-slate-600 file:rounded-md file:border-0 file:bg-slate-200 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
                       />
                     </div>
                     <div className="mt-2 flex justify-end">
@@ -1277,7 +1282,7 @@ export function TeacherProfilePage() {
                         type="button"
                         onClick={() => {
                           if (!syllabusFile) {
-                            toast.error("Select a syllabus file");
+                            toast.error(t("teacherProfile.selectSyllabusFile"));
                             return;
                           }
                           const formData = new FormData();
@@ -1288,7 +1293,7 @@ export function TeacherProfilePage() {
                         }}
                         className="rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90"
                       >
-                        Upload syllabus
+                        {t("teacherProfile.uploadSyllabus")}
                       </button>
                     </div>
                   </div>
@@ -1296,9 +1301,11 @@ export function TeacherProfilePage() {
               )}
 
               <div className="mt-3 text-[11px] text-slate-500">
-                Curricula: {(curriculaRes?.curricula || []).length} • Lesson plans:{" "}
-                {(lessonPlansRes?.lesson_plans || []).length} • Syllabi:{" "}
-                {(syllabiRes?.syllabi || []).length}
+                {t("teacherProfile.materialsSummary", {
+                  curricula: (curriculaRes?.curricula || []).length,
+                  lessonPlans: (lessonPlansRes?.lesson_plans || []).length,
+                  syllabi: (syllabiRes?.syllabi || []).length,
+                })}
               </div>
             </section>
 
@@ -1454,11 +1461,11 @@ export function TeacherProfilePage() {
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-3 text-sm font-semibold text-slate-900">
-                Human observations
+                {t("teacherProfile.humanObservations")}
               </h2>
               {observations.length === 0 ? (
                 <div className="text-xs text-slate-500">
-                  No observations recorded yet.
+                  {t("teacherProfile.noObservations")}
                 </div>
               ) : (
                 <div className="space-y-2 text-xs">
@@ -1478,7 +1485,7 @@ export function TeacherProfilePage() {
                           <div className="flex items-center gap-2">
                             {needsAttention && (
                               <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
-                                Needs attention
+                                {t("teacherProfile.needsAttention")}
                               </span>
                             )}
                             {obs.implementation_status && (
@@ -1495,12 +1502,12 @@ export function TeacherProfilePage() {
                           </div>
                         </div>
                         <div className="text-xs text-slate-700">
-                          {obs.admin_comment || "No admin comment"}
+                          {obs.admin_comment || t("teacherProfile.noAdminComment")}
                         </div>
                         {obs.teacher_response && (
                           <div className="mt-1 text-[11px] text-slate-600">
                             <span className="font-semibold text-slate-700">
-                              Teacher response:
+                              {t("teacherProfile.teacherResponse")}
                             </span>{" "}
                             {obs.teacher_response}
                           </div>
@@ -1520,7 +1527,7 @@ export function TeacherProfilePage() {
                                 : "border-slate-200 text-slate-600 hover:bg-slate-100"
                             }`}
                           >
-                            Review
+                            {t("teacherProfile.review")}
                           </button>
                           <button
                             type="button"
@@ -1536,10 +1543,10 @@ export function TeacherProfilePage() {
                                 : "border-slate-200 text-slate-600 hover:bg-slate-100"
                             }`}
                           >
-                            Agree
+                            {t("teacherProfile.agree")}
                           </button>
                           <span className="text-[10px] text-slate-500">
-                            Status: {reviewState}
+                            {t("teacherProfile.status", { status: reviewState })}
                           </span>
                         </div>
                         {obs.video_id && (
@@ -1548,10 +1555,10 @@ export function TeacherProfilePage() {
                               to={`/videos/${obs.video_id}`}
                               className="text-primary hover:underline"
                             >
-                              View linked clip
+                              {t("teacherProfile.viewLinkedClip")}
                             </Link>
                             {typeof obs.timestamp_seconds === "number" && (
-                              <span className="ml-1 text-slate-400">
+                              <span className={`${isRtl ? "mr-1" : "ml-1"} text-slate-400`}>
                                 ({Math.round(obs.timestamp_seconds)}s)
                               </span>
                             )}
@@ -1570,14 +1577,14 @@ export function TeacherProfilePage() {
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                    Recognition
+                    {t("teacherProfile.recognition")}
                   </h2>
                   <p className="text-xs text-slate-500">
-                    Track 5-star lesson badges and readiness for exemplar publication.
+                    {t("teacherProfile.recognitionDescription")}
                   </p>
                 </div>
                 <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">
-                  {recognitionSummary.five_star_lessons || 0} awarded
+                  {t("teacherProfile.awardedCount", { count: recognitionSummary.five_star_lessons || 0 })}
                 </span>
               </div>
               <div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs">
@@ -1586,7 +1593,7 @@ export function TeacherProfilePage() {
                     {recognitionSummary.five_star_lessons || 0}
                   </div>
                   <div className="text-[10px] uppercase tracking-wide text-slate-500">
-                    5-Star Lessons
+                    {t("teacherProfile.fiveStarLessons")}
                   </div>
                 </div>
                 <div className="rounded-md border border-slate-200 bg-slate-50 px-2 py-3">
@@ -1594,7 +1601,7 @@ export function TeacherProfilePage() {
                     {recognitionSummary.published_exemplars || 0}
                   </div>
                   <div className="text-[10px] uppercase tracking-wide text-slate-500">
-                    Exemplars
+                    {t("teacherProfile.exemplars")}
                   </div>
                 </div>
                 <div className="rounded-md border border-slate-200 bg-slate-50 px-2 py-3">
@@ -1602,14 +1609,14 @@ export function TeacherProfilePage() {
                     {recognitionSummary.active_streak || 0}
                   </div>
                   <div className="text-[10px] uppercase tracking-wide text-slate-500">
-                    Active Streak
+                    {t("teacherProfile.activeStreak")}
                   </div>
                 </div>
               </div>
               <div className="mt-4 space-y-2">
                 {recognitionBadges.length === 0 ? (
                   <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-500">
-                    No recognition badges have been awarded yet. Qualifying lessons will appear here once privacy and analysis are complete and admin review confirms the lesson.
+                    {t("teacherProfile.noRecognitionBadges")}
                   </div>
                 ) : (
                   recognitionBadges.slice(0, 4).map((badge) => (
@@ -1620,7 +1627,7 @@ export function TeacherProfilePage() {
                       <div className="flex items-center justify-between gap-2">
                         <div className="text-xs font-semibold text-slate-800">
                           {badge.badge_type === "five_star_lesson"
-                            ? "5-Star Lesson"
+                            ? t("teacherProfile.fiveStarLessons")
                             : badge.badge_type.replace(/_/g, " ")}
                         </div>
                         <span
@@ -1635,15 +1642,15 @@ export function TeacherProfilePage() {
                       </div>
                       <div className="mt-1 text-[11px] text-slate-500">
                         {badge.awarded_at
-                          ? `Awarded ${String(badge.awarded_at).slice(0, 10)}`
-                          : "Awaiting award date"}
+                          ? t("teacherProfile.awardedOn", { date: String(badge.awarded_at).slice(0, 10) })
+                          : t("teacherProfile.awaitingAwardDate")}
                       </div>
                       {badge.video_id && (
                         <Link
                           to={`/videos/${badge.video_id}`}
                           className="mt-2 inline-flex text-[11px] font-medium text-primary hover:underline"
                         >
-                          Open recognized recording
+                          {t("teacherProfile.openRecognizedRecording")}
                         </Link>
                       )}
                     </div>
@@ -1654,61 +1661,65 @@ export function TeacherProfilePage() {
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                Recording compliance
+                {t("teacherProfile.recordingCompliance")}
               </h2>
               {recordingPolicy ? (
                 <div className="space-y-2 text-xs text-slate-600">
                   <div className="text-[11px] text-slate-500">
-                    Policy: {recordingPolicy.min_recordings_per_period} recordings every{" "}
-                    {recordingPolicy.period_length_days} days.
+                    {t("teacherProfile.recordingPolicy", {
+                      count: recordingPolicy.min_recordings_per_period,
+                      days: recordingPolicy.period_length_days,
+                    })}
                   </div>
                   <div className="flex items-center justify-between">
-                    <span>Required recordings</span>
+                    <span>{t("teacherProfile.requiredRecordings")}</span>
                     <span className="text-slate-900">
                       {recordingCompliance?.recordings_completed ?? 0} /{" "}
                       {recordingPolicy.min_recordings_per_period}
                     </span>
                   </div>
                   <div className="text-[11px] text-slate-500">
-                    Period length: {recordingPolicy.period_length_days} days
+                    {t("teacherProfile.periodLength", { days: recordingPolicy.period_length_days })}
                   </div>
                   {recordingCompliance?.missing_subjects?.length ? (
                     <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
-                      Missing subjects: {recordingCompliance.missing_subjects.join(", ")}
+                      {t("teacherProfile.missingSubjects", {
+                        subjects: recordingCompliance.missing_subjects.join(", "),
+                      })}
                     </div>
                   ) : (
                     <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px] text-emerald-700">
-                      Subject coverage complete for this period.
+                      {t("teacherProfile.subjectCoverageComplete")}
                     </div>
                   )}
                   {recordingCompliance?.is_compliant ? (
                     <span className="inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
-                      Compliant
+                      {t("teacherProfile.compliant")}
                     </span>
                   ) : (
                     <span className="inline-flex rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-medium text-rose-700">
-                      Behind schedule
+                      {t("teacherProfile.behindSchedule")}
                     </span>
                   )}
                 </div>
               ) : (
                 <div className="text-xs text-slate-500">
-                  Recording policy not configured yet.
+                  {t("teacherProfile.policyNotConfigured")}
                 </div>
               )}
             </section>
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                Curriculum adherence
+                {t("teacherProfile.curriculumAdherence")}
               </h2>
               <p className="mb-3 text-xs text-slate-500">
-                Separate adherence score contributing to overall performance.
+                {t("teacherProfile.curriculumAdherenceDescription")}
               </p>
               {adherenceRes?.adherence_score != null ? (
                 <div className="space-y-2 text-xs">
                   <div className="flex items-center justify-between">
-                    <span className="text-slate-600">Adherence score</span>
+                    <span className="text-slate-600">{t("teacherProfile.adherenceScore")}</span>
                     <span className="text-sm font-semibold text-slate-900">
                       {Math.round(adherenceRes.adherence_score * 100)}%
                     </span>
@@ -1722,9 +1733,9 @@ export function TeacherProfilePage() {
                   {adherenceRes.matched_topics?.length ? (
                     <div>
                       <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                        Matched topics
+                        {t("teacherProfile.matchedTopics")}
                       </div>
-                      <ul className="list-disc space-y-1 pl-4 text-xs text-slate-700">
+                      <ul className={`list-disc space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"}`}>
                         {adherenceRes.matched_topics.slice(0, 3).map((t, idx) => (
                           <li key={idx}>{t}</li>
                         ))}
@@ -1734,7 +1745,7 @@ export function TeacherProfilePage() {
                   {adherenceRes.evidence_segments?.length ? (
                     <div>
                       <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                        Evidence
+                        {t("teacherProfile.evidence")}
                       </div>
                       <ul className="space-y-1 text-[11px] text-slate-600">
                         {adherenceRes.evidence_segments.slice(0, 2).map((seg, idx) => (
@@ -1748,7 +1759,7 @@ export function TeacherProfilePage() {
                 </div>
               ) : (
                 <div className="text-xs text-slate-500">
-                  Upload a lesson plan to begin adherence scoring.
+                  {t("teacherProfile.uploadLessonPlanToStart")}
                 </div>
               )}
             </section>

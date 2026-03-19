@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import os
+import shutil
 import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import cv2
 import numpy as np
+from PIL import Image, ImageDraw
+
+try:
+    import cv2 as _cv2
+    _cv2_import_error = None
+except Exception as exc:
+    _cv2 = None
+    _cv2_import_error = exc
+
+ALLOW_DEGRADED_PRIVACY_RUNTIME = os.getenv("PRIVACY_ALLOW_DEGRADED_RUNTIME", "false").lower() == "true"
 
 
 @dataclass
@@ -15,7 +26,37 @@ class FaceSignature:
     ahash: np.ndarray
 
 
-def _load_face_cascade() -> cv2.CascadeClassifier:
+def _require_cv2():
+    if _cv2 is None:
+        raise RuntimeError(f"OpenCV is unavailable in this runtime: {_cv2_import_error}")
+    return _cv2
+
+
+def _cv2_unavailable_message() -> str:
+    return f"OpenCV is unavailable in this runtime: {_cv2_import_error}"
+
+
+def get_privacy_runtime_status() -> Dict[str, Any]:
+    return {
+        "cv2_available": _cv2 is not None,
+        "cv2_error": None if _cv2 is not None else str(_cv2_import_error),
+        "degraded_runtime_enabled": ALLOW_DEGRADED_PRIVACY_RUNTIME,
+    }
+
+
+def _write_placeholder_thumbnail(output_path: str, width: int = 640, height: int = 360) -> None:
+    image = Image.new("RGB", (width, height), (235, 241, 248))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((40, 40, width - 40, height - 40), outline=(76, 92, 122), width=3)
+    draw.text((70, 130), "Cognivio staging thumbnail", fill=(45, 62, 80))
+    draw.text((70, 170), "Privacy runtime fallback active", fill=(45, 62, 80))
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    image.save(target, format="JPEG", quality=84)
+
+
+def _load_face_cascade():
+    cv2 = _require_cv2()
     cascade_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
     cascade = cv2.CascadeClassifier(str(cascade_path))
     if cascade.empty():
@@ -32,9 +73,10 @@ def _safe_crop(frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> Optional[n
     return frame[y:y + h, x:x + w]
 
 
-def detect_faces(frame: np.ndarray, cascade: Optional[cv2.CascadeClassifier] = None) -> List[Tuple[int, int, int, int]]:
+def detect_faces(frame: np.ndarray, cascade: Optional[Any] = None) -> List[Tuple[int, int, int, int]]:
     if frame is None:
         return []
+    cv2 = _require_cv2()
     cascade = cascade or _load_face_cascade()
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     detected = cascade.detectMultiScale(
@@ -49,6 +91,7 @@ def detect_faces(frame: np.ndarray, cascade: Optional[cv2.CascadeClassifier] = N
 def build_face_signature(face_bgr: np.ndarray) -> Optional[FaceSignature]:
     if face_bgr is None or face_bgr.size == 0:
         return None
+    cv2 = _require_cv2()
     gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
     normalized = cv2.resize(gray, (128, 128))
     equalized = cv2.equalizeHist(normalized)
@@ -63,6 +106,7 @@ def build_face_signature(face_bgr: np.ndarray) -> Optional[FaceSignature]:
 def signature_similarity(signature: FaceSignature, references: List[FaceSignature]) -> float:
     if not references:
         return 0.0
+    cv2 = _require_cv2()
     best_score = 0.0
     for reference in references:
         hist_score = float(cv2.compareHist(signature.histogram.astype(np.float32), reference.histogram.astype(np.float32), cv2.HISTCMP_CORREL))
@@ -75,6 +119,7 @@ def signature_similarity(signature: FaceSignature, references: List[FaceSignatur
 
 
 def load_reference_signatures(reference_paths: List[str]) -> List[FaceSignature]:
+    cv2 = _require_cv2()
     cascade = _load_face_cascade()
     signatures: List[FaceSignature] = []
     for reference_path in reference_paths:
@@ -113,6 +158,7 @@ def _bbox_iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> flo
 
 
 def blur_region(frame: np.ndarray, bbox: Tuple[int, int, int, int], padding: float = 0.18) -> None:
+    cv2 = _require_cv2()
     height, width = frame.shape[:2]
     x, y, w, h = bbox
     pad_w = int(w * padding)
@@ -138,6 +184,19 @@ def analyze_video_privacy(
     max_frames: int = 150,
     sample_stride: int = 15,
 ) -> Dict[str, Any]:
+    if _cv2 is None:
+        if not ALLOW_DEGRADED_PRIVACY_RUNTIME:
+            raise RuntimeError(_cv2_unavailable_message())
+        return {
+            "frames_analyzed": 0,
+            "teacher_track_id": None,
+            "review_reason": None,
+            "candidate_tracks": [],
+            "fallback_mode": "blur_all",
+            "manifest_tracks": [],
+            "runtime_fallback": "cv2_unavailable",
+        }
+    cv2 = _require_cv2()
     references = load_reference_signatures(reference_paths)
     if not references:
         raise RuntimeError("Teacher privacy profile has no usable face references")
@@ -268,6 +327,21 @@ def render_redacted_video(
     teacher_track_id: Optional[str] = None,
     force_blur_all: bool = False,
 ) -> Dict[str, Any]:
+    if _cv2 is None:
+        if not ALLOW_DEGRADED_PRIVACY_RUNTIME:
+            raise RuntimeError(_cv2_unavailable_message())
+        output_path = Path(output_video_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(str(source_video_path), str(output_path))
+        _write_placeholder_thumbnail(thumbnail_output_path)
+        return {
+            "frames_processed": 0,
+            "frames_with_teacher_visible": 0,
+            "faces_detected_total": 0,
+            "faces_blurred_total": 0,
+            "runtime_fallback": "cv2_unavailable_copy_only",
+        }
+    cv2 = _require_cv2()
     references = load_reference_signatures(reference_paths)
     if not references:
         raise RuntimeError("Teacher privacy profile has no usable face references")

@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 export function VideoRecorder({ onRecordingReady }) {
+  const { t } = useTranslation();
   const videoRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const [stream, setStream] = useState(null);
@@ -20,7 +22,7 @@ export function VideoRecorder({ onRecordingReady }) {
   const startRecording = async () => {
     setError("");
     if (!navigator.mediaDevices?.getUserMedia) {
-      setError("Browser does not support video recording.");
+      setError(t("videoRecorder.unsupported"));
       return;
     }
     try {
@@ -65,7 +67,7 @@ export function VideoRecorder({ onRecordingReady }) {
       setPreviewUrl("");
       setRecordingState("recording");
     } catch (err) {
-      setError("Unable to access camera or microphone.");
+      setError(t("videoRecorder.accessError"));
     }
   };
 
@@ -108,7 +110,7 @@ export function VideoRecorder({ onRecordingReady }) {
       </div>
       {previewUrl && (
         <div className="rounded-xl border border-slate-200 bg-white p-3">
-          <div className="mb-2 text-xs text-slate-500">Preview</div>
+          <div className="mb-2 text-xs text-slate-500">{t("videoRecorder.preview")}</div>
           <video src={previewUrl} controls className="w-full rounded-lg" />
         </div>
       )}
@@ -120,7 +122,7 @@ export function VideoRecorder({ onRecordingReady }) {
           className="rounded-md bg-primary px-3 py-2 text-xs font-medium text-white"
           disabled={recordingState === "recording"}
         >
-          Start
+          {t("videoRecorder.start")}
         </button>
         <button
           type="button"
@@ -128,7 +130,7 @@ export function VideoRecorder({ onRecordingReady }) {
           className="rounded-md border border-slate-200 px-3 py-2 text-xs text-slate-700"
           disabled={recordingState !== "recording"}
         >
-          Pause
+          {t("videoRecorder.pause")}
         </button>
         <button
           type="button"
@@ -136,7 +138,7 @@ export function VideoRecorder({ onRecordingReady }) {
           className="rounded-md border border-slate-200 px-3 py-2 text-xs text-slate-700"
           disabled={recordingState !== "paused"}
         >
-          Resume
+          {t("videoRecorder.resume")}
         </button>
         <button
           type="button"
@@ -144,7 +146,7 @@ export function VideoRecorder({ onRecordingReady }) {
           className="rounded-md border border-slate-200 px-3 py-2 text-xs text-slate-700"
           disabled={recordingState === "idle"}
         >
-          Stop
+          {t("videoRecorder.stop")}
         </button>
       </div>
     </div>

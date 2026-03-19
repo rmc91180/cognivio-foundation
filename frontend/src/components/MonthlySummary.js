@@ -1,4 +1,5 @@
 import React, { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 
 /**
  * MonthlySummary - Displays aggregated performance summary for a period
@@ -11,6 +12,8 @@ export function MonthlySummary({
   evidenceByElement = {},
   onViewEvidence,
 }) {
+  const { t, i18n } = useTranslation();
+  const isRtl = i18n.dir() === "rtl";
   const summaryData = useMemo(() => {
     if (!dashboardRes?.assessments?.length) {
       return null;
@@ -65,12 +68,12 @@ export function MonthlySummary({
 
     const periodLabel =
       periodMonths === 1
-        ? "Last 1 month"
+        ? t("monthlySummary.last1Month")
         : periodMonths === 3
-          ? "Last 3 months"
+          ? t("monthlySummary.last3Months")
           : periodMonths === 6
-            ? "Last 6 months"
-            : "Last 12 months";
+            ? t("monthlySummary.last6Months")
+            : t("monthlySummary.last12Months");
 
     const observationByElement = (dashboardRes.element_summary || []).reduce(
       (acc, item) => {
@@ -104,39 +107,29 @@ export function MonthlySummary({
       const recs = [];
 
       if (name.includes("instruction") || evidenceText.includes("question")) {
-        recs.push(
-          "Increase higher-order questioning and wait time (3-5 seconds) before prompting."
-        );
+        recs.push(t("monthlySummary.recHigherOrderQuestioning"));
       }
       if (name.includes("classroom environment") || evidenceText.includes("routine")) {
-        recs.push(
-          "Reinforce routines with visual cues and a consistent start-of-lesson reset."
-        );
+        recs.push(t("monthlySummary.recRoutines"));
       }
       if (name.includes("planning") || name.includes("preparation")) {
-        recs.push(
-          "Align lesson objectives to a clear success criteria and check for mastery mid-lesson."
-        );
+        recs.push(t("monthlySummary.recObjectives"));
       }
       if (name.includes("professional")) {
-        recs.push(
-          "Log post-lesson reflections and tie one adjustment to a specific student need."
-        );
+        recs.push(t("monthlySummary.recReflection"));
       }
       if (evidenceText.includes("teacher talk")) {
-        recs.push("Reduce teacher talk by inserting paired turn-and-talk every 7-10 minutes.");
+        recs.push(t("monthlySummary.recTeacherTalk"));
       }
       if (evidenceText.includes("engage") || evidenceText.includes("participation")) {
-        recs.push("Use cold-call plus equity sticks to increase student participation.");
+        recs.push(t("monthlySummary.recParticipation"));
       }
       if (evidenceText.includes("checks for understanding") || evidenceText.includes("assessment")) {
-        recs.push("Add a quick exit ticket or hinge question to verify understanding.");
+        recs.push(t("monthlySummary.recExitTicket"));
       }
 
       if (!recs.length) {
-        recs.push(
-          `Focus on ${domainName} by planning one concrete practice to apply in the next lesson.`
-        );
+        recs.push(t("monthlySummary.recFallback", { domain: domainName }));
       }
 
       return recs.slice(0, 2);
@@ -155,16 +148,16 @@ export function MonthlySummary({
       assessmentCount: dashboardRes.assessments.length,
       periodLabel,
     };
-  }, [dashboardRes, periodMonths, evidenceByElement]);
+  }, [dashboardRes, periodMonths, evidenceByElement, t]);
 
   if (!summaryData) {
     return (
       <div className="rounded-xl border border-slate-200 bg-white p-5">
         <h2 className="mb-2 text-sm font-semibold text-slate-900">
-          Performance Summary
+          {t("monthlySummary.title")}
         </h2>
         <div className="text-xs text-slate-500">
-          No assessment data available for this period.
+          {t("monthlySummary.noData")}
         </div>
       </div>
     );
@@ -174,7 +167,7 @@ export function MonthlySummary({
     <div className="rounded-xl border border-slate-200 bg-white p-5">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-sm font-semibold text-slate-900">
-          Performance Summary
+          {t("monthlySummary.title")}
         </h2>
         <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600">
           {summaryData.periodLabel}
@@ -182,9 +175,9 @@ export function MonthlySummary({
       </div>
 
       <div className="mb-4 text-xs text-slate-500">
-        {summaryData.assessmentCount} assessments in the selected period. Domain
-        movement reflects the teacher's change from the first to the latest
-        assessment in this period.
+        {t("monthlySummary.assessmentCount", {
+          count: summaryData.assessmentCount,
+        })}
       </div>
 
       <div className="grid gap-3 md:grid-cols-2">
@@ -211,28 +204,28 @@ export function MonthlySummary({
                 </div>
                 <span className={`rounded-full px-2 py-0.5 text-[10px] ${trendClass}`}>
                   {trend === "up"
-                    ? "Improving"
+                    ? t("monthlySummary.improving")
                     : trend === "down"
-                      ? "Declining"
-                      : "Stable"}
+                      ? t("monthlySummary.declining")
+                      : t("monthlySummary.stable")}
                 </span>
               </div>
               <div className="mt-1 flex items-center justify-between text-[11px] text-slate-600">
-                <span>
-                  Baseline {domain.baseline.toFixed(1)} → Latest{" "}
-                  {domain.latest.toFixed(1)}
-                </span>
+                <span>{t("monthlySummary.baselineLatest", {
+                  baseline: domain.baseline.toFixed(1),
+                  latest: domain.latest.toFixed(1),
+                })}</span>
                 <span className="font-semibold text-slate-700">{deltaLabel}</span>
               </div>
               <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
-                <span>{evidenceCount} evidence items</span>
+                <span>{t("monthlySummary.evidenceItems", { count: evidenceCount })}</span>
                 {typeof onViewEvidence === "function" && (
                   <button
                     type="button"
                     onClick={() => onViewEvidence(domain.elementId)}
                     className="rounded-md border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-100"
                   >
-                    View evidence
+                    {t("monthlySummary.viewEvidence")}
                   </button>
                 )}
               </div>
@@ -245,7 +238,7 @@ export function MonthlySummary({
       {summaryData.highlights.length > 0 && (
         <div className="mt-4">
           <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-emerald-600">
-            Highlights (relative gains)
+            {t("monthlySummary.highlights")}
           </div>
           <div className="flex flex-wrap gap-2">
             {summaryData.highlights.map((h) => (
@@ -254,7 +247,7 @@ export function MonthlySummary({
                 className="inline-flex items-center rounded bg-emerald-50 px-2 py-1 text-[11px] text-emerald-700"
               >
                 {h.name}
-                <span className="ml-1.5 font-semibold">
+                <span className={`${isRtl ? "mr-1.5" : "ml-1.5"} font-semibold`}>
                   {h.delta > 0 ? `+${h.delta.toFixed(1)}` : h.delta.toFixed(1)}
                 </span>
               </span>
@@ -267,7 +260,7 @@ export function MonthlySummary({
       {summaryData.growthAreas.length > 0 && (
         <div className="mt-4">
           <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-amber-600">
-            Areas for Growth (relative declines)
+            {t("monthlySummary.growthAreas")}
           </div>
           <div className="flex flex-wrap gap-2">
             {summaryData.growthAreas.map((l) => (
@@ -276,7 +269,7 @@ export function MonthlySummary({
                 className="inline-flex items-center rounded bg-amber-50 px-2 py-1 text-[11px] text-amber-700"
               >
                 {l.name}
-                <span className="ml-1.5 font-semibold">
+                <span className={`${isRtl ? "mr-1.5" : "ml-1.5"} font-semibold`}>
                   {l.delta > 0 ? `+${l.delta.toFixed(1)}` : l.delta.toFixed(1)}
                 </span>
               </span>
@@ -288,7 +281,7 @@ export function MonthlySummary({
               className="mt-3 rounded-md border border-amber-200 bg-amber-50/40 px-3 py-2 text-[11px] text-amber-900"
             >
               <div className="font-semibold text-amber-800">
-                Why this moved for {l.name}
+                {t("monthlySummary.whyThisMoved", { name: l.name })}
               </div>
               {l.whyDetails?.length ? (
                 <div className="mt-1 space-y-1 text-amber-800">
@@ -298,12 +291,12 @@ export function MonthlySummary({
                 </div>
               ) : (
                 <div className="mt-1 text-amber-700">
-                  Evidence detail is limited. Add more observations to surface context.
+                  {t("monthlySummary.limitedEvidence")}
                 </div>
               )}
               {l.recommendations?.length ? (
                 <div className="mt-2 text-amber-900">
-                  <div className="font-semibold">Next steps</div>
+                  <div className="font-semibold">{t("monthlySummary.nextSteps")}</div>
                   <div className="mt-1 space-y-1">
                     {l.recommendations.map((rec, idx) => (
                       <div key={idx}>• {rec}</div>

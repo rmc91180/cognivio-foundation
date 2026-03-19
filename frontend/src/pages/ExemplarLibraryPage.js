@@ -1,11 +1,13 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { exemplarApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { EmptyState, ErrorState, LoadingState, PageHeader, Panel } from "@/components/ui";
 
 export function ExemplarLibraryPage() {
+  const { t } = useTranslation();
   const [subjectFilter, setSubjectFilter] = useState("");
   const [tagFilter, setTagFilter] = useState("");
 
@@ -26,33 +28,33 @@ export function ExemplarLibraryPage() {
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
         <PageHeader
-          title="All-Star Library"
-          description="Privacy-safe exemplar lessons curated from Cognivio’s strongest recognized recordings."
+          title={t("exemplarLibrary.title")}
+          description={t("exemplarLibrary.description")}
         />
 
         <Panel className="mb-6">
           <div className="grid gap-3 md:grid-cols-2">
             <div>
               <label className="mb-1 block text-[11px] font-medium uppercase tracking-wide text-slate-500">
-                Subject
+                {t("exemplarLibrary.subject")}
               </label>
               <input
                 type="text"
                 value={subjectFilter}
                 onChange={(e) => setSubjectFilter(e.target.value)}
-                placeholder="Filter by subject"
+                placeholder={t("exemplarLibrary.filterBySubject")}
                 className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
               />
             </div>
             <div>
               <label className="mb-1 block text-[11px] font-medium uppercase tracking-wide text-slate-500">
-                Tag
+                {t("exemplarLibrary.tag")}
               </label>
               <input
                 type="text"
                 value={tagFilter}
                 onChange={(e) => setTagFilter(e.target.value)}
-                placeholder="Filter by tag"
+                placeholder={t("exemplarLibrary.filterByTag")}
                 className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
               />
             </div>
@@ -60,16 +62,16 @@ export function ExemplarLibraryPage() {
         </Panel>
 
         {isLoading ? (
-          <LoadingState message="Loading exemplar library..." />
+          <LoadingState message={t("exemplarLibrary.loading")} />
         ) : isError ? (
           <ErrorState
-            title="Unable to load the library"
-            message="Refresh and try again. If this persists, verify the exemplar library endpoints."
+            title={t("exemplarLibrary.errorTitle")}
+            message={t("exemplarLibrary.errorMessage")}
           />
         ) : items.length === 0 ? (
           <EmptyState
-            title="No published exemplars yet"
-            message="Approved all-star lessons will appear here once they are published."
+            title={t("exemplarLibrary.emptyTitle")}
+            message={t("exemplarLibrary.emptyMessage")}
           />
         ) : (
           <div className="grid gap-4 lg:grid-cols-2">
@@ -94,7 +96,7 @@ export function ExemplarLibraryPage() {
                       </div>
                     </div>
                     <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">
-                      5-Star Lesson
+                      {t("exemplarLibrary.fiveStarLesson")}
                     </span>
                   </div>
                   <p className="mt-3 text-sm text-slate-600">{item.summary}</p>
@@ -115,7 +117,7 @@ export function ExemplarLibraryPage() {
                       to={`/videos/${item.video_id}`}
                       className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
                     >
-                      Open original lesson page
+                      {t("exemplarLibrary.openLessonPage")}
                     </Link>
                   </div>
                 </div>

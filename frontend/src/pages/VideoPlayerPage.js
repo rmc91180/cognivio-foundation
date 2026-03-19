@@ -7,8 +7,11 @@ import { VideoTimeline } from "@/components/VideoTimeline";
 import { useAuth } from "@/hooks/useAuth";
 import { toast } from "sonner";
 import { Badge, Button, EmptyState, Field, PageHeader, Panel, Textarea } from "@/components/ui";
+import { useTranslation } from "react-i18next";
+import { runtimeConfig } from "@/lib/runtimeConfig";
 
 export function VideoPlayerPage() {
+  const { t, i18n } = useTranslation();
   const { videoId } = useParams();
   const queryClient = useQueryClient();
   const { user } = useAuth();
@@ -19,6 +22,25 @@ export function VideoPlayerPage() {
   const hasSeenkedFromUrl = useRef(false);
   const [videoStatus, setVideoStatus] = useState("processing");
   const [wsConnected, setWsConnected] = useState(false);
+  const isRtl = i18n.dir() === "rtl";
+  const formatStatus = useCallback(
+    (value) => {
+      const map = {
+        queued: t("labels.queued"),
+        processing: t("labels.processing"),
+        completed: t("labels.completed"),
+        failed: t("labels.failed"),
+        error: t("labels.error"),
+        review_required: t("labels.reviewRequired"),
+        pending_admin_review: t("labels.pendingAdminReview"),
+        not_submitted: t("labels.notSubmitted"),
+        awarded: t("labels.awarded"),
+        not_evaluated: t("labels.notEvaluated"),
+      };
+      return map[value] || value || t("videosPage.unknown");
+    },
+    [t]
+  );
 
   // Parse timestamp from URL and seek to it when video loads
   useEffect(() => {
@@ -61,11 +83,11 @@ export function VideoPlayerPage() {
     const url = new URL(window.location.href);
     url.searchParams.set("t", currentTime.toString());
     navigator.clipboard.writeText(url.toString()).then(() => {
-      toast.success("Link copied to clipboard");
+      toast.success(t("videoPlayer.linkCopied"));
     }).catch(() => {
-      toast.error("Failed to copy link");
+      toast.error(t("videoPlayer.linkCopyFailed"));
     });
-  }, [currentTime]);
+  }, [currentTime, t]);
 
   const { data: videoRes } = useQuery({
     queryKey: ["video", videoId],
@@ -89,8 +111,8 @@ export function VideoPlayerPage() {
 
   useEffect(() => {
     const token = localStorage.getItem("cognivio_token");
-    if (!videoId || !token || !process.env.REACT_APP_BACKEND_URL) return;
-    const base = process.env.REACT_APP_BACKEND_URL;
+    if (!videoId || !token || !runtimeConfig.backendUrl) return;
+    const base = runtimeConfig.backendUrl;
     const wsBase = base.replace("https://", "wss://").replace("http://", "ws://");
     const ws = new WebSocket(`${wsBase}/ws/videos/${videoId}?token=${token}`);
     setWsConnected(true);
@@ -148,30 +170,30 @@ export function VideoPlayerPage() {
   const retryMutation = useMutation({
     mutationFn: () => videoApi.retry(videoId),
     onSuccess: () => {
-      toast.success("Video re-queued for analysis");
+      toast.success(t("videoPlayer.analysisRequeued"));
       queryClient.invalidateQueries({ queryKey: ["video", videoId] });
       queryClient.invalidateQueries({ queryKey: ["video-status", videoId] });
     },
     onError: (error) => {
-      toast.error(error?.response?.data?.detail || "Failed to retry processing");
+      toast.error(error?.response?.data?.detail || t("videoPlayer.analysisRetryFailed"));
     },
   });
   const retryPrivacyMutation = useMutation({
     mutationFn: () => videoApi.retryPrivacy(videoId),
     onSuccess: () => {
-      toast.success("Privacy processing re-queued");
+      toast.success(t("videoPlayer.privacyRequeued"));
       queryClient.invalidateQueries({ queryKey: ["video", videoId] });
       queryClient.invalidateQueries({ queryKey: ["video-status", videoId] });
     },
     onError: (error) => {
       const detail = error?.response?.data?.detail;
-      toast.error(typeof detail === "string" ? detail : detail?.message || "Failed to retry privacy processing");
+      toast.error(typeof detail === "string" ? detail : detail?.message || t("videoPlayer.privacyRetryFailed"));
     },
   });
   const saveRecognitionOptInMutation = useMutation({
     mutationFn: (payload) => recognitionApi.updateOptIn(videoId, payload),
     onSuccess: () => {
-      toast.success("Recognition preferences saved");
+      toast.success(t("videoPlayer.preferencesSaved"));
       queryClient.invalidateQueries({ queryKey: ["video-recognition", videoId] });
       if (videoRes?.teacher_id) {
         queryClient.invalidateQueries({ queryKey: ["teacher-recognition-summary", videoRes.teacher_id] });
@@ -179,18 +201,18 @@ export function VideoPlayerPage() {
     },
     onError: (error) => {
       const detail = error?.response?.data?.detail;
-      toast.error(typeof detail === "string" ? detail : detail?.message || "Failed to save recognition preferences");
+      toast.error(typeof detail === "string" ? detail : detail?.message || t("videoPlayer.preferencesSaveFailed"));
     },
   });
   const submitExemplarMutation = useMutation({
     mutationFn: (payload) => exemplarApi.submit(videoId, payload),
     onSuccess: () => {
-      toast.success("Exemplar submission queued for admin review");
+      toast.success(t("videoPlayer.exemplarQueued"));
       queryClient.invalidateQueries({ queryKey: ["video-recognition", videoId] });
     },
     onError: (error) => {
       const detail = error?.response?.data?.detail;
-      toast.error(typeof detail === "string" ? detail : detail?.message || "Failed to submit exemplar");
+      toast.error(typeof detail === "string" ? detail : detail?.message || t("videoPlayer.exemplarFailed"));
     },
   });
   const generateSocialCardMutation = useMutation({
@@ -203,11 +225,11 @@ export function VideoPlayerPage() {
       }),
     onSuccess: (response) => {
       setSocialCardResult(response.data);
-      toast.success("Social card generated");
+      toast.success(t("videoPlayer.socialCardGenerated"));
     },
     onError: (error) => {
       const detail = error?.response?.data?.detail;
-      toast.error(typeof detail === "string" ? detail : detail?.message || "Failed to generate social card");
+      toast.error(typeof detail === "string" ? detail : detail?.message || t("videoPlayer.socialCardFailed"));
     },
   });
   const generateEmailSignatureMutation = useMutation({
@@ -218,11 +240,11 @@ export function VideoPlayerPage() {
       }),
     onSuccess: (response) => {
       setEmailSignatureResult(response.data);
-      toast.success("Email signature badge generated");
+      toast.success(t("videoPlayer.emailSignatureGenerated"));
     },
     onError: (error) => {
       const detail = error?.response?.data?.detail;
-      toast.error(typeof detail === "string" ? detail : detail?.message || "Failed to generate email signature");
+      toast.error(typeof detail === "string" ? detail : detail?.message || t("videoPlayer.emailSignatureFailed"));
     },
   });
 
@@ -257,9 +279,9 @@ export function VideoPlayerPage() {
     const observations = observationsRes ?? [];
     const assessment = assessmentRes;
     const html = `
-      <html>
+      <html lang="${i18n.language}" dir="${i18n.dir()}">
         <head>
-          <title>Cognivio Observation Report</title>
+          <title>${t("videoPlayer.reportTitle")}</title>
           <style>
             body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 24px; color: #020617; }
             h1, h2, h3 { margin: 0 0 8px; }
@@ -272,18 +294,18 @@ export function VideoPlayerPage() {
           </style>
         </head>
         <body>
-          <h1>Lesson Observation Report</h1>
+          <h1>${t("videoPlayer.reportTitle")}</h1>
           <div class="section">
-            <div><strong>Video:</strong> ${videoRes?.filename || ""}</div>
-            <div><strong>Date:</strong> ${assessment?.analyzed_at || ""}</div>
+            <div><strong>${t("videoPlayer.reportVideo")}:</strong> ${videoRes?.filename || ""}</div>
+            <div><strong>${t("videoPlayer.reportDate")}:</strong> ${assessment?.analyzed_at || ""}</div>
           </div>
           <div class="section">
-            <h2>Summary</h2>
+            <h2>${t("videoPlayer.reportSummary")}</h2>
             <p>${assessment?.summary || ""}</p>
             <p>${summaryNotes || ""}</p>
           </div>
           <div class="section">
-            <h2>Key observations</h2>
+            <h2>${t("videoPlayer.reportObservations")}</h2>
             <ul>
               ${observations
                 .map(
@@ -298,7 +320,7 @@ export function VideoPlayerPage() {
             </ul>
           </div>
           <div class="section">
-            <h2>Action items for next lesson</h2>
+            <h2>${t("videoPlayer.reportActionItems")}</h2>
             <p>${actionItems || ""}</p>
           </div>
         </body>
@@ -319,12 +341,12 @@ export function VideoPlayerPage() {
   const canSubmitExemplar = recognitionStatus === "awarded" && teacherOptIn;
   const recognitionBadgeLabel =
     recognitionStatus === "awarded"
-      ? "5-Star Lesson"
+      ? t("videoPlayer.recognitionAwarded")
       : recognitionStatus === "pending_admin_review"
-        ? "Recognition pending admin review"
+        ? t("videoPlayer.recognitionPending")
         : recognitionEligible
-          ? "Recognition eligible"
-          : "Recognition not yet awarded";
+          ? t("videoPlayer.recognitionEligible")
+          : t("videoPlayer.recognitionNotAwarded");
   const recognitionBadgeVariant =
     recognitionStatus === "awarded"
       ? "success"
@@ -336,13 +358,13 @@ export function VideoPlayerPage() {
     privacyStatus === "completed" && videoRes?.playback_url
       ? (videoRes.playback_url.startsWith("http")
           ? videoRes.playback_url
-          : `${process.env.REACT_APP_BACKEND_URL}${videoRes.playback_url}`)
+          : `${runtimeConfig.backendUrl}${videoRes.playback_url}`)
       : null;
   const thumbnailUrl =
     videoRes?.thumbnail_url &&
     (videoRes.thumbnail_url.startsWith("http")
       ? videoRes.thumbnail_url
-      : `${process.env.REACT_APP_BACKEND_URL}${videoRes.thumbnail_url}`);
+      : `${runtimeConfig.backendUrl}${videoRes.thumbnail_url}`);
   const statusVariant =
     videoStatus === "completed"
       ? "success"
@@ -355,13 +377,13 @@ export function VideoPlayerPage() {
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
-        <PageHeader title="Lesson recording" compact className="mb-4" />
+        <PageHeader title={t("videoPlayer.lessonRecording")} compact className="mb-4" />
         <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-slate-600">
           <Badge variant={statusVariant}>
-            Status: {videoStatus || "unknown"}
+            {t("videoPlayer.status", { status: formatStatus(videoStatus) })}
           </Badge>
           <Badge variant={privacyStatus === "completed" ? "success" : privacyStatus === "failed" ? "danger" : "warning"}>
-            Privacy: {privacyStatus}
+            {t("videoPlayer.privacy", { status: formatStatus(privacyStatus) })}
           </Badge>
           <Badge variant={recognitionBadgeVariant}>
             {recognitionBadgeLabel}
@@ -371,17 +393,17 @@ export function VideoPlayerPage() {
               to="/privacy-review"
               className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-700 hover:bg-amber-100"
             >
-              Open privacy review
+              {t("videoPlayer.openPrivacyReview")}
             </Link>
           )}
           {privacyStatus === "failed" && (
             <Button size="sm" variant="danger" onClick={() => retryPrivacyMutation.mutate()} disabled={retryPrivacyMutation.isPending}>
-              {retryPrivacyMutation.isPending ? "Retrying privacy..." : "Retry privacy"}
+              {retryPrivacyMutation.isPending ? t("videoPlayer.retryingPrivacy") : t("videoPlayer.retryPrivacy")}
             </Button>
           )}
           {(videoStatus === "failed" || videoStatus === "error") && (
             <Button size="sm" variant="danger" onClick={() => retryMutation.mutate()} disabled={retryMutation.isPending}>
-              {retryMutation.isPending ? "Retrying..." : "Retry analysis"}
+              {retryMutation.isPending ? t("videoPlayer.retrying") : t("videoPlayer.retryAnalysis")}
             </Button>
           )}
           {isAdmin && recognitionStatus === "pending_admin_review" && (
@@ -389,11 +411,11 @@ export function VideoPlayerPage() {
               to="/recognition-review"
               className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-700 hover:bg-amber-100"
             >
-              Open recognition review
+              {t("videoPlayer.openRecognitionReview")}
             </Link>
           )}
           <span className="text-[11px] text-slate-400">
-            {wsConnected ? "Live updates connected" : "Live updates offline"}
+            {wsConnected ? t("videoPlayer.liveUpdatesConnected") : t("videoPlayer.liveUpdatesOffline")}
           </span>
           {statusRes?.error_message && (
             <span className="text-[11px] text-rose-600">{statusRes.error_message}</span>
@@ -427,8 +449,9 @@ export function VideoPlayerPage() {
                     )}
                     <div className="flex items-center justify-between">
                       <span className="text-[11px] text-slate-500">
-                        Current time: {Math.floor(currentTime / 60)}:
-                        {String(currentTime % 60).padStart(2, "0")}
+                        {t("videoPlayer.currentTime", {
+                          time: `${Math.floor(currentTime / 60)}:${String(currentTime % 60).padStart(2, "0")}`,
+                        })}
                       </span>
                       <Button variant="secondary" size="sm" onClick={copyTimestampLink}>
                         <svg
@@ -444,7 +467,7 @@ export function VideoPlayerPage() {
                             d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"
                           />
                         </svg>
-                        Copy link at timestamp
+                        {t("videoPlayer.copyTimestampLink")}
                       </Button>
                     </div>
                   </div>
@@ -454,13 +477,13 @@ export function VideoPlayerPage() {
                   className="m-4"
                   title={
                     videoStatus === "queued" || videoStatus === "processing"
-                      ? "Video is processing"
-                      : "Video file unavailable"
+                      ? t("videoPlayer.videoProcessing")
+                      : t("videoPlayer.videoUnavailable")
                   }
                   message={
                     videoStatus === "queued" || videoStatus === "processing"
-                      ? "Analysis is in progress. Playback will appear once processing is complete."
-                      : "This recording cannot be loaded right now."
+                      ? t("videoPlayer.videoProcessingMessage")
+                      : t("videoPlayer.videoUnavailableMessage")
                   }
                 />
               )}
@@ -471,24 +494,24 @@ export function VideoPlayerPage() {
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <h2 className="text-sm font-semibold text-slate-900">
-                      Recognition & sharing
+                      {t("videoPlayer.recognitionSharing")}
                     </h2>
                     <p className="mt-1 text-xs text-slate-600">
-                      Recognition is only available after privacy-safe analysis completes and admin review confirms the lesson.
+                      {t("videoPlayer.recognitionSharingDescription")}
                     </p>
                   </div>
-                  <Badge variant={recognitionBadgeVariant}>{recognitionStatus}</Badge>
+                  <Badge variant={recognitionBadgeVariant}>{formatStatus(recognitionStatus)}</Badge>
                 </div>
                 <div className="mt-3 text-xs text-slate-700">
                   {recognitionEligible ? (
                     <div className="rounded-md border border-emerald-200 bg-white px-3 py-2 text-emerald-700">
-                      This lesson currently qualifies for 5-star review based on completed privacy processing and its analysis score.
+                      {t("videoPlayer.lessonQualifies")}
                     </div>
                   ) : (
                     <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-slate-600">
                       {recognitionReasons.length
-                        ? `Not yet eligible: ${recognitionReasons.join(", ")}.`
-                        : "Recognition will be evaluated when analysis is complete."}
+                        ? t("videoPlayer.notYetEligible", { reasons: recognitionReasons.join(", ") })
+                        : t("videoPlayer.recognitionWhenComplete")}
                     </div>
                   )}
                 </div>
@@ -500,15 +523,15 @@ export function VideoPlayerPage() {
                         checked={teacherOptIn}
                         onChange={(e) => setTeacherOptIn(e.target.checked)}
                       />
-                      <span className="font-medium">Opt this lesson into recognition</span>
+                      <span className="font-medium">{t("videoPlayer.optInLesson")}</span>
                     </div>
                     <div className="mt-1 text-[11px] text-slate-500">
-                      Allow Cognivio to hold this lesson for 5-star recognition and exemplar review if it qualifies.
+                      {t("videoPlayer.optInLessonDescription")}
                     </div>
                   </label>
                   <div className="rounded-md border border-slate-200 bg-white px-3 py-3 text-xs text-slate-700">
                     <label className="mb-1 block text-[11px] font-medium text-slate-600">
-                      Sharing scope
+                      {t("videoPlayer.sharingScope")}
                     </label>
                     <select
                       value={sharingScope}
@@ -516,12 +539,12 @@ export function VideoPlayerPage() {
                       disabled={!teacherOptIn}
                       className="w-full rounded-md border border-slate-200 bg-white px-2 py-2 text-xs text-slate-700 disabled:bg-slate-100"
                     >
-                      <option value="private">Private recognition only</option>
-                      <option value="school_only">School-only exemplar</option>
-                      <option value="cognivio_library">Cognivio-wide exemplar</option>
+                      <option value="private">{t("videoPlayer.privateOnly")}</option>
+                      <option value="school_only">{t("videoPlayer.schoolOnly")}</option>
+                      <option value="cognivio_library">{t("videoPlayer.cognivioWide")}</option>
                     </select>
                     <div className="mt-2 text-[11px] text-slate-500">
-                      Publication still requires admin review and only redacted assets may be used.
+                      {t("videoPlayer.publicationRequiresReview")}
                     </div>
                   </div>
                 </div>
@@ -534,10 +557,10 @@ export function VideoPlayerPage() {
                         disabled={!teacherOptIn}
                         onChange={(e) => setAllowSocialShare(e.target.checked)}
                       />
-                      <span className="font-medium">Allow social achievement card</span>
+                      <span className="font-medium">{t("videoPlayer.allowSocialCard")}</span>
                     </div>
                     <div className="mt-1 text-[11px] text-slate-500">
-                      Enables a shareable recognition card later. Classroom video is not posted by default.
+                      {t("videoPlayer.allowSocialCardDescription")}
                     </div>
                   </label>
                   <label className="rounded-md border border-slate-200 bg-white px-3 py-3 text-xs text-slate-700">
@@ -548,10 +571,10 @@ export function VideoPlayerPage() {
                         disabled={!teacherOptIn}
                         onChange={(e) => setAllowEmailSignature(e.target.checked)}
                       />
-                      <span className="font-medium">Allow email signature badge</span>
+                      <span className="font-medium">{t("videoPlayer.allowEmailSignature")}</span>
                     </div>
                     <div className="mt-1 text-[11px] text-slate-500">
-                      Prepares this lesson for a Cognivio recognition badge in email signature exports.
+                      {t("videoPlayer.allowEmailSignatureDescription")}
                     </div>
                   </label>
                 </div>
@@ -568,11 +591,11 @@ export function VideoPlayerPage() {
                     }
                     disabled={saveRecognitionOptInMutation.isPending}
                   >
-                    {saveRecognitionOptInMutation.isPending ? "Saving..." : "Save recognition preferences"}
+                    {saveRecognitionOptInMutation.isPending ? t("teachersPage.saving") : t("videoPlayer.saveRecognitionPreferences")}
                   </Button>
                   {recognitionStatus === "awarded" && (
                     <span className="text-[11px] text-emerald-700">
-                      Recognition awarded. Next steps can move into exemplar submission and share assets.
+                      {t("videoPlayer.recognitionAwardedNextSteps")}
                     </span>
                   )}
                 </div>
@@ -582,25 +605,25 @@ export function VideoPlayerPage() {
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div>
                           <div className="text-xs font-semibold text-slate-800">
-                            All-Star Library submission
+                            {t("videoPlayer.allStarSubmission")}
                           </div>
-                          <div className="mt-1 text-[11px] text-slate-500">
-                            Current status: {publicationStatus}
-                          </div>
+                    <div className="mt-1 text-[11px] text-slate-500">
+                      {t("videoPlayer.currentStatus", { status: formatStatus(publicationStatus) })}
+                    </div>
                         </div>
                         {publicationStatus === "published" && (
                           <Link
                             to="/all-star-library"
                             className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
                           >
-                            Open library
+                            {t("videoPlayer.openLibrary")}
                           </Link>
                         )}
                       </div>
                       <div className="mt-3 grid gap-3">
                         <div>
                           <label className="mb-1 block text-[11px] font-medium text-slate-600">
-                            Exemplar title
+                            {t("videoPlayer.exemplarTitle")}
                           </label>
                           <input
                             type="text"
@@ -611,7 +634,7 @@ export function VideoPlayerPage() {
                         </div>
                         <div>
                           <label className="mb-1 block text-[11px] font-medium text-slate-600">
-                            Exemplar summary
+                            {t("videoPlayer.exemplarSummary")}
                           </label>
                           <Textarea
                             rows={3}
@@ -622,13 +645,13 @@ export function VideoPlayerPage() {
                         </div>
                         <div>
                           <label className="mb-1 block text-[11px] font-medium text-slate-600">
-                            Tags
+                            {t("videoPlayer.tags")}
                           </label>
                           <input
                             type="text"
                             value={exemplarTags}
                             onChange={(e) => setExemplarTags(e.target.value)}
-                            placeholder="questioning, pacing, checks_for_understanding"
+                            placeholder={t("videoPlayer.tagsPlaceholder")}
                             className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700"
                           />
                         </div>
@@ -649,11 +672,11 @@ export function VideoPlayerPage() {
                             })
                           }
                         >
-                          {submitExemplarMutation.isPending ? "Submitting..." : "Submit to All-Star Library"}
+                          {submitExemplarMutation.isPending ? t("videoPlayer.submitting") : t("videoPlayer.submitToLibrary")}
                         </Button>
                         {!teacherOptIn && (
                           <span className="text-[11px] text-amber-700">
-                            Save recognition preferences with opt-in enabled before submitting.
+                            {t("videoPlayer.savePreferencesFirst")}
                           </span>
                         )}
                       </div>
@@ -661,10 +684,10 @@ export function VideoPlayerPage() {
 
                     <div className="mt-4 rounded-md border border-slate-200 bg-white px-3 py-3">
                       <div className="text-xs font-semibold text-slate-800">
-                        Share assets
+                        {t("videoPlayer.shareAssets")}
                       </div>
                       <div className="mt-1 text-[11px] text-slate-500">
-                        Generate privacy-safe recognition assets for social posting and email signatures.
+                        {t("videoPlayer.shareAssetsDescription")}
                       </div>
                       <div className="mt-3 flex flex-wrap gap-2">
                         <Button
@@ -673,7 +696,7 @@ export function VideoPlayerPage() {
                           disabled={!allowSocialShare || generateSocialCardMutation.isPending}
                           onClick={() => generateSocialCardMutation.mutate()}
                         >
-                          {generateSocialCardMutation.isPending ? "Generating..." : "Generate social card"}
+                          {generateSocialCardMutation.isPending ? t("videoPlayer.generating") : t("videoPlayer.generateSocialCard")}
                         </Button>
                         <Button
                           size="sm"
@@ -681,43 +704,43 @@ export function VideoPlayerPage() {
                           disabled={!allowEmailSignature || generateEmailSignatureMutation.isPending}
                           onClick={() => generateEmailSignatureMutation.mutate()}
                         >
-                          {generateEmailSignatureMutation.isPending ? "Generating..." : "Generate email signature"}
+                          {generateEmailSignatureMutation.isPending ? t("videoPlayer.generating") : t("videoPlayer.generateEmailSignature")}
                         </Button>
                       </div>
                       {socialCardResult && (
                         <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-[11px] text-slate-600">
-                          <div className="font-medium text-slate-800">Social card ready</div>
+                          <div className="font-medium text-slate-800">{t("videoPlayer.socialCardReady")}</div>
                           <a
                             href={socialCardResult.file_url}
                             target="_blank"
                             rel="noreferrer"
                             className="mt-2 inline-flex text-primary hover:underline"
                           >
-                            Open social card
+                            {t("videoPlayer.openSocialCard")}
                           </a>
                           <div className="mt-2 text-slate-500">{socialCardResult.caption}</div>
                         </div>
                       )}
                       {emailSignatureResult && (
                         <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-[11px] text-slate-600">
-                          <div className="font-medium text-slate-800">Email signature ready</div>
+                          <div className="font-medium text-slate-800">{t("videoPlayer.emailSignatureReady")}</div>
                           <a
                             href={emailSignatureResult.image_url}
                             target="_blank"
                             rel="noreferrer"
                             className="mt-2 inline-flex text-primary hover:underline"
                           >
-                            Open signature badge
+                            {t("videoPlayer.openSignatureBadge")}
                           </a>
                           <button
                             type="button"
                             onClick={() => {
                               navigator.clipboard.writeText(emailSignatureResult.html);
-                              toast.success("Email signature HTML copied");
+                              toast.success(t("videoPlayer.emailSignatureCopied"));
                             }}
-                            className="ml-3 inline-flex text-primary hover:underline"
+                            className={`${isRtl ? "mr-3" : "ml-3"} inline-flex text-primary hover:underline`}
                           >
-                            Copy HTML
+                            {t("videoPlayer.copyHtml")}
                           </button>
                         </div>
                       )}
@@ -727,12 +750,12 @@ export function VideoPlayerPage() {
               </div>
 
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                Summary & action items
+                {t("videoPlayer.summaryActionItems")}
               </h2>
               <div className="mb-2 text-xs text-slate-600">
                 {assessmentRes?.summary}
               </div>
-              <Field label="Additional summary notes" className="mb-2">
+              <Field label={t("videoPlayer.additionalSummaryNotes")} className="mb-2">
                 <Textarea
                   rows={2}
                   value={summaryNotes}
@@ -740,7 +763,7 @@ export function VideoPlayerPage() {
                   size="sm"
                 />
               </Field>
-              <Field label="Action items for next lesson" className="mb-3">
+              <Field label={t("videoPlayer.actionItemsNextLesson")} className="mb-3">
                 <Textarea
                   rows={2}
                   value={actionItems}
@@ -749,7 +772,7 @@ export function VideoPlayerPage() {
                 />
               </Field>
               <Button size="sm" onClick={handleGenerateReport}>
-                Generate report
+                {t("videoPlayer.generateReport")}
               </Button>
             </Panel>
           </section>
@@ -757,11 +780,11 @@ export function VideoPlayerPage() {
           <section className="md:col-span-5 space-y-3">
             <Panel className="p-4 text-xs">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                Timestamped observations
+                {t("videoPlayer.timestampedObservations")}
               </h2>
               {observations.length === 0 ? (
                 <div className="text-xs text-slate-500">
-                  No observations yet for this recording.
+                  {t("videoPlayer.noObservations")}
                 </div>
               ) : (
                 <ul className="space-y-1">
@@ -770,14 +793,14 @@ export function VideoPlayerPage() {
                       <button
                         type="button"
                         onClick={() => handleSeek(o.timestamp_seconds)}
-                        className="w-full rounded-md px-2 py-1 text-left text-xs text-slate-700 hover:bg-slate-100"
+                        className={`w-full rounded-md px-2 py-1 ${isRtl ? "text-right" : "text-left"} text-xs text-slate-700 hover:bg-slate-100`}
                       >
-                        <span className="mr-2 inline-flex min-w-[46px] items-center justify-center rounded-full bg-slate-200 px-2 py-0.5 text-[10px] text-slate-700">
+                        <span className={`${isRtl ? "ml-2" : "mr-2"} inline-flex min-w-[46px] items-center justify-center rounded-full bg-slate-200 px-2 py-0.5 text-[10px] text-slate-700`}>
                           {typeof o.timestamp_seconds === "number"
                             ? `${Math.round(o.timestamp_seconds)}s`
                             : "--"}
                         </span>
-                        {o.admin_comment || "Observation"}
+                        {o.admin_comment || t("videoPlayer.observationFallback")}
                       </button>
                     </li>
                   ))}
@@ -787,7 +810,7 @@ export function VideoPlayerPage() {
 
             <Panel className="p-4 text-xs">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                Linked AI insights
+                {t("videoPlayer.linkedAiInsights")}
               </h2>
               {assessmentRes?.element_scores?.length ? (
                 <ul className="space-y-1">
@@ -812,7 +835,7 @@ export function VideoPlayerPage() {
                 </ul>
               ) : (
                 <div className="text-xs text-slate-500">
-                  No AI insights associated with this video yet.
+                  {t("videoPlayer.noAiInsights")}
                 </div>
               )}
             </Panel>

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { exemplarApi, recognitionApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { useAuth } from "@/hooks/useAuth";
@@ -32,25 +33,40 @@ function QueueMetric({ label, value, tone = "neutral" }) {
 }
 
 function RecognitionReviewCard({ item, onReview, approving }) {
+  const { t } = useTranslation();
+  const formatStatus = (value) => {
+    const map = {
+      pending_admin_review: t("labels.pendingAdminReview"),
+      not_submitted: t("labels.notSubmitted"),
+      awarded: t("labels.awarded"),
+      private: t("labels.private"),
+      school_only: t("labels.schoolOnly"),
+      cognivio_library: t("labels.cognivioLibrary"),
+    };
+    return map[value] || value || t("recognitionReview.privateScope");
+  };
   return (
     <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="text-sm font-semibold text-slate-900">
-            {item.teacher_name || "Teacher"} • {item.badge_type === "five_star_lesson" ? "5-Star Lesson" : (item.badge_type || "recognition").replace(/_/g, " ")}
+            {item.teacher_name || t("recognitionReview.teacherFallback")} • {item.badge_type === "five_star_lesson" ? t("recognitionReview.fiveStarLesson") : (item.badge_type || "recognition").replace(/_/g, " ")}
           </div>
           <div className="mt-1 text-[11px] text-slate-500">
-            Scope: {item.sharing_scope || "private"} • Submitted {item.submitted_at ? String(item.submitted_at).slice(0, 10) : "recently"}
+            {t("recognitionReview.scopeLine", {
+              scope: formatStatus(item.sharing_scope),
+              date: item.submitted_at ? String(item.submitted_at).slice(0, 10) : t("recognitionReview.recentlySubmitted"),
+            })}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="warning">{item.recognition_status || "pending_admin_review"}</Badge>
-          <Badge variant="neutral">{item.publication_status || "not_submitted"}</Badge>
+          <Badge variant="warning">{formatStatus(item.recognition_status)}</Badge>
+          <Badge variant="neutral">{formatStatus(item.publication_status)}</Badge>
           <Link
             to={`/videos/${item.video_id}`}
             className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
           >
-            Open recording
+            {t("recognitionReview.openRecording")}
           </Link>
         </div>
       </div>
@@ -67,7 +83,7 @@ function RecognitionReviewCard({ item, onReview, approving }) {
           }
           disabled={approving}
         >
-          {approving ? "Saving..." : "Approve badge"}
+          {approving ? "..." : t("recognitionReview.approveBadge")}
         </Button>
         <Button
           size="sm"
@@ -80,7 +96,7 @@ function RecognitionReviewCard({ item, onReview, approving }) {
           }
           disabled={approving}
         >
-          Reject
+          {t("recognitionReview.reject")}
         </Button>
         <Button
           size="sm"
@@ -93,7 +109,7 @@ function RecognitionReviewCard({ item, onReview, approving }) {
           }
           disabled={approving}
         >
-          Revoke
+          {t("recognitionReview.revoke")}
         </Button>
       </div>
     </div>
@@ -101,24 +117,38 @@ function RecognitionReviewCard({ item, onReview, approving }) {
 }
 
 function ExemplarReviewCard({ item, onReview, approving }) {
+  const { t } = useTranslation();
+  const formatStatus = (value) => {
+    const map = {
+      pending_admin_review: t("labels.pendingAdminReview"),
+      not_submitted: t("labels.notSubmitted"),
+      private: t("labels.private"),
+      school_only: t("labels.schoolOnly"),
+      cognivio_library: t("labels.cognivioLibrary"),
+    };
+    return map[value] || value || t("recognitionReview.privateScope");
+  };
   return (
     <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="text-sm font-semibold text-slate-900">
-            {item.teacher_name || "Teacher"} • {item.title}
+            {item.teacher_name || t("recognitionReview.teacherFallback")} • {item.title}
           </div>
           <div className="mt-1 text-[11px] text-slate-500">
-            Scope: {item.sharing_scope || "private"} • Submitted {item.submitted_at ? String(item.submitted_at).slice(0, 10) : "recently"}
+            {t("recognitionReview.scopeLine", {
+              scope: formatStatus(item.sharing_scope),
+              date: item.submitted_at ? String(item.submitted_at).slice(0, 10) : t("recognitionReview.recentlySubmitted"),
+            })}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="warning">{item.submission_status || "pending_admin_review"}</Badge>
+          <Badge variant="warning">{formatStatus(item.submission_status)}</Badge>
           <Link
             to={`/videos/${item.video_id}`}
             className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
           >
-            Open recording
+            {t("recognitionReview.openRecording")}
           </Link>
         </div>
       </div>
@@ -146,7 +176,7 @@ function ExemplarReviewCard({ item, onReview, approving }) {
           }
           disabled={approving}
         >
-          {approving ? "Saving..." : "Publish to library"}
+          {approving ? "..." : t("recognitionReview.publishToLibrary")}
         </Button>
         <Button
           size="sm"
@@ -159,7 +189,7 @@ function ExemplarReviewCard({ item, onReview, approving }) {
           }
           disabled={approving}
         >
-          Reject submission
+          {t("recognitionReview.rejectSubmission")}
         </Button>
       </div>
     </div>
@@ -167,6 +197,7 @@ function ExemplarReviewCard({ item, onReview, approving }) {
 }
 
 export function RecognitionReviewPage() {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
@@ -195,7 +226,7 @@ export function RecognitionReviewPage() {
   const reviewMutation = useMutation({
     mutationFn: ({ videoId, payload }) => recognitionApi.review(videoId, payload),
     onSuccess: () => {
-      toast.success("Recognition review saved");
+      toast.success(t("recognitionReview.reviewSaved"));
       queryClient.invalidateQueries({ queryKey: ["recognition-review-queue"] });
       queryClient.invalidateQueries({ queryKey: ["videos"] });
       queryClient.invalidateQueries({ queryKey: ["video"] });
@@ -204,13 +235,13 @@ export function RecognitionReviewPage() {
     },
     onError: (error) => {
       const detail = error?.response?.data?.detail;
-      toast.error(typeof detail === "string" ? detail : detail?.message || "Failed to save recognition review");
+      toast.error(typeof detail === "string" ? detail : detail?.message || t("recognitionReview.reviewSaveFailed"));
     },
   });
   const exemplarReviewMutation = useMutation({
     mutationFn: ({ submissionId, payload }) => exemplarApi.review(submissionId, payload),
     onSuccess: () => {
-      toast.success("Exemplar review saved");
+      toast.success(t("recognitionReview.exemplarReviewSaved"));
       queryClient.invalidateQueries({ queryKey: ["exemplar-review-queue"] });
       queryClient.invalidateQueries({ queryKey: ["exemplar-library"] });
       queryClient.invalidateQueries({ queryKey: ["video-recognition"] });
@@ -218,7 +249,7 @@ export function RecognitionReviewPage() {
     },
     onError: (error) => {
       const detail = error?.response?.data?.detail;
-      toast.error(typeof detail === "string" ? detail : detail?.message || "Failed to save exemplar review");
+      toast.error(typeof detail === "string" ? detail : detail?.message || t("recognitionReview.exemplarReviewFailed"));
     },
   });
 
@@ -234,8 +265,8 @@ export function RecognitionReviewPage() {
       <LayoutShell>
         <div className="mx-auto max-w-5xl px-6 py-6">
           <ErrorState
-            title="Admin Access Required"
-            message="Recognition review tools are only available to admins."
+            title={t("recognitionReview.adminRequiredTitle")}
+            message={t("recognitionReview.adminRequiredMessage")}
           />
         </div>
       </LayoutShell>
@@ -246,45 +277,45 @@ export function RecognitionReviewPage() {
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
         <PageHeader
-          title="Recognition Review"
-          description="Confirm 5-star lessons, protect publication quality, and keep exemplar approvals deliberate."
+          title={t("recognitionReview.title")}
+          description={t("recognitionReview.description")}
         />
 
         <div className="grid gap-6 lg:grid-cols-[1.1fr_2fr]">
           <Panel>
             <h2 className="mb-3 text-sm font-semibold text-slate-900">
-              Queue Snapshot
+              {t("recognitionReview.queueSnapshot")}
             </h2>
             <div className="grid gap-3 sm:grid-cols-2">
               <QueueMetric
-                label="Pending Reviews"
+                label={t("dashboard.pendingReviews")}
                 value={queueItems.length}
                 tone={queueItems.length > 0 ? "warning" : "neutral"}
               />
               <QueueMetric
-                label="Badge Queue"
+                label={t("dashboard.badgeQueue")}
                 value={queueItems.length}
                 tone={queueItems.length > 0 ? "warning" : "neutral"}
               />
               <QueueMetric
-                label="Exemplar Queue"
+                label={t("dashboard.exemplarQueue")}
                 value={exemplarItems.length}
                 tone={exemplarItems.length > 0 ? "warning" : "neutral"}
               />
               <QueueMetric
-                label="Library Scope"
+                label={t("dashboard.libraryScope")}
                 value={libraryReadyCount + exemplarItems.filter((item) => item.sharing_scope === "cognivio_library").length}
                 tone={libraryReadyCount + exemplarItems.filter((item) => item.sharing_scope === "cognivio_library").length > 0 ? "warning" : "neutral"}
               />
             </div>
             <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
               <div className="font-semibold text-slate-800">
-                Review rule
+                {t("recognitionReview.reviewRule")}
               </div>
               <div className="mt-2 space-y-1">
-                <div>Only privacy-safe completed lessons should be approved.</div>
-                <div>Recognition does not publish anything by itself.</div>
-                <div>Teacher opt-in and later exemplar review still apply.</div>
+                <div>{t("recognitionReview.reviewRuleLine1")}</div>
+                <div>{t("recognitionReview.reviewRuleLine2")}</div>
+                <div>{t("recognitionReview.reviewRuleLine3")}</div>
               </div>
             </div>
           </Panel>
@@ -294,28 +325,30 @@ export function RecognitionReviewPage() {
             <div className="mb-4 flex items-center justify-between gap-3">
               <div>
                 <h2 className="text-sm font-semibold text-slate-900">
-                  Pending Recognition Reviews
+                  {t("recognitionReview.pendingRecognitionTitle")}
                 </h2>
                 <p className="text-xs text-slate-500">
-                  Review the lesson, confirm the quality bar, and award or reject recognition.
+                  {t("recognitionReview.pendingRecognitionDescription")}
                 </p>
               </div>
               <div className="text-xs text-slate-500">
-                {queueItems.length} item{queueItems.length === 1 ? "" : "s"}
+                {queueItems.length === 1
+                  ? t("recognitionReview.oneItemCount")
+                  : t("recognitionReview.itemsCount", { count: queueItems.length })}
               </div>
             </div>
 
             {isLoading ? (
-              <LoadingState message="Loading recognition review queue..." />
+              <LoadingState message={t("recognitionReview.loadingRecognitionQueue")} />
             ) : isError ? (
               <ErrorState
-                title="Unable to load recognition queue"
-                message="Refresh and try again. If this persists, verify the backend recognition endpoints."
+                title={t("recognitionReview.recognitionQueueErrorTitle")}
+                message={t("recognitionReview.recognitionQueueErrorMessage")}
               />
             ) : queueItems.length === 0 ? (
               <EmptyState
-                title="Recognition queue is clear"
-                message="No lessons are currently waiting for admin recognition review."
+                title={t("recognitionReview.emptyRecognitionTitle")}
+                message={t("recognitionReview.emptyRecognitionMessage")}
               />
             ) : (
               <div className="space-y-4">
@@ -334,28 +367,30 @@ export function RecognitionReviewPage() {
             <div className="mb-4 flex items-center justify-between gap-3">
               <div>
                 <h2 className="text-sm font-semibold text-slate-900">
-                  Pending Exemplar Publication Reviews
+                  {t("recognitionReview.pendingExemplarTitle")}
                 </h2>
                 <p className="text-xs text-slate-500">
-                  Approve recognized lessons for the All-Star Library only after checking quality and publication fit.
+                  {t("recognitionReview.pendingExemplarDescription")}
                 </p>
               </div>
               <div className="text-xs text-slate-500">
-                {exemplarItems.length} item{exemplarItems.length === 1 ? "" : "s"}
+                {exemplarItems.length === 1
+                  ? t("recognitionReview.oneItemCount")
+                  : t("recognitionReview.itemsCount", { count: exemplarItems.length })}
               </div>
             </div>
 
             {exemplarLoading ? (
-              <LoadingState message="Loading exemplar review queue..." />
+              <LoadingState message={t("recognitionReview.loadingExemplarQueue")} />
             ) : exemplarError ? (
               <ErrorState
-                title="Unable to load exemplar queue"
-                message="Refresh and try again. If this persists, verify the exemplar review endpoints."
+                title={t("recognitionReview.exemplarQueueErrorTitle")}
+                message={t("recognitionReview.exemplarQueueErrorMessage")}
               />
             ) : exemplarItems.length === 0 ? (
               <EmptyState
-                title="Exemplar queue is clear"
-                message="No submissions are currently waiting for library approval."
+                title={t("recognitionReview.emptyExemplarTitle")}
+                message={t("recognitionReview.emptyExemplarMessage")}
               />
             ) : (
               <div className="space-y-4">
