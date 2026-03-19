@@ -2070,26 +2070,6 @@ async def get_frameworks(current_user: dict = Depends(get_current_user)):
         ]
     }
 
-@api_router.get("/frameworks/{framework_type}")
-async def get_framework_details(
-    framework_type: FrameworkType, current_user: dict = Depends(get_current_user)
-):
-    if framework_type == FrameworkType.DANIELSON:
-        return DANIELSON_FRAMEWORK
-    elif framework_type == FrameworkType.MARSHALL:
-        return MARSHALL_FRAMEWORK
-    else:
-        custom_domains = await db.custom_domains.find(
-            {"user_id": current_user["id"]}, {"_id": 0, "user_id": 0}
-        ).to_list(1000)
-        domains = (
-            DANIELSON_FRAMEWORK["domains"]
-            + MARSHALL_FRAMEWORK["domains"]
-            + custom_domains
-        )
-        return {"name": "Custom Framework", "type": "custom", "domains": domains}
-
-
 @api_router.get("/frameworks/custom-domains")
 async def list_custom_domains(current_user: dict = Depends(get_current_user)):
     domains = await db.custom_domains.find(
@@ -2154,6 +2134,26 @@ async def delete_custom_domain(
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Domain not found")
     return {"message": "Domain deleted"}
+
+
+@api_router.get("/frameworks/{framework_type}")
+async def get_framework_details(
+    framework_type: FrameworkType, current_user: dict = Depends(get_current_user)
+):
+    if framework_type == FrameworkType.DANIELSON:
+        return DANIELSON_FRAMEWORK
+    elif framework_type == FrameworkType.MARSHALL:
+        return MARSHALL_FRAMEWORK
+    else:
+        custom_domains = await db.custom_domains.find(
+            {"user_id": current_user["id"]}, {"_id": 0, "user_id": 0}
+        ).to_list(1000)
+        domains = (
+            DANIELSON_FRAMEWORK["domains"]
+            + MARSHALL_FRAMEWORK["domains"]
+            + custom_domains
+        )
+        return {"name": "Custom Framework", "type": "custom", "domains": domains}
 
 @api_router.post("/frameworks/selection")
 async def save_framework_selection(selection: FrameworkSelection, current_user: dict = Depends(get_current_user)):
@@ -6547,15 +6547,12 @@ async def get_action_plan(
     teacher_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    teacher = await db.teachers.find_one(
-        {"id": teacher_id, "created_by": current_user["id"]},
-        {"_id": 0, "created_by": 0}
-    )
-    if not teacher:
-        raise HTTPException(status_code=404, detail="Teacher not found")
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    role = _get_user_role(current_user)
+    plan_owner_id = teacher.get("created_by") if role == "teacher" and teacher.get("created_by") else current_user["id"]
 
     plan = await db.action_plans.find_one(
-        {"teacher_id": teacher_id, "user_id": current_user["id"]},
+        {"teacher_id": teacher_id, "user_id": plan_owner_id},
         {"_id": 0, "user_id": 0},
     )
     if not plan:
@@ -6581,15 +6578,12 @@ async def save_action_plan(
     payload: ActionPlanUpsert,
     current_user: dict = Depends(get_current_user),
 ):
-    teacher = await db.teachers.find_one(
-        {"id": teacher_id, "created_by": current_user["id"]},
-        {"_id": 0, "created_by": 0}
-    )
-    if not teacher:
-        raise HTTPException(status_code=404, detail="Teacher not found")
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    role = _get_user_role(current_user)
+    plan_owner_id = teacher.get("created_by") if role == "teacher" and teacher.get("created_by") else current_user["id"]
 
     existing = await db.action_plans.find_one(
-        {"teacher_id": teacher_id, "user_id": current_user["id"]},
+        {"teacher_id": teacher_id, "user_id": plan_owner_id},
         {"_id": 0},
     )
     now = datetime.now(timezone.utc).isoformat()
@@ -6612,7 +6606,7 @@ async def save_action_plan(
             "teacher_id": teacher_id,
             "goals": [goal.dict() for goal in payload.goals],
             "notes": payload.notes,
-            "user_id": current_user["id"],
+            "user_id": plan_owner_id,
             "created_at": created_at,
             "updated_at": None,
         }
@@ -6622,7 +6616,7 @@ async def save_action_plan(
     await db.schedules.delete_many(
         {
             "teacher_id": teacher_id,
-            "user_id": current_user["id"],
+            "user_id": plan_owner_id,
             "reminder_type": "action_plan",
         }
     )
@@ -6651,7 +6645,7 @@ async def save_action_plan(
                 "plan_id": plan_id,
             },
             "reminder_note": goal.description,
-            "user_id": current_user["id"],
+            "user_id": plan_owner_id,
             "created_at": now,
             "updated_at": None,
         }
@@ -6665,7 +6659,7 @@ async def save_action_plan(
         )
 
     result = await db.action_plans.find_one(
-        {"id": plan_id, "user_id": current_user["id"]},
+        {"id": plan_id, "user_id": plan_owner_id},
         {"_id": 0, "user_id": 0},
     )
     if not result:
