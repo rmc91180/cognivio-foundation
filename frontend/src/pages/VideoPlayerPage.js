@@ -338,6 +338,7 @@ export function VideoPlayerPage() {
   const recognitionEligible = Boolean(recognitionRes?.eligibility?.is_eligible);
   const recognitionReasons = recognitionRes?.eligibility?.reasons || [];
   const publicationStatus = recognitionRes?.publication?.submission_status || "not_submitted";
+  const observationSummary = assessmentRes?.observation_summary;
   const canSubmitExemplar = recognitionStatus === "awarded" && teacherOptIn;
   const recognitionBadgeLabel =
     recognitionStatus === "awarded"
@@ -490,6 +491,96 @@ export function VideoPlayerPage() {
             </Panel>
 
             <Panel className="p-4 text-xs text-slate-700">
+              <div className="mb-5 rounded-lg border border-slate-200 bg-slate-50 px-4 py-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold text-slate-900">
+                      {t("videoPlayer.observationSummary")}
+                    </h2>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {t("videoPlayer.observationSummaryDescription")}
+                    </p>
+                  </div>
+                  {assessmentRes?.overall_score != null && (
+                    <Badge variant="success">
+                      {t("videoPlayer.scoreSummary", { score: assessmentRes.overall_score.toFixed(1) })}
+                    </Badge>
+                  )}
+                </div>
+                <div className="mt-3 rounded-md border border-slate-200 bg-white px-3 py-3 text-sm leading-6 text-slate-700">
+                  {observationSummary?.executive_summary || assessmentRes?.summary || t("videoPlayer.noSummaryAvailable")}
+                </div>
+                {observationSummary?.focus_note && (
+                  <div className="mt-3 rounded-md border border-sky-200 bg-sky-50 px-3 py-3 text-[11px] text-sky-800">
+                    <div className="font-semibold text-sky-900">{t("videoPlayer.adminFocus")}</div>
+                    <div className="mt-1">{observationSummary.focus_note}</div>
+                  </div>
+                )}
+                {observationSummary?.confidence_note && (
+                  <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-[11px] text-amber-800">
+                    {observationSummary.confidence_note}
+                  </div>
+                )}
+                <div className="mt-4 grid gap-3 md:grid-cols-2">
+                  <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      {t("videoPlayer.topStrengths")}
+                    </div>
+                    {observationSummary?.top_strengths?.length ? (
+                      <ul className="mt-2 list-disc space-y-1 ps-4 text-xs text-slate-700">
+                        {observationSummary.top_strengths.map((item, idx) => (
+                          <li key={idx}>{item}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="mt-2 text-xs text-slate-500">{t("videoPlayer.noStrengthsAvailable")}</div>
+                    )}
+                  </div>
+                  <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      {t("videoPlayer.growthAreas")}
+                    </div>
+                    {observationSummary?.growth_areas?.length ? (
+                      <ul className="mt-2 list-disc space-y-1 ps-4 text-xs text-slate-700">
+                        {observationSummary.growth_areas.map((item, idx) => (
+                          <li key={idx}>{item}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="mt-2 text-xs text-slate-500">{t("videoPlayer.noGrowthAreasAvailable")}</div>
+                    )}
+                  </div>
+                  <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      {t("videoPlayer.coachingMoves")}
+                    </div>
+                    {observationSummary?.coaching_actions?.length ? (
+                      <ul className="mt-2 list-disc space-y-1 ps-4 text-xs text-slate-700">
+                        {observationSummary.coaching_actions.map((item, idx) => (
+                          <li key={idx}>{item}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="mt-2 text-xs text-slate-500">{t("videoPlayer.noCoachingMovesAvailable")}</div>
+                    )}
+                  </div>
+                  <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      {t("videoPlayer.priorityAlignment")}
+                    </div>
+                    {observationSummary?.priority_alignment?.length ? (
+                      <ul className="mt-2 list-disc space-y-1 ps-4 text-xs text-slate-700">
+                        {observationSummary.priority_alignment.map((item, idx) => (
+                          <li key={idx}>{item}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="mt-2 text-xs text-slate-500">{t("videoPlayer.noPriorityAlignment")}</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
               <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
@@ -753,7 +844,7 @@ export function VideoPlayerPage() {
                 {t("videoPlayer.summaryActionItems")}
               </h2>
               <div className="mb-2 text-xs text-slate-600">
-                {assessmentRes?.summary}
+                {observationSummary?.executive_summary || assessmentRes?.summary}
               </div>
               <Field label={t("videoPlayer.additionalSummaryNotes")} className="mb-2">
                 <Textarea
@@ -810,7 +901,7 @@ export function VideoPlayerPage() {
 
             <Panel className="p-4 text-xs">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                {t("videoPlayer.linkedAiInsights")}
+                {t("videoPlayer.detailedRubricView")}
               </h2>
               {assessmentRes?.element_scores?.length ? (
                 <ul className="space-y-1">

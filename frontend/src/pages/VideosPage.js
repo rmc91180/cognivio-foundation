@@ -31,6 +31,7 @@ function VideoRow({
 }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const observationSummary = assessment?.observation_summary;
   const formatStatus = (value) => {
     const map = {
       queued: t("labels.queued"),
@@ -166,19 +167,19 @@ function VideoRow({
       <div className="mt-2 grid gap-2 text-xs text-slate-600 md:grid-cols-2">
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-            {t("videosPage.summaryAssessment")}
+            {t("videosPage.observationSummary")}
           </div>
           <div className="mt-1 line-clamp-2">
-            {assessment?.summary || t("videosPage.noAssessmentSummary")}
+            {observationSummary?.executive_summary || assessment?.summary || t("videosPage.noAssessmentSummary")}
           </div>
         </div>
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-            {t("videosPage.recommendations")}
+            {t("videosPage.coachingMoves")}
           </div>
-          {assessment?.recommendations?.length ? (
+          {(observationSummary?.coaching_actions?.length || assessment?.recommendations?.length) ? (
             <ul className="mt-1 list-disc space-y-1 ps-4">
-              {assessment.recommendations.slice(0, 2).map((rec, idx) => (
+              {(observationSummary?.coaching_actions || assessment?.recommendations || []).slice(0, 2).map((rec, idx) => (
                 <li key={idx}>{rec}</li>
               ))}
             </ul>
@@ -189,6 +190,14 @@ function VideoRow({
           )}
         </div>
       </div>
+      {observationSummary?.priority_alignment?.length ? (
+        <div className="mt-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-[11px] text-sky-800">
+          <div className="font-semibold text-sky-900">{t("videosPage.priorityAlignment")}</div>
+          <div className="mt-1 line-clamp-2">
+            {observationSummary.priority_alignment.join(" • ")}
+          </div>
+        </div>
+      ) : null}
       {video.error_message && (
         <div className="mt-2 rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-[11px] text-rose-700">
           {video.error_message}

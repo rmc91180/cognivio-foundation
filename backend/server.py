@@ -1650,10 +1650,22 @@ class ElementScore(BaseModel):
 
     element_id: str
     element_name: str
+    domain: Optional[str] = None
+    priority: Optional[bool] = False
     score: float  # 1-10 gradient rather than binary
     level: PerformanceLevel
     observations: List[str]
     confidence: float
+
+
+class ObservationSummaryPacket(BaseModel):
+    executive_summary: str
+    top_strengths: List[str] = []
+    growth_areas: List[str] = []
+    coaching_actions: List[str] = []
+    priority_alignment: List[str] = []
+    focus_note: Optional[str] = None
+    confidence_note: Optional[str] = None
 
 
 class Observation(BaseModel):
@@ -1690,6 +1702,11 @@ class AssessmentResult(BaseModel):
     summary: str
     recommendations: List[str]
     analyzed_at: str
+    priority_elements: List[str] = []
+    focus_note: Optional[str] = None
+    analysis_confidence: Optional[Dict[str, Any]] = None
+    analysis_modalities_used: List[str] = []
+    observation_summary: Optional[ObservationSummaryPacket] = None
 
 class TeacherPerformance(BaseModel):
     teacher_id: str
@@ -4778,7 +4795,7 @@ async def get_assessments(
         query["teacher_id"] = teacher_id
     
     assessments = await db.assessments.find(query, {"_id": 0, "user_id": 0}).to_list(1000)
-    return [AssessmentResult(**a) for a in assessments]
+    return [AssessmentResult(**_enrich_assessment_for_response(a)) for a in assessments]
 
 @api_router.get("/assessments/{assessment_id}", response_model=AssessmentResult)
 async def get_assessment(assessment_id: str, current_user: dict = Depends(get_current_user)):
@@ -4788,7 +4805,7 @@ async def get_assessment(assessment_id: str, current_user: dict = Depends(get_cu
     )
     if not assessment:
         raise HTTPException(status_code=404, detail="Assessment not found")
-    return AssessmentResult(**assessment)
+    return AssessmentResult(**_enrich_assessment_for_response(assessment))
 
 
 @api_router.get("/assessments/{assessment_id}/evidence")
@@ -8163,6 +8180,15 @@ async def analyze_video(
             priority_element_ids=priority_elements,
             focus_note=focus_note,
         )
+        observation_summary = build_observation_summary_packet(
+            element_scores,
+            overall_score,
+            summary_text,
+            recommendations,
+            priority_element_ids=priority_elements,
+            focus_note=focus_note,
+            analysis_confidence=analysis_metadata["analysis_confidence"],
+        )
         
         # Create assessment document
         assessment_doc = {
@@ -8177,6 +8203,7 @@ async def analyze_video(
             "recommendations": recommendations,
             "priority_elements": priority_elements,
             "focus_note": focus_note or None,
+            "observation_summary": observation_summary,
             "analyzed_at": datetime.now(timezone.utc).isoformat(),
             "analysis_mode": analysis_payload.get("analysis_mode", "fallback"),
             "analysis_confidence": analysis_metadata["analysis_confidence"],
@@ -8995,6 +9022,87 @@ def _score_priority_rank(item: dict, priority_element_ids: Optional[List[str]] =
     priority_set = set(priority_element_ids or [])
     is_priority = bool(item.get("priority")) or item.get("element_id") in priority_set
     return (0 if is_priority else 1, -float(item.get("score", 0.0)))
+
+
+def _observation_focus_label(item: dict, priority_element_ids: Optional[List[str]] = None) -> str:
+    if bool(item.get("priority")) or item.get("element_id") in set(priority_element_ids or []):
+        return "Priority focus"
+    return "Observation area"
+
+
+def build_observation_summary_packet(
+    element_scores: List[dict],
+    overall_score: float,
+    summary_text: str,
+    recommendations: List[str],
+    priority_element_ids: Optional[List[str]] = None,
+    focus_note: Optional[str] = None,
+    analysis_confidence: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    priority_set = set(priority_element_ids or [])
+    ranked_strengths = sorted(
+        [es for es in element_scores if es.get("score", 0) >= 7.0],
+        key=lambda item: _score_priority_rank(item, priority_element_ids),
+    )[:3]
+    ranked_growth = sorted(
+        [es for es in element_scores if es.get("score", 0) < 7.0],
+        key=lambda item: (0 if (bool(item.get("priority")) or item.get("element_id") in priority_set) else 1, item.get("score", 0)),
+    )[:3]
+
+    def _format_area(item: dict) -> str:
+        observation = str((item.get("observations") or [""])[0]).strip()
+        label = _observation_focus_label(item, priority_element_ids)
+        if observation:
+            return f"{label}: {item['element_name']} - {observation.rstrip('.')}"
+        return f"{label}: {item['element_name']}"
+
+    priority_alignment: List[str] = []
+    for item in element_scores:
+        if item.get("element_id") not in priority_set and not item.get("priority"):
+            continue
+        score = float(item.get("score", 0.0))
+        direction = "currently strong" if score >= 7.0 else "needs coaching attention"
+        priority_alignment.append(f"{item['element_name']}: {direction} ({score:.1f}/10)")
+
+    confidence_note = None
+    degradation_reasons = ((analysis_confidence or {}).get("degradation_reasons") or [])
+    if degradation_reasons:
+        if "audio_unavailable" in degradation_reasons:
+            confidence_note = "Audio was unavailable, so this observation emphasizes visual evidence."
+        else:
+            confidence_note = "This observation was completed with partial evidence and should be reviewed alongside the video."
+
+    return {
+        "executive_summary": summary_text,
+        "top_strengths": [_format_area(item) for item in ranked_strengths],
+        "growth_areas": [_format_area(item) for item in ranked_growth],
+        "coaching_actions": recommendations[:3],
+        "priority_alignment": priority_alignment[:3],
+        "focus_note": focus_note or None,
+        "confidence_note": confidence_note,
+    }
+
+
+def _enrich_assessment_for_response(assessment: Dict[str, Any]) -> Dict[str, Any]:
+    enriched = dict(assessment)
+    priority_elements = list(enriched.get("priority_elements") or [])
+    focus_note = enriched.get("focus_note")
+    analysis_confidence = enriched.get("analysis_confidence") or {}
+    if not enriched.get("observation_summary"):
+        enriched["observation_summary"] = build_observation_summary_packet(
+            enriched.get("element_scores") or [],
+            float(enriched.get("overall_score", 0.0) or 0.0),
+            enriched.get("summary") or "",
+            enriched.get("recommendations") or [],
+            priority_element_ids=priority_elements,
+            focus_note=focus_note,
+            analysis_confidence=analysis_confidence,
+        )
+    enriched.setdefault("priority_elements", priority_elements)
+    enriched.setdefault("focus_note", focus_note)
+    enriched.setdefault("analysis_confidence", analysis_confidence)
+    enriched.setdefault("analysis_modalities_used", list(enriched.get("analysis_modalities_used") or []))
+    return enriched
 
 
 def generate_summary(

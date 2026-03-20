@@ -204,6 +204,37 @@ def test_build_elements_to_analyze_marks_priority_items_first():
     assert elements[1]["priority"] is False
 
 
+def test_build_observation_summary_packet_prioritizes_focus_areas():
+    packet = server.build_observation_summary_packet(
+        element_scores=[
+            {
+                "element_id": "2b",
+                "element_name": "Questioning",
+                "priority": True,
+                "score": 6.2,
+                "observations": ["Questions were mostly short and teacher-led."],
+            },
+            {
+                "element_id": "3c",
+                "element_name": "Engagement",
+                "score": 7.8,
+                "observations": ["Students were consistently on task."],
+            },
+        ],
+        overall_score=7.0,
+        summary_text="Students stayed engaged, while questioning remained the main coaching priority.",
+        recommendations=["[02:10–02:40] Increase probing questions and wait time."],
+        priority_element_ids=["2b"],
+        focus_note="Look closely at questioning.",
+        analysis_confidence={"degradation_reasons": ["audio_unavailable"]},
+    )
+
+    assert packet["executive_summary"].startswith("Students stayed engaged")
+    assert packet["focus_note"] == "Look closely at questioning."
+    assert packet["priority_alignment"][0].startswith("Questioning:")
+    assert "Audio was unavailable" in packet["confidence_note"]
+
+
 def test_build_analysis_metadata_tracks_modality_confidence_and_degradation(monkeypatch):
     monkeypatch.setattr(server, "AUDIO_ANALYSIS_ENABLED", True)
     monkeypatch.setattr(server, "AUDIO_ALLOW_STUDENT_VOICE_PROCESSING", True)
