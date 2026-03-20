@@ -77,6 +77,33 @@ def test_generate_summary_uses_10_point_thresholds_and_observations():
     assert "Engagement" in summary
 
 
+def test_generate_summary_supports_hebrew_output():
+    summary = server.generate_summary(
+        [
+            {
+                "element_id": "2b",
+                "element_name": "שימוש בשאלות ובדיון",
+                "score": 8.2,
+                "observations": ["המורה השתמשה בשאלות המשך כדי להעמיק את החשיבה."],
+            },
+            {
+                "element_id": "3c",
+                "element_name": "מעורבות תלמידים בלמידה",
+                "score": 6.1,
+                "observations": ["רק חלק קטן מהתלמידים השתתף באופן פעיל."],
+            },
+        ],
+        7.1,
+        priority_element_ids=["2b"],
+        focus_note="לשים לב במיוחד לאיכות הדיון.",
+        language="he",
+    )
+
+    assert "התרשמות כללית" in summary
+    assert "מוקד התצפית" in summary
+    assert "הערת מיקוד לתצפית" in summary
+
+
 def test_generate_recommendations_uses_evidence_segments_and_not_canned_defaults():
     recommendations = server.generate_recommendations(
         [
@@ -103,6 +130,32 @@ def test_generate_recommendations_uses_evidence_segments_and_not_canned_defaults
     assert "Engagement".lower() in recommendations[0].lower()
     assert "Observed evidence" in recommendations[0]
     assert "Continue modeling strong routines" not in recommendations[0]
+
+
+def test_generate_recommendations_supports_hebrew_output():
+    recommendations = server.generate_recommendations(
+        [
+            {
+                "element_id": "3c",
+                "element_name": "מעורבות תלמידים בלמידה",
+                "score": 6.0,
+                "observations": ["נראו סימני השתתפות לא אחידים בין קבוצות התלמידים."],
+                "evidence_segments": [
+                    {
+                        "start_sec": 95,
+                        "end_sec": 125,
+                        "summary": "רק קבוצה קטנה של תלמידים הגיבה במהלך המשימה.",
+                        "rationale": "model-observed",
+                    }
+                ],
+            }
+        ],
+        priority_element_ids=["3c"],
+        language="he",
+    )
+
+    assert recommendations
+    assert "ראיה שנצפתה" in recommendations[0]
 
 
 def test_generate_recommendations_prioritizes_admin_pressure_points_when_model_output_exists():
@@ -152,7 +205,7 @@ async def test_analyze_frames_with_ai_marks_multimodal_mode_when_audio_present(m
     monkeypatch.setattr(server, "PAID_ANALYSIS_ALLOWLIST_EMAILS", {"teacher@demo.cognivio.app"})
     monkeypatch.setattr(server, "OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(server, "AsyncOpenAI", object())
-    async def _fake_openai(frames, elements, focus_instruction=None):
+    async def _fake_openai(frames, elements, focus_instruction=None, language="en"):
         return {
             "summary": "Teacher models at the board and prompts students to compare strategies.",
             "recommendations": [],
@@ -202,6 +255,26 @@ def test_build_elements_to_analyze_marks_priority_items_first():
     assert elements[0]["id"] == "3c"
     assert elements[0]["priority"] is True
     assert elements[1]["priority"] is False
+
+
+def test_build_elements_to_analyze_localizes_hebrew_framework_labels():
+    elements = server._build_elements_to_analyze(
+        framework={
+            "domains": [
+                {
+                    "id": "d3",
+                    "name": "Instruction",
+                    "elements": [{"id": "d3b", "name": "Using Questioning and Discussion Techniques"}],
+                }
+            ]
+        },
+        selected_elements=["d3b"],
+        framework_type="danielson",
+        language="he",
+    )
+
+    assert elements[0]["name"] == "שימוש בשאלות ובדיון"
+    assert elements[0]["domain"] == "תחום 3: הוראה"
 
 
 def test_build_observation_summary_packet_prioritizes_focus_areas():

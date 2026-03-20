@@ -66,16 +66,18 @@ def render_social_share_card(
     summary: str,
     subject: Optional[str] = None,
     grade_level: Optional[str] = None,
+    language: str = "en",
 ) -> Dict[str, int]:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    is_hebrew = str(language or "en").lower().startswith("he")
     image = Image.new("RGB", (CARD_WIDTH, CARD_HEIGHT), "#f5f1e8")
     draw = ImageDraw.Draw(image)
 
     draw.rounded_rectangle((60, 60, CARD_WIDTH - 60, CARD_HEIGHT - 60), radius=28, fill="#fffdf8", outline="#d7c7ab", width=4)
     draw.rounded_rectangle((90, 90, 530, 180), radius=26, fill="#0f766e")
-    draw.text((120, 116), "COGNIVIO RECOGNITION", font=_load_font(36, bold=True), fill="#f8fafc")
+    draw.text((120, 116), "הוקרת COGNIVIO" if is_hebrew else "COGNIVIO RECOGNITION", font=_load_font(36, bold=True), fill="#f8fafc")
     draw.text((110, 240), badge_label.upper(), font=_load_font(74, bold=True), fill="#92400e")
     draw.text((110, 340), teacher_name, font=_load_font(54, bold=True), fill="#111827")
     meta = " • ".join([item for item in [subject, grade_level] if item])
@@ -91,9 +93,9 @@ def render_social_share_card(
         max_width=1320,
         line_spacing=12,
     )
-    draw.rounded_rectangle((110, CARD_HEIGHT - 180, 420, CARD_HEIGHT - 110), radius=24, fill="#1d4ed8")
-    draw.text((145, CARD_HEIGHT - 160), "Teach. Reflect. Grow.", font=_load_font(28, bold=True), fill="#eff6ff")
-    draw.text((110, max(end_y + 30, CARD_HEIGHT - 250)), "Recognized inside Cognivio's professional learning network.", font=_load_font(26), fill="#64748b")
+    draw.rounded_rectangle((110, CARD_HEIGHT - 180, 470, CARD_HEIGHT - 110), radius=24, fill="#1d4ed8")
+    draw.text((145, CARD_HEIGHT - 160), "ללמד. לשקף. לצמוח." if is_hebrew else "Teach. Reflect. Grow.", font=_load_font(28, bold=True), fill="#eff6ff")
+    draw.text((110, max(end_y + 30, CARD_HEIGHT - 250)), "הוקרה מתוך רשת הלמידה המקצועית של Cognivio." if is_hebrew else "Recognized inside Cognivio's professional learning network.", font=_load_font(26), fill="#64748b")
 
     image.save(path, format="PNG")
     return {"width": CARD_WIDTH, "height": CARD_HEIGHT}
@@ -105,22 +107,24 @@ def render_email_signature_badge(
     teacher_name: str,
     badge_label: str,
     featured_label: Optional[str] = None,
+    language: str = "en",
 ) -> Dict[str, int]:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    is_hebrew = str(language or "en").lower().startswith("he")
     image = Image.new("RGB", (SIGNATURE_WIDTH, SIGNATURE_HEIGHT), "#ffffff")
     draw = ImageDraw.Draw(image)
 
     draw.rounded_rectangle((20, 20, SIGNATURE_WIDTH - 20, SIGNATURE_HEIGHT - 20), radius=24, fill="#f8fafc", outline="#cbd5e1", width=3)
     draw.rounded_rectangle((40, 50, 280, 230), radius=22, fill="#7c2d12")
     draw.text((78, 95), "COGNIVIO", font=_load_font(34, bold=True), fill="#fff7ed")
-    draw.text((78, 142), "5-STAR", font=_load_font(42, bold=True), fill="#fef3c7")
+    draw.text((78, 142), "5-STAR" if not is_hebrew else "5 כוכבים", font=_load_font(42, bold=True), fill="#fef3c7")
     draw.text((340, 78), teacher_name, font=_load_font(42, bold=True), fill="#0f172a")
     draw.text((340, 136), badge_label, font=_load_font(30), fill="#334155")
     if featured_label:
         draw.text((340, 182), featured_label, font=_load_font(24), fill="#0f766e")
-    draw.text((340, 214), "Recognized by Cognivio", font=_load_font(22), fill="#64748b")
+    draw.text((340, 214), "הוכר על ידי Cognivio" if is_hebrew else "Recognized by Cognivio", font=_load_font(22), fill="#64748b")
 
     image.save(path, format="PNG")
     return {"width": SIGNATURE_WIDTH, "height": SIGNATURE_HEIGHT}
@@ -132,11 +136,13 @@ def build_email_signature_html(
     teacher_name: str,
     badge_label: str,
     link_url: str,
+    language: str = "en",
 ) -> str:
     safe_image_url = (image_url or "").replace('"', "&quot;")
     safe_link_url = (link_url or "").replace('"', "&quot;")
     safe_teacher_name = (teacher_name or "").replace("<", "&lt;").replace(">", "&gt;")
     safe_badge_label = (badge_label or "").replace("<", "&lt;").replace(">", "&gt;")
+    is_hebrew = str(language or "en").lower().startswith("he")
     return (
         "<table cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"font-family:Arial,sans-serif;\">"
         "<tr>"
@@ -146,7 +152,7 @@ def build_email_signature_html(
         "<td style=\"font-size:13px;line-height:1.4;color:#334155;\">"
         f"<div style=\"font-weight:700;color:#0f172a;\">{safe_teacher_name}</div>"
         f"<div>{safe_badge_label}</div>"
-        f"<div><a href=\"{safe_link_url}\" style=\"color:#2563eb;text-decoration:none;\">Recognized by Cognivio</a></div>"
+        f"<div><a href=\"{safe_link_url}\" style=\"color:#2563eb;text-decoration:none;\">{'הוכר על ידי Cognivio' if is_hebrew else 'Recognized by Cognivio'}</a></div>"
         "</td>"
         "</tr>"
         "</table>"

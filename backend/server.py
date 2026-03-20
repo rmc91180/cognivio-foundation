@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, Depends, Response, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, Depends, Response, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
@@ -1426,6 +1426,109 @@ def _get_framework_by_type(framework_type: str) -> dict:
     return {
         "domains": DANIELSON_FRAMEWORK["domains"] + MARSHALL_FRAMEWORK["domains"]
     }
+
+
+SUPPORTED_APP_LANGUAGES = {"en", "he"}
+
+HEBREW_FRAMEWORK_LABELS = {
+    "danielson": {
+        "d1": "תחום 1: תכנון והיערכות",
+        "d1a": "הפגנת ידע בתוכן ובהוראה",
+        "d1b": "היכרות עם התלמידים",
+        "d1c": "הגדרת יעדי הוראה",
+        "d1d": "היכרות עם משאבים",
+        "d1e": "תכנון הוראה קוהרנטי",
+        "d1f": "תכנון הערכות תלמידים",
+        "d2": "תחום 2: אקלים כיתתי",
+        "d2a": "יצירת אקלים של כבוד ויחסי אמון",
+        "d2b": "ביסוס תרבות של למידה",
+        "d2c": "ניהול נהלים ושגרות בכיתה",
+        "d2d": "ניהול התנהגות תלמידים",
+        "d2e": "ארגון המרחב הפיזי",
+        "d3": "תחום 3: הוראה",
+        "d3a": "תקשורת עם תלמידים",
+        "d3b": "שימוש בשאלות ובדיון",
+        "d3c": "מעורבות תלמידים בלמידה",
+        "d3d": "שימוש בהערכה בתוך ההוראה",
+        "d3e": "גמישות והיענות",
+        "d4": "תחום 4: אחריות מקצועית",
+        "d4a": "רפלקציה על ההוראה",
+        "d4b": "שמירה על תיעוד מדויק",
+        "d4c": "תקשורת עם משפחות",
+        "d4d": "השתתפות בקהילה המקצועית",
+        "d4e": "צמיחה והתפתחות מקצועית",
+        "d4f": "מקצועיות",
+    },
+    "marshall": {
+        "m1": "א. תכנון והיערכות ללמידה",
+        "m1a": "שליטה בתחום הדעת",
+        "m1b": "תכנון אסטרטגי",
+        "m1c": "יישור לתוכנית הלימודים",
+        "m1d": "תכנון ההערכה",
+        "m1e": "היערכות לצורכי התלמידים",
+        "m1f": "הכנת השיעור",
+        "m1g": "תכנון מעורבות תלמידים",
+        "m1h": "הכנת חומרים",
+        "m1i": "תכנון דיפרנציאלי",
+        "m1j": "היערכות המרחב",
+        "m2": "ב. ניהול כיתה",
+        "m2a": "ציפיות ונורמות",
+        "m2b": "יחסים עם תלמידים",
+        "m2c": "שגרות ונהלים",
+        "m2d": "ניהול התנהגות",
+        "m2e": "ארגון המרחב הפיזי",
+        "m3": "ג. העברת ההוראה",
+        "m3a": "תקשורת בהירה",
+        "m3b": "טכניקות שאילה",
+        "m3c": "מעורבות תלמידים",
+        "m3d": "קצב וגמישות",
+        "m3e": "הוראה דיפרנציאלית",
+        "m4": "ד. ניטור, הערכה ומעקב",
+        "m4a": "הערכה מתמשכת",
+        "m4b": "איכות המשוב",
+        "m4c": "קבלת החלטות מבוססת נתונים",
+        "m4d": "מעקב אחר התקדמות תלמידים",
+        "m5": "ה. קשר עם משפחה וקהילה",
+        "m5a": "תקשורת עם המשפחה",
+        "m5b": "מעורבות קהילתית",
+        "m5c": "רגישות תרבותית",
+        "m6": "ו. אחריות מקצועית",
+        "m6a": "רפלקציה עצמית",
+        "m6b": "פיתוח מקצועי",
+        "m6c": "שיתופי פעולה מקצועיים",
+        "m6d": "מעורבות בקהילת בית הספר",
+    },
+}
+
+
+def _normalize_app_language(value: Optional[str], default: str = "en") -> str:
+    candidate = (value or "").strip().lower()
+    if candidate.startswith("he"):
+        return "he"
+    if candidate.startswith("en"):
+        return "en"
+    return default
+
+
+def _resolve_request_language(request: Optional[Request], default: str = "en") -> str:
+    if request is None:
+        return default
+    header = request.headers.get("accept-language") or ""
+    for part in header.split(","):
+        normalized = _normalize_app_language(part, default="")
+        if normalized in SUPPORTED_APP_LANGUAGES:
+            return normalized
+    return default
+
+
+def _is_hebrew_language(language: Optional[str]) -> bool:
+    return _normalize_app_language(language) == "he"
+
+
+def _localize_framework_node_label(node_id: str, fallback: str, framework_type: str, language: Optional[str]) -> str:
+    if not _is_hebrew_language(language):
+        return fallback
+    return HEBREW_FRAMEWORK_LABELS.get(framework_type, {}).get(node_id, fallback)
 
 
 def _normalize_uploaded_rubric_domains(parsed_domains: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -3398,6 +3501,7 @@ async def _start_privacy_maintenance_tasks() -> None:
 
 @api_router.post("/videos/upload", response_model=VideoUploadResponse)
 async def upload_video(
+    request: Request,
     file: UploadFile = File(...),
     teacher_id: str = Form(...),
     subject: Optional[str] = Form(None),
@@ -3420,6 +3524,7 @@ async def upload_video(
         )
     normalized_recorded_at = _parse_optional_iso_datetime(recorded_at, "recorded_at")
     upload_time = datetime.now(timezone.utc).isoformat()
+    preferred_language = _resolve_request_language(request, default="en")
     
     # Verify teacher exists (admins can upload for their roster; teachers can upload for themselves)
     teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
@@ -3515,6 +3620,7 @@ async def upload_video(
         "subject": subject,
         "recorded_at": normalized_recorded_at,
         "upload_date": upload_time,
+        "analysis_language": preferred_language,
     }
     await db.videos.insert_one(video_doc)
 
@@ -4424,6 +4530,7 @@ async def generate_social_card(
     if not event.get("allow_social_share"):
         raise HTTPException(status_code=400, detail="Social sharing has not been enabled for this lesson")
     created_at = datetime.now(timezone.utc).isoformat()
+    asset_language = _normalize_app_language(video.get("analysis_language"), default="en")
     relative_path = f"share-assets/social/{video['teacher_id']}/{video_id}_{uuid.uuid4().hex[:8]}.png"
     full_path = UPLOAD_DIR / relative_path
     subject = video.get("subject") if payload.include_subject else None
@@ -4432,16 +4539,21 @@ async def generate_social_card(
         (await _get_assessment_for_video(video_id) or {}).get("summary")
         if payload.include_summary
         else ""
-    ) or "Recognized for excellent classroom instruction and reflective practice."
+    ) or (
+        "הוקרה על הוראה כיתתית חזקה ועל פרקטיקה רפלקטיבית."
+        if _is_hebrew_language(asset_language)
+        else "Recognized for excellent classroom instruction and reflective practice."
+    )
     await asyncio.to_thread(
         render_social_share_card,
         str(full_path),
         teacher_name=teacher.get("name") or "Teacher",
-        badge_label="5-Star Lesson",
-        lesson_title=video.get("filename") or "Recognized Lesson",
+        badge_label="שיעור 5 כוכבים" if _is_hebrew_language(asset_language) else "5-Star Lesson",
+        lesson_title=video.get("filename") or ("שיעור שזכה להוקרה" if _is_hebrew_language(asset_language) else "Recognized Lesson"),
         summary=summary,
         subject=subject,
         grade_level=grade_level,
+        language=asset_language,
     )
     file_url = _resolve_public_asset_url(relative_path)
     try:
@@ -4469,7 +4581,11 @@ async def generate_social_card(
         asset_id=asset["id"],
         asset_type="social_card",
         file_url=file_url,
-        caption="Proud to have earned a 5-Star Lesson recognition in Cognivio.",
+        caption=(
+            "גאה לקבל הוקרה של שיעור 5 כוכבים ב-Cognivio."
+            if _is_hebrew_language(asset_language)
+            else "Proud to have earned a 5-Star Lesson recognition in Cognivio."
+        ),
         created_at=created_at,
     )
 
@@ -4490,15 +4606,21 @@ async def generate_email_signature(
     if not event.get("allow_email_signature"):
         raise HTTPException(status_code=400, detail="Email signature sharing has not been enabled for this lesson")
     created_at = datetime.now(timezone.utc).isoformat()
+    asset_language = _normalize_app_language(video.get("analysis_language"), default="en")
     relative_path = f"share-assets/email-signatures/{video['teacher_id']}/{video_id}_{uuid.uuid4().hex[:8]}.png"
     full_path = UPLOAD_DIR / relative_path
-    featured_label = "Featured in Cognivio All-Star Library" if event.get("library_item_id") else None
+    featured_label = (
+        "מופיע בספריית כל הכוכבים של Cognivio"
+        if event.get("library_item_id") and _is_hebrew_language(asset_language)
+        else "Featured in Cognivio All-Star Library" if event.get("library_item_id") else None
+    )
     await asyncio.to_thread(
         render_email_signature_badge,
         str(full_path),
         teacher_name=teacher.get("name") or "Teacher",
-        badge_label="5-Star Lesson",
+        badge_label="שיעור 5 כוכבים" if _is_hebrew_language(asset_language) else "5-Star Lesson",
         featured_label=featured_label,
+        language=asset_language,
     )
     image_url = _resolve_public_asset_url(relative_path)
     try:
@@ -4510,8 +4632,9 @@ async def generate_email_signature(
     html = build_email_signature_html(
         image_url=image_url,
         teacher_name=teacher.get("name") or "Teacher",
-        badge_label="5-Star Lesson",
+        badge_label="שיעור 5 כוכבים" if _is_hebrew_language(asset_language) else "5-Star Lesson",
         link_url=link_url,
+        language=asset_language,
     )
     asset = await _create_share_asset_record(
         teacher_id=video["teacher_id"],
@@ -5073,11 +5196,14 @@ async def get_curriculum_adherence(
 
 @api_router.post("/reports/export")
 async def export_summary_report(
+    request: Request,
     format: str = Form("pdf"),
     teacher_id: Optional[str] = Form(None),
     department: Optional[str] = Form(None),
     current_user: dict = Depends(get_current_user),
 ):
+    language = _resolve_request_language(request, default="en")
+    is_hebrew = _is_hebrew_language(language)
     teacher_query: Dict[str, Any] = {"created_by": current_user["id"]}
     if teacher_id:
         teacher_query["id"] = teacher_id
@@ -5125,7 +5251,12 @@ async def export_summary_report(
             deltas.sort(key=lambda x: x[1], reverse=True)
             gains = [f"{d[0].upper()}({d[1]:+0.2f})" for d in deltas[:2]]
             declines = [f"{d[0].upper()}({d[1]:+0.2f})" for d in deltas[-2:]] if deltas else []
-            trend_summary = f"Gains: {', '.join(gains)} | Declines: {', '.join(declines)}" if deltas else None
+            if deltas:
+                trend_summary = (
+                    f"שיפורים: {', '.join(gains)} | ירידות: {', '.join(declines)}"
+                    if is_hebrew
+                    else f"Gains: {', '.join(gains)} | Declines: {', '.join(declines)}"
+                )
 
         adherence_score = None
         if assessment:
@@ -5153,10 +5284,28 @@ async def export_summary_report(
         )
 
     if format.lower() == "csv":
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=list(rows[0].keys()) if rows else [])
-        writer.writeheader()
+        localized_rows = []
         for row in rows:
+            localized_rows.append(
+                {
+                    ("שם מורה" if is_hebrew else "teacher_name"): row["teacher_name"],
+                    ("מקצוע" if is_hebrew else "subject"): row["subject"],
+                    ("שכבת גיל" if is_hebrew else "grade_level"): row["grade_level"],
+                    ("מחלקה" if is_hebrew else "department"): row["department"],
+                    ("ציון אחרון" if is_hebrew else "latest_score"): row["latest_score"],
+                    ("ציון ממוצע" if is_hebrew else "average_score"): row["average_score"],
+                    ("מספר הערכות" if is_hebrew else "assessment_count"): row["assessment_count"],
+                    ("מספר ראיות" if is_hebrew else "evidence_count"): row["evidence_count"],
+                    ("ציון התאמה" if is_hebrew else "adherence_score"): row["adherence_score"],
+                    ("סיכום מגמה" if is_hebrew else "domain_trend_summary"): row["domain_trend_summary"],
+                    ("מועד הערכה אחרונה" if is_hebrew else "last_assessment"): row["last_assessment"],
+                    ("קישור פירוט" if is_hebrew else "detail_url"): row["detail_url"],
+                }
+            )
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=list(localized_rows[0].keys()) if localized_rows else [])
+        writer.writeheader()
+        for row in localized_rows:
             writer.writerow(row)
         return Response(
             content=output.getvalue(),
@@ -5169,43 +5318,57 @@ async def export_summary_report(
             raise HTTPException(status_code=501, detail="PDF export not available")
         buffer = io.BytesIO()
         pdf = canvas.Canvas(buffer)
-        pdf.setTitle("Cognivio Summary Report")
-        pdf.drawString(50, 800, "Cognivio Summary Report")
-        pdf.drawString(50, 785, f"Generated: {datetime.now(timezone.utc).isoformat()}")
+        title = "דוח סיכום Cognivio" if is_hebrew else "Cognivio Summary Report"
+        generated_label = "הופק בתאריך" if is_hebrew else "Generated"
+        teacher_filter_label = "סינון מורה" if is_hebrew else "Teacher filter"
+        department_filter_label = "סינון מחלקה" if is_hebrew else "Department filter"
+        dept_fallback = "ללא מחלקה" if is_hebrew else "No dept"
+        subject_label = "מקצוע" if is_hebrew else "Subject"
+        grade_label = "שכבה" if is_hebrew else "Grade"
+        latest_score_label = "ציון אחרון" if is_hebrew else "Latest score"
+        avg_score_label = "ציון ממוצע" if is_hebrew else "Avg score"
+        assessments_label = "הערכות" if is_hebrew else "Assessments"
+        evidence_label = "ראיות" if is_hebrew else "Evidence"
+        adherence_label = "התאמה" if is_hebrew else "Adherence"
+        trend_label = "מגמה" if is_hebrew else "Trend"
+        detail_label = "פירוט" if is_hebrew else "Detail"
+        pdf.setTitle(title)
+        pdf.drawString(50, 800, title)
+        pdf.drawString(50, 785, f"{generated_label}: {datetime.now(timezone.utc).isoformat()}")
         if teacher_id:
-            pdf.drawString(50, 770, f"Teacher filter: {teacher_id}")
+            pdf.drawString(50, 770, f"{teacher_filter_label}: {teacher_id}")
         if department:
-            pdf.drawString(50, 755, f"Department filter: {department}")
+            pdf.drawString(50, 755, f"{department_filter_label}: {department}")
         y = 735
         for row in rows[:30]:
             pdf.setFont("Helvetica-Bold", 10)
             pdf.drawString(
                 50,
                 y,
-                f"{row['teacher_name']} ({row['department'] or 'No dept'})",
+                f"{row['teacher_name']} ({row['department'] or dept_fallback})",
             )
             y -= 12
             pdf.setFont("Helvetica", 9)
             pdf.drawString(
                 50,
                 y,
-                f"Subject: {row['subject'] or 'N/A'} | Grade: {row['grade_level'] or 'N/A'}",
+                f"{subject_label}: {row['subject'] or 'N/A'} | {grade_label}: {row['grade_level'] or 'N/A'}",
             )
             y -= 12
             pdf.drawString(
                 50,
                 y,
-                f"Latest score: {row['latest_score']} | Avg score: {row['average_score']} | Assessments: {row['assessment_count']} | Evidence: {row['evidence_count']}",
+                f"{latest_score_label}: {row['latest_score']} | {avg_score_label}: {row['average_score']} | {assessments_label}: {row['assessment_count']} | {evidence_label}: {row['evidence_count']}",
             )
             y -= 12
             pdf.drawString(
                 50,
                 y,
-                f"Adherence: {row.get('adherence_score')} | Trend: {row.get('domain_trend_summary')}",
+                f"{adherence_label}: {row.get('adherence_score')} | {trend_label}: {row.get('domain_trend_summary')}",
             )
             y -= 12
             if row.get("detail_url"):
-                pdf.drawString(50, y, f"Detail: {row['detail_url']}")
+                pdf.drawString(50, y, f"{detail_label}: {row['detail_url']}")
                 y -= 14
             else:
                 y -= 8
@@ -5265,6 +5428,7 @@ async def smoke_test(current_user: dict = Depends(get_current_user)):
 @api_router.get("/teachers/{teacher_id}/summary-insights")
 async def get_teacher_summary_insights(
     teacher_id: str,
+    request: Request,
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -5315,8 +5479,9 @@ async def get_teacher_summary_insights(
             }
         )
 
-    summary_text = generate_summary(synthetic_element_scores, overall_trend or 0)
-    recs = generate_recommendations(synthetic_element_scores)
+    language = _resolve_request_language(request, default="en")
+    summary_text = generate_summary(synthetic_element_scores, overall_trend or 0, language=language)
+    recs = generate_recommendations(synthetic_element_scores, language=language)
 
     return {
         "teacher_id": teacher_id,
@@ -8086,6 +8251,7 @@ async def analyze_video(
         selected_elements = selection.get("selected_elements", []) if selection else []
         priority_elements = selection.get("priority_elements", []) if selection else []
         focus_note = (selection.get("focus_note") or "").strip() if selection else ""
+        analysis_language = _normalize_app_language(video.get("analysis_language"), default="en")
         
         # Get framework data
         if framework_type == "danielson":
@@ -8121,6 +8287,7 @@ async def analyze_video(
                 video_id,
                 file_path,
                 analysis_user,
+                analysis_language=analysis_language,
             )
         except Exception as exc:
             logger.warning(f"Audio artifact generation failed for {video_id}; continuing with vision-only analysis: {exc}")
@@ -8151,6 +8318,8 @@ async def analyze_video(
             selected_elements,
             priority_elements=priority_elements,
             focus_note=focus_note,
+            language=analysis_language,
+            framework_type=framework_type,
             current_user=analysis_user,
             multimodal_payload=multimodal_payload,
         )
@@ -8172,6 +8341,7 @@ async def analyze_video(
             provided_recommendations=analysis_payload.get("recommendations"),
             priority_element_ids=priority_elements,
             focus_note=focus_note,
+            language=analysis_language,
         )
         summary_text = generate_summary(
             element_scores,
@@ -8179,6 +8349,7 @@ async def analyze_video(
             provided_summary=analysis_payload.get("summary"),
             priority_element_ids=priority_elements,
             focus_note=focus_note,
+            language=analysis_language,
         )
         observation_summary = build_observation_summary_packet(
             element_scores,
@@ -8188,6 +8359,7 @@ async def analyze_video(
             priority_element_ids=priority_elements,
             focus_note=focus_note,
             analysis_confidence=analysis_metadata["analysis_confidence"],
+            language=analysis_language,
         )
         
         # Create assessment document
@@ -8205,6 +8377,7 @@ async def analyze_video(
             "focus_note": focus_note or None,
             "observation_summary": observation_summary,
             "analyzed_at": datetime.now(timezone.utc).isoformat(),
+            "analysis_language": analysis_language,
             "analysis_mode": analysis_payload.get("analysis_mode", "fallback"),
             "analysis_confidence": analysis_metadata["analysis_confidence"],
             "analysis_modalities_used": analysis_metadata["analysis_modalities_used"],
@@ -8231,6 +8404,7 @@ async def analyze_video(
                     "analysis_confidence": analysis_metadata["analysis_confidence"],
                     "priority_elements": priority_elements,
                     "focus_note": focus_note or None,
+                    "analysis_language": analysis_language,
                     "status_updated_at": completed_at,
                     "processing_completed_at": completed_at,
                     "processing_failed_at": None,
@@ -8286,6 +8460,8 @@ def _build_elements_to_analyze(
     framework: dict,
     selected_elements: List[str],
     priority_elements: Optional[List[str]] = None,
+    framework_type: str = "danielson",
+    language: Optional[str] = "en",
 ) -> List[dict]:
     elements_to_analyze: List[dict] = []
     priority_set = set(priority_elements or [])
@@ -8296,8 +8472,8 @@ def _build_elements_to_analyze(
             elements_to_analyze.append(
                 {
                     "id": element["id"],
-                    "name": element["name"],
-                    "domain": domain["name"],
+                    "name": _localize_framework_node_label(element["id"], element["name"], framework_type, language),
+                    "domain": _localize_framework_node_label(domain.get("id") or "", domain["name"], framework_type, language),
                     "priority": element["id"] in priority_set,
                 }
             )
@@ -8483,6 +8659,7 @@ async def build_audio_artifacts(
     video_id: str,
     video_path: str,
     current_user: Optional[dict],
+    analysis_language: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     if not _should_run_audio_analysis(current_user):
         return None, None
@@ -8498,12 +8675,13 @@ async def build_audio_artifacts(
         transcription_model = None
 
         if AUDIO_TRANSCRIPTION_ENABLED and OPENAI_API_KEY:
+            transcription_language = AUDIO_TRANSCRIPTION_LANGUAGE or _normalize_app_language(analysis_language, default="")
             transcription = await asyncio.to_thread(
                 transcribe_audio_file,
                 extraction["audio_path"],
                 OPENAI_API_KEY,
                 AUDIO_TRANSCRIPTION_MODEL,
-                AUDIO_TRANSCRIPTION_LANGUAGE,
+                transcription_language,
             )
             transcript_segments = transcription.get("segments") or []
             transcript_text = transcription.get("text") or ""
@@ -8517,7 +8695,7 @@ async def build_audio_artifacts(
             "video_id": video_id,
             "transcript_status": transcription_status,
             "model": transcription_model,
-            "language": AUDIO_TRANSCRIPTION_LANGUAGE,
+            "language": AUDIO_TRANSCRIPTION_LANGUAGE or _normalize_app_language(analysis_language, default=""),
             "segments": transcript_segments,
             "text": transcript_text,
             "retention_expires_at": (
@@ -8791,6 +8969,7 @@ async def _analyze_frames_with_openai(
     frames: List[dict],
     elements_to_analyze: List[dict],
     focus_instruction: Optional[str] = None,
+    language: str = "en",
 ) -> Optional[dict]:
     if not OPENAI_API_KEY or AsyncOpenAI is None:
         return None
@@ -8802,6 +8981,11 @@ async def _analyze_frames_with_openai(
         "Write the result as if a strong school leader observed the lesson and needs a concise, coaching-ready judgment. "
         "Return only valid JSON."
     )
+    if _is_hebrew_language(language):
+        system_prompt += (
+            " Write all summaries, observations, rationale, and recommendations in modern Hebrew suitable for Israeli school leaders. "
+            "Use natural Hebrew educational terminology rather than literal translation."
+        )
     elements_text = "\n".join(
         f"- {element['id']}: {element['name']} (Domain: {element['domain']}){' [PRIORITY]' if element.get('priority') else ''}"
         for element in elements_to_analyze
@@ -8911,11 +9095,19 @@ async def analyze_frames_with_ai(
     selected_elements: List[str],
     priority_elements: Optional[List[str]] = None,
     focus_note: Optional[str] = None,
+    language: str = "en",
+    framework_type: str = "danielson",
     current_user: Optional[dict] = None,
     multimodal_payload: Optional[dict] = None,
 ) -> dict:
     """Analyze extracted video frames and return normalized assessment output."""
-    elements_to_analyze = _build_elements_to_analyze(framework, selected_elements, priority_elements=priority_elements)
+    elements_to_analyze = _build_elements_to_analyze(
+        framework,
+        selected_elements,
+        priority_elements=priority_elements,
+        framework_type=framework_type,
+        language=language,
+    )
     if not elements_to_analyze:
         return {"analysis_mode": "empty_selection", "summary": None, "recommendations": [], "element_scores": []}
     prioritized_elements = [element for element in elements_to_analyze if element.get("priority")]
@@ -8941,6 +9133,7 @@ async def analyze_frames_with_ai(
                 frames,
                 elements_to_analyze,
                 focus_instruction=focus_instruction,
+                language=language,
             )
             normalized = _normalize_model_analysis(payload, elements_to_analyze, frames, analysis_mode="openai")
             if multimodal_payload and "audio" in (multimodal_payload.get("modalities_used") or []):
@@ -9018,6 +9211,20 @@ def _build_recommendation_text(element_name: str, observation: str) -> str:
     return f"Strengthen {element_name.lower()} with clearer modeling, checks for understanding, and visible student response routines."
 
 
+def _build_recommendation_text_hebrew(element_name: str, observation: str) -> str:
+    observation_lower = observation.lower()
+    element_lower = element_name.lower()
+    if "question" in observation_lower or "שאל" in observation_lower or "question" in element_lower:
+        return f"להעמיק את איכות השאלות ולהאריך זמן המתנה כדי לחזק את {element_name.lower()}."
+    if "engagement" in observation_lower or "participation" in observation_lower or "מעורב" in observation_lower:
+        return f"להרחיב את מעגל ההשתתפות כדי שיותר תלמידים ייקחו חלק בתוך {element_name.lower()}."
+    if "routine" in observation_lower or "transition" in observation_lower or "שגר" in observation_lower or "מעבר" in observation_lower:
+        return f"לחדד מעברים ושגרות כדי לחזק את {element_name.lower()}."
+    if "feedback" in observation_lower or "משוב" in observation_lower:
+        return f"להפוך את המשוב למדויק וישים יותר כדי לחזק את {element_name.lower()}."
+    return f"לחזק את {element_name.lower()} באמצעות מודלינג ברור יותר, בדיקות הבנה עקביות ותגובות תלמידים גלויות."
+
+
 def _score_priority_rank(item: dict, priority_element_ids: Optional[List[str]] = None) -> Tuple[int, float]:
     priority_set = set(priority_element_ids or [])
     is_priority = bool(item.get("priority")) or item.get("element_id") in priority_set
@@ -9038,6 +9245,7 @@ def build_observation_summary_packet(
     priority_element_ids: Optional[List[str]] = None,
     focus_note: Optional[str] = None,
     analysis_confidence: Optional[Dict[str, Any]] = None,
+    language: str = "en",
 ) -> Dict[str, Any]:
     priority_set = set(priority_element_ids or [])
     ranked_strengths = sorted(
@@ -9068,9 +9276,17 @@ def build_observation_summary_packet(
     degradation_reasons = ((analysis_confidence or {}).get("degradation_reasons") or [])
     if degradation_reasons:
         if "audio_unavailable" in degradation_reasons:
-            confidence_note = "Audio was unavailable, so this observation emphasizes visual evidence."
+            confidence_note = (
+                "האודיו לא היה זמין, ולכן התצפית נשענת בעיקר על ראיות חזותיות."
+                if _is_hebrew_language(language)
+                else "Audio was unavailable, so this observation emphasizes visual evidence."
+            )
         else:
-            confidence_note = "This observation was completed with partial evidence and should be reviewed alongside the video."
+            confidence_note = (
+                "התצפית הושלמה על סמך ראיות חלקיות, ולכן מומלץ לבחון אותה לצד ההקלטה."
+                if _is_hebrew_language(language)
+                else "This observation was completed with partial evidence and should be reviewed alongside the video."
+            )
 
     return {
         "executive_summary": summary_text,
@@ -9085,6 +9301,7 @@ def build_observation_summary_packet(
 
 def _enrich_assessment_for_response(assessment: Dict[str, Any]) -> Dict[str, Any]:
     enriched = dict(assessment)
+    analysis_language = _normalize_app_language(enriched.get("analysis_language"), default="en")
     priority_elements = list(enriched.get("priority_elements") or [])
     focus_note = enriched.get("focus_note")
     analysis_confidence = enriched.get("analysis_confidence") or {}
@@ -9097,11 +9314,13 @@ def _enrich_assessment_for_response(assessment: Dict[str, Any]) -> Dict[str, Any
             priority_element_ids=priority_elements,
             focus_note=focus_note,
             analysis_confidence=analysis_confidence,
+            language=analysis_language,
         )
     enriched.setdefault("priority_elements", priority_elements)
     enriched.setdefault("focus_note", focus_note)
     enriched.setdefault("analysis_confidence", analysis_confidence)
     enriched.setdefault("analysis_modalities_used", list(enriched.get("analysis_modalities_used") or []))
+    enriched.setdefault("analysis_language", analysis_language)
     return enriched
 
 
@@ -9111,6 +9330,7 @@ def generate_summary(
     provided_summary: Optional[str] = None,
     priority_element_ids: Optional[List[str]] = None,
     focus_note: Optional[str] = None,
+    language: str = "en",
 ) -> str:
     """Generate an evidence-grounded summary of the assessment."""
     if provided_summary:
@@ -9126,7 +9346,16 @@ def generate_summary(
         key=lambda item: (0 if (bool(item.get("priority")) or item.get("element_id") in set(priority_element_ids or [])) else 1, item.get("score", 0)),
     )[:2]
 
-    summary_parts = [f"Overall performance: {level.replace('_', ' ').title()} (Score: {overall_score}/10)."]
+    if _is_hebrew_language(language):
+        level_map = {
+            "distinguished": "מצוין",
+            "proficient": "טוב",
+            "basic": "בסיסי",
+            "unsatisfactory": "דורש שיפור",
+        }
+        summary_parts = [f"התרשמות כללית: {level_map.get(level, level)} (ציון: {overall_score}/10)."]
+    else:
+        summary_parts = [f"Overall performance: {level.replace('_', ' ').title()} (Score: {overall_score}/10)."]
     if priority_element_ids:
         focus_names = [
             item["element_name"]
@@ -9134,9 +9363,15 @@ def generate_summary(
             if item.get("element_id") in set(priority_element_ids)
         ]
         if focus_names:
-            summary_parts.append(f"Observation emphasis was placed on {', '.join(focus_names[:3])}.")
+            if _is_hebrew_language(language):
+                summary_parts.append(f"מוקד התצפית הושם על {', '.join(focus_names[:3])}.")
+            else:
+                summary_parts.append(f"Observation emphasis was placed on {', '.join(focus_names[:3])}.")
     if focus_note:
-        summary_parts.append(f"Observation focus note: {focus_note.rstrip('.')}.")
+        if _is_hebrew_language(language):
+            summary_parts.append(f"הערת מיקוד לתצפית: {focus_note.rstrip('.')}.")
+        else:
+            summary_parts.append(f"Observation focus note: {focus_note.rstrip('.')}.")
 
     if strengths:
         strength_notes = []
@@ -9146,7 +9381,10 @@ def generate_summary(
             if observation:
                 note = f"{note} ({observation.rstrip('.')})"
             strength_notes.append(note)
-        summary_parts.append(f"Strongest visible practices were {', '.join(strength_notes)}.")
+        if _is_hebrew_language(language):
+            summary_parts.append(f"נקודות החוזקה הבולטות ביותר היו {', '.join(strength_notes)}.")
+        else:
+            summary_parts.append(f"Strongest visible practices were {', '.join(strength_notes)}.")
 
     if growth_areas:
         growth_notes = []
@@ -9156,7 +9394,10 @@ def generate_summary(
             if observation:
                 note = f"{note} ({observation.rstrip('.')})"
             growth_notes.append(note)
-        summary_parts.append(f"Priority growth areas are {', '.join(growth_notes)}.")
+        if _is_hebrew_language(language):
+            summary_parts.append(f"תחומי הצמיחה המרכזיים הם {', '.join(growth_notes)}.")
+        else:
+            summary_parts.append(f"Priority growth areas are {', '.join(growth_notes)}.")
 
     return " ".join(summary_parts)
 
@@ -9166,6 +9407,7 @@ def generate_recommendations(
     provided_recommendations: Optional[List[dict]] = None,
     priority_element_ids: Optional[List[str]] = None,
     focus_note: Optional[str] = None,
+    language: str = "en",
 ) -> List[str]:
     """Generate timestamped, evidence-grounded recommendations."""
     if provided_recommendations:
@@ -9201,16 +9443,28 @@ def generate_recommendations(
         start_sec = int(float(first_segment.get("start_sec", 90 + idx * 150))) if first_segment else 90 + idx * 150
         end_sec = int(float(first_segment.get("end_sec", start_sec + 30))) if first_segment else start_sec + 30
         observation = str((es.get("observations") or ["Visible evidence was limited."])[0]).strip()
-        action = _build_recommendation_text(es["element_name"], observation)
-        recommendations.append(
-            f"[{_format_timestamp(start_sec)}–{_format_timestamp(end_sec)}] {action} "
-            f"Observed evidence: {observation.rstrip('.')}."
-        )
+        if _is_hebrew_language(language):
+            action = _build_recommendation_text_hebrew(es["element_name"], observation)
+            recommendations.append(
+                f"[{_format_timestamp(start_sec)}–{_format_timestamp(end_sec)}] {action} "
+                f"ראיה שנצפתה: {observation.rstrip('.')}."
+            )
+        else:
+            action = _build_recommendation_text(es["element_name"], observation)
+            recommendations.append(
+                f"[{_format_timestamp(start_sec)}–{_format_timestamp(end_sec)}] {action} "
+                f"Observed evidence: {observation.rstrip('.')}."
+            )
 
     if not recommendations:
-        closing_note = "Maintain the strongest routines visible in the lesson and reinforce them with explicit checks for understanding."
-        if focus_note:
-            closing_note = f"Maintain the strongest routines visible in the lesson while keeping the observation focus on {focus_note.rstrip('.')}."
+        if _is_hebrew_language(language):
+            closing_note = "לשמר את השגרות החזקות שנראו בשיעור ולחזק אותן באמצעות בדיקות הבנה ברורות."
+            if focus_note:
+                closing_note = f"לשמר את השגרות החזקות שנראו בשיעור תוך שמירה על מוקד התצפית: {focus_note.rstrip('.')}."
+        else:
+            closing_note = "Maintain the strongest routines visible in the lesson and reinforce them with explicit checks for understanding."
+            if focus_note:
+                closing_note = f"Maintain the strongest routines visible in the lesson while keeping the observation focus on {focus_note.rstrip('.')}."
         recommendations.append(f"[00:30–01:00] {closing_note}")
 
     return recommendations

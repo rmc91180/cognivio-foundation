@@ -14,10 +14,13 @@ const api = axios.create({
 
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem("cognivio_token");
+  const language = localStorage.getItem("cognivio_language") || "en";
   if (token) {
     // eslint-disable-next-line no-param-reassign
     config.headers.Authorization = `Bearer ${token}`;
   }
+  // eslint-disable-next-line no-param-reassign
+  config.headers["Accept-Language"] = language;
   return config;
 });
 
