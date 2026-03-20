@@ -4,6 +4,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 
 def _load_server_module():
     os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
@@ -120,3 +122,59 @@ def test_paid_analysis_gate_blocks_when_disabled(monkeypatch):
     monkeypatch.setattr(server, "PAID_ANALYSIS_ALLOWLIST_EMAILS", {"teacher@demo.cognivio.app"})
 
     assert server._is_paid_analysis_allowed_for_user({"email": "teacher@demo.cognivio.app"}) is False
+
+
+@pytest.mark.asyncio
+async def test_analyze_frames_with_ai_marks_multimodal_mode_when_audio_present(monkeypatch):
+    monkeypatch.setattr(server, "PAID_ANALYSIS_ENABLED", True)
+    monkeypatch.setattr(server, "PAID_ANALYSIS_ALLOWLIST_EMAILS", {"teacher@demo.cognivio.app"})
+    monkeypatch.setattr(server, "OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(server, "AsyncOpenAI", object())
+    async def _fake_openai(frames, elements):
+        return {
+            "summary": "Teacher models at the board and prompts students to compare strategies.",
+            "recommendations": [],
+            "element_scores": [
+                {
+                    "element_id": "2b",
+                    "score": 7.2,
+                    "confidence": 81,
+                    "observations": ["Teacher prompts comparison thinking."],
+                    "evidence_segments": [{"start_sec": 10, "end_sec": 20, "summary": "Teacher points to the board.", "rationale": "model"}],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(server, "_analyze_frames_with_openai", _fake_openai)
+
+    result = await server.analyze_frames_with_ai(
+        frames=[{"timestamp_sec": 12.0, "image_b64": "abc"}],
+        framework={"domains": [{"name": "Instruction", "elements": [{"id": "2b", "name": "Questioning"}]}]},
+        selected_elements=[],
+        current_user={"email": "teacher@demo.cognivio.app"},
+        multimodal_payload={"modalities_used": ["vision", "audio"], "audio_features": {"question_count": 3}},
+    )
+
+    assert result["analysis_mode"] == "openai_multimodal"
+
+
+def test_build_analysis_metadata_tracks_modality_confidence_and_degradation(monkeypatch):
+    monkeypatch.setattr(server, "AUDIO_ANALYSIS_ENABLED", True)
+    monkeypatch.setattr(server, "AUDIO_ALLOW_STUDENT_VOICE_PROCESSING", True)
+    monkeypatch.setattr(server, "AUDIO_FEATURES_ENABLED", True)
+
+    metadata = server.build_analysis_metadata(
+        analysis_payload={
+            "element_scores": [
+                {"confidence": 80},
+                {"confidence": 60},
+            ]
+        },
+        multimodal_payload={"modalities_used": ["vision"]},
+        transcript_doc=None,
+        feature_doc=None,
+    )
+
+    assert metadata["analysis_confidence"]["overall"] == 70.0
+    assert "audio_unavailable" in metadata["analysis_confidence"]["degradation_reasons"]
+    assert metadata["analysis_confidence"]["by_modality"]["vision"] == 70.0

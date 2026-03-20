@@ -47,6 +47,10 @@ load_dotenv(ROOT_DIR / ".env")
 if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
 from privacy_pipeline import analyze_video_privacy, render_redacted_video, get_privacy_runtime_status
+from frame_selection import scan_video_candidates, score_frame_candidates, select_diverse_frames
+from moment_sampler import segment_video_windows, score_windows, select_lesson_moments
+from audio_pipeline import extract_audio_track, transcribe_audio_file, compute_audio_features
+from multimodal_analysis import build_multimodal_analysis_payload
 from recognition_engine import (
     DEFAULT_FIVE_STAR_SCORE_MIN,
     FIVE_STAR_BADGE,
@@ -978,6 +982,19 @@ async def _get_recording_policy(admin_id: str, school_id: Optional[str] = None) 
         )
         if policy:
             return policy
+
+
+async def _get_admin_owned_video_or_404(video_id: str, current_user: dict) -> dict:
+    role = _get_user_role(current_user)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if video.get("uploaded_by") != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Not authorized for this video")
+    await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    return video
     policy = await db.recording_policies.find_one(query, {"_id": 0})
     return policy
 
@@ -1181,6 +1198,22 @@ PRIVACY_REQUIRE_PROFILE = os.getenv("PRIVACY_REQUIRE_PROFILE", "true").lower() =
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4.1-mini").strip()
 VIDEO_ANALYSIS_MAX_FRAMES = max(3, int(os.getenv("VIDEO_ANALYSIS_MAX_FRAMES", "6")))
+SMART_FRAME_SELECTION_ENABLED = os.getenv("SMART_FRAME_SELECTION_ENABLED", "false").lower() == "true"
+SMART_FRAME_SELECTION_VERSION = os.getenv("SMART_FRAME_SELECTION_VERSION", "smart_frames_v1").strip() or "smart_frames_v1"
+VIDEO_ANALYSIS_FRAME_SCAN_FPS = max(0.25, float(os.getenv("VIDEO_ANALYSIS_FRAME_SCAN_FPS", "1")))
+VIDEO_ANALYSIS_MIN_FRAME_GAP_SEC = max(1.0, float(os.getenv("VIDEO_ANALYSIS_MIN_FRAME_GAP_SEC", "8")))
+VIDEO_ANALYSIS_ENABLE_OCR_SIGNALS = os.getenv("VIDEO_ANALYSIS_ENABLE_OCR_SIGNALS", "false").lower() == "true"
+SMART_MOMENT_SAMPLING_ENABLED = os.getenv("SMART_MOMENT_SAMPLING_ENABLED", "true").lower() == "true"
+SMART_MOMENT_SAMPLING_VERSION = os.getenv("SMART_MOMENT_SAMPLING_VERSION", "lesson_moments_v1").strip() or "lesson_moments_v1"
+VIDEO_ANALYSIS_WINDOW_SEC = max(10.0, float(os.getenv("VIDEO_ANALYSIS_WINDOW_SEC", "20")))
+VIDEO_ANALYSIS_MAX_MOMENTS = max(3, int(os.getenv("VIDEO_ANALYSIS_MAX_MOMENTS", "6")))
+AUDIO_ANALYSIS_ENABLED = os.getenv("AUDIO_ANALYSIS_ENABLED", "false").lower() == "true"
+AUDIO_TRANSCRIPTION_ENABLED = os.getenv("AUDIO_TRANSCRIPTION_ENABLED", "false").lower() == "true"
+AUDIO_FEATURES_ENABLED = os.getenv("AUDIO_FEATURES_ENABLED", "false").lower() == "true"
+AUDIO_TRANSCRIPTION_MODEL = os.getenv("AUDIO_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe").strip() or "gpt-4o-mini-transcribe"
+AUDIO_TRANSCRIPTION_LANGUAGE = os.getenv("AUDIO_TRANSCRIPTION_LANGUAGE", "").strip() or None
+AUDIO_TRANSCRIPT_RETENTION_DAYS = max(1, int(os.getenv("AUDIO_TRANSCRIPT_RETENTION_DAYS", "30")))
+AUDIO_ALLOW_STUDENT_VOICE_PROCESSING = os.getenv("AUDIO_ALLOW_STUDENT_VOICE_PROCESSING", "false").lower() == "true"
 PAID_ANALYSIS_ENABLED = os.getenv("PAID_ANALYSIS_ENABLED", "false").lower() == "true"
 PAID_ANALYSIS_ALLOWLIST_EMAILS = {
     email.lower() for email in _get_optional_env_list("PAID_ANALYSIS_ALLOWLIST_EMAILS")
@@ -1687,6 +1720,74 @@ class PrivacyAuditEvent(BaseModel):
     target_type: str
     target_id: str
     details: Dict[str, Any] = {}
+    created_at: str
+
+
+class SamplingManifestFrameResponse(BaseModel):
+    timestamp_sec: float
+    reason: str
+    score: float
+    features: Dict[str, Any] = {}
+
+
+class SamplingManifestResponse(BaseModel):
+    video_id: str
+    strategy_version: str
+    scan_fps: Optional[float] = None
+    max_frames: int
+    selected_frames: List[SamplingManifestFrameResponse]
+    created_at: str
+
+
+class AnalysisMomentResponse(BaseModel):
+    moment_id: str
+    start_sec: float
+    end_sec: float
+    phase: str
+    selection_reason: str
+    representative_frame_sec: float
+    supporting_features: Dict[str, Any] = {}
+    score: float = 0.0
+
+
+class AnalysisMomentManifestResponse(BaseModel):
+    video_id: str
+    strategy_version: str
+    window_sec: Optional[float] = None
+    max_moments: Optional[int] = None
+    moments: List[AnalysisMomentResponse]
+    created_at: str
+
+
+class AudioTranscriptSegmentResponse(BaseModel):
+    segment_id: Optional[str] = None
+    start_sec: float
+    end_sec: float
+    speaker: Optional[str] = None
+    text: str
+
+
+class AudioTranscriptResponse(BaseModel):
+    video_id: str
+    transcript_status: str
+    model: Optional[str] = None
+    language: Optional[str] = None
+    text: str = ""
+    segments: List[AudioTranscriptSegmentResponse] = []
+    retention_expires_at: Optional[str] = None
+    created_at: str
+
+
+class AudioFeatureResponse(BaseModel):
+    video_id: str
+    teacher_talk_ratio: float = 0.0
+    turn_count: int = 0
+    question_count: int = 0
+    open_question_count: int = 0
+    directive_density: float = 0.0
+    pause_density: float = 0.0
+    transition_markers: int = 0
+    modalities_used: List[str] = []
     created_at: str
 
 
@@ -3118,6 +3219,19 @@ async def _purge_expired_privacy_artifacts() -> None:
             details={"teacher_id": video.get("teacher_id")},
         )
 
+    expired_transcripts = await db.video_audio_transcripts.find(
+        {"retention_expires_at": {"$ne": None, "$lte": now_iso}},
+        {"_id": 0, "id": 1, "video_id": 1},
+    ).to_list(500)
+    for transcript in expired_transcripts:
+        await db.video_audio_transcripts.delete_one({"id": transcript["id"]})
+        await _log_privacy_audit_event(
+            "audio_transcript_purged",
+            "video_audio_transcript",
+            transcript["id"],
+            details={"video_id": transcript.get("video_id")},
+        )
+
 
 async def _privacy_maintenance_worker() -> None:
     logger.info("Privacy maintenance worker started")
@@ -3533,6 +3647,54 @@ async def get_privacy_audit_events(
         query["target_id"] = target_id
     docs = await db.privacy_audit_events.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
     return [PrivacyAuditEvent(**doc) for doc in docs]
+
+
+@api_router.get("/admin/videos/{video_id}/sampling-manifest", response_model=SamplingManifestResponse)
+async def get_admin_video_sampling_manifest(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_admin_owned_video_or_404(video_id, current_user)
+    doc = await db.video_sampling_manifests.find_one({"video_id": video_id}, {"_id": 0}, sort=[("created_at", -1)])
+    if not doc:
+        raise HTTPException(status_code=404, detail="Sampling manifest not found")
+    return SamplingManifestResponse(**doc)
+
+
+@api_router.get("/admin/videos/{video_id}/analysis-moments", response_model=AnalysisMomentManifestResponse)
+async def get_admin_video_analysis_moments(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_admin_owned_video_or_404(video_id, current_user)
+    doc = await db.video_analysis_moments.find_one({"video_id": video_id}, {"_id": 0}, sort=[("created_at", -1)])
+    if not doc:
+        raise HTTPException(status_code=404, detail="Analysis moments not found")
+    return AnalysisMomentManifestResponse(**doc)
+
+
+@api_router.get("/admin/videos/{video_id}/audio-transcript", response_model=AudioTranscriptResponse)
+async def get_admin_video_audio_transcript(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_admin_owned_video_or_404(video_id, current_user)
+    doc = await db.video_audio_transcripts.find_one({"video_id": video_id}, {"_id": 0}, sort=[("created_at", -1)])
+    if not doc:
+        raise HTTPException(status_code=404, detail="Audio transcript not found")
+    return AudioTranscriptResponse(**doc)
+
+
+@api_router.get("/admin/videos/{video_id}/audio-features", response_model=AudioFeatureResponse)
+async def get_admin_video_audio_features(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_admin_owned_video_or_404(video_id, current_user)
+    doc = await db.video_analysis_features.find_one({"video_id": video_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Audio features not found")
+    return AudioFeatureResponse(**doc)
 
 
 @api_router.post("/videos/{video_id}/privacy/review", response_model=PrivacyReviewDecisionResponse)
@@ -7795,6 +7957,48 @@ async def analyze_video(
         # Extract frames from video (run in thread to avoid blocking event loop)
         frames = await asyncio.to_thread(extract_video_frames, file_path, VIDEO_ANALYSIS_MAX_FRAMES)
         logger.info(f"Extracted {len(frames)} frames from video")
+        sampling_manifest = build_sampling_manifest(video_id, frames)
+        await db.video_sampling_manifests.update_one(
+            {"video_id": video_id, "strategy_version": sampling_manifest["strategy_version"]},
+            {"$set": sampling_manifest},
+            upsert=True,
+        )
+        moment_manifest = build_moment_manifest(video_id, file_path, frames)
+        await db.video_analysis_moments.update_one(
+            {"video_id": video_id, "strategy_version": moment_manifest["strategy_version"]},
+            {"$set": moment_manifest},
+            upsert=True,
+        )
+        frames = attach_moment_metadata_to_frames(frames, moment_manifest)
+        transcript_doc = None
+        feature_doc = None
+        try:
+            transcript_doc, feature_doc = await build_audio_artifacts(
+                video_id,
+                file_path,
+                analysis_user,
+            )
+        except Exception as exc:
+            logger.warning(f"Audio artifact generation failed for {video_id}; continuing with vision-only analysis: {exc}")
+        if transcript_doc:
+            await db.video_audio_transcripts.update_one(
+                {"video_id": video_id},
+                {"$set": transcript_doc},
+                upsert=True,
+            )
+        if feature_doc:
+            await db.video_analysis_features.update_one(
+                {"video_id": video_id},
+                {"$set": feature_doc},
+                upsert=True,
+            )
+        multimodal_payload = build_multimodal_analysis_payload(
+            frames,
+            moment_manifest,
+            transcript_doc,
+            feature_doc,
+        )
+        frames = multimodal_payload.get("frames") or frames
         
         # Analyze with AI
         analysis_payload = await analyze_frames_with_ai(
@@ -7802,6 +8006,13 @@ async def analyze_video(
             framework,
             selected_elements,
             current_user=analysis_user,
+            multimodal_payload=multimodal_payload,
+        )
+        analysis_metadata = build_analysis_metadata(
+            analysis_payload,
+            multimodal_payload,
+            transcript_doc,
+            feature_doc,
         )
         element_scores = analysis_payload.get("element_scores", [])
         
@@ -7833,6 +8044,8 @@ async def analyze_video(
             "recommendations": recommendations,
             "analyzed_at": datetime.now(timezone.utc).isoformat(),
             "analysis_mode": analysis_payload.get("analysis_mode", "fallback"),
+            "analysis_confidence": analysis_metadata["analysis_confidence"],
+            "analysis_modalities_used": analysis_metadata["analysis_modalities_used"],
         }
         
         await db.assessments.insert_one(assessment_doc)
@@ -7848,6 +8061,12 @@ async def analyze_video(
                     "analysis_status": VideoProcessingStatus.COMPLETED.value,
                     "assessment_id": assessment_doc["id"],
                     "analysis_mode": analysis_payload.get("analysis_mode", "fallback"),
+                    "sampling_strategy_version": sampling_manifest["strategy_version"],
+                    "moment_sampling_version": moment_manifest["strategy_version"],
+                    "audio_analysis_enabled": bool(transcript_doc or feature_doc),
+                    "audio_transcript_status": analysis_metadata["audio_transcript_status"],
+                    "analysis_modalities_used": analysis_metadata["analysis_modalities_used"],
+                    "analysis_confidence": analysis_metadata["analysis_confidence"],
                     "status_updated_at": completed_at,
                     "processing_completed_at": completed_at,
                     "processing_failed_at": None,
@@ -7917,6 +8136,38 @@ def _build_elements_to_analyze(framework: dict, selected_elements: List[str]) ->
 
 def extract_video_frames(video_path: str, max_frames: int = VIDEO_ANALYSIS_MAX_FRAMES) -> List[dict]:
     """Extract evenly spaced video frames with timestamps."""
+    if SMART_FRAME_SELECTION_ENABLED:
+        try:
+            candidates = scan_video_candidates(
+                video_path,
+                scan_fps=VIDEO_ANALYSIS_FRAME_SCAN_FPS,
+                enable_ocr_signals=VIDEO_ANALYSIS_ENABLE_OCR_SIGNALS,
+            )
+            scored_candidates = score_frame_candidates(candidates)
+            selected_candidates = select_diverse_frames(
+                scored_candidates,
+                max_frames=max_frames,
+                min_gap_sec=VIDEO_ANALYSIS_MIN_FRAME_GAP_SEC,
+            )
+            if selected_candidates:
+                logger.info(
+                    "Selected %s smart analysis frames using %s",
+                    len(selected_candidates),
+                    SMART_FRAME_SELECTION_VERSION,
+                )
+                return [
+                    {
+                        "timestamp_sec": candidate["timestamp_sec"],
+                        "image_b64": candidate["image_b64"],
+                        "selection_reason": candidate.get("reason"),
+                        "selection_score": candidate.get("score"),
+                        "selection_features": candidate.get("features"),
+                    }
+                    for candidate in selected_candidates
+                ]
+        except Exception as e:
+            logger.error(f"Smart frame selection failed, falling back to evenly spaced extraction: {e}")
+
     frames: List[dict] = []
     try:
         if cv2 is None:
@@ -7952,6 +8203,200 @@ def extract_video_frames(video_path: str, max_frames: int = VIDEO_ANALYSIS_MAX_F
     except Exception as e:
         logger.error(f"Error extracting frames: {e}")
     return frames
+
+
+def build_sampling_manifest(video_id: str, frames: List[dict]) -> Dict[str, Any]:
+    strategy_version = SMART_FRAME_SELECTION_VERSION if SMART_FRAME_SELECTION_ENABLED else "even_spacing_v1"
+    selected_frames = []
+    for frame in frames:
+        selected_frames.append(
+            {
+                "timestamp_sec": round(float(frame.get("timestamp_sec", 0.0)), 2),
+                "reason": frame.get("selection_reason") or "even_spacing",
+                "score": round(float(frame.get("selection_score", 0.0) or 0.0), 4),
+                "features": frame.get("selection_features") or {},
+            }
+        )
+    return {
+        "id": f"sampling_{video_id}_{strategy_version}",
+        "video_id": video_id,
+        "strategy_version": strategy_version,
+        "scan_fps": VIDEO_ANALYSIS_FRAME_SCAN_FPS if SMART_FRAME_SELECTION_ENABLED else None,
+        "max_frames": len(frames),
+        "selected_frames": selected_frames,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def build_moment_manifest(video_id: str, video_path: str, frames: List[dict]) -> Dict[str, Any]:
+    if not SMART_MOMENT_SAMPLING_ENABLED:
+        return {
+            "id": f"moments_{video_id}_disabled",
+            "video_id": video_id,
+            "strategy_version": "moment_sampling_disabled",
+            "moments": [],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    windows = segment_video_windows(video_path, window_sec=VIDEO_ANALYSIS_WINDOW_SEC)
+    scored_windows = score_windows(windows, frames)
+    moments = select_lesson_moments(scored_windows, max_moments=VIDEO_ANALYSIS_MAX_MOMENTS)
+    return {
+        "id": f"moments_{video_id}_{SMART_MOMENT_SAMPLING_VERSION}",
+        "video_id": video_id,
+        "strategy_version": SMART_MOMENT_SAMPLING_VERSION,
+        "window_sec": VIDEO_ANALYSIS_WINDOW_SEC,
+        "max_moments": VIDEO_ANALYSIS_MAX_MOMENTS,
+        "moments": moments,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def attach_moment_metadata_to_frames(frames: List[dict], moment_manifest: Dict[str, Any]) -> List[dict]:
+    moments = list(moment_manifest.get("moments") or [])
+    if not moments:
+        return frames
+
+    enriched: List[dict] = []
+    for frame in frames:
+        timestamp_sec = float(frame.get("timestamp_sec", 0.0))
+        matching_moment = next(
+            (
+                moment
+                for moment in moments
+                if float(moment.get("start_sec", 0.0)) <= timestamp_sec <= float(moment.get("end_sec", timestamp_sec))
+            ),
+            None,
+        )
+        if matching_moment:
+            enriched.append(
+                {
+                    **frame,
+                    "moment_id": matching_moment.get("moment_id"),
+                    "moment_phase": matching_moment.get("phase"),
+                    "moment_selection_reason": matching_moment.get("selection_reason"),
+                }
+            )
+        else:
+            enriched.append(frame)
+    return enriched
+
+
+def _should_run_audio_analysis(current_user: Optional[dict]) -> bool:
+    if not AUDIO_ANALYSIS_ENABLED:
+        return False
+    if not AUDIO_ALLOW_STUDENT_VOICE_PROCESSING:
+        return False
+    return _is_paid_analysis_allowed_for_user(current_user)
+
+
+async def build_audio_artifacts(
+    video_id: str,
+    video_path: str,
+    current_user: Optional[dict],
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    if not _should_run_audio_analysis(current_user):
+        return None, None
+
+    extracted_audio_path = str(UPLOAD_DIR / "audio" / f"{video_id}.wav")
+    transcript_doc: Optional[Dict[str, Any]] = None
+    feature_doc: Optional[Dict[str, Any]] = None
+    try:
+        extraction = await asyncio.to_thread(extract_audio_track, video_path, extracted_audio_path)
+        transcript_segments: List[Dict[str, Any]] = []
+        transcript_text = ""
+        transcription_status = "disabled"
+        transcription_model = None
+
+        if AUDIO_TRANSCRIPTION_ENABLED and OPENAI_API_KEY:
+            transcription = await asyncio.to_thread(
+                transcribe_audio_file,
+                extraction["audio_path"],
+                OPENAI_API_KEY,
+                AUDIO_TRANSCRIPTION_MODEL,
+                AUDIO_TRANSCRIPTION_LANGUAGE,
+            )
+            transcript_segments = transcription.get("segments") or []
+            transcript_text = transcription.get("text") or ""
+            transcription_model = transcription.get("model")
+            transcription_status = "completed"
+        elif AUDIO_TRANSCRIPTION_ENABLED:
+            transcription_status = "unconfigured"
+
+        transcript_doc = {
+            "id": f"transcript_{video_id}",
+            "video_id": video_id,
+            "transcript_status": transcription_status,
+            "model": transcription_model,
+            "language": AUDIO_TRANSCRIPTION_LANGUAGE,
+            "segments": transcript_segments,
+            "text": transcript_text,
+            "retention_expires_at": (
+                datetime.now(timezone.utc) + timedelta(days=AUDIO_TRANSCRIPT_RETENTION_DAYS)
+            ).isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        if AUDIO_FEATURES_ENABLED:
+            features = compute_audio_features(transcript_segments)
+            feature_doc = {
+                "id": f"audio_features_{video_id}",
+                "video_id": video_id,
+                **features,
+                "modalities_used": ["audio"],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        return transcript_doc, feature_doc
+    finally:
+        try:
+            if extracted_audio_path and os.path.exists(extracted_audio_path):
+                await asyncio.to_thread(os.remove, extracted_audio_path)
+        except Exception as exc:
+            logger.warning(f"Unable to remove temporary extracted audio for {video_id}: {exc}")
+
+
+def build_analysis_metadata(
+    analysis_payload: Dict[str, Any],
+    multimodal_payload: Optional[Dict[str, Any]],
+    transcript_doc: Optional[Dict[str, Any]],
+    feature_doc: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    modalities_used = list((multimodal_payload or {}).get("modalities_used") or ["vision"])
+    confidence_values = [
+        float(score.get("confidence", 0.0) or 0.0)
+        for score in (analysis_payload.get("element_scores") or [])
+    ]
+    overall_confidence = round(sum(confidence_values) / len(confidence_values), 1) if confidence_values else 0.0
+
+    degradation_reasons: List[str] = []
+    transcript_status = (transcript_doc or {}).get("transcript_status")
+    if "audio" not in modalities_used:
+        if AUDIO_ANALYSIS_ENABLED and AUDIO_ALLOW_STUDENT_VOICE_PROCESSING:
+            degradation_reasons.append("audio_unavailable")
+        else:
+            degradation_reasons.append("vision_only_mode")
+    if transcript_doc and transcript_status != "completed":
+        degradation_reasons.append(f"audio_transcript_{transcript_status}")
+    if not feature_doc and AUDIO_FEATURES_ENABLED:
+        degradation_reasons.append("audio_features_unavailable")
+
+    modality_confidence = {
+        "vision": overall_confidence,
+        "audio": 100.0 if ("audio" in modalities_used and transcript_status == "completed") else 0.0,
+    }
+    if "audio" in modalities_used and feature_doc:
+        modality_confidence["audio"] = 75.0
+
+    return {
+        "analysis_modalities_used": modalities_used,
+        "analysis_confidence": {
+            "overall": overall_confidence,
+            "by_modality": modality_confidence,
+            "degradation_reasons": degradation_reasons,
+        },
+        "audio_transcript_status": transcript_status,
+    }
 
 
 def _extract_json_object(text: str) -> Optional[dict]:
@@ -8209,6 +8654,30 @@ Return JSON with this exact shape:
     for frame in frames:
         timestamp_sec = round(float(frame.get("timestamp_sec", 0.0)), 1)
         user_content.append({"type": "input_text", "text": f"Frame timestamp: {timestamp_sec} seconds"})
+        if frame.get("selection_reason"):
+            user_content.append(
+                {
+                    "type": "input_text",
+                    "text": f"Frame selection reason: {frame.get('selection_reason')}",
+                }
+            )
+        if frame.get("moment_phase"):
+            user_content.append(
+                {
+                    "type": "input_text",
+                    "text": (
+                        f"Lesson moment: {frame.get('moment_phase')} "
+                        f"(reason: {frame.get('moment_selection_reason') or 'timeline_coverage'})"
+                    ),
+                }
+            )
+        if frame.get("transcript_excerpt"):
+            user_content.append(
+                {
+                    "type": "input_text",
+                    "text": f"Transcript excerpt for this moment: {frame.get('transcript_excerpt')}",
+                }
+            )
         user_content.append(
             {
                 "type": "input_image",
@@ -8237,6 +8706,7 @@ async def analyze_frames_with_ai(
     framework: dict,
     selected_elements: List[str],
     current_user: Optional[dict] = None,
+    multimodal_payload: Optional[dict] = None,
 ) -> dict:
     """Analyze extracted video frames and return normalized assessment output."""
     elements_to_analyze = _build_elements_to_analyze(framework, selected_elements)
@@ -8244,10 +8714,26 @@ async def analyze_frames_with_ai(
         return {"analysis_mode": "empty_selection", "summary": None, "recommendations": [], "element_scores": []}
 
     paid_analysis_allowed = _is_paid_analysis_allowed_for_user(current_user)
+    if multimodal_payload:
+        audio_features = multimodal_payload.get("audio_features") or {}
+        modalities_used = multimodal_payload.get("modalities_used") or ["vision"]
+        if "audio" in modalities_used and audio_features:
+            logger.info(
+                "Preparing multimodal analysis context with audio features: %s",
+                {
+                    "turn_count": audio_features.get("turn_count"),
+                    "question_count": audio_features.get("question_count"),
+                    "open_question_count": audio_features.get("open_question_count"),
+                },
+            )
+
     if OPENAI_API_KEY and AsyncOpenAI is not None and paid_analysis_allowed:
         try:
             payload = await _analyze_frames_with_openai(frames, elements_to_analyze)
-            return _normalize_model_analysis(payload, elements_to_analyze, frames, analysis_mode="openai")
+            normalized = _normalize_model_analysis(payload, elements_to_analyze, frames, analysis_mode="openai")
+            if multimodal_payload and "audio" in (multimodal_payload.get("modalities_used") or []):
+                normalized["analysis_mode"] = "openai_multimodal"
+            return normalized
         except Exception as exc:
             logger.error(f"OpenAI video analysis failed; falling back to heuristic analysis: {exc}")
             fallback_mode = "fallback_model_error"
@@ -8906,6 +9392,11 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.exemplar_library_items, [("subject", 1), ("grade_level", 1)])
     await _safe_create_index(db.share_assets, [("teacher_id", 1), ("created_at", -1)])
     await _safe_create_index(db.videos, [("raw_retention_expires_at", 1)])
+    await _safe_create_index(db.video_sampling_manifests, [("video_id", 1), ("strategy_version", 1)], unique=True)
+    await _safe_create_index(db.video_analysis_moments, [("video_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.video_audio_transcripts, [("video_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.video_audio_transcripts, [("retention_expires_at", 1)])
+    await _safe_create_index(db.video_analysis_features, [("video_id", 1)], unique=True)
 
 
 async def _stop_video_workers() -> None:
