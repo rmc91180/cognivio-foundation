@@ -1428,6 +1428,74 @@ def _get_framework_by_type(framework_type: str) -> dict:
     }
 
 
+def _normalize_uploaded_rubric_domains(parsed_domains: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for domain in parsed_domains:
+        domain_name = str(domain.get("name") or domain.get("domain") or "").strip()
+        if not domain_name:
+            continue
+        raw_elements = domain.get("elements") or []
+        elements = []
+        for element_index, raw_element in enumerate(raw_elements):
+            if isinstance(raw_element, dict):
+                element_name = str(raw_element.get("name") or raw_element.get("element") or "").strip()
+            else:
+                element_name = str(raw_element).strip()
+            if not element_name:
+                continue
+            elements.append(
+                {
+                    "id": f"c{uuid.uuid4().hex[:8]}-{element_index + 1}",
+                    "name": element_name,
+                }
+            )
+        if not elements:
+            continue
+        normalized.append(
+            {
+                "id": f"c{uuid.uuid4().hex[:8]}",
+                "name": domain_name,
+                "elements": elements,
+                "source_type": "uploaded",
+                "uploaded_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    return normalized
+
+
+def _parse_uploaded_rubric_file(filename: str, content: bytes) -> Tuple[str, List[Dict[str, Any]]]:
+    lower_name = (filename or "").lower()
+    default_rubric_name = Path(filename or "uploaded-rubric").stem or "Uploaded Rubric"
+    if lower_name.endswith(".json"):
+        payload = json.loads(content.decode("utf-8"))
+        rubric_name = str(payload.get("name") or payload.get("title") or default_rubric_name).strip()
+        parsed_domains = payload.get("domains") or payload.get("rubric") or []
+        if not isinstance(parsed_domains, list):
+            raise HTTPException(status_code=400, detail="Uploaded rubric JSON must contain a domains array")
+        normalized_domains = _normalize_uploaded_rubric_domains(parsed_domains)
+        if not normalized_domains:
+            raise HTTPException(status_code=400, detail="Uploaded rubric JSON did not contain valid domains and elements")
+        return rubric_name, normalized_domains
+
+    if lower_name.endswith(".csv"):
+        decoded = content.decode("utf-8-sig")
+        reader = csv.DictReader(io.StringIO(decoded))
+        grouped: Dict[str, List[str]] = {}
+        for row in reader:
+            domain_name = str(row.get("domain") or row.get("Domain") or row.get("category") or "").strip()
+            element_name = str(row.get("element") or row.get("Element") or row.get("indicator") or "").strip()
+            if not domain_name or not element_name:
+                continue
+            grouped.setdefault(domain_name, []).append(element_name)
+        parsed_domains = [{"name": domain_name, "elements": elements} for domain_name, elements in grouped.items()]
+        normalized_domains = _normalize_uploaded_rubric_domains(parsed_domains)
+        if not normalized_domains:
+            raise HTTPException(status_code=400, detail="Uploaded rubric CSV must contain domain and element columns")
+        return default_rubric_name, normalized_domains
+
+    raise HTTPException(status_code=400, detail="Uploaded rubric must be a .json or .csv file")
+
+
 def _find_domain_for_element(framework: dict, element_id: str) -> Optional[dict]:
     for domain in framework.get("domains", []):
         for element in domain.get("elements", []):
@@ -1501,6 +1569,8 @@ class SchoolResponse(BaseModel):
 class FrameworkSelection(BaseModel):
     framework_type: FrameworkType
     selected_elements: List[str]
+    priority_elements: List[str] = []
+    focus_note: Optional[str] = None
 
 
 class CustomElementCreate(BaseModel):
@@ -2213,12 +2283,42 @@ async def create_custom_domain(
         "id": domain_id,
         "name": payload.name,
         "elements": elements,
+        "source_type": "manual",
         "user_id": current_user["id"],
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.custom_domains.insert_one(domain_doc)
     domain_doc.pop("user_id", None)
     return {"domain": domain_doc}
+
+
+@api_router.post("/frameworks/upload-rubric")
+async def upload_focus_rubric(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+):
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded rubric file is empty")
+    rubric_name, parsed_domains = _parse_uploaded_rubric_file(file.filename or "", content)
+    created_domains = []
+    created_at = datetime.now(timezone.utc).isoformat()
+    for domain in parsed_domains:
+        domain_doc = {
+            **domain,
+            "rubric_set_name": rubric_name,
+            "user_id": current_user["id"],
+            "created_at": created_at,
+        }
+        await db.custom_domains.insert_one(domain_doc)
+        created_domains.append({k: v for k, v in domain_doc.items() if k != "user_id"})
+    return {
+        "message": "Rubric uploaded",
+        "rubric_name": rubric_name,
+        "domains_created": len(created_domains),
+        "elements_created": sum(len(domain.get("elements") or []) for domain in created_domains),
+        "domains": created_domains,
+    }
 
 
 @api_router.post("/frameworks/custom-domains/{domain_id}/elements")
@@ -2279,11 +2379,29 @@ async def get_framework_details(
 
 @api_router.post("/frameworks/selection")
 async def save_framework_selection(selection: FrameworkSelection, current_user: dict = Depends(get_current_user)):
+    selected_elements = []
+    seen_selected = set()
+    for element_id in selection.selected_elements or []:
+        if element_id in seen_selected:
+            continue
+        seen_selected.add(element_id)
+        selected_elements.append(element_id)
+
+    priority_elements = []
+    seen_priority = set()
+    for element_id in selection.priority_elements or []:
+        if element_id not in seen_selected or element_id in seen_priority:
+            continue
+        seen_priority.add(element_id)
+        priority_elements.append(element_id)
+
     selection_doc = {
         "id": str(uuid.uuid4()),
         "user_id": current_user["id"],
         "framework_type": selection.framework_type,
-        "selected_elements": selection.selected_elements,
+        "selected_elements": selected_elements,
+        "priority_elements": priority_elements,
+        "focus_note": (selection.focus_note or "").strip() or None,
         "created_at": datetime.now(timezone.utc).isoformat()
     }
     await db.framework_selections.update_one(
@@ -2305,7 +2423,12 @@ async def get_current_selection(current_user: dict = Depends(get_current_user)):
         for domain in DANIELSON_FRAMEWORK["domains"]:
             for element in domain["elements"]:
                 all_elements.append(element["id"])
-        return {"framework_type": "danielson", "selected_elements": all_elements}
+        return {
+            "framework_type": "danielson",
+            "selected_elements": all_elements,
+            "priority_elements": [],
+            "focus_note": None,
+        }
 
     if selection.get("framework_type") == "custom" and not selection.get(
         "selected_elements"
@@ -2322,6 +2445,8 @@ async def get_current_selection(current_user: dict = Depends(get_current_user)):
             el["id"] for domain in domains for el in domain.get("elements", [])
         ]
         selection["selected_elements"] = element_ids
+    selection.setdefault("priority_elements", [])
+    selection.setdefault("focus_note", None)
     return selection
 
 # ==================== TEACHER ENDPOINTS ====================
@@ -7942,6 +8067,8 @@ async def analyze_video(
         
         framework_type = selection.get("framework_type", "danielson") if selection else "danielson"
         selected_elements = selection.get("selected_elements", []) if selection else []
+        priority_elements = selection.get("priority_elements", []) if selection else []
+        focus_note = (selection.get("focus_note") or "").strip() if selection else ""
         
         # Get framework data
         if framework_type == "danielson":
@@ -8005,6 +8132,8 @@ async def analyze_video(
             frames,
             framework,
             selected_elements,
+            priority_elements=priority_elements,
+            focus_note=focus_note,
             current_user=analysis_user,
             multimodal_payload=multimodal_payload,
         )
@@ -8024,11 +8153,15 @@ async def analyze_video(
         recommendations = generate_recommendations(
             element_scores,
             provided_recommendations=analysis_payload.get("recommendations"),
+            priority_element_ids=priority_elements,
+            focus_note=focus_note,
         )
         summary_text = generate_summary(
             element_scores,
             overall_score,
             provided_summary=analysis_payload.get("summary"),
+            priority_element_ids=priority_elements,
+            focus_note=focus_note,
         )
         
         # Create assessment document
@@ -8042,6 +8175,8 @@ async def analyze_video(
             "overall_score": overall_score,
             "summary": summary_text,
             "recommendations": recommendations,
+            "priority_elements": priority_elements,
+            "focus_note": focus_note or None,
             "analyzed_at": datetime.now(timezone.utc).isoformat(),
             "analysis_mode": analysis_payload.get("analysis_mode", "fallback"),
             "analysis_confidence": analysis_metadata["analysis_confidence"],
@@ -8067,6 +8202,8 @@ async def analyze_video(
                     "audio_transcript_status": analysis_metadata["audio_transcript_status"],
                     "analysis_modalities_used": analysis_metadata["analysis_modalities_used"],
                     "analysis_confidence": analysis_metadata["analysis_confidence"],
+                    "priority_elements": priority_elements,
+                    "focus_note": focus_note or None,
                     "status_updated_at": completed_at,
                     "processing_completed_at": completed_at,
                     "processing_failed_at": None,
@@ -8118,8 +8255,13 @@ async def analyze_video(
             except Exception as e:
                 logger.error(f"Error removing video file: {e}")
 
-def _build_elements_to_analyze(framework: dict, selected_elements: List[str]) -> List[dict]:
+def _build_elements_to_analyze(
+    framework: dict,
+    selected_elements: List[str],
+    priority_elements: Optional[List[str]] = None,
+) -> List[dict]:
     elements_to_analyze: List[dict] = []
+    priority_set = set(priority_elements or [])
     for domain in framework.get("domains", []):
         for element in domain.get("elements", []):
             if selected_elements and element["id"] not in selected_elements:
@@ -8129,9 +8271,29 @@ def _build_elements_to_analyze(framework: dict, selected_elements: List[str]) ->
                     "id": element["id"],
                     "name": element["name"],
                     "domain": domain["name"],
+                    "priority": element["id"] in priority_set,
                 }
             )
-    return elements_to_analyze
+    return sorted(
+        elements_to_analyze,
+        key=lambda item: (0 if item.get("priority") else 1, item["domain"], item["id"]),
+    )
+
+
+def _build_focus_instruction(priority_elements: List[dict], focus_note: Optional[str] = None) -> str:
+    parts: List[str] = []
+    if priority_elements:
+        priority_text = ", ".join(f"{element['id']}: {element['name']}" for element in priority_elements)
+        parts.append(
+            "Admin focus priorities for this observation are: "
+            f"{priority_text}. Weight your summary, judgments, and coaching recommendations toward these areas first."
+        )
+    if focus_note:
+        parts.append(
+            "Admin observation note: "
+            f"{focus_note.strip()}. Treat this as guidance for what to pay especially close attention to."
+        )
+    return "\n".join(parts).strip()
 
 
 def extract_video_frames(video_path: str, max_frames: int = VIDEO_ANALYSIS_MAX_FRAMES) -> List[dict]:
@@ -8506,6 +8668,8 @@ def _build_placeholder_element_score(element: dict, timestamp_sec: float) -> dic
     return {
         "element_id": element["id"],
         "element_name": element["name"],
+        "domain": element.get("domain"),
+        "priority": bool(element.get("priority")),
         "score": 5.0,
         "level": get_performance_level(5.0),
         "observations": ["Insufficient visible evidence in the sampled frames for a stronger judgment."],
@@ -8570,6 +8734,8 @@ def _normalize_model_analysis(
             {
                 "element_id": element_id,
                 "element_name": element["name"],
+                "domain": element.get("domain"),
+                "priority": bool(element.get("priority")),
                 "score": score,
                 "level": get_performance_level(score),
                 "observations": observations,
@@ -8594,29 +8760,40 @@ def _normalize_model_analysis(
     }
 
 
-async def _analyze_frames_with_openai(frames: List[dict], elements_to_analyze: List[dict]) -> Optional[dict]:
+async def _analyze_frames_with_openai(
+    frames: List[dict],
+    elements_to_analyze: List[dict],
+    focus_instruction: Optional[str] = None,
+) -> Optional[dict]:
     if not OPENAI_API_KEY or AsyncOpenAI is None:
         return None
 
     system_prompt = (
         "You are an expert instructional coach evaluating sampled classroom video frames. "
-        "Use only visible evidence from the provided frames. Do not infer audio, curriculum intent, or unseen behavior. "
+        "Use only visible evidence from the provided frames unless transcript context is explicitly provided. "
+        "Do not invent unseen behavior. "
+        "Write the result as if a strong school leader observed the lesson and needs a concise, coaching-ready judgment. "
         "Return only valid JSON."
     )
     elements_text = "\n".join(
-        f"- {element['id']}: {element['name']} (Domain: {element['domain']})"
+        f"- {element['id']}: {element['name']} (Domain: {element['domain']}){' [PRIORITY]' if element.get('priority') else ''}"
         for element in elements_to_analyze
     )
+    focus_text = focus_instruction.strip() if focus_instruction else ""
     prompt = f"""
 Analyze the classroom frames below and score the teacher on a 1-10 scale for each rubric element.
 
 Rubric elements:
 {elements_text}
 
+{focus_text}
+
 Requirements:
 - Use the timestamps provided with each frame.
-- Base every observation on visible evidence only.
+- Base every observation on the provided evidence only.
 - Keep observations concrete and specific to what is visible.
+- Make the summary feel like an administrator's classroom observation summary, not a technical model report.
+- If priority rubric elements are present, lead with them in the summary, strengths, growth areas, and recommendations.
 - For each element, include 1-2 timestamped evidence segments tied to the sampled frames when possible.
 - Include 2-3 targeted recommendations tied to timestamps and linked elements.
 
@@ -8705,13 +8882,17 @@ async def analyze_frames_with_ai(
     frames: List[dict],
     framework: dict,
     selected_elements: List[str],
+    priority_elements: Optional[List[str]] = None,
+    focus_note: Optional[str] = None,
     current_user: Optional[dict] = None,
     multimodal_payload: Optional[dict] = None,
 ) -> dict:
     """Analyze extracted video frames and return normalized assessment output."""
-    elements_to_analyze = _build_elements_to_analyze(framework, selected_elements)
+    elements_to_analyze = _build_elements_to_analyze(framework, selected_elements, priority_elements=priority_elements)
     if not elements_to_analyze:
         return {"analysis_mode": "empty_selection", "summary": None, "recommendations": [], "element_scores": []}
+    prioritized_elements = [element for element in elements_to_analyze if element.get("priority")]
+    focus_instruction = _build_focus_instruction(prioritized_elements, focus_note=focus_note)
 
     paid_analysis_allowed = _is_paid_analysis_allowed_for_user(current_user)
     if multimodal_payload:
@@ -8729,7 +8910,11 @@ async def analyze_frames_with_ai(
 
     if OPENAI_API_KEY and AsyncOpenAI is not None and paid_analysis_allowed:
         try:
-            payload = await _analyze_frames_with_openai(frames, elements_to_analyze)
+            payload = await _analyze_frames_with_openai(
+                frames,
+                elements_to_analyze,
+                focus_instruction=focus_instruction,
+            )
             normalized = _normalize_model_analysis(payload, elements_to_analyze, frames, analysis_mode="openai")
             if multimodal_payload and "audio" in (multimodal_payload.get("modalities_used") or []):
                 normalized["analysis_mode"] = "openai_multimodal"
@@ -8806,10 +8991,18 @@ def _build_recommendation_text(element_name: str, observation: str) -> str:
     return f"Strengthen {element_name.lower()} with clearer modeling, checks for understanding, and visible student response routines."
 
 
+def _score_priority_rank(item: dict, priority_element_ids: Optional[List[str]] = None) -> Tuple[int, float]:
+    priority_set = set(priority_element_ids or [])
+    is_priority = bool(item.get("priority")) or item.get("element_id") in priority_set
+    return (0 if is_priority else 1, -float(item.get("score", 0.0)))
+
+
 def generate_summary(
     element_scores: List[dict],
     overall_score: float,
     provided_summary: Optional[str] = None,
+    priority_element_ids: Optional[List[str]] = None,
+    focus_note: Optional[str] = None,
 ) -> str:
     """Generate an evidence-grounded summary of the assessment."""
     if provided_summary:
@@ -8818,15 +9011,24 @@ def generate_summary(
     level = get_performance_level(overall_score)
     strengths = sorted(
         [es for es in element_scores if es.get("score", 0) >= 7.5],
-        key=lambda item: item.get("score", 0),
-        reverse=True,
+        key=lambda item: _score_priority_rank(item, priority_element_ids),
     )[:3]
     growth_areas = sorted(
         [es for es in element_scores if es.get("score", 0) < 6.5],
-        key=lambda item: item.get("score", 0),
+        key=lambda item: (0 if (bool(item.get("priority")) or item.get("element_id") in set(priority_element_ids or [])) else 1, item.get("score", 0)),
     )[:2]
 
     summary_parts = [f"Overall performance: {level.replace('_', ' ').title()} (Score: {overall_score}/10)."]
+    if priority_element_ids:
+        focus_names = [
+            item["element_name"]
+            for item in element_scores
+            if item.get("element_id") in set(priority_element_ids)
+        ]
+        if focus_names:
+            summary_parts.append(f"Observation emphasis was placed on {', '.join(focus_names[:3])}.")
+    if focus_note:
+        summary_parts.append(f"Observation focus note: {focus_note.rstrip('.')}.")
 
     if strengths:
         strength_notes = []
@@ -8854,13 +9056,21 @@ def generate_summary(
 def generate_recommendations(
     element_scores: List[dict],
     provided_recommendations: Optional[List[dict]] = None,
+    priority_element_ids: Optional[List[str]] = None,
+    focus_note: Optional[str] = None,
 ) -> List[str]:
     """Generate timestamped, evidence-grounded recommendations."""
     if provided_recommendations:
         rendered = []
-        for item in provided_recommendations:
-            if not isinstance(item, dict):
-                continue
+        priority_set = set(priority_element_ids or [])
+        sorted_recommendations = sorted(
+            [item for item in provided_recommendations if isinstance(item, dict)],
+            key=lambda item: (
+                0 if item.get("linked_element_id") in priority_set else 1,
+                float(item.get("start_sec", 0) or 0),
+            ),
+        )
+        for item in sorted_recommendations:
             text = str(item.get("text") or "").strip()
             if not text:
                 continue
@@ -8871,9 +9081,10 @@ def generate_recommendations(
             return rendered[:3]
 
     recommendations: List[str] = []
+    priority_set = set(priority_element_ids or [])
     low_scores = sorted(
         [es for es in element_scores if es.get("score", 0) < 7.0],
-        key=lambda x: x.get("score", 0),
+        key=lambda x: (0 if (bool(x.get("priority")) or x.get("element_id") in priority_set) else 1, x.get("score", 0)),
     )[:3]
 
     for idx, es in enumerate(low_scores):
@@ -8889,9 +9100,10 @@ def generate_recommendations(
         )
 
     if not recommendations:
-        recommendations.append(
-            "[00:30–01:00] Maintain the strongest routines visible in the lesson and reinforce them with explicit checks for understanding."
-        )
+        closing_note = "Maintain the strongest routines visible in the lesson and reinforce them with explicit checks for understanding."
+        if focus_note:
+            closing_note = f"Maintain the strongest routines visible in the lesson while keeping the observation focus on {focus_note.rstrip('.')}."
+        recommendations.append(f"[00:30–01:00] {closing_note}")
 
     return recommendations
 

@@ -52,6 +52,7 @@ def test_generate_summary_uses_10_point_thresholds_and_observations():
             {
                 "element_id": "2b",
                 "element_name": "Questioning",
+                "priority": True,
                 "score": 8.2,
                 "observations": ["Teacher used follow-up questions to press for reasoning."],
             },
@@ -63,9 +64,13 @@ def test_generate_summary_uses_10_point_thresholds_and_observations():
             },
         ],
         7.1,
+        priority_element_ids=["2b"],
+        focus_note="Pay particular attention to questioning and checks for understanding.",
     )
 
     assert "Overall performance" in summary
+    assert "Observation emphasis was placed on Questioning" in summary
+    assert "Observation focus note" in summary
     assert "Strongest visible practices" in summary
     assert "Priority growth areas" in summary
     assert "Questioning" in summary
@@ -89,7 +94,8 @@ def test_generate_recommendations_uses_evidence_segments_and_not_canned_defaults
                     }
                 ],
             }
-        ]
+        ],
+        priority_element_ids=["3c"],
     )
 
     assert recommendations
@@ -97,6 +103,22 @@ def test_generate_recommendations_uses_evidence_segments_and_not_canned_defaults
     assert "Engagement".lower() in recommendations[0].lower()
     assert "Observed evidence" in recommendations[0]
     assert "Continue modeling strong routines" not in recommendations[0]
+
+
+def test_generate_recommendations_prioritizes_admin_pressure_points_when_model_output_exists():
+    recommendations = server.generate_recommendations(
+        [
+            {"element_id": "2b", "element_name": "Questioning", "score": 6.4},
+            {"element_id": "3c", "element_name": "Engagement", "score": 6.2},
+        ],
+        provided_recommendations=[
+            {"start_sec": 210, "end_sec": 240, "text": "Reinforce discussion norms.", "linked_element_id": "3c"},
+            {"start_sec": 90, "end_sec": 120, "text": "Increase probing questions and wait time.", "linked_element_id": "2b"},
+        ],
+        priority_element_ids=["2b"],
+    )
+
+    assert recommendations[0].endswith("Increase probing questions and wait time.")
 
 
 def test_normalize_analysis_score_scales_legacy_four_point_scores():
@@ -130,7 +152,7 @@ async def test_analyze_frames_with_ai_marks_multimodal_mode_when_audio_present(m
     monkeypatch.setattr(server, "PAID_ANALYSIS_ALLOWLIST_EMAILS", {"teacher@demo.cognivio.app"})
     monkeypatch.setattr(server, "OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(server, "AsyncOpenAI", object())
-    async def _fake_openai(frames, elements):
+    async def _fake_openai(frames, elements, focus_instruction=None):
         return {
             "summary": "Teacher models at the board and prompts students to compare strategies.",
             "recommendations": [],
@@ -151,11 +173,35 @@ async def test_analyze_frames_with_ai_marks_multimodal_mode_when_audio_present(m
         frames=[{"timestamp_sec": 12.0, "image_b64": "abc"}],
         framework={"domains": [{"name": "Instruction", "elements": [{"id": "2b", "name": "Questioning"}]}]},
         selected_elements=[],
+        priority_elements=["2b"],
+        focus_note="Look especially at questioning depth.",
         current_user={"email": "teacher@demo.cognivio.app"},
         multimodal_payload={"modalities_used": ["vision", "audio"], "audio_features": {"question_count": 3}},
     )
 
     assert result["analysis_mode"] == "openai_multimodal"
+
+
+def test_build_elements_to_analyze_marks_priority_items_first():
+    elements = server._build_elements_to_analyze(
+        framework={
+            "domains": [
+                {
+                    "name": "Instruction",
+                    "elements": [
+                        {"id": "2b", "name": "Questioning"},
+                        {"id": "3c", "name": "Engagement"},
+                    ],
+                }
+            ]
+        },
+        selected_elements=["2b", "3c"],
+        priority_elements=["3c"],
+    )
+
+    assert elements[0]["id"] == "3c"
+    assert elements[0]["priority"] is True
+    assert elements[1]["priority"] is False
 
 
 def test_build_analysis_metadata_tracks_modality_confidence_and_degradation(monkeypatch):

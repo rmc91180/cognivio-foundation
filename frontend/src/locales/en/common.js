@@ -694,11 +694,21 @@ const en = {
     domainsCount: "{{count}} domains",
     focusDomains: "Focus domains",
     selectedElements: "Selected elements: {{count}}",
+    priorityElements: "Priority pressure points: {{count}}",
     saveSelection: "Save selection",
     selectionSaved: "Framework selection saved",
     selectionSaveFailed: "Failed to save selection",
     loadingFramework: "Loading framework...",
     frameworkLoadFailed: "Failed to load framework details. Please refresh.",
+    uploadRubric: "Upload focus rubric",
+    uploadRubricDescription:
+      "Upload a school rubric in CSV or JSON so Cognivio can observe against your own pressure points.",
+    uploadRubricButton: "Upload rubric",
+    uploadingRubric: "Uploading...",
+    rubricUploadSuccess: "Rubric uploaded",
+    rubricUploadFailed: "Failed to upload rubric",
+    uploadRubricFormats:
+      "Supported formats: JSON with domains and elements, or CSV with domain and element columns.",
     createCustomDomain: "Create custom domain",
     createCustomDomainDescription:
       "Add your own focus domains and elements. Elements are comma-separated.",
@@ -721,6 +731,14 @@ const en = {
     selectedOfTotal: "{{selected}} of {{total}} selected",
     clearDomain: "Clear domain",
     selectDomain: "Select domain",
+    pressurePoint: "Admin pressure point",
+    markPriority: "Mark priority",
+    prioritySelected: "Priority selected",
+    focusNote: "Observation focus note",
+    focusNoteDescription:
+      "Add a short note about what you want the analysis to pay special attention to.",
+    focusNotePlaceholder:
+      "Example: Pay special attention to student discussion quality, checks for understanding, and transition strength.",
   },
 };
 

@@ -694,11 +694,21 @@ const he = {
     domainsCount: "{{count}} תחומים",
     focusDomains: "תחומי מיקוד",
     selectedElements: "פריטים שנבחרו: {{count}}",
+    priorityElements: "נקודות הלחץ בעדיפות גבוהה: {{count}}",
     saveSelection: "שמירת הבחירה",
     selectionSaved: "בחירת מסגרת ההערכה נשמרה",
     selectionSaveFailed: "שמירת הבחירה נכשלה",
     loadingFramework: "טוען את מסגרת ההערכה...",
     frameworkLoadFailed: "לא ניתן לטעון את פרטי המסגרת. רעננו ונסו שוב.",
+    uploadRubric: "העלאת רובריקת מיקוד",
+    uploadRubricDescription:
+      "העלו רובריקה בית־ספרית בקובץ CSV או JSON כדי שקוגניביו תתצפת לפי נקודות הלחץ שלכם.",
+    uploadRubricButton: "העלאת רובריקה",
+    uploadingRubric: "מעלה...",
+    rubricUploadSuccess: "הרובריקה הועלתה",
+    rubricUploadFailed: "העלאת הרובריקה נכשלה",
+    uploadRubricFormats:
+      "פורמטים נתמכים: JSON עם תחומים ורכיבים, או CSV עם עמודות domain ו-element.",
     createCustomDomain: "יצירת תחום מותאם",
     createCustomDomainDescription:
       "הוסיפו תחומי מיקוד ורכיבים משלכם. את הרכיבים יש להפריד בפסיקים.",
@@ -721,6 +731,14 @@ const he = {
     selectedOfTotal: "{{selected}} מתוך {{total}} נבחרו",
     clearDomain: "ניקוי התחום",
     selectDomain: "בחירת התחום",
+    pressurePoint: "נקודת לחץ ניהולית",
+    markPriority: "סימון כעדיפות",
+    prioritySelected: "סומן כעדיפות",
+    focusNote: "הערת מיקוד לתצפית",
+    focusNoteDescription:
+      "הוסיפו הערה קצרה שתחדד למה אתם רוצים שהניתוח ישים לב במיוחד.",
+    focusNotePlaceholder:
+      "לדוגמה: לשים לב במיוחד לאיכות הדיון הכיתתי, לבדיקות הבנה ולחוזק המעברים בין חלקי השיעור.",
   },
 };
 

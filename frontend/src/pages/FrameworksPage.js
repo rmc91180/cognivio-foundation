@@ -128,9 +128,12 @@ export function FrameworksPage() {
   });
 
   const [selectedElements, setSelectedElements] = useState([]);
+  const [priorityElements, setPriorityElements] = useState([]);
+  const [focusNote, setFocusNote] = useState("");
   const [customDomainName, setCustomDomainName] = useState("");
   const [customElementsInput, setCustomElementsInput] = useState("");
   const [customElementInputs, setCustomElementInputs] = useState({});
+  const [rubricUploadFile, setRubricUploadFile] = useState(null);
   const [policyPeriodDays, setPolicyPeriodDays] = useState(30);
   const [policyMinRecordings, setPolicyMinRecordings] = useState(2);
   const [policyReminderOffsets, setPolicyReminderOffsets] = useState([7, 2]);
@@ -143,6 +146,10 @@ export function FrameworksPage() {
     if (selectionRes?.selected_elements) {
       setSelectedElements(selectionRes.selected_elements);
     }
+    if (selectionRes?.priority_elements) {
+      setPriorityElements(selectionRes.priority_elements);
+    }
+    setFocusNote(selectionRes?.focus_note || "");
   }, [selectionRes]);
 
   const domains = useMemo(
@@ -176,6 +183,12 @@ export function FrameworksPage() {
   }, [frameworkType, domains, selectedElements.length]);
 
   useEffect(() => {
+    setPriorityElements((prev) =>
+      prev.filter((elementId) => selectedElements.includes(elementId))
+    );
+  }, [selectedElements]);
+
+  useEffect(() => {
     const policy = recordingPolicyRes?.[0];
     if (policy) {
       setPolicyPeriodDays(policy.period_length_days || 30);
@@ -190,6 +203,8 @@ export function FrameworksPage() {
       frameworkApi.saveSelection({
         framework_type: frameworkType,
         selected_elements: selectedElements,
+        priority_elements: priorityElements,
+        focus_note: focusNote,
       }),
     onSuccess: () => {
       toast.success(t("frameworksPage.selectionSaved"));
@@ -198,6 +213,24 @@ export function FrameworksPage() {
     },
     onError: () => {
       toast.error(t("frameworksPage.selectionSaveFailed"));
+    },
+  });
+  const uploadRubricMutation = useMutation({
+    mutationFn: () => {
+      const formData = new FormData();
+      formData.append("file", rubricUploadFile);
+      return frameworkApi.uploadRubric(formData);
+    },
+    onSuccess: () => {
+      toast.success(t("frameworksPage.rubricUploadSuccess"));
+      setRubricUploadFile(null);
+      setFrameworkType("custom");
+      queryClient.invalidateQueries({ queryKey: ["custom-domains"] });
+      queryClient.invalidateQueries({ queryKey: ["framework-detail", "custom"] });
+      queryClient.invalidateQueries({ queryKey: ["frameworks"] });
+    },
+    onError: () => {
+      toast.error(t("frameworksPage.rubricUploadFailed"));
     },
   });
   const saveRecordingPolicyMutation = useMutation({
@@ -285,6 +318,7 @@ export function FrameworksPage() {
     setSelectedElements((prev) => {
       const allSelected = elementIds.every((id) => prev.includes(id));
       if (allSelected) {
+        setPriorityElements((existing) => existing.filter((id) => !elementIds.includes(id)));
         return prev.filter((id) => !elementIds.includes(id));
       }
       const merged = new Set([...prev, ...elementIds]);
@@ -292,12 +326,27 @@ export function FrameworksPage() {
     });
   };
 
+  const togglePriority = (elementId) => {
+    if (!selectedElements.includes(elementId)) {
+      return;
+    }
+    setPriorityElements((prev) => {
+      if (prev.includes(elementId)) {
+        return prev.filter((id) => id !== elementId);
+      }
+      return [...prev, elementId];
+    });
+  };
+
   const handleFrameworkChange = (type) => {
     setFrameworkType(type);
     setSelectedElements([]);
+    setPriorityElements([]);
+    setFocusNote("");
   };
 
   const selectedCount = selectedElements.length;
+  const priorityCount = priorityElements.length;
   const localizeFrameworkNode = (id, fallback) => {
     if (!isHebrew || frameworkType === "custom") {
       return fallback;
@@ -461,10 +510,13 @@ export function FrameworksPage() {
               <p className="text-xs text-slate-500">
                 {t("frameworksPage.selectedElements", { count: selectedCount })}
               </p>
+              <p className="text-xs text-slate-500">
+                {t("frameworksPage.priorityElements", { count: priorityCount })}
+              </p>
             </div>
             <Button
               onClick={() => saveSelectionMutation.mutate()}
-              disabled={saveSelectionMutation.isPending}
+              disabled={saveSelectionMutation.isPending || !selectedCount}
             >
               {saveSelectionMutation.isPending
                 ? t("frameworksPage.saving")
@@ -480,6 +532,35 @@ export function FrameworksPage() {
             <div className="space-y-4">
               {frameworkType === "custom" && (
                 <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4">
+                  <div className="mb-4 rounded-md border border-slate-200 bg-white p-4">
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      {t("frameworksPage.uploadRubric")}
+                    </h3>
+                    <p className="mt-1 text-[11px] text-slate-500">
+                      {t("frameworksPage.uploadRubricDescription")}
+                    </p>
+                    <div className="mt-3 flex flex-wrap items-center gap-3">
+                      <input
+                        type="file"
+                        accept=".json,.csv"
+                        onChange={(e) => setRubricUploadFile(e.target.files?.[0] || null)}
+                        className="block text-xs text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-2 file:text-xs file:font-medium file:text-slate-700"
+                      />
+                      <Button
+                        onClick={() => uploadRubricMutation.mutate()}
+                        disabled={uploadRubricMutation.isPending || !rubricUploadFile}
+                        variant="secondary"
+                        size="sm"
+                      >
+                        {uploadRubricMutation.isPending
+                          ? t("frameworksPage.uploadingRubric")
+                          : t("frameworksPage.uploadRubricButton")}
+                      </Button>
+                    </div>
+                    <p className="mt-2 text-[11px] text-slate-500">
+                      {t("frameworksPage.uploadRubricFormats")}
+                    </p>
+                  </div>
                   <h3 className="text-sm font-semibold text-slate-900">
                     {t("frameworksPage.createCustomDomain")}
                   </h3>
@@ -620,30 +701,65 @@ export function FrameworksPage() {
                     <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                       {(domain.elements || []).map((el) => {
                         const isSelected = selectedElements.includes(el.id);
+                        const isPriority = priorityElements.includes(el.id);
                         return (
-                          <label
+                          <div
                             key={el.id}
-                            className="flex cursor-pointer items-start gap-2 rounded-md border border-slate-200 bg-white p-2 text-xs text-slate-600 hover:border-primary/40"
+                            className={`rounded-md border bg-white p-2 text-xs text-slate-600 ${
+                              isPriority ? "border-amber-300 shadow-sm" : "border-slate-200"
+                            } hover:border-primary/40`}
                           >
-                            <input
-                              type="checkbox"
-                              checked={isSelected}
-                              onChange={() => toggleElement(el.id)}
-                              className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 bg-white text-primary focus:ring-primary/40"
-                            />
-                            <div>
-                              <div className="text-slate-800">{el.id.toUpperCase()}</div>
-                              <div className="text-[11px] text-slate-500">
-                                {localizeFrameworkNode(el.id, el.name)}
+                            <label className="flex cursor-pointer items-start gap-2">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => toggleElement(el.id)}
+                                className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 bg-white text-primary focus:ring-primary/40"
+                              />
+                              <div className="min-w-0 flex-1">
+                                <div className="text-slate-800">{el.id.toUpperCase()}</div>
+                                <div className="text-[11px] text-slate-500">
+                                  {localizeFrameworkNode(el.id, el.name)}
+                                </div>
                               </div>
+                            </label>
+                            <div className="mt-2 flex items-center justify-between gap-2 border-t border-slate-100 pt-2">
+                              <span className="text-[11px] text-slate-500">
+                                {t("frameworksPage.pressurePoint")}
+                              </span>
+                              <Button
+                                onClick={() => togglePriority(el.id)}
+                                size="sm"
+                                variant={isPriority ? "primary" : "secondary"}
+                                disabled={!isSelected}
+                              >
+                                {isPriority
+                                  ? t("frameworksPage.prioritySelected")
+                                  : t("frameworksPage.markPriority")}
+                              </Button>
                             </div>
-                          </label>
+                          </div>
                         );
                       })}
                     </div>
                   </div>
                 );
               })}
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                <h3 className="text-sm font-semibold text-slate-900">
+                  {t("frameworksPage.focusNote")}
+                </h3>
+                <p className="mt-1 text-[11px] text-slate-500">
+                  {t("frameworksPage.focusNoteDescription")}
+                </p>
+                <textarea
+                  value={focusNote}
+                  onChange={(e) => setFocusNote(e.target.value)}
+                  placeholder={t("frameworksPage.focusNotePlaceholder")}
+                  rows={3}
+                  className="mt-3 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none ring-0 placeholder:text-slate-400 focus:border-primary/50"
+                />
+              </div>
             </div>
           )}
         </Panel>

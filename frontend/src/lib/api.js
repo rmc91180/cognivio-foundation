@@ -147,6 +147,10 @@ export const frameworkApi = {
   get: (frameworkType) => api.get(`/api/frameworks/${frameworkType}`),
   currentSelection: () => api.get("/api/frameworks/selection/current"),
   saveSelection: (payload) => api.post("/api/frameworks/selection", payload),
+  uploadRubric: (formData) =>
+    api.post("/api/frameworks/upload-rubric", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+    }),
   listCustomDomains: () => api.get("/api/frameworks/custom-domains"),
   createCustomDomain: (payload) => api.post("/api/frameworks/custom-domains", payload),
   addCustomElement: (domainId, payload) =>
