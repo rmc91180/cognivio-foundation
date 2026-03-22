@@ -308,6 +308,41 @@ def test_build_observation_summary_packet_prioritizes_focus_areas():
     assert "Audio was unavailable" in packet["confidence_note"]
 
 
+def test_enrich_assessment_for_response_rebuilds_hebrew_summary_for_english_assessment():
+    enriched = server._enrich_assessment_for_response(
+        {
+            "id": "assessment-1",
+            "video_id": "video-1",
+            "teacher_id": "teacher-1",
+            "framework_type": "danielson",
+            "element_scores": [
+                {
+                    "element_id": "d3b",
+                    "element_name": "Using Questioning and Discussion Techniques",
+                    "domain": "Domain 3: Instruction",
+                    "score": 6.1,
+                    "level": "basic",
+                    "priority": True,
+                    "observations": ["Questions were mostly short and teacher-directed."],
+                    "confidence": 77,
+                }
+            ],
+            "overall_score": 6.4,
+            "summary": "Overall performance: Needs Improvement.",
+            "recommendations": ["[01:20–01:50] Increase probing questions and wait time."],
+            "priority_elements": ["d3b"],
+            "focus_note": "Pay close attention to classroom discussion.",
+            "analysis_language": "en",
+        },
+        response_language="he",
+    )
+
+    assert enriched["summary"].startswith("התרשמות כללית")
+    assert enriched["element_scores"][0]["element_name"] == "שימוש בשאלות ובדיון"
+    assert enriched["observation_summary"]["executive_summary"].startswith("התרשמות כללית")
+    assert enriched["recommendations"]
+
+
 def test_build_analysis_metadata_tracks_modality_confidence_and_degradation(monkeypatch):
     monkeypatch.setattr(server, "AUDIO_ANALYSIS_ENABLED", True)
     monkeypatch.setattr(server, "AUDIO_ALLOW_STUDENT_VOICE_PROCESSING", True)

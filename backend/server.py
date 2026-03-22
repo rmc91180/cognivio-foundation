@@ -2376,7 +2376,7 @@ async def get_frameworks(current_user: dict = Depends(get_current_user)):
             {"type": "marshall", "name": "Marshall Rubrics", "domain_count": 6},
             {
                 "type": "custom",
-                "name": "Custom (User defined)",
+                "name": "Custom Focus Rubric",
                 "domain_count": 10 + custom_domain_count,
             },
         ]
@@ -4910,6 +4910,7 @@ async def list_syllabi(
 # ==================== ASSESSMENT ENDPOINTS ====================
 @api_router.get("/assessments", response_model=List[AssessmentResult])
 async def get_assessments(
+    request: Request,
     teacher_id: Optional[str] = None,
     current_user: dict = Depends(get_current_user)
 ):
@@ -4918,17 +4919,23 @@ async def get_assessments(
         query["teacher_id"] = teacher_id
     
     assessments = await db.assessments.find(query, {"_id": 0, "user_id": 0}).to_list(1000)
-    return [AssessmentResult(**_enrich_assessment_for_response(a)) for a in assessments]
+    response_language = _resolve_request_language(request, default="en")
+    return [AssessmentResult(**_enrich_assessment_for_response(a, response_language=response_language)) for a in assessments]
 
 @api_router.get("/assessments/{assessment_id}", response_model=AssessmentResult)
-async def get_assessment(assessment_id: str, current_user: dict = Depends(get_current_user)):
+async def get_assessment(
+    assessment_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
     assessment = await db.assessments.find_one(
         {"id": assessment_id, "user_id": current_user["id"]},
         {"_id": 0, "user_id": 0}
     )
     if not assessment:
         raise HTTPException(status_code=404, detail="Assessment not found")
-    return AssessmentResult(**_enrich_assessment_for_response(assessment))
+    response_language = _resolve_request_language(request, default="en")
+    return AssessmentResult(**_enrich_assessment_for_response(assessment, response_language=response_language))
 
 
 @api_router.get("/assessments/{assessment_id}/evidence")
@@ -5204,6 +5211,17 @@ async def export_summary_report(
 ):
     language = _resolve_request_language(request, default="en")
     is_hebrew = _is_hebrew_language(language)
+    def _format_export_datetime(value: Optional[str]) -> Optional[str]:
+        if not value:
+            return value
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return value
+        if is_hebrew:
+            return parsed.astimezone(timezone.utc).strftime("%d/%m/%Y %H:%M")
+        return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+
     teacher_query: Dict[str, Any] = {"created_by": current_user["id"]}
     if teacher_id:
         teacher_query["id"] = teacher_id
@@ -5278,7 +5296,7 @@ async def export_summary_report(
                 "evidence_count": evidence_count,
                 "adherence_score": adherence_score,
                 "domain_trend_summary": trend_summary,
-                "last_assessment": assessment.get("analyzed_at") if assessment else None,
+                "last_assessment": _format_export_datetime(assessment.get("analyzed_at")) if assessment else None,
                 "detail_url": f"{FRONTEND_URL.rstrip('/')}/teachers/{t['id']}" if FRONTEND_URL else None,
             }
         )
@@ -5318,23 +5336,23 @@ async def export_summary_report(
             raise HTTPException(status_code=501, detail="PDF export not available")
         buffer = io.BytesIO()
         pdf = canvas.Canvas(buffer)
-        title = "דוח סיכום Cognivio" if is_hebrew else "Cognivio Summary Report"
-        generated_label = "הופק בתאריך" if is_hebrew else "Generated"
+        title = "דוח סיכום תצפיות Cognivio" if is_hebrew else "Cognivio Summary Report"
+        generated_label = "הופק ב־" if is_hebrew else "Generated"
         teacher_filter_label = "סינון מורה" if is_hebrew else "Teacher filter"
         department_filter_label = "סינון מחלקה" if is_hebrew else "Department filter"
         dept_fallback = "ללא מחלקה" if is_hebrew else "No dept"
         subject_label = "מקצוע" if is_hebrew else "Subject"
-        grade_label = "שכבה" if is_hebrew else "Grade"
+        grade_label = "שכבת גיל" if is_hebrew else "Grade"
         latest_score_label = "ציון אחרון" if is_hebrew else "Latest score"
         avg_score_label = "ציון ממוצע" if is_hebrew else "Avg score"
         assessments_label = "הערכות" if is_hebrew else "Assessments"
         evidence_label = "ראיות" if is_hebrew else "Evidence"
-        adherence_label = "התאמה" if is_hebrew else "Adherence"
-        trend_label = "מגמה" if is_hebrew else "Trend"
-        detail_label = "פירוט" if is_hebrew else "Detail"
+        adherence_label = "התאמה לתוכנית הלימודים" if is_hebrew else "Adherence"
+        trend_label = "מגמות מרכזיות" if is_hebrew else "Trend"
+        detail_label = "קישור לפרופיל" if is_hebrew else "Detail"
         pdf.setTitle(title)
         pdf.drawString(50, 800, title)
-        pdf.drawString(50, 785, f"{generated_label}: {datetime.now(timezone.utc).isoformat()}")
+        pdf.drawString(50, 785, f"{generated_label} {_format_export_datetime(datetime.now(timezone.utc).isoformat())}")
         if teacher_id:
             pdf.drawString(50, 770, f"{teacher_filter_label}: {teacher_id}")
         if department:
@@ -9299,23 +9317,83 @@ def build_observation_summary_packet(
     }
 
 
-def _enrich_assessment_for_response(assessment: Dict[str, Any]) -> Dict[str, Any]:
+def _localize_element_scores_for_response(
+    element_scores: List[dict],
+    framework_type: str,
+    language: str,
+) -> List[dict]:
+    localized_scores: List[dict] = []
+    for item in element_scores or []:
+        localized = dict(item)
+        localized["element_name"] = _localize_framework_node_label(
+            str(item.get("element_id") or ""),
+            str(item.get("element_name") or ""),
+            framework_type,
+            language,
+        )
+        localized["domain"] = _localize_framework_node_label(
+            str(item.get("domain_id") or item.get("domain") or ""),
+            str(item.get("domain") or ""),
+            framework_type,
+            language,
+        )
+        localized_scores.append(localized)
+    return localized_scores
+
+
+def _enrich_assessment_for_response(
+    assessment: Dict[str, Any],
+    response_language: Optional[str] = None,
+) -> Dict[str, Any]:
     enriched = dict(assessment)
     analysis_language = _normalize_app_language(enriched.get("analysis_language"), default="en")
+    display_language = _normalize_app_language(response_language or analysis_language, default=analysis_language)
+    framework_type = str(enriched.get("framework_type") or "danielson")
     priority_elements = list(enriched.get("priority_elements") or [])
     focus_note = enriched.get("focus_note")
     analysis_confidence = enriched.get("analysis_confidence") or {}
-    if not enriched.get("observation_summary"):
-        enriched["observation_summary"] = build_observation_summary_packet(
-            enriched.get("element_scores") or [],
-            float(enriched.get("overall_score", 0.0) or 0.0),
-            enriched.get("summary") or "",
-            enriched.get("recommendations") or [],
+    localized_element_scores = _localize_element_scores_for_response(
+        enriched.get("element_scores") or [],
+        framework_type,
+        display_language,
+    )
+    enriched["element_scores"] = localized_element_scores
+
+    should_regenerate_localized_text = display_language != analysis_language
+    stored_recommendations = list(enriched.get("recommendations") or [])
+    localized_summary = generate_summary(
+        localized_element_scores,
+        float(enriched.get("overall_score", 0.0) or 0.0),
+        provided_summary=None if should_regenerate_localized_text else enriched.get("summary"),
+        priority_element_ids=priority_elements,
+        focus_note=focus_note,
+        language=display_language,
+    )
+    localized_recommendations = (
+        stored_recommendations
+        if (not should_regenerate_localized_text and stored_recommendations and all(isinstance(item, str) for item in stored_recommendations))
+        else generate_recommendations(
+            localized_element_scores,
+            provided_recommendations=None if should_regenerate_localized_text else stored_recommendations,
             priority_element_ids=priority_elements,
             focus_note=focus_note,
-            analysis_confidence=analysis_confidence,
-            language=analysis_language,
+            language=display_language,
         )
+        if localized_element_scores
+        else stored_recommendations
+    )
+    enriched["summary"] = localized_summary
+    enriched["recommendations"] = localized_recommendations
+    enriched["observation_summary"] = build_observation_summary_packet(
+        localized_element_scores,
+        float(enriched.get("overall_score", 0.0) or 0.0),
+        localized_summary,
+        localized_recommendations,
+        priority_element_ids=priority_elements,
+        focus_note=focus_note,
+        analysis_confidence=analysis_confidence,
+        language=display_language,
+    )
     enriched.setdefault("priority_elements", priority_elements)
     enriched.setdefault("focus_note", focus_note)
     enriched.setdefault("analysis_confidence", analysis_confidence)

@@ -8,6 +8,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { useTranslation } from "react-i18next";
 
 const DOMAIN_COLORS = [
   "#2563eb",
@@ -33,11 +34,13 @@ export function DomainTrendsChart({
   selectedTeacherName,
   isLoading,
 }) {
+  const { t } = useTranslation();
+
   if (isLoading) {
     return (
       <div className="h-72 rounded-md bg-slate-50">
         <div className="flex h-full items-center justify-center text-xs text-slate-500">
-          Loading domain trend data...
+          {t("dashboard.loadingDomainTrends")}
         </div>
       </div>
     );
@@ -47,7 +50,7 @@ export function DomainTrendsChart({
     return (
       <div className="h-72 rounded-md bg-slate-50">
         <div className="flex h-full items-center justify-center text-xs text-slate-500">
-          No trend data for the selected filters.
+          {t("dashboard.noTrendDataForFilters")}
         </div>
       </div>
     );
@@ -75,7 +78,7 @@ export function DomainTrendsChart({
           <Line
             type="monotone"
             dataKey="overall_all"
-            name="All teachers overall"
+            name={t("dashboard.allTeachersOverall")}
             stroke="#0f172a"
             strokeWidth={2}
             dot={{ r: 2 }}
@@ -86,7 +89,9 @@ export function DomainTrendsChart({
             <Line
               type="monotone"
               dataKey="overall_teacher"
-              name={`${selectedTeacherName || "Selected teacher"} overall`}
+              name={t("dashboard.selectedTeacherOverall", {
+                teacher: selectedTeacherName || t("dashboard.selectedTeacher"),
+              })}
               stroke="#334155"
               strokeWidth={2}
               strokeDasharray="6 4"
@@ -102,7 +107,11 @@ export function DomainTrendsChart({
                 key={`all_${domain.id}`}
                 type="monotone"
                 dataKey={`all_${domain.id}`}
-                name={comparisonEnabled ? `${domain.name} (All)` : domain.name}
+                name={
+                  comparisonEnabled
+                    ? t("dashboard.domainAllTeachers", { domain: domain.name })
+                    : domain.name
+                }
                 stroke={color}
                 strokeWidth={comparisonEnabled ? 1.5 : 2}
                 strokeDasharray={comparisonEnabled ? "4 3" : undefined}
@@ -120,7 +129,10 @@ export function DomainTrendsChart({
                   key={`teacher_${domain.id}`}
                   type="monotone"
                   dataKey={`teacher_${domain.id}`}
-                  name={`${domain.name} (${selectedTeacherName || "Selected"})`}
+                  name={t("dashboard.domainSelectedTeacher", {
+                    domain: domain.name,
+                    teacher: selectedTeacherName || t("dashboard.selectedTeacher"),
+                  })}
                   stroke={color}
                   strokeWidth={2.5}
                   dot={{ r: 2 }}

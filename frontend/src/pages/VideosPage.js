@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { assessmentApi, teacherApi, videoApi, evidenceApi, privacyProfileApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { toast } from "sonner";
@@ -29,9 +29,25 @@ function VideoRow({
   isRetrying,
   isRetryingPrivacy,
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const observationSummary = assessment?.observation_summary;
+  const dateTimeFormatter = useMemo(
+    () =>
+      new Intl.DateTimeFormat(i18n.language === "he" ? "he-IL" : "en-US", {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }),
+    [i18n.language]
+  );
+  const scoreFormatter = useMemo(
+    () =>
+      new Intl.NumberFormat(i18n.language === "he" ? "he-IL" : "en-US", {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+      }),
+    [i18n.language]
+  );
   const formatStatus = (value) => {
     const map = {
       queued: t("labels.queued"),
@@ -50,6 +66,25 @@ function VideoRow({
   );
   const [adjustedScore, setAdjustedScore] = useState("");
   const [adminNote, setAdminNote] = useState("");
+  const formatRecordedAt = (value) => {
+    if (!value) return t("videosPage.unknown");
+    const parsed = Date.parse(value);
+    if (Number.isNaN(parsed)) return value;
+    return dateTimeFormatter.format(new Date(parsed));
+  };
+  const formatScore = (value) => {
+    if (typeof value !== "number" || Number.isNaN(value)) return "N/A";
+    return scoreFormatter.format(value);
+  };
+  const formatTimestampRange = (start, end) => {
+    const toClock = (value) => {
+      const totalSeconds = Math.max(0, Math.round(value));
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds % 60;
+      return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+    };
+    return `${toClock(start)}–${toClock(end)}`;
+  };
 
   const { data: evidenceRes } = useQuery({
     queryKey: ["assessment-evidence", assessment?.id],
@@ -97,7 +132,7 @@ function VideoRow({
             {teacher?.name || t("teachersPage.teacher")} • {video.subject || t("teachersPage.subject")}
           </div>
           <div className="text-[11px] text-slate-500">
-            {video.recorded_at || video.upload_date}
+            {formatRecordedAt(video.recorded_at || video.upload_date)}
           </div>
         </div>
         <div className="flex items-center gap-2 text-[11px] text-slate-600">
@@ -118,7 +153,7 @@ function VideoRow({
           {assessment && (
             <Badge variant="success">
               {t("videosPage.scoreLabel", {
-                score: assessment.overall_score?.toFixed(1) ?? "N/A",
+                score: formatScore(assessment.overall_score),
               })}
             </Badge>
           )}
@@ -220,7 +255,7 @@ function VideoRow({
                 <div key={el.element_id} className="rounded-md bg-slate-50 px-2 py-2">
                   <div className="flex items-center justify-between text-[11px]">
                     <span className="font-semibold text-slate-800">{el.element_name}</span>
-                    <span className="text-slate-600">{el.score?.toFixed(1)}/10</span>
+                    <span className="text-slate-600">{formatScore(el.score)}/10</span>
                   </div>
                   {(evidenceByElement[el.element_id] || []).length ? (
                     <ul className="mt-1 space-y-1 text-[11px] text-slate-600">
@@ -229,8 +264,7 @@ function VideoRow({
                           {ev.evidence_text}{" "}
                           {typeof ev.timestamp_start === "number" && (
                             <span className="text-slate-400">
-                              ({Math.round(ev.timestamp_start)}s-
-                              {Math.round(ev.timestamp_end)}s)
+                              ({formatTimestampRange(ev.timestamp_start, ev.timestamp_end)})
                             </span>
                           )}
                         </li>
@@ -300,7 +334,7 @@ function VideoRow({
                     domain_id: selectedDomain,
                     original_score: original,
                     adjusted_score: adjusted,
-                    rationale: adminNote || "Admin comment",
+                    rationale: adminNote || t("videosPage.adminCommentAdjustment"),
                   });
                 }}
                 className="mt-2 inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90"
@@ -319,6 +353,7 @@ export function VideosPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const fileInputRef = useRef(null);
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
   const [selectedTeacher, setSelectedTeacher] = useState("");
   const [file, setFile] = useState(null);
@@ -579,12 +614,28 @@ export function VideosPage() {
                   </Select>
                 </Field>
                 <Field label={t("videosPage.videoFile")}>
-                  <input
-                    type="file"
-                    accept="video/*"
-                    onChange={(e) => setFile(e.target.files?.[0] || null)}
-                    className="mt-1 w-full text-xs text-slate-600 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
-                  />
+                  <div className="mt-1 space-y-2">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="video/*"
+                      onChange={(e) => setFile(e.target.files?.[0] || null)}
+                      className="hidden"
+                    />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => fileInputRef.current?.click()}
+                      >
+                        {t("videosPage.chooseFile")}
+                      </Button>
+                      <span className="text-xs text-slate-500">
+                        {file ? file.name : t("videosPage.noFileSelected")}
+                      </span>
+                    </div>
+                  </div>
                 </Field>
                 <Button
                   type="submit"

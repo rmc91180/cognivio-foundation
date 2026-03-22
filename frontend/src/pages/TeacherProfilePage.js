@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams, Link } from "react-router-dom";
 import {
@@ -32,6 +32,17 @@ export function TeacherProfilePage() {
   const { user } = useAuth();
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
   const isRtl = i18n.dir() === "rtl";
+  const dateFormatter = new Intl.DateTimeFormat(i18n.language === "he" ? "he-IL" : "en-US", {
+    dateStyle: "medium",
+  });
+  const dateTimeFormatter = new Intl.DateTimeFormat(i18n.language === "he" ? "he-IL" : "en-US", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+  const scoreFormatter = new Intl.NumberFormat(i18n.language === "he" ? "he-IL" : "en-US", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  });
   const [periodMonths, setPeriodMonths] = useState(3);
   const [nextCoachingConference, setNextCoachingConference] = useState("");
 
@@ -246,6 +257,10 @@ export function TeacherProfilePage() {
   const [videoSubject, setVideoSubject] = useState("");
   const [videoTab, setVideoTab] = useState("record");
   const [privacyReferenceFiles, setPrivacyReferenceFiles] = useState([]);
+  const privacyReferenceInputRef = useRef(null);
+  const curriculumInputRef = useRef(null);
+  const lessonPlanInputRef = useRef(null);
+  const syllabusInputRef = useRef(null);
 
   const makeGoalId = () => {
     if (typeof crypto !== "undefined" && crypto.randomUUID) {
@@ -397,6 +412,46 @@ export function TeacherProfilePage() {
   const recognitionSummary = recognitionSummaryRes?.summary || {};
   const recognitionBadges = recognitionSummaryRes?.badges || [];
 
+  const formatDate = (value) => {
+    if (!value) return t("teacherProfile.notConfigured");
+    const parsed = Date.parse(value);
+    if (Number.isNaN(parsed)) return value;
+    return dateFormatter.format(new Date(parsed));
+  };
+
+  const formatDateTime = (value) => {
+    if (!value) return t("teacherProfile.notConfigured");
+    const parsed = Date.parse(value);
+    if (Number.isNaN(parsed)) return value;
+    return dateTimeFormatter.format(new Date(parsed));
+  };
+
+  const formatClock = (seconds) => {
+    const safeSeconds = Math.max(0, Math.round(Number(seconds) || 0));
+    const minutes = Math.floor(safeSeconds / 60);
+    const remainder = safeSeconds % 60;
+    return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+  };
+
+  const formatScore = (value) => {
+    const numeric = Number(value);
+    if (Number.isNaN(numeric)) return "N/A";
+    return scoreFormatter.format(numeric);
+  };
+
+  const formatImplementationStatus = (value) => {
+    const map = {
+      planned: t("teacherProfile.goalStatusPlanned"),
+      in_progress: t("teacherProfile.goalStatusInProgress"),
+      implemented: t("teacherProfile.goalStatusImplemented"),
+      complete: t("teacherProfile.goalStatusComplete"),
+      pending: t("teacherProfile.goalStatusPending"),
+      review: t("teacherProfile.review"),
+      agree: t("teacherProfile.agree"),
+    };
+    return map[value] || value || t("teacherProfile.notConfigured");
+  };
+
   const handleSaveReflection = (e) => {
     e.preventDefault();
     saveReflectionMutation.mutate({
@@ -423,7 +478,14 @@ export function TeacherProfilePage() {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = format === "csv" ? "summary-report.csv" : "summary-report.pdf";
+      a.download =
+        format === "csv"
+          ? i18n.language === "he"
+            ? "cognivio-summary-report-he.csv"
+            : "summary-report.csv"
+          : i18n.language === "he"
+            ? "cognivio-summary-report-he.pdf"
+            : "summary-report.pdf";
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -697,10 +759,10 @@ export function TeacherProfilePage() {
                             className="rounded-md border border-slate-200 bg-white px-3 py-2"
                           >
                             <div className="text-[11px] text-slate-500">
-                              {h.created_at}
+                              {formatDateTime(h.created_at)}
                               {typeof h.timestamp_seconds === "number" && (
                                 <span className={isRtl ? "mr-2" : "ml-2"}>
-                                  • {Math.round(h.timestamp_seconds)}s
+                                  • {formatClock(h.timestamp_seconds)}
                                 </span>
                               )}
                             </div>
@@ -862,7 +924,7 @@ export function TeacherProfilePage() {
                       disabled={saveNextCoachingConferenceMutation.isPending}
                       className="rounded-md bg-primary px-3 py-2 text-xs font-semibold text-white hover:bg-primary/90 disabled:opacity-60"
                     >
-                      Save date
+                      {t("teacherProfile.saveDate")}
                     </button>
                   </div>
                 )}
@@ -873,10 +935,10 @@ export function TeacherProfilePage() {
 
         <div className="mt-8">
           <h2 className="text-sm font-semibold text-slate-900">
-            Breaking it down
+            {t("teacherProfile.breakingItDown")}
           </h2>
           <p className="text-xs text-slate-500">
-            Drill into domain evidence, curriculum adherence, and detailed observations.
+            {t("teacherProfile.breakingItDownDescription")}
           </p>
         </div>
 
@@ -886,10 +948,10 @@ export function TeacherProfilePage() {
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-900">
-                    Action plan
+                    {t("teacherProfile.actionPlan")}
                   </h2>
                   <p className="text-xs text-slate-500">
-                    Track concrete goals and next steps for this teacher.
+                    {t("teacherProfile.actionPlanDescription")}
                   </p>
                 </div>
                 <button
@@ -898,7 +960,7 @@ export function TeacherProfilePage() {
                   disabled={saveActionPlanMutation.isPending}
                   className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90 disabled:opacity-60"
                 >
-                  Save action plan
+                  {t("teacherProfile.saveActionPlan")}
                 </button>
               </div>
 
@@ -913,7 +975,7 @@ export function TeacherProfilePage() {
                         type="text"
                         value={goal.title}
                         onChange={(e) => updateGoal(goal.id, { title: e.target.value })}
-                        placeholder="Goal title"
+                        placeholder={t("teacherProfile.goalTitlePlaceholder")}
                         className="flex-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800"
                       />
                       <select
@@ -921,16 +983,16 @@ export function TeacherProfilePage() {
                         onChange={(e) => updateGoal(goal.id, { status: e.target.value })}
                         className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
                       >
-                        <option value="planned">Planned</option>
-                        <option value="in_progress">In progress</option>
-                        <option value="complete">Complete</option>
+                        <option value="planned">{t("teacherProfile.goalStatusPlanned")}</option>
+                        <option value="in_progress">{t("teacherProfile.goalStatusInProgress")}</option>
+                        <option value="complete">{t("teacherProfile.goalStatusComplete")}</option>
                       </select>
                       <button
                         type="button"
                         onClick={() => removeGoal(goal.id)}
                         className="text-[11px] text-slate-500 hover:text-slate-700"
                       >
-                        Remove
+                        {t("teacherProfile.removeGoal")}
                       </button>
                     </div>
                     <textarea
@@ -939,11 +1001,11 @@ export function TeacherProfilePage() {
                       onChange={(e) =>
                         updateGoal(goal.id, { description: e.target.value })
                       }
-                      placeholder="Why this matters and what to do next"
+                      placeholder={t("teacherProfile.goalDescriptionPlaceholder")}
                       className="mt-2 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800"
                     />
                     <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                      <label className="text-slate-500">Due date</label>
+                      <label className="text-slate-500">{t("teacherProfile.dueDate")}</label>
                       <input
                         type="date"
                         value={goal.due_date || ""}
@@ -969,7 +1031,7 @@ export function TeacherProfilePage() {
                   }
                   className="inline-flex items-center rounded-md border border-dashed border-slate-200 px-3 py-2 text-[11px] text-slate-600 hover:bg-slate-50"
                 >
-                  Add goal
+                  {t("teacherProfile.addGoal")}
                 </button>
                 <div>
                   <label className="mb-1 block text-[11px] font-medium text-slate-600">
@@ -1062,15 +1124,30 @@ export function TeacherProfilePage() {
                   </button>
                 </div>
                 <input
+                  ref={privacyReferenceInputRef}
                   type="file"
                   accept="image/jpeg,image/png,image/webp"
                   multiple
                   onChange={(e) => setPrivacyReferenceFiles(Array.from(e.target.files || []))}
-                  className="mt-3 w-full text-xs text-slate-600 file:rounded-md file:border-0 file:bg-white file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
+                  className="hidden"
                 />
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => privacyReferenceInputRef.current?.click()}
+                    className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
+                  >
+                    {t("teacherProfile.chooseFiles")}
+                  </button>
+                  <span className="text-[11px] text-slate-500">
+                    {privacyReferenceFiles.length > 0
+                      ? t("teacherProfile.referenceFilesSelected", { count: privacyReferenceFiles.length })
+                      : t("teacherProfile.noFilesSelected")}
+                  </span>
+                </div>
                 <div className="mt-2 text-[11px] text-slate-500">
                   {privacyReferenceFiles.length > 0
-                    ? t("teacherProfile.referenceFilesSelected", { count: privacyReferenceFiles.length })
+                    ? privacyReferenceFiles.map((file) => file.name).join(", ")
                     : t("teacherProfile.noReferenceFiles")}
                 </div>
               </div>
@@ -1138,15 +1215,17 @@ export function TeacherProfilePage() {
                         >
                           <div>
                             <div className="text-xs font-medium text-slate-800">
-                              {video.filename || "Lesson recording"}
+                              {video.filename || t("teacherProfile.lessonRecordingFallback")}
                             </div>
                             <div className="text-[11px] text-slate-500">
                               {video.subject ? `${video.subject} • ` : ""}
-                              {video.recorded_at || video.upload_date || "Date not set"}
+                              {video.recorded_at || video.upload_date
+                                ? formatDateTime(video.recorded_at || video.upload_date)
+                                : t("teacherProfile.dateNotSet")}
                             </div>
                             {video.status && (
                               <span className="mt-1 inline-flex rounded-full bg-slate-200 px-2 py-0.5 text-[10px] text-slate-600">
-                                {video.status}
+                                {t(`labels.${video.status}`, { defaultValue: video.status })}
                               </span>
                             )}
                           </div>
@@ -1185,11 +1264,24 @@ export function TeacherProfilePage() {
                       className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
                     />
                     <input
+                      ref={curriculumInputRef}
                       type="file"
                       accept=".pdf,.docx,.pptx,.jpeg,.jpg"
                       onChange={(e) => setCurriculumFile(e.target.files?.[0] || null)}
-                      className="md:col-span-2 text-xs text-slate-600 file:rounded-md file:border-0 file:bg-slate-200 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
+                      className="hidden"
                     />
+                    <div className="md:col-span-2 flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => curriculumInputRef.current?.click()}
+                        className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
+                      >
+                        {t("teacherProfile.chooseFile")}
+                      </button>
+                      <span className="text-[11px] text-slate-500">
+                        {curriculumFile ? curriculumFile.name : t("teacherProfile.noFileSelected")}
+                      </span>
+                    </div>
                   </div>
                   <div className="mt-2 flex justify-end">
                     <button
@@ -1232,11 +1324,24 @@ export function TeacherProfilePage() {
                         className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
                       />
                       <input
+                        ref={lessonPlanInputRef}
                         type="file"
                         accept=".pdf,.docx,.pptx,.jpeg,.jpg"
                         onChange={(e) => setLessonPlanFile(e.target.files?.[0] || null)}
-                        className="text-xs text-slate-600 file:rounded-md file:border-0 file:bg-slate-200 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
+                        className="hidden"
                       />
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => lessonPlanInputRef.current?.click()}
+                          className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
+                        >
+                          {t("teacherProfile.chooseFile")}
+                        </button>
+                        <span className="text-[11px] text-slate-500">
+                          {lessonPlanFile ? lessonPlanFile.name : t("teacherProfile.noFileSelected")}
+                        </span>
+                      </div>
                     </div>
                     <div className="mt-2 flex justify-end">
                       <button
@@ -1271,11 +1376,24 @@ export function TeacherProfilePage() {
                         className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
                       />
                       <input
+                        ref={syllabusInputRef}
                         type="file"
                         accept=".pdf,.docx,.pptx,.jpeg,.jpg"
                         onChange={(e) => setSyllabusFile(e.target.files?.[0] || null)}
-                        className="md:col-span-2 text-xs text-slate-600 file:rounded-md file:border-0 file:bg-slate-200 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
+                        className="hidden"
                       />
+                      <div className="md:col-span-2 flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => syllabusInputRef.current?.click()}
+                          className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
+                        >
+                          {t("teacherProfile.chooseFile")}
+                        </button>
+                        <span className="text-[11px] text-slate-500">
+                          {syllabusFile ? syllabusFile.name : t("teacherProfile.noFileSelected")}
+                        </span>
+                      </div>
                     </div>
                     <div className="mt-2 flex justify-end">
                       <button
@@ -1380,7 +1498,7 @@ export function TeacherProfilePage() {
                       if (!scoreRow) {
                         return (
                           <div className="text-[11px] text-slate-500">
-                            No score found for this domain.
+                            {t("teacherProfile.noScoreFound")}
                           </div>
                         );
                       }
@@ -1392,11 +1510,13 @@ export function TeacherProfilePage() {
                       return (
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="text-slate-500">
-                            AI score: {scoreRow.score.toFixed(1)}/10
+                            {t("teacherProfile.aiScore", { score: formatScore(scoreRow.score) })}
                           </span>
                           {existingOverride && (
                             <span className="text-[10px] text-emerald-700">
-                              Current override: {existingOverride.adjusted_score.toFixed(1)}/10
+                              {t("teacherProfile.currentOverride", {
+                                score: formatScore(existingOverride.adjusted_score),
+                              })}
                             </span>
                           )}
                           <input
@@ -1418,19 +1538,19 @@ export function TeacherProfilePage() {
                             onClick={() => {
                               const adjusted = parseFloat(value);
                               if (Number.isNaN(adjusted)) {
-                                toast.error("Enter a valid score");
+                                toast.error(t("teacherProfile.enterValidScore"));
                                 return;
                               }
                               adminOverrideMutation.mutate({
                                 domain_id: selectedEvidenceElement,
                                 original_score: scoreRow.score,
                                 adjusted_score: adjusted,
-                                rationale: "Admin adjustment",
+                                rationale: t("teacherProfile.adminAdjustmentRationale"),
                               });
                             }}
                             className="rounded-md bg-primary px-2 py-1 text-[11px] font-medium text-white hover:bg-primary/90"
                           >
-                            Apply
+                            {t("teacherProfile.apply")}
                           </button>
                         </div>
                       );
@@ -1439,12 +1559,12 @@ export function TeacherProfilePage() {
                 )}
                 {isAdmin && overrideByElement[selectedEvidenceElement] && (
                   <div className="mt-2 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-2 text-[11px] text-emerald-800">
-                    <div className="font-semibold">Override history</div>
+                    <div className="font-semibold">{t("teacherProfile.overrideHistory")}</div>
                     <div>
-                      Adjusted from{" "}
-                      {overrideByElement[selectedEvidenceElement].original_score?.toFixed(1)}
-                      /10 to{" "}
-                      {overrideByElement[selectedEvidenceElement].adjusted_score?.toFixed(1)}/10
+                      {t("teacherProfile.adjustedFromTo", {
+                        original: formatScore(overrideByElement[selectedEvidenceElement].original_score),
+                        adjusted: formatScore(overrideByElement[selectedEvidenceElement].adjusted_score),
+                      })}
                     </div>
                     {overrideByElement[selectedEvidenceElement].rationale && (
                       <div className="text-[10px] text-emerald-700">
@@ -1452,7 +1572,7 @@ export function TeacherProfilePage() {
                       </div>
                     )}
                     <div className="text-[10px] text-emerald-700">
-                      {overrideByElement[selectedEvidenceElement].created_at}
+                      {formatDateTime(overrideByElement[selectedEvidenceElement].created_at)}
                     </div>
                   </div>
                 )}
@@ -1481,7 +1601,7 @@ export function TeacherProfilePage() {
                         className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
                       >
                         <div className="mb-1 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
-                          <span>{obs.created_at}</span>
+                          <span>{formatDateTime(obs.created_at)}</span>
                           <div className="flex items-center gap-2">
                             {needsAttention && (
                               <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
@@ -1496,7 +1616,7 @@ export function TeacherProfilePage() {
                                     : "rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700"
                                 }
                               >
-                                {obs.implementation_status}
+                                {formatImplementationStatus(obs.implementation_status)}
                               </span>
                             )}
                           </div>
@@ -1559,7 +1679,7 @@ export function TeacherProfilePage() {
                             </Link>
                             {typeof obs.timestamp_seconds === "number" && (
                               <span className={`${isRtl ? "mr-1" : "ml-1"} text-slate-400`}>
-                                ({Math.round(obs.timestamp_seconds)}s)
+                                ({formatClock(obs.timestamp_seconds)})
                               </span>
                             )}
                           </div>
@@ -1640,9 +1760,9 @@ export function TeacherProfilePage() {
                           {badge.status}
                         </span>
                       </div>
-                      <div className="mt-1 text-[11px] text-slate-500">
+                        <div className="mt-1 text-[11px] text-slate-500">
                         {badge.awarded_at
-                          ? t("teacherProfile.awardedOn", { date: String(badge.awarded_at).slice(0, 10) })
+                          ? t("teacherProfile.awardedOn", { date: formatDate(badge.awarded_at) })
                           : t("teacherProfile.awaitingAwardDate")}
                       </div>
                       {badge.video_id && (
@@ -1750,7 +1870,7 @@ export function TeacherProfilePage() {
                       <ul className="space-y-1 text-[11px] text-slate-600">
                         {adherenceRes.evidence_segments.slice(0, 2).map((seg, idx) => (
                           <li key={idx}>
-                            {seg.summary} ({Math.round(seg.start_sec)}s - {Math.round(seg.end_sec)}s)
+                            {seg.summary} ({formatClock(seg.start_sec)} - {formatClock(seg.end_sec)})
                           </li>
                         ))}
                       </ul>

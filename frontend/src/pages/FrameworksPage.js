@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { LayoutShell } from "@/components/LayoutShell";
@@ -134,6 +134,7 @@ export function FrameworksPage() {
   const [customElementsInput, setCustomElementsInput] = useState("");
   const [customElementInputs, setCustomElementInputs] = useState({});
   const [rubricUploadFile, setRubricUploadFile] = useState(null);
+  const rubricUploadInputRef = useRef(null);
   const [policyPeriodDays, setPolicyPeriodDays] = useState(30);
   const [policyMinRecordings, setPolicyMinRecordings] = useState(2);
   const [policyReminderOffsets, setPolicyReminderOffsets] = useState([7, 2]);
@@ -541,11 +542,22 @@ export function FrameworksPage() {
                     </p>
                     <div className="mt-3 flex flex-wrap items-center gap-3">
                       <input
+                        ref={rubricUploadInputRef}
                         type="file"
                         accept=".json,.csv"
                         onChange={(e) => setRubricUploadFile(e.target.files?.[0] || null)}
-                        className="block text-xs text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-2 file:text-xs file:font-medium file:text-slate-700"
+                        className="hidden"
                       />
+                      <button
+                        type="button"
+                        onClick={() => rubricUploadInputRef.current?.click()}
+                        className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                      >
+                        {t("frameworksPage.chooseRubricFile")}
+                      </button>
+                      <span className="text-xs text-slate-500">
+                        {rubricUploadFile ? rubricUploadFile.name : t("frameworksPage.noRubricFileSelected")}
+                      </span>
                       <Button
                         onClick={() => uploadRubricMutation.mutate()}
                         disabled={uploadRubricMutation.isPending || !rubricUploadFile}

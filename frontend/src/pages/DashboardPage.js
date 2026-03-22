@@ -25,14 +25,14 @@ import {
   YAxis,
 } from "recharts";
 import { toast } from "sonner";
-import { subDays, format } from "date-fns";
+import { subDays } from "date-fns";
 import { useAuth } from "@/hooks/useAuth";
 import { Button, EmptyState, LoadingState, PageHeader, Panel } from "@/components/ui";
 import { Link } from "react-router-dom";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 
 export function DashboardPage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
@@ -43,6 +43,14 @@ export function DashboardPage() {
     : null;
   const isDashboardV2Enabled = runtimeConfig.dashboardV2Enabled;
   const now = useMemo(() => new Date(), []);
+  const dateFormatter = useMemo(
+    () =>
+      new Intl.DateTimeFormat(i18n.language?.startsWith("he") ? "he-IL" : "en-US", {
+        month: "short",
+        day: "numeric",
+      }),
+    [i18n.language]
+  );
   const currentRange = useMemo(
     () => ({ start: subDays(now, 30), end: now }),
     [now]
@@ -188,11 +196,11 @@ export function DashboardPage() {
   const seedDemoMutation = useMutation({
     mutationFn: () => assessmentApi.seedDemoData(),
     onSuccess: (res) => {
-      toast.success(res?.data?.message || "Demo data created");
+      toast.success(res?.data?.message || t("dashboard.demoDataCreated"));
       queryClient.invalidateQueries();
     },
     onError: () => {
-      toast.error("Failed to seed demo data");
+      toast.error(t("dashboard.demoDataCreateFailed"));
     },
   });
   const saveDomainSelectionMutation = useMutation({
@@ -202,34 +210,34 @@ export function DashboardPage() {
         selected_elements: selectedElementsState,
       }),
     onSuccess: () => {
-      toast.success("Focus domains updated");
+      toast.success(t("dashboard.focusDomainsUpdated"));
       queryClient.invalidateQueries({ queryKey: ["framework-selection"] });
       queryClient.invalidateQueries({ queryKey: ["roster"] });
     },
     onError: () => {
-      toast.error("Failed to update focus domains");
+      toast.error(t("dashboard.focusDomainsUpdateFailed"));
     },
   });
   const connectGradebookMutation = useMutation({
     mutationFn: (payload) => gradebookApi.connect(payload),
     onSuccess: () => {
-      toast.success("Gradebook integration saved");
+      toast.success(t("dashboard.gradebookSaved"));
       queryClient.invalidateQueries({ queryKey: ["gradebook-integrations"] });
       setGradebookApiKey("");
     },
     onError: () => {
-      toast.error("Failed to save integration");
+      toast.error(t("dashboard.gradebookSaveFailed"));
     },
   });
 
   const sendComplianceReminderMutation = useMutation({
     mutationFn: (teacherId) => recordingComplianceApi.remind(teacherId),
     onSuccess: () => {
-      toast.success("Reminder sent");
+      toast.success(t("dashboard.reminderSent"));
       queryClient.invalidateQueries({ queryKey: ["schedules"] });
     },
     onError: () => {
-      toast.error("Failed to send reminder");
+      toast.error(t("dashboard.reminderSendFailed"));
     },
   });
 
@@ -317,7 +325,7 @@ export function DashboardPage() {
       0
     );
     const deptCount = new Set(
-      roster.map((t) => t.department || "Unassigned")
+      roster.map((row) => row.department || t("labels.noDepartment"))
     ).size;
     return { teacherCount, assessmentCount, deptCount };
   }, [roster]);
@@ -343,9 +351,9 @@ export function DashboardPage() {
           const meta = teacherMetaById[teacher.teacher_id] || {};
           return {
             id: teacher.teacher_id,
-            name: teacher.teacher_name || meta.name || "Unknown teacher",
-            subject: teacher.subject || meta.subject || "N/A",
-            department: teacher.department || meta.department || "Unassigned",
+            name: teacher.teacher_name || meta.name || t("teachersPage.teacher"),
+            subject: teacher.subject || meta.subject || t("labels.noSubject"),
+            department: teacher.department || meta.department || t("labels.noDepartment"),
             overallScore: teacher.overall_score,
             assessmentCount: teacher.assessment_count || 0,
           };
@@ -370,7 +378,7 @@ export function DashboardPage() {
     const selectedFromTrend = domainTrendsRes?.selected_teacher?.name;
     if (selectedFromTrend) return selectedFromTrend;
     const matched = teacherOptions.find((teacher) => teacher.id === trendTeacherId);
-    return matched?.name || "Selected teacher";
+    return matched?.name || t("dashboard.selectedTeacher");
   }, [domainTrendsRes, teacherOptions, trendTeacherId]);
   const domainTrendChartData = useMemo(() => {
     if (!trendPeriods.length || !trendDomains.length) return [];
@@ -396,7 +404,10 @@ export function DashboardPage() {
     return sorted.slice(0, 3).map((item) => {
       const count = item.teacherCount;
       const label = item.elementName || item.elementId;
-      return `${count} teacher${count === 1 ? "" : "s"} observed demonstrating ${label.toLowerCase()}`;
+      return t("dashboard.achievementLine", {
+        count,
+        label: label.toLowerCase(),
+      });
     });
   }, [focusAreaData]);
 
@@ -405,11 +416,11 @@ export function DashboardPage() {
     if (!roster.length && !previousRoster.length) return [];
     const buildBuckets = (rows) => {
       const buckets = {};
-      rows.forEach((t) => {
-        const dept = t.department || "Unassigned";
+      rows.forEach((row) => {
+        const dept = row.department || t("labels.noDepartment");
         const bucket = buckets[dept] || { department: dept, total: 0, count: 0 };
-        if (typeof t.overall_score === "number") {
-          bucket.total += t.overall_score;
+        if (typeof row.overall_score === "number") {
+          bucket.total += row.overall_score;
           bucket.count += 1;
         }
         buckets[dept] = bucket;
@@ -449,7 +460,7 @@ export function DashboardPage() {
   const departmentKpiRows = useMemo(() => {
     const counts = {};
     teacherKpiRows.forEach((row) => {
-      const key = row.department || "Unassigned";
+      const key = row.department || t("labels.noDepartment");
       counts[key] = (counts[key] || 0) + 1;
     });
     return departmentData
@@ -505,7 +516,7 @@ export function DashboardPage() {
       a.remove();
       window.URL.revokeObjectURL(url);
     } catch (error) {
-      toast.error("Failed to export report");
+      toast.error(t("dashboard.exportFailed"));
     }
   };
 
@@ -515,7 +526,7 @@ export function DashboardPage() {
         <PageHeader
           title={t("dashboard.title")}
           description={t("dashboard.description")}
-          meta={buildStamp ? `Build: ${buildStamp}` : null}
+          meta={buildStamp ? t("dashboard.buildMeta", { build: buildStamp }) : null}
           actions={
             <Button
               variant="success"
@@ -636,11 +647,15 @@ export function DashboardPage() {
                     : "border-slate-200 hover:bg-slate-50"
                 }`}
               >
-                <div className="text-[11px] uppercase tracking-wide text-slate-500">Teachers</div>
+                <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                  {t("dashboard.kpiTeachersTitle")}
+                </div>
                 <div className="mt-1 text-2xl font-semibold text-slate-900">
                   {focusSummary.teacherCount}
                 </div>
-                <div className="text-[11px] text-slate-500">Active roster count</div>
+                <div className="text-[11px] text-slate-500">
+                  {t("dashboard.kpiTeachersDescription")}
+                </div>
               </button>
               <button
                 type="button"
@@ -651,11 +666,15 @@ export function DashboardPage() {
                     : "border-slate-200 hover:bg-slate-50"
                 }`}
               >
-                <div className="text-[11px] uppercase tracking-wide text-slate-500">Observations</div>
+                <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                  {t("dashboard.kpiObservationsTitle")}
+                </div>
                 <div className="mt-1 text-2xl font-semibold text-slate-900">
                   {focusSummary.assessmentCount}
                 </div>
-                <div className="text-[11px] text-slate-500">In the current reporting window</div>
+                <div className="text-[11px] text-slate-500">
+                  {t("dashboard.kpiObservationsDescription")}
+                </div>
               </button>
               <button
                 type="button"
@@ -666,11 +685,15 @@ export function DashboardPage() {
                     : "border-slate-200 hover:bg-slate-50"
                 }`}
               >
-                <div className="text-[11px] uppercase tracking-wide text-slate-500">Departments</div>
+                <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                  {t("dashboard.kpiDepartmentsTitle")}
+                </div>
                 <div className="mt-1 text-2xl font-semibold text-slate-900">
                   {focusSummary.deptCount}
                 </div>
-                <div className="text-[11px] text-slate-500">Represented in observed data</div>
+                <div className="text-[11px] text-slate-500">
+                  {t("dashboard.kpiDepartmentsDescription")}
+                </div>
               </button>
               <button
                 type="button"
@@ -681,18 +704,24 @@ export function DashboardPage() {
                     : "border-slate-200 hover:bg-slate-50"
                 }`}
               >
-                <div className="text-[11px] uppercase tracking-wide text-slate-500">Needs support</div>
+                <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                  {t("dashboard.kpiSupportTitle")}
+                </div>
                 <div className="mt-1 text-2xl font-semibold text-rose-700">
                   {prioritySupportCount}
                 </div>
-                <div className="text-[11px] text-slate-500">Teachers below 6.0 overall</div>
+                <div className="text-[11px] text-slate-500">
+                  {t("dashboard.kpiSupportDescription")}
+                </div>
               </button>
             </section>
 
             <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
               {selectedKpi === "teachers" && (
                 <>
-                  <h2 className="text-sm font-semibold text-slate-900">Teachers in active roster</h2>
+                  <h2 className="text-sm font-semibold text-slate-900">
+                    {t("dashboard.teachersInRoster")}
+                  </h2>
                   <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
                     {teacherKpiRows.map((row) => (
                       <div
@@ -710,7 +739,9 @@ export function DashboardPage() {
               )}
               {selectedKpi === "observations" && (
                 <>
-                  <h2 className="text-sm font-semibold text-slate-900">Observation count by teacher</h2>
+                  <h2 className="text-sm font-semibold text-slate-900">
+                    {t("dashboard.observationCountByTeacher")}
+                  </h2>
                   <div className="mt-3 space-y-2">
                     {observationKpiRows.map((row) => (
                       <div
@@ -718,18 +749,22 @@ export function DashboardPage() {
                         className="flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700"
                       >
                         <span className="font-medium text-slate-900">{row.name}</span>
-                        <span>{row.assessmentCount} observations</span>
+                        <span>{t("dashboard.observationsCount", { count: row.assessmentCount })}</span>
                       </div>
                     ))}
                     {observationKpiRows.length === 0 && (
-                      <div className="text-xs text-slate-500">No observation data yet.</div>
+                      <div className="text-xs text-slate-500">
+                        {t("dashboard.noObservationData")}
+                      </div>
                     )}
                   </div>
                 </>
               )}
               {selectedKpi === "departments" && (
                 <>
-                  <h2 className="text-sm font-semibold text-slate-900">Departments represented</h2>
+                  <h2 className="text-sm font-semibold text-slate-900">
+                    {t("dashboard.departmentsRepresented")}
+                  </h2>
                   <div className="mt-3 space-y-2">
                     {departmentKpiRows.map((row) => (
                       <div
@@ -738,9 +773,11 @@ export function DashboardPage() {
                       >
                         <span className="font-medium text-slate-900">{row.department}</span>
                         <span>
-                          {row.teacherCount} teachers
+                          {t("dashboard.teachersCount", { count: row.teacherCount })}
                           {typeof row.averageScore === "number"
-                            ? ` • Avg ${row.averageScore.toFixed(1)}`
+                            ? ` • ${t("dashboard.averageScoreShort", {
+                                score: row.averageScore.toFixed(1),
+                              })}`
                             : ""}
                         </span>
                       </div>
@@ -751,7 +788,7 @@ export function DashboardPage() {
               {selectedKpi === "support" && (
                 <>
                   <h2 className="text-sm font-semibold text-slate-900">
-                    Teachers below 6.0 overall
+                    {t("dashboard.kpiSupportDescription")}
                   </h2>
                   <div className="mt-3 space-y-2">
                     {supportKpiRows.map((row) => (
@@ -765,7 +802,7 @@ export function DashboardPage() {
                     ))}
                     {supportKpiRows.length === 0 && (
                       <div className="text-xs text-slate-500">
-                        No teachers currently flagged in this range.
+                        {t("dashboard.noTeachersInSupportRange")}
                       </div>
                     )}
                   </div>
@@ -775,24 +812,26 @@ export function DashboardPage() {
 
             <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs font-semibold text-slate-800">Quick actions:</span>
+                <span className="text-xs font-semibold text-slate-800">
+                  {t("dashboard.quickActions")}
+                </span>
                 <Link
                   to="/teachers"
                   className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
                 >
-                  Review teacher roster
+                  {t("dashboard.reviewTeacherRoster")}
                 </Link>
                 <Link
                   to="/videos"
                   className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
                 >
-                  Open recordings library
+                  {t("dashboard.openRecordingsLibrary")}
                 </Link>
                 <Link
                   to="/school-setup"
                   className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
                 >
-                  Update school setup
+                  {t("dashboard.updateSchoolSetup")}
                 </Link>
               </div>
             </section>
@@ -807,34 +846,37 @@ export function DashboardPage() {
                 <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
                   <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <h2 className="text-sm font-semibold text-slate-900">Domain trends</h2>
+                      <h2 className="text-sm font-semibold text-slate-900">
+                        {t("dashboard.domainTrendsTitle")}
+                      </h2>
                       <p className="text-xs text-slate-500">
-                        Monthly domain trajectory over the last {trendWindowMonths} month
-                        {trendWindowMonths === 1 ? "" : "s"} with optional teacher comparison.
+                        {t("dashboard.domainTrendsDescription", {
+                          count: trendWindowMonths,
+                        })}
                       </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <label className="text-[11px] text-slate-500">
-                        Window
+                        {t("dashboard.trendWindow")}
                         <select
                           className="ml-2 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
                           value={trendWindowMonths}
                           onChange={(e) => setTrendWindowMonths(Number(e.target.value))}
                         >
-                          <option value={3}>3 months</option>
-                          <option value={6}>6 months</option>
-                          <option value={9}>9 months</option>
-                          <option value={12}>12 months</option>
+                          <option value={3}>{t("dashboard.monthsOption", { count: 3 })}</option>
+                          <option value={6}>{t("dashboard.monthsOption", { count: 6 })}</option>
+                          <option value={9}>{t("dashboard.monthsOption", { count: 9 })}</option>
+                          <option value={12}>{t("dashboard.monthsOption", { count: 12 })}</option>
                         </select>
                       </label>
                       <label className="text-[11px] text-slate-500">
-                        Teacher
+                        {t("dashboard.teacherFilter")}
                         <select
                           className="ml-2 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
                           value={trendTeacherId}
                           onChange={(e) => setTrendTeacherId(e.target.value)}
                         >
-                          <option value="">All teachers</option>
+                          <option value="">{t("dashboard.allTeachers")}</option>
                           {teacherOptions.map((teacher) => (
                             <option key={teacher.id} value={teacher.id}>
                               {teacher.name}
@@ -843,7 +885,7 @@ export function DashboardPage() {
                         </select>
                       </label>
                       <label className="text-[11px] text-slate-500">
-                        Subjects
+                        {t("dashboard.subjectsFilter")}
                         <select
                           multiple
                           value={trendSubjects}
@@ -864,11 +906,11 @@ export function DashboardPage() {
                     </div>
                   </div>
                   <div className="mb-3 flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
-                    <span>{focusSummary.teacherCount} teachers included in roster</span>
+                    <span>{t("dashboard.rosterTeacherCount", { count: focusSummary.teacherCount })}</span>
                     <span>•</span>
-                    <span>{focusSummary.assessmentCount} observations analyzed</span>
+                    <span>{t("dashboard.observationsAnalyzed", { count: focusSummary.assessmentCount })}</span>
                     <span>•</span>
-                    <span>{focusSummary.deptCount} departments represented</span>
+                    <span>{t("dashboard.departmentsRepresentedCount", { count: focusSummary.deptCount })}</span>
                   </div>
                   <DomainTrendsChart
                     chartData={domainTrendChartData}
@@ -882,20 +924,20 @@ export function DashboardPage() {
               ) : (
                 <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
                 <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                  School focus areas
+                  {t("dashboard.schoolFocusAreasTitle")}
                 </h2>
                 <p className="mb-2 text-xs text-slate-500">
-                  Aggregate performance on your top three priority rubric elements.
+                  {t("dashboard.schoolFocusAreasDescription")}
                 </p>
                 <div className="mb-4 flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
-                  <span>{focusSummary.teacherCount} teachers included</span>
+                  <span>{t("dashboard.rosterTeacherCountShort", { count: focusSummary.teacherCount })}</span>
                   <span>•</span>
-                  <span>{focusSummary.assessmentCount} observations analyzed</span>
+                  <span>{t("dashboard.observationsAnalyzed", { count: focusSummary.assessmentCount })}</span>
                   <span>•</span>
-                  <span>{focusSummary.deptCount} departments represented</span>
+                  <span>{t("dashboard.departmentsRepresentedCount", { count: focusSummary.deptCount })}</span>
                 </div>
                 {focusAreaData.length === 0 ? (
-                  <div className="text-xs text-slate-500">No focus area data yet.</div>
+                  <div className="text-xs text-slate-500">{t("dashboard.noFocusAreaData")}</div>
                 ) : (
                   <>
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
@@ -911,7 +953,10 @@ export function DashboardPage() {
                             {item.averageScore != null ? item.averageScore.toFixed(1) : "—"}
                           </div>
                           <div className="mt-1 text-[11px] text-slate-500">
-                            {item.teacherCount} teachers • {item.assessmentCount} observations
+                            {t("dashboard.focusAreaStatLine", {
+                              teachers: item.teacherCount,
+                              observations: item.assessmentCount,
+                            })}
                           </div>
                           <div className="mt-2 h-1 w-full rounded-full bg-slate-200">
                             <div
@@ -948,19 +993,22 @@ export function DashboardPage() {
 
             <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                Departmental progress
+                {t("dashboard.departmentalProgressTitle")}
               </h2>
               <p className="mb-2 text-xs text-slate-500">
-                Compare average performance across departments to identify
-                pockets of strength and support needs.
+                {t("dashboard.departmentalProgressDescription")}
               </p>
               <p className="mb-4 text-[11px] text-slate-500">
-                Showing {format(previousRange.start, "MMM d")}–{format(previousRange.end, "MMM d")} vs{" "}
-                {format(currentRange.start, "MMM d")}–{format(currentRange.end, "MMM d")}.
+                {t("dashboard.departmentalProgressRange", {
+                  previousStart: dateFormatter.format(previousRange.start),
+                  previousEnd: dateFormatter.format(previousRange.end),
+                  currentStart: dateFormatter.format(currentRange.start),
+                  currentEnd: dateFormatter.format(currentRange.end),
+                })}
               </p>
               {departmentData.length === 0 ? (
                 <div className="text-xs text-slate-500">
-                  No departmental data yet.
+                  {t("dashboard.noDepartmentalData")}
                 </div>
               ) : (
                 <div className="h-64">
@@ -977,8 +1025,8 @@ export function DashboardPage() {
                         }}
                       />
                       <Legend />
-                      <Bar dataKey="averageScore" name="Current" fill="#22c55e" />
-                      <Bar dataKey="previousAverage" name="Month ago" fill="#94a3b8" />
+                      <Bar dataKey="averageScore" name={t("dashboard.currentPeriod")} fill="#22c55e" />
+                      <Bar dataKey="previousAverage" name={t("dashboard.previousPeriod")} fill="#94a3b8" />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
@@ -986,29 +1034,31 @@ export function DashboardPage() {
             </section>
             <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-4">
               <div className="flex flex-wrap items-center gap-2 text-xs">
-                <h2 className="mr-auto text-sm font-semibold text-slate-900">Reports</h2>
+                <h2 className="mr-auto text-sm font-semibold text-slate-900">
+                  {t("dashboard.reportsTitle")}
+                </h2>
                 <button
                   type="button"
                   onClick={() => downloadReport("pdf", {}, "summary-report.pdf")}
                   className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
                 >
-                  Summary PDF
+                  {t("dashboard.summaryPdf")}
                 </button>
                 <button
                   type="button"
                   onClick={() => downloadReport("csv", {}, "summary-report.csv")}
                   className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
                 >
-                  Summary CSV
+                  {t("dashboard.summaryCsv")}
                 </button>
                 <div className="flex flex-wrap items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5">
-                  <label className="text-[11px] text-slate-500">Unit</label>
+                  <label className="text-[11px] text-slate-500">{t("dashboard.unitLabel")}</label>
                   <select
                     className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
                     value={reportDepartment}
                     onChange={(e) => setReportDepartment(e.target.value)}
                   >
-                    <option value="">Select dept</option>
+                    <option value="">{t("dashboard.selectDepartment")}</option>
                     {departmentOptions.map((dept) => (
                       <option key={dept} value={dept}>
                         {dept}
@@ -1019,7 +1069,7 @@ export function DashboardPage() {
                     type="button"
                     onClick={() => {
                       if (!reportDepartment) {
-                        toast.error("Select a department to export");
+                        toast.error(t("dashboard.selectDepartmentToExport"));
                         return;
                       }
                       downloadReport("pdf", { department: reportDepartment }, "unit-report.pdf");
@@ -1032,7 +1082,7 @@ export function DashboardPage() {
                     type="button"
                     onClick={() => {
                       if (!reportDepartment) {
-                        toast.error("Select a department to export");
+                        toast.error(t("dashboard.selectDepartmentToExport"));
                         return;
                       }
                       downloadReport("csv", { department: reportDepartment }, "unit-report.csv");
@@ -1049,23 +1099,23 @@ export function DashboardPage() {
                 <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <h2 className="text-sm font-semibold text-slate-900">
-                      Recording compliance dashboard
+                      {t("dashboard.recordingComplianceTitle")}
                     </h2>
                     <p className="text-xs text-slate-500">
-                      Only teachers with at least one subject behind are shown. Click to expand.
+                      {t("dashboard.recordingComplianceDescription")}
                     </p>
                   </div>
                   <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-700">
-                    {behindComplianceRows.length} behind
+                    {t("dashboard.behindCount", { count: behindComplianceRows.length })}
                   </span>
                 </div>
                 {complianceSummaryRows.length === 0 ? (
                   <div className="text-xs text-slate-500">
-                    No compliance data yet. Save a policy to begin tracking.
+                    {t("dashboard.noComplianceData")}
                   </div>
                 ) : behindComplianceRows.length === 0 ? (
                   <div className="text-xs text-slate-500">
-                    No teachers are currently behind on required subjects.
+                    {t("dashboard.noTeachersBehind")}
                   </div>
                 ) : (
                   <div className="space-y-2 text-xs text-slate-600">
@@ -1091,15 +1141,15 @@ export function DashboardPage() {
                                 {row.teacher_name}
                               </div>
                               <div className="text-[11px] text-slate-500">
-                                {row.subject || "Subject not set"}
+                                {row.subject || t("dashboard.subjectNotSet")}
                               </div>
                             </div>
                             <div className="flex items-center gap-2">
                               <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[10px] text-rose-700">
-                                {missingCount} subject{missingCount === 1 ? "" : "s"} behind
+                                {t("dashboard.subjectsBehind", { count: missingCount })}
                               </span>
                               <span className="text-[10px] text-slate-400">
-                                {isExpanded ? "Hide details" : "View details"}
+                                {isExpanded ? t("dashboard.hideDetails") : t("dashboard.viewDetails")}
                               </span>
                             </div>
                           </button>
@@ -1107,10 +1157,17 @@ export function DashboardPage() {
                             <div className="border-t border-slate-200 bg-white px-3 py-2">
                               <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-600">
                                 <span>
-                                  {row.recordings_completed}/{row.recordings_required} recordings
+                                  {t("dashboard.recordingsCompleted", {
+                                    completed: row.recordings_completed,
+                                    required: row.recordings_required,
+                                  })}
                                 </span>
                                 {row.period_end && (
-                                  <span>Period end: {String(row.period_end).slice(0, 10)}</span>
+                                  <span>
+                                    {t("dashboard.periodEnd", {
+                                      date: String(row.period_end).slice(0, 10),
+                                    })}
+                                  </span>
                                 )}
                               </div>
                               <div className="mt-2 flex flex-wrap gap-1.5">
@@ -1131,7 +1188,7 @@ export function DashboardPage() {
                                   }
                                   className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-700 hover:bg-slate-100"
                                 >
-                                  Send reminder
+                                  {t("dashboard.sendReminder")}
                                 </button>
                               </div>
                             </div>
@@ -1147,11 +1204,10 @@ export function DashboardPage() {
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-900">
-                    Focus domains
+                    {t("dashboard.focusDomainsTitle")}
                   </h2>
                   <p className="text-xs text-slate-500">
-                    Selected domains power roster scoring and dashboard focus
-                    areas.
+                    {t("dashboard.focusDomainsDescription")}
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -1160,7 +1216,9 @@ export function DashboardPage() {
                     onClick={() => setShowFocusDomains((prev) => !prev)}
                     className="rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"
                   >
-                    {showFocusDomains ? "Collapse" : "Show selections"}
+                    {showFocusDomains
+                      ? t("dashboard.collapse")
+                      : t("dashboard.showSelections")}
                   </button>
                   <button
                     type="button"
@@ -1169,14 +1227,14 @@ export function DashboardPage() {
                     className="rounded-md bg-primary px-3 py-2 text-xs font-semibold text-white hover:bg-primary/90 disabled:opacity-60"
                   >
                     {saveDomainSelectionMutation.isPending
-                      ? "Saving..."
-                      : "Save focus domains"}
+                      ? t("dashboard.saving")
+                      : t("dashboard.saveFocusDomains")}
                   </button>
                 </div>
               </div>
               {frameworkLoading ? (
                 <div className="text-xs text-slate-500">
-                  Loading framework domains...
+                  {t("dashboard.loadingFrameworkDomains")}
                 </div>
               ) : showFocusDomains ? (
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -1197,7 +1255,10 @@ export function DashboardPage() {
                       >
                         <div className="text-sm font-semibold">{domain.name}</div>
                         <div className="mt-1 text-[11px] text-slate-500">
-                          {stats?.selected || 0} of {stats?.total || 0} elements selected
+                          {t("dashboard.elementsSelected", {
+                            selected: stats?.selected || 0,
+                            total: stats?.total || 0,
+                          })}
                         </div>
                       </button>
                     );
@@ -1205,7 +1266,7 @@ export function DashboardPage() {
                 </div>
               ) : (
                 <div className="text-xs text-slate-500">
-                  Focus domain selections are collapsed to save space. Expand to review or edit.
+                  {t("dashboard.focusDomainsCollapsed")}
                 </div>
               )}
             </section>
@@ -1214,10 +1275,10 @@ export function DashboardPage() {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-900">
-                    Gradebook integrations
+                    {t("dashboard.gradebookTitle")}
                   </h2>
                   <p className="text-xs text-slate-500">
-                    Connect PowerSchool or Canvas to sync gradebook signals.
+                    {t("dashboard.gradebookDescription")}
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -1231,7 +1292,7 @@ export function DashboardPage() {
                   </select>
                   <input
                     type="password"
-                    placeholder="API key (optional)"
+                    placeholder={t("dashboard.gradebookApiKeyOptional")}
                     value={gradebookApiKey}
                     onChange={(e) => setGradebookApiKey(e.target.value)}
                     className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
@@ -1247,14 +1308,14 @@ export function DashboardPage() {
                     }
                     className="rounded-md border border-slate-200 bg-white px-3 py-1 text-[11px] text-slate-700 hover:bg-slate-100"
                   >
-                    Connect
+                    {t("dashboard.connect")}
                   </button>
                 </div>
               </div>
               <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-slate-600">
                 {(gradebookData || []).length === 0 ? (
                   <span className="text-slate-500">
-                    No gradebook integrations connected yet.
+                    {t("dashboard.noGradebookIntegrations")}
                   </span>
                 ) : (
                   gradebookData.map((integration) => (
@@ -1262,7 +1323,9 @@ export function DashboardPage() {
                       key={integration.id}
                       className="rounded-full bg-emerald-50 px-2 py-1 text-emerald-700"
                     >
-                      {integration.provider} • {integration.status}
+                      {integration.provider} • {integration.status === "connected"
+                        ? t("dashboard.connected")
+                        : integration.status}
                     </span>
                   ))
                 )}
@@ -1271,14 +1334,14 @@ export function DashboardPage() {
               {!isDashboardV2Enabled && (
                 <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
                 <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                  Key achievements
+                  {t("dashboard.keyAchievementsTitle")}
                 </h2>
                 <p className="mb-3 text-xs text-slate-500">
-                  Highlights pulled from recent observations and strongest focus areas.
+                  {t("dashboard.keyAchievementsDescription")}
                 </p>
                 {achievements.length === 0 ? (
                   <div className="text-xs text-slate-500">
-                    No achievement highlights yet.
+                    {t("dashboard.noAchievementHighlights")}
                   </div>
                 ) : (
                   <ul className="list-disc space-y-1 pl-5 text-xs text-slate-700">

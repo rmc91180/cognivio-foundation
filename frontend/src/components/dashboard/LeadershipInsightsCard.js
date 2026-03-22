@@ -1,8 +1,18 @@
+import { useTranslation } from "react-i18next";
+
+function isLikelyEnglish(value) {
+  return typeof value === "string" && /[A-Za-z]{3,}/.test(value) && !/[\u0590-\u05FF]/.test(value);
+}
+
 export function LeadershipInsightsCard({ insights, isLoading }) {
+  const { t, i18n } = useTranslation();
+
   if (isLoading) {
     return (
       <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
-        <h2 className="text-sm font-semibold text-slate-900">Leadership insights</h2>
+        <h2 className="text-sm font-semibold text-slate-900">
+          {t("dashboard.leadershipInsightsTitle")}
+        </h2>
         <div className="mt-3 space-y-2">
           <div className="h-4 w-3/4 animate-pulse rounded bg-slate-100" />
           <div className="h-4 w-2/3 animate-pulse rounded bg-slate-100" />
@@ -17,20 +27,20 @@ export function LeadershipInsightsCard({ insights, isLoading }) {
   const teacherNamePattern = /\b(Mr|Ms|Mrs|Mx|Dr)\.?\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\b/;
   const defaultFallbackItems = [
     {
-      insight: "Review where progress has slowed across departments.",
-      action: "Set one support priority per department for the next leadership check-in.",
+      insight: t("dashboard.leadershipFallback1Insight"),
+      action: t("dashboard.leadershipFallback1Action"),
     },
     {
-      insight: "Confirm recording and observation coverage is consistent.",
-      action: "Close evidence gaps so trend decisions are based on complete data.",
+      insight: t("dashboard.leadershipFallback2Insight"),
+      action: t("dashboard.leadershipFallback2Action"),
     },
     {
-      insight: "Focus coaching on domains with the largest decline.",
-      action: "Assign owners and define a short cycle to monitor impact.",
+      insight: t("dashboard.leadershipFallback3Insight"),
+      action: t("dashboard.leadershipFallback3Action"),
     },
     {
-      insight: "Protect and replicate what is improving school-wide.",
-      action: "Identify the strongest routines and scale them through PLCs.",
+      insight: t("dashboard.leadershipFallback4Insight"),
+      action: t("dashboard.leadershipFallback4Action"),
     },
   ];
 
@@ -53,11 +63,20 @@ export function LeadershipInsightsCard({ insights, isLoading }) {
     : [];
   const fallbackItems = fallbackBullets.map((bullet) => ({
     insight: normalizeText(bullet),
-    action: "Decide the next principal-led action and review progress in the next leadership meeting.",
+    action: t("dashboard.leadershipBulletFallbackAction"),
   }));
   const dedupedItems = [];
   const seenInsights = new Set();
-  [...nonTeacherSpecificItems, ...fallbackItems, ...defaultFallbackItems].forEach((item) => {
+  const normalizedItems = [...nonTeacherSpecificItems, ...fallbackItems].map((item) => {
+    if (
+      i18n.language?.startsWith("he") &&
+      (isLikelyEnglish(item.insight) || isLikelyEnglish(item.action))
+    ) {
+      return null;
+    }
+    return item;
+  });
+  [...normalizedItems.filter(Boolean), ...defaultFallbackItems].forEach((item) => {
     const key = item.insight.toLowerCase();
     if (seenInsights.has(key)) return;
     seenInsights.add(key);
@@ -69,15 +88,19 @@ export function LeadershipInsightsCard({ insights, isLoading }) {
     <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h2 className="text-sm font-semibold text-slate-900">Leadership insights</h2>
+          <h2 className="text-sm font-semibold text-slate-900">
+            {t("dashboard.leadershipInsightsTitle")}
+          </h2>
           <p className="text-xs text-slate-500">
-            Four principal priorities in plain language.
+            {t("dashboard.leadershipInsightsDescription")}
           </p>
         </div>
       </div>
 
       {actionableItems.length === 0 ? (
-        <div className="text-xs text-slate-500">No leadership insights yet for this filter set.</div>
+        <div className="text-xs text-slate-500">
+          {t("dashboard.leadershipInsightsEmpty")}
+        </div>
       ) : (
         <div className="space-y-2">
           {actionableItems.map((item, index) => (
@@ -86,7 +109,10 @@ export function LeadershipInsightsCard({ insights, isLoading }) {
                 {index + 1}. {item.insight}
               </h3>
               <p className="mt-2 text-xs text-slate-600">
-                <span className="font-semibold text-slate-700">Focus:</span> {item.action}
+                <span className="font-semibold text-slate-700">
+                  {t("dashboard.leadershipFocusLabel")}
+                </span>{" "}
+                {item.action}
               </p>
             </article>
           ))}

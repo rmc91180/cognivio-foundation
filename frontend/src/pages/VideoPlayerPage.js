@@ -23,6 +23,14 @@ export function VideoPlayerPage() {
   const [videoStatus, setVideoStatus] = useState("processing");
   const [wsConnected, setWsConnected] = useState(false);
   const isRtl = i18n.dir() === "rtl";
+  const dateTimeFormatter = new Intl.DateTimeFormat(i18n.language === "he" ? "he-IL" : "en-US", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+  const scoreFormatter = new Intl.NumberFormat(i18n.language === "he" ? "he-IL" : "en-US", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  });
   const formatStatus = useCallback(
     (value) => {
       const map = {
@@ -40,6 +48,21 @@ export function VideoPlayerPage() {
       return map[value] || value || t("videosPage.unknown");
     },
     [t]
+  );
+  const formatClock = useCallback((seconds) => {
+    const safeSeconds = Math.max(0, Math.round(Number(seconds) || 0));
+    const minutes = Math.floor(safeSeconds / 60);
+    const remainder = safeSeconds % 60;
+    return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+  }, []);
+  const formatAnalyzedAt = useCallback(
+    (value) => {
+      if (!value) return "";
+      const parsed = Date.parse(value);
+      if (Number.isNaN(parsed)) return value;
+      return dateTimeFormatter.format(new Date(parsed));
+    },
+    [dateTimeFormatter]
   );
 
   // Parse timestamp from URL and seek to it when video loads
@@ -278,6 +301,7 @@ export function VideoPlayerPage() {
     if (!win) return;
     const observations = observationsRes ?? [];
     const assessment = assessmentRes;
+    const reportSummary = observationSummary?.executive_summary || assessment?.summary || "";
     const html = `
       <html lang="${i18n.language}" dir="${i18n.dir()}">
         <head>
@@ -290,18 +314,18 @@ export function VideoPlayerPage() {
             h3 { font-size: 14px; margin-top: 12px; }
             .section { margin-bottom: 16px; }
             .chip { display:inline-block; padding:2px 8px; border-radius:999px; background:#e5e7eb; font-size:11px; }
-            ul { padding-left: 18px; }
+            ul { padding-inline-start: 18px; }
           </style>
         </head>
         <body>
           <h1>${t("videoPlayer.reportTitle")}</h1>
           <div class="section">
             <div><strong>${t("videoPlayer.reportVideo")}:</strong> ${videoRes?.filename || ""}</div>
-            <div><strong>${t("videoPlayer.reportDate")}:</strong> ${assessment?.analyzed_at || ""}</div>
+            <div><strong>${t("videoPlayer.reportDate")}:</strong> ${formatAnalyzedAt(assessment?.analyzed_at) || ""}</div>
           </div>
           <div class="section">
             <h2>${t("videoPlayer.reportSummary")}</h2>
-            <p>${assessment?.summary || ""}</p>
+            <p>${reportSummary}</p>
             <p>${summaryNotes || ""}</p>
           </div>
           <div class="section">
@@ -312,7 +336,7 @@ export function VideoPlayerPage() {
                   (o) =>
                     `<li>${o.admin_comment || ""} ${
                       typeof o.timestamp_seconds === "number"
-                        ? `(t=${Math.round(o.timestamp_seconds)}s)`
+                        ? `(${formatClock(o.timestamp_seconds)})`
                         : ""
                     }</li>`
                 )
@@ -451,7 +475,7 @@ export function VideoPlayerPage() {
                     <div className="flex items-center justify-between">
                       <span className="text-[11px] text-slate-500">
                         {t("videoPlayer.currentTime", {
-                          time: `${Math.floor(currentTime / 60)}:${String(currentTime % 60).padStart(2, "0")}`,
+                          time: formatClock(currentTime),
                         })}
                       </span>
                       <Button variant="secondary" size="sm" onClick={copyTimestampLink}>
@@ -503,7 +527,7 @@ export function VideoPlayerPage() {
                   </div>
                   {assessmentRes?.overall_score != null && (
                     <Badge variant="success">
-                      {t("videoPlayer.scoreSummary", { score: assessmentRes.overall_score.toFixed(1) })}
+                      {t("videoPlayer.scoreSummary", { score: scoreFormatter.format(assessmentRes.overall_score) })}
                     </Badge>
                   )}
                 </div>
@@ -888,7 +912,7 @@ export function VideoPlayerPage() {
                       >
                         <span className={`${isRtl ? "ml-2" : "mr-2"} inline-flex min-w-[46px] items-center justify-center rounded-full bg-slate-200 px-2 py-0.5 text-[10px] text-slate-700`}>
                           {typeof o.timestamp_seconds === "number"
-                            ? `${Math.round(o.timestamp_seconds)}s`
+                            ? formatClock(o.timestamp_seconds)
                             : "--"}
                         </span>
                         {o.admin_comment || t("videoPlayer.observationFallback")}
@@ -915,7 +939,7 @@ export function VideoPlayerPage() {
                           {es.element_name}
                         </span>
                         <span className="text-[10px] text-slate-500">
-                          {es.score.toFixed(1)}/10
+                          {scoreFormatter.format(es.score)}/10
                         </span>
                       </div>
                       <div className="text-[11px] text-slate-500">
