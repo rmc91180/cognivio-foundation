@@ -366,6 +366,43 @@ def test_enrich_assessment_for_response_rebuilds_hebrew_summary_for_english_asse
     assert enriched["recommendations"]
 
 
+def test_enrich_assessment_for_response_regenerates_mixed_hebrew_text_when_english_leaks():
+    enriched = server._enrich_assessment_for_response(
+        {
+            "id": "assessment_2",
+            "overall_score": 4.0,
+            "summary": "התרשמות כללית critical (ציון: 4.0/10).",
+            "recommendations": [
+                "[02:00–02:30] לחזק את הפגנת ידע בתוכן ובהוראה. Observed demonstrating knowledge of content and pedagogy during classroom instruction."
+            ],
+            "element_scores": [
+                {
+                    "element_id": "1a",
+                    "element_name": "הפגנת ידע בתוכן ובהוראה",
+                    "score": 4.0,
+                    "observations": ["נראתה הפגנה חלקית של ידע בתוכן ובהוראה."],
+                    "evidence_segments": [
+                        {
+                            "start_sec": 120,
+                            "end_sec": 150,
+                            "summary": "ההסבר התוכני נותר חלקי ולא התרחב מעבר להצגה בסיסית.",
+                            "rationale": "model",
+                        }
+                    ],
+                }
+            ],
+            "analysis_language": "he",
+            "framework_type": "danielson",
+        },
+        "he",
+    )
+
+    assert "critical" not in enriched["summary"]
+    assert all("Observed demonstrating" not in item for item in enriched["recommendations"])
+    assert not server._contains_latin_characters(enriched["summary"])
+    assert all(not server._contains_latin_characters(item) for item in enriched["recommendations"])
+
+
 def test_localize_teacher_payload_converts_demo_fields_to_hebrew():
     localized = server._localize_teacher_payload(
         {

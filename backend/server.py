@@ -852,6 +852,23 @@ def _build_exemplar_library_item_response(doc: dict) -> "ExemplarLibraryItemResp
     )
 
 
+def _localize_exemplar_library_item_response(
+    item: "ExemplarLibraryItemResponse",
+    language: Optional[str],
+) -> "ExemplarLibraryItemResponse":
+    if not _is_hebrew_language(language):
+        return item
+    localized_summary = _localize_observation_text(item.summary, language) or item.summary
+    return ExemplarLibraryItemResponse(
+        **{
+            **item.model_dump(),
+            "summary": localized_summary,
+            "subject": _localize_subject_label(item.subject, language),
+            "grade_level": _localize_grade_level_label(item.grade_level, language),
+        }
+    )
+
+
 async def _create_share_asset_record(
     *,
     teacher_id: str,
@@ -1213,6 +1230,7 @@ AUDIO_FEATURES_ENABLED = os.getenv("AUDIO_FEATURES_ENABLED", "false").lower() ==
 AUDIO_TRANSCRIPTION_MODEL = os.getenv("AUDIO_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe").strip() or "gpt-4o-mini-transcribe"
 AUDIO_TRANSCRIPTION_LANGUAGE = os.getenv("AUDIO_TRANSCRIPTION_LANGUAGE", "").strip() or None
 AUDIO_TRANSCRIPT_RETENTION_DAYS = max(1, int(os.getenv("AUDIO_TRANSCRIPT_RETENTION_DAYS", "30")))
+AUDIO_TRANSCRIPTION_MAX_SECONDS = max(15, int(os.getenv("AUDIO_TRANSCRIPTION_MAX_SECONDS", "120")))
 AUDIO_ALLOW_STUDENT_VOICE_PROCESSING = os.getenv("AUDIO_ALLOW_STUDENT_VOICE_PROCESSING", "false").lower() == "true"
 PAID_ANALYSIS_ENABLED = os.getenv("PAID_ANALYSIS_ENABLED", "false").lower() == "true"
 PAID_ANALYSIS_ALLOWLIST_EMAILS = {
@@ -1616,7 +1634,43 @@ def _localize_observation_text(text: Optional[str], language: Optional[str]) -> 
         area = variable_match.group(1).strip()
         return f"בתחום {area} נראתה עקביות משתנה לאורך השיעור."
 
+    content_match = re.fullmatch(
+        r"Observed demonstrating knowledge of content(?: and pedagogy)?(?: during classroom instruction)?\.?",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    if content_match:
+        return "נראתה הפגנת ידע בתוכן ובהוראה במהלך השיעור."
+
+    student_match = re.fullmatch(
+        r"Observed demonstrating knowledge of students(?: during classroom instruction)?\.?",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    if student_match:
+        return "ניכרה היכרות עם התלמידים ועם צורכי הלמידה שלהם במהלך השיעור."
+
     return stripped
+
+
+def _contains_latin_characters(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    return bool(re.search(r"[A-Za-z]", str(value)))
+
+
+def _should_regenerate_hebrew_assessment_text(
+    summary_text: Optional[str],
+    recommendations: List[Any],
+) -> bool:
+    if _contains_latin_characters(summary_text):
+        return True
+    for item in recommendations or []:
+        if isinstance(item, str) and _contains_latin_characters(item):
+            return True
+        if isinstance(item, dict) and _contains_latin_characters(item.get("text")):
+            return True
+    return False
 
 
 def _localize_schedule_title(course_name: Optional[str], language: Optional[str]) -> Optional[str]:
@@ -4655,15 +4709,20 @@ async def review_exemplar_submission(
 async def get_exemplar_library(
     subject: Optional[str] = None,
     tag: Optional[str] = None,
+    request: Request = None,
     current_user: dict = Depends(get_current_user),
 ):
+    language = _resolve_request_language(request, default=_normalize_app_language(current_user.get("preferred_language"), default="en"))
     query: Dict[str, Any] = {"status": "published"}
     if subject:
         query["subject"] = subject
     if tag:
         query["tags"] = str(tag).strip().lower()
     docs = await db.exemplar_library_items.find(query, {"_id": 0}).sort("published_at", -1).to_list(200)
-    items = [_build_exemplar_library_item_response(doc) for doc in docs]
+    items = [
+        _localize_exemplar_library_item_response(_build_exemplar_library_item_response(doc), language)
+        for doc in docs
+    ]
     return ExemplarLibraryResponse(items=items, count=len(items))
 
 
@@ -4763,7 +4822,7 @@ async def generate_email_signature(
     relative_path = f"share-assets/email-signatures/{video['teacher_id']}/{video_id}_{uuid.uuid4().hex[:8]}.png"
     full_path = UPLOAD_DIR / relative_path
     featured_label = (
-        "מופיע בספריית כל הכוכבים של Cognivio"
+        "מופיע בספריית הכוכבים של Cognivio"
         if event.get("library_item_id") and _is_hebrew_language(asset_language)
         else "Featured in Cognivio All-Star Library" if event.get("library_item_id") else None
     )
@@ -8863,7 +8922,12 @@ async def build_audio_artifacts(
     transcript_doc: Optional[Dict[str, Any]] = None
     feature_doc: Optional[Dict[str, Any]] = None
     try:
-        extraction = await asyncio.to_thread(extract_audio_track, video_path, extracted_audio_path)
+        extraction = await asyncio.to_thread(
+            extract_audio_track,
+            video_path,
+            extracted_audio_path,
+            AUDIO_TRANSCRIPTION_MAX_SECONDS,
+        )
         transcript_segments: List[Dict[str, Any]] = []
         transcript_text = ""
         transcription_status = "disabled"
@@ -9585,8 +9649,11 @@ def _enrich_assessment_for_response(
     )
     enriched["element_scores"] = localized_element_scores
 
-    should_regenerate_localized_text = display_language != analysis_language
     stored_recommendations = list(enriched.get("recommendations") or [])
+    should_regenerate_localized_text = display_language != analysis_language or (
+        _is_hebrew_language(display_language)
+        and _should_regenerate_hebrew_assessment_text(enriched.get("summary"), stored_recommendations)
+    )
     localized_summary = generate_summary(
         localized_element_scores,
         float(enriched.get("overall_score", 0.0) or 0.0),
@@ -9652,6 +9719,9 @@ def generate_summary(
 
     if _is_hebrew_language(language):
         level_map = {
+            "excellent": "חזקה מאוד",
+            "needs_improvement": "דורשת שיפור",
+            "critical": "נדרשת התערבות",
             "distinguished": "מצוין",
             "proficient": "טוב",
             "basic": "בסיסי",
