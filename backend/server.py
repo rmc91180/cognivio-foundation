@@ -1612,6 +1612,39 @@ def _localize_grade_level_label(grade_level: Optional[str], language: Optional[s
     return f"כיתה {hebrew_grade_map.get(grade_number, grade_level)}"
 
 
+_HEBREW_OBSERVATION_AREA_MAP = {
+    "demonstrating knowledge of content and pedagogy": "הפגנת ידע בתוכן ובהוראה",
+    "demonstrating knowledge of students": "היכרות עם התלמידים ועם צורכי הלמידה שלהם",
+    "setting instructional outcomes": "הגדרת יעדי הוראה ברורים",
+    "demonstrating knowledge of resources": "היכרות עם משאבים לימודיים רלוונטיים",
+    "designing coherent instruction": "תכנון הוראה קוהרנטי",
+    "designing student assessments": "תכנון הערכות תלמידים",
+    "creating an environment of respect and rapport": "יצירת אקלים של כבוד ויחסי אמון",
+    "establishing a culture for learning": "ביסוס תרבות של למידה",
+    "managing classroom procedures": "ניהול נהלים ושגרות בכיתה",
+    "managing student behavior": "ניהול התנהגות תלמידים",
+    "organizing physical space": "ארגון המרחב הפיזי",
+    "communicating with students": "תקשורת עם תלמידים",
+    "using questioning and discussion techniques": "שימוש בשאלות ובדיון",
+    "engaging students in learning": "מעורבות תלמידים בלמידה",
+    "using assessment in instruction": "שימוש בהערכה בתוך ההוראה",
+    "demonstrating flexibility and responsiveness": "גמישות והיענות",
+    "reflecting on teaching": "רפלקציה על ההוראה",
+    "maintaining accurate records": "שמירה על תיעוד מדויק",
+    "communicating with families": "תקשורת עם משפחות",
+    "participating in the professional community": "השתתפות בקהילה המקצועית",
+    "growing and developing professionally": "צמיחה והתפתחות מקצועית",
+    "showing professionalism": "מקצועיות",
+}
+
+
+def _localize_observation_area(area: Optional[str], language: Optional[str]) -> Optional[str]:
+    if not area or not _is_hebrew_language(language):
+        return area
+    normalized = str(area).strip().lower().rstrip(".")
+    return _HEBREW_OBSERVATION_AREA_MAP.get(normalized, area)
+
+
 def _localize_observation_text(text: Optional[str], language: Optional[str]) -> Optional[str]:
     if not text or not _is_hebrew_language(language):
         return text
@@ -1624,15 +1657,6 @@ def _localize_observation_text(text: Optional[str], language: Optional[str]) -> 
     if observed_match:
         teacher_name = observed_match.group(1).strip()
         return f"בתצפית על {teacher_name} נראתה הפעלה עקבית של אסטרטגיות למעורבות פעילה של תלמידים."
-
-    variable_match = re.fullmatch(
-        r"Observed\s+(.+?)\s+with variable consistency over the lesson\.",
-        stripped,
-        flags=re.IGNORECASE,
-    )
-    if variable_match:
-        area = variable_match.group(1).strip()
-        return f"בתחום {area} נראתה עקביות משתנה לאורך השיעור."
 
     content_match = re.fullmatch(
         r"Observed demonstrating knowledge of content(?: and pedagogy)?(?: during classroom instruction)?\.?",
@@ -1649,6 +1673,15 @@ def _localize_observation_text(text: Optional[str], language: Optional[str]) -> 
     )
     if student_match:
         return "ניכרה היכרות עם התלמידים ועם צורכי הלמידה שלהם במהלך השיעור."
+
+    variable_match = re.fullmatch(
+        r"Observed\s+(.+?)\s+with variable consistency over the lesson\.?",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    if variable_match:
+        area = _localize_observation_area(variable_match.group(1).strip(), language)
+        return f"בתחום {area} נראתה עקביות משתנה לאורך השיעור."
 
     return stripped
 
@@ -9627,6 +9660,10 @@ def _localize_element_scores_for_response(
             framework_type,
             language,
         )
+        localized["observations"] = [
+            _localize_observation_text(observation, language)
+            for observation in list(item.get("observations") or [])
+        ]
         localized_scores.append(localized)
     return localized_scores
 

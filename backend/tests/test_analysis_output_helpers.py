@@ -403,6 +403,36 @@ def test_enrich_assessment_for_response_regenerates_mixed_hebrew_text_when_engli
     assert all(not server._contains_latin_characters(item) for item in enriched["recommendations"])
 
 
+def test_localize_observation_text_translates_common_framework_phrases_to_hebrew():
+    localized = server._localize_observation_text(
+        "Observed demonstrating knowledge of resources with variable consistency over the lesson.",
+        "he",
+    )
+
+    assert localized == "בתחום היכרות עם משאבים לימודיים רלוונטיים נראתה עקביות משתנה לאורך השיעור."
+
+
+def test_localize_element_scores_for_response_translates_observations_for_hebrew():
+    localized_scores = server._localize_element_scores_for_response(
+        [
+            {
+                "element_id": "d1d",
+                "element_name": "Knowledge of resources",
+                "domain": "Planning",
+                "observations": [
+                    "Observed demonstrating knowledge of resources with variable consistency over the lesson."
+                ],
+            }
+        ],
+        "danielson",
+        "he",
+    )
+
+    assert localized_scores[0]["observations"] == [
+        "בתחום היכרות עם משאבים לימודיים רלוונטיים נראתה עקביות משתנה לאורך השיעור."
+    ]
+
+
 def test_localize_teacher_payload_converts_demo_fields_to_hebrew():
     localized = server._localize_teacher_payload(
         {
