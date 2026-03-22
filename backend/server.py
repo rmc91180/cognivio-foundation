@@ -8661,19 +8661,36 @@ def _build_elements_to_analyze(
     )
 
 
-def _build_focus_instruction(priority_elements: List[dict], focus_note: Optional[str] = None) -> str:
+def _build_focus_instruction(
+    priority_elements: List[dict],
+    focus_note: Optional[str] = None,
+    language: str = "en",
+) -> str:
     parts: List[str] = []
     if priority_elements:
         priority_text = ", ".join(f"{element['id']}: {element['name']}" for element in priority_elements)
-        parts.append(
-            "Admin focus priorities for this observation are: "
-            f"{priority_text}. Weight your summary, judgments, and coaching recommendations toward these areas first."
-        )
+        if _is_hebrew_language(language):
+            parts.append(
+                "מוקדי ההתבוננות שהוגדרו על ידי המנהל לתצפית זו הם: "
+                f"{priority_text}. יש לתת להם משקל מוביל בסיכום, בשיפוט המקצועי ובהמלצות להמשך."
+            )
+        else:
+            parts.append(
+                "Admin focus priorities for this observation are: "
+                f"{priority_text}. Weight your summary, judgments, and coaching recommendations toward these areas first."
+            )
     if focus_note:
-        parts.append(
-            "Admin observation note: "
-            f"{focus_note.strip()}. Treat this as guidance for what to pay especially close attention to."
-        )
+        normalized_note = focus_note.strip()
+        if _is_hebrew_language(language):
+            parts.append(
+                "הערת מיקוד של המנהל לתצפית זו, כפי שנכתבה במקור: "
+                f"\"{normalized_note}\". יש להשתמש בנוסח זה כפי שהוא, בלי לתרגם אותו לאנגלית ובלי לשנות את המשמעות שלו."
+            )
+        else:
+            parts.append(
+                "Admin observation note, preserved as originally written: "
+                f"\"{normalized_note}\". Use it directly as guidance and do not normalize it into another wording style."
+            )
     return "\n".join(parts).strip()
 
 
@@ -9047,7 +9064,13 @@ def _normalize_model_recommendations(raw_recommendations: Any) -> List[dict]:
     return normalized
 
 
-def _build_placeholder_element_score(element: dict, timestamp_sec: float) -> dict:
+def _build_placeholder_element_score(element: dict, timestamp_sec: float, language: str = "en") -> dict:
+    if _is_hebrew_language(language):
+        observation_text = "הראיות החזותיות במדגם שנבחר לא הספיקו לקביעה בטוחה יותר."
+        summary_text = f"לגבי {element['name']} נמצאו ראיות חזותיות חלקיות בלבד במסגרת מדגם הרגעים שנבדק."
+    else:
+        observation_text = "Insufficient visible evidence in the sampled frames for a stronger judgment."
+        summary_text = f"Limited visible evidence was available for {element['name'].lower()} in the sampled frames."
     return {
         "element_id": element["id"],
         "element_name": element["name"],
@@ -9055,13 +9078,13 @@ def _build_placeholder_element_score(element: dict, timestamp_sec: float) -> dic
         "priority": bool(element.get("priority")),
         "score": 5.0,
         "level": get_performance_level(5.0),
-        "observations": ["Insufficient visible evidence in the sampled frames for a stronger judgment."],
+        "observations": [observation_text],
         "confidence": 25.0,
         "evidence_segments": [
             {
                 "start_sec": round(timestamp_sec, 1),
                 "end_sec": round(timestamp_sec + 20.0, 1),
-                "summary": f"Limited visible evidence was available for {element['name'].lower()} in the sampled frames.",
+                "summary": summary_text,
                 "rationale": "fallback",
             }
         ],
@@ -9073,6 +9096,7 @@ def _normalize_model_analysis(
     elements_to_analyze: List[dict],
     frames: List[dict],
     analysis_mode: str,
+    language: str = "en",
 ) -> dict:
     frame_timestamps = [float(frame.get("timestamp_sec", 0.0)) for frame in frames] or [0.0]
     element_by_id = {element["id"]: element for element in elements_to_analyze}
@@ -9102,7 +9126,11 @@ def _normalize_model_analysis(
         if not observations and evidence_segments:
             observations = [evidence_segments[0]["summary"]]
         if not observations:
-            observations = ["Evidence was limited in the sampled frames."]
+            observations = (
+                ["הראיות במדגם הרגעים שנבדק היו מוגבלות."]
+                if _is_hebrew_language(language)
+                else ["Evidence was limited in the sampled frames."]
+            )
         if not evidence_segments:
             evidence_segments = [
                 {
@@ -9131,7 +9159,7 @@ def _normalize_model_analysis(
         if element["id"] in seen_ids:
             continue
         fallback_timestamp = frame_timestamps[min(idx, len(frame_timestamps) - 1)]
-        normalized_scores.append(_build_placeholder_element_score(element, fallback_timestamp))
+        normalized_scores.append(_build_placeholder_element_score(element, fallback_timestamp, language=language))
 
     return {
         "analysis_mode": analysis_mode,
@@ -9162,7 +9190,8 @@ async def _analyze_frames_with_openai(
     if _is_hebrew_language(language):
         system_prompt += (
             " Write all summaries, observations, rationale, and recommendations in modern Hebrew suitable for Israeli school leaders. "
-            "Use natural Hebrew educational terminology rather than literal translation."
+            "Use natural Hebrew educational terminology rather than literal translation. "
+            "If the admin's custom observation note or custom rubric wording is already written in Hebrew, preserve it as-is and do not rewrite it into English-style phrasing."
         )
     elements_text = "\n".join(
         f"- {element['id']}: {element['name']} (Domain: {element['domain']}){' [PRIORITY]' if element.get('priority') else ''}"
@@ -9289,7 +9318,11 @@ async def analyze_frames_with_ai(
     if not elements_to_analyze:
         return {"analysis_mode": "empty_selection", "summary": None, "recommendations": [], "element_scores": []}
     prioritized_elements = [element for element in elements_to_analyze if element.get("priority")]
-    focus_instruction = _build_focus_instruction(prioritized_elements, focus_note=focus_note)
+    focus_instruction = _build_focus_instruction(
+        prioritized_elements,
+        focus_note=focus_note,
+        language=language,
+    )
 
     paid_analysis_allowed = _is_paid_analysis_allowed_for_user(current_user)
     if multimodal_payload:
@@ -9313,7 +9346,13 @@ async def analyze_frames_with_ai(
                 focus_instruction=focus_instruction,
                 language=language,
             )
-            normalized = _normalize_model_analysis(payload, elements_to_analyze, frames, analysis_mode="openai")
+            normalized = _normalize_model_analysis(
+                payload,
+                elements_to_analyze,
+                frames,
+                analysis_mode="openai",
+                language=language,
+            )
             if multimodal_payload and "audio" in (multimodal_payload.get("modalities_used") or []):
                 normalized["analysis_mode"] = "openai_multimodal"
             return normalized
@@ -9333,34 +9372,52 @@ async def analyze_frames_with_ai(
         f"Real analysis model path unavailable ({fallback_mode}); using fallback analysis output"
     )
     return _normalize_model_analysis(
-        {"summary": None, "recommendations": [], "element_scores": generate_mock_scores(elements_to_analyze)},
+        {
+            "summary": None,
+            "recommendations": [],
+            "element_scores": generate_mock_scores(elements_to_analyze, language=language),
+        },
         elements_to_analyze,
         frames,
         analysis_mode=fallback_mode,
+        language=language,
     )
 
 
-def generate_mock_scores(elements: List[dict]) -> List[dict]:
+def generate_mock_scores(elements: List[dict], language: str = "en") -> List[dict]:
     """Generate bounded fallback scores when no live model is configured."""
     import random
 
     scores = []
-    fallback_actions = [
-        "Teacher modeling was visible, but checks for understanding were not consistently evident in sampled frames.",
-        "Student participation cues were visible, though broader engagement routines were not consistently clear.",
-        "Classroom routines appeared stable, but transitions and response checks need stronger visual evidence.",
-        "Instructional pacing looked steady, though opportunities for deeper student thinking were not clearly visible.",
-    ]
+    if _is_hebrew_language(language):
+        fallback_actions = [
+            "נראה מודלינג של המורה, אך בדיקות הבנה עקביות לא בלטו במידה מספקת במדגם הרגעים שנבדק.",
+            "נראו סימנים להשתתפות תלמידים, אך דפוסי מעורבות רחבים יותר לא היו ברורים די הצורך.",
+            "שגרות הכיתה נראו יציבות, אך המעברים ובדיקות התגובה דורשים ראיות חזותיות ברורות יותר.",
+            "קצב ההוראה נראה סדור, אך הזדמנויות לחשיבה מעמיקה של תלמידים לא בלטו באופן מספק.",
+        ]
+    else:
+        fallback_actions = [
+            "Teacher modeling was visible, but checks for understanding were not consistently evident in sampled frames.",
+            "Student participation cues were visible, though broader engagement routines were not consistently clear.",
+            "Classroom routines appeared stable, but transitions and response checks need stronger visual evidence.",
+            "Instructional pacing looked steady, though opportunities for deeper student thinking were not clearly visible.",
+        ]
     for idx, element in enumerate(elements):
         score = round(random.uniform(5.2, 7.4), 1)
         observation = fallback_actions[idx % len(fallback_actions)]
+        primary_observation = (
+            f"נמצאה ראיה חלקית בלבד עבור {element['name']} במדגם הרגעים שנבדק."
+            if _is_hebrew_language(language)
+            else f"Visible evidence for {element['name'].lower()} was limited to sampled frames."
+        )
         scores.append(
             {
                 "element_id": element["id"],
                 "element_name": element["name"],
                 "score": score,
                 "observations": [
-                    f"Visible evidence for {element['name'].lower()} was limited to sampled frames.",
+                    primary_observation,
                     observation,
                 ],
                 "confidence": random.randint(35, 60),
@@ -9437,7 +9494,13 @@ def build_observation_summary_packet(
 
     def _format_area(item: dict) -> str:
         observation = str((item.get("observations") or [""])[0]).strip()
-        label = _observation_focus_label(item, priority_element_ids)
+        label = (
+            "מוקד מועדף"
+            if _is_hebrew_language(language) and (bool(item.get("priority")) or item.get("element_id") in priority_set)
+            else "תחום להתבוננות"
+            if _is_hebrew_language(language)
+            else _observation_focus_label(item, priority_element_ids)
+        )
         if observation:
             return f"{label}: {item['element_name']} - {observation.rstrip('.')}"
         return f"{label}: {item['element_name']}"
@@ -9447,7 +9510,10 @@ def build_observation_summary_packet(
         if item.get("element_id") not in priority_set and not item.get("priority"):
             continue
         score = float(item.get("score", 0.0))
-        direction = "currently strong" if score >= 7.0 else "needs coaching attention"
+        if _is_hebrew_language(language):
+            direction = "מהווה נקודת חוזק" if score >= 7.0 else "דורש תשומת לב פדגוגית"
+        else:
+            direction = "currently strong" if score >= 7.0 else "needs coaching attention"
         priority_alignment.append(f"{item['element_name']}: {direction} ({score:.1f}/10)")
 
     confidence_note = None
@@ -9680,7 +9746,12 @@ def generate_recommendations(
         first_segment = segments[0] if segments else None
         start_sec = int(float(first_segment.get("start_sec", 90 + idx * 150))) if first_segment else 90 + idx * 150
         end_sec = int(float(first_segment.get("end_sec", start_sec + 30))) if first_segment else start_sec + 30
-        observation = str((es.get("observations") or ["Visible evidence was limited."])[0]).strip()
+        default_observation = (
+            "הראיות שנצפו היו מוגבלות."
+            if _is_hebrew_language(language)
+            else "Visible evidence was limited."
+        )
+        observation = str((es.get("observations") or [default_observation])[0]).strip()
         if _is_hebrew_language(language):
             action = _build_recommendation_text_hebrew(es["element_name"], observation)
             recommendations.append(

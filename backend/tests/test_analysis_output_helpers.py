@@ -158,6 +158,29 @@ def test_generate_recommendations_supports_hebrew_output():
     assert "ראיה שנצפתה" in recommendations[0]
 
 
+def test_build_focus_instruction_preserves_hebrew_admin_text_without_english_normalization():
+    instruction = server._build_focus_instruction(
+        [{"id": "d3b", "name": "שימוש בשאלות ובדיון", "priority": True}],
+        focus_note="לשים לב במיוחד לאיכות השיח בכיתה ולהיענות של התלמידים.",
+        language="he",
+    )
+
+    assert "מוקדי ההתבוננות" in instruction
+    assert "כפי שנכתבה במקור" in instruction
+    assert "\"לשים לב במיוחד לאיכות השיח בכיתה ולהיענות של התלמידים.\"" in instruction
+    assert "Treat this as guidance" not in instruction
+
+
+def test_generate_mock_scores_supports_hebrew_fallback_output():
+    scores = server.generate_mock_scores(
+        [{"id": "d3b", "name": "שימוש בשאלות ובדיון"}],
+        language="he",
+    )
+
+    assert scores
+    assert "נמצאה ראיה חלקית בלבד" in scores[0]["observations"][0]
+
+
 def test_generate_recommendations_prioritizes_admin_pressure_points_when_model_output_exists():
     recommendations = server.generate_recommendations(
         [
