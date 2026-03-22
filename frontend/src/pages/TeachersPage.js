@@ -20,6 +20,7 @@ export function TeachersPage() {
   const { user } = useAuth();
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
   const isRtl = i18n.dir() === "rtl";
+  const locale = i18n.language?.startsWith("he") ? "he-IL" : "en-US";
   const { data: teachersData, isLoading } = useQuery({
     queryKey: ["teachers"],
     queryFn: () => teacherApi.list().then((res) => res.data),
@@ -296,6 +297,32 @@ export function TeachersPage() {
     };
   }, [tableRows]);
 
+  const trendLabelMap = {
+    improving: t("teachersPage.improving"),
+    stable: t("teachersPage.stable"),
+    declining: t("teachersPage.declining"),
+  };
+
+  const formatScore = (value) =>
+    typeof value === "number"
+      ? new Intl.NumberFormat(locale, {
+          minimumFractionDigits: 1,
+          maximumFractionDigits: 1,
+        }).format(value)
+      : "—";
+
+  const formatScheduleTime = (value) => {
+    if (!value) return "";
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return value;
+    return new Intl.DateTimeFormat(locale, {
+      day: "numeric",
+      month: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(parsed);
+  };
+
   const downloadReport = async (format, params, filename) => {
     try {
       const res = await reportApi.export(format, params);
@@ -530,13 +557,13 @@ export function TeachersPage() {
                     </select>
                   </div>
                   <div className="flex items-center gap-1">
-                    <span className="text-slate-500">Export teacher</span>
+                    <span className="text-slate-500">{t("teachersPage.exportTeacher")}</span>
                     <select
                       className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
                       value={exportTeacherId}
                       onChange={(e) => setExportTeacherId(e.target.value)}
                     >
-                      <option value="">Select teacher</option>
+                      <option value="">{t("videoRecorderPage.selectTeacher")}</option>
                       {teachers.map((t) => (
                         <option key={t.id} value={t.id}>
                           {t.name}
@@ -547,7 +574,7 @@ export function TeachersPage() {
                       type="button"
                       onClick={async () => {
                         if (!exportTeacherId) {
-                          toast.error("Select a teacher to export");
+                          toast.error(t("teachersPage.selectTeacherToExport"));
                           return;
                         }
                         await downloadReport(
@@ -564,7 +591,7 @@ export function TeachersPage() {
                       type="button"
                       onClick={async () => {
                         if (!exportTeacherId) {
-                          toast.error("Select a teacher to export");
+                          toast.error(t("teachersPage.selectTeacherToExport"));
                           return;
                         }
                         await downloadReport(
@@ -579,12 +606,12 @@ export function TeachersPage() {
                     </button>
                   </div>
                   <div className="flex items-center gap-1">
-                    <span className="text-slate-500">Export unit</span>
+                    <span className="text-slate-500">{t("teachersPage.exportUnit")}</span>
                     <button
                       type="button"
                       onClick={async () => {
                         if (!departmentFilter) {
-                          toast.error("Select a department to export");
+                          toast.error(t("teachersPage.selectDepartmentToExport"));
                           return;
                         }
                         await downloadReport(
@@ -601,7 +628,7 @@ export function TeachersPage() {
                       type="button"
                       onClick={async () => {
                         if (!departmentFilter) {
-                          toast.error("Select a department to export");
+                          toast.error(t("teachersPage.selectDepartmentToExport"));
                           return;
                         }
                         await downloadReport(
@@ -626,7 +653,7 @@ export function TeachersPage() {
                     }}
                     className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"
                   >
-                    Reset filters
+                    {t("teachersPage.resetFilters")}
                   </button>
                 </div>
               </div>
@@ -704,9 +731,9 @@ export function TeachersPage() {
                           </div>
                           <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-slate-600">
                             <span>
-                              {t("labels.score")}: {typeof overallScore === "number" ? overallScore.toFixed(1) : "—"}
+                              {t("labels.score")}: {formatScore(overallScore)}
                             </span>
-                            <span>{t("labels.trend")}: {trend}</span>
+                            <span>{t("labels.trend")}: {trendLabelMap[trend] || trend}</span>
                             <span>{t("labels.observationsShort")}: {roster?.assessment_count ?? 0}</span>
                           </div>
                           <div className="mt-2 flex flex-wrap gap-2">
@@ -950,7 +977,7 @@ export function TeachersPage() {
                                             {c.course_name}
                                           </div>
                                           <div className="text-[10px] text-slate-500">
-                                            {c.start_time}
+                                            {formatScheduleTime(c.start_time)}
                                           </div>
                                         </div>
                                       ))}

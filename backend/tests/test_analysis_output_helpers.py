@@ -343,6 +343,58 @@ def test_enrich_assessment_for_response_rebuilds_hebrew_summary_for_english_asse
     assert enriched["recommendations"]
 
 
+def test_localize_teacher_payload_converts_demo_fields_to_hebrew():
+    localized = server._localize_teacher_payload(
+        {
+            "name": "Emily Rodriguez",
+            "subject": "Biology",
+            "grade_level": "10th Grade",
+            "department": "STEM",
+        },
+        "he",
+    )
+
+    assert localized["subject"] == "ביולוגיה"
+    assert localized["grade_level"] == "כיתה י׳"
+    assert localized["department"] == "מדעים וטכנולוגיה"
+
+
+def test_localize_roster_row_payload_converts_seeded_observation_text_to_hebrew():
+    localized = server._localize_roster_row_payload(
+        {
+            "teacher_id": "teacher-1",
+            "subject": "History",
+            "grade_level": "8th Grade",
+            "department": "Humanities",
+            "recent_observations": [
+                {
+                    "summary": None,
+                    "admin_comment": "Observed David demonstrating active engagement strategies.",
+                }
+            ],
+            "action_items": [
+                {"title": "Action Plan: Strengthen questioning routines"},
+            ],
+        },
+        "he",
+    )
+
+    assert localized["subject"] == "היסטוריה"
+    assert localized["grade_level"] == "כיתה ח׳"
+    assert localized["department"] == "מדעי הרוח"
+    assert "בתצפית על David" in localized["recent_observations"][0]["admin_comment"]
+    assert localized["action_items"][0]["title"].startswith("תכנית פעולה:")
+
+
+def test_localize_schedule_payload_translates_known_reminder_prefixes_to_hebrew():
+    localized = server._localize_schedule_payload(
+        {"course_name": "Lesson plan reminder: Chemistry"},
+        "he",
+    )
+
+    assert localized["course_name"] == "תזכורת לתכנית שיעור: כימיה"
+
+
 def test_build_analysis_metadata_tracks_modality_confidence_and_degradation(monkeypatch):
     monkeypatch.setattr(server, "AUDIO_ANALYSIS_ENABLED", True)
     monkeypatch.setattr(server, "AUDIO_ALLOW_STUDENT_VOICE_PROCESSING", True)

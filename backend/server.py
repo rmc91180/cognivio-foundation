@@ -1525,6 +1525,157 @@ def _is_hebrew_language(language: Optional[str]) -> bool:
     return _normalize_app_language(language) == "he"
 
 
+_HEBREW_SUBJECT_MAP = {
+    "mathematics": "מתמטיקה",
+    "math": "מתמטיקה",
+    "english literature": "ספרות אנגלית",
+    "biology": "ביולוגיה",
+    "history": "היסטוריה",
+    "chemistry": "כימיה",
+    "physical education": "חינוך גופני",
+}
+
+_HEBREW_DEPARTMENT_MAP = {
+    "stem": "מדעים וטכנולוגיה",
+    "humanities": "מדעי הרוח",
+    "athletics": "חינוך גופני וספורט",
+}
+
+_HEBREW_GRADE_MAP = {
+    "7th grade": "כיתה ז׳",
+    "8th grade": "כיתה ח׳",
+    "9th grade": "כיתה ט׳",
+    "10th grade": "כיתה י׳",
+    "11th grade": "כיתה י״א",
+    "12th grade": "כיתה י״ב",
+}
+
+
+def _localize_subject_label(subject: Optional[str], language: Optional[str]) -> Optional[str]:
+    if not subject or not _is_hebrew_language(language):
+        return subject
+    normalized = str(subject).strip().lower()
+    return _HEBREW_SUBJECT_MAP.get(normalized, subject)
+
+
+def _localize_department_label(department: Optional[str], language: Optional[str]) -> Optional[str]:
+    if not department or not _is_hebrew_language(language):
+        return department
+    normalized = str(department).strip().lower()
+    return _HEBREW_DEPARTMENT_MAP.get(normalized, department)
+
+
+def _localize_grade_level_label(grade_level: Optional[str], language: Optional[str]) -> Optional[str]:
+    if not grade_level or not _is_hebrew_language(language):
+        return grade_level
+    normalized = str(grade_level).strip().lower()
+    if normalized in _HEBREW_GRADE_MAP:
+        return _HEBREW_GRADE_MAP[normalized]
+
+    match = re.fullmatch(r"(\d{1,2})(?:st|nd|rd|th)\s+grade", normalized)
+    if not match:
+        return grade_level
+
+    grade_number = int(match.group(1))
+    hebrew_grade_map = {
+        1: "א׳",
+        2: "ב׳",
+        3: "ג׳",
+        4: "ד׳",
+        5: "ה׳",
+        6: "ו׳",
+        7: "ז׳",
+        8: "ח׳",
+        9: "ט׳",
+        10: "י׳",
+        11: "י״א",
+        12: "י״ב",
+    }
+    return f"כיתה {hebrew_grade_map.get(grade_number, grade_level)}"
+
+
+def _localize_observation_text(text: Optional[str], language: Optional[str]) -> Optional[str]:
+    if not text or not _is_hebrew_language(language):
+        return text
+
+    stripped = str(text).strip()
+    observed_match = re.fullmatch(
+        r"Observed\s+([A-Za-z' -]+)\s+demonstrating active engagement strategies\.",
+        stripped,
+    )
+    if observed_match:
+        teacher_name = observed_match.group(1).strip()
+        return f"בתצפית על {teacher_name} נראתה הפעלה עקבית של אסטרטגיות למעורבות פעילה של תלמידים."
+
+    variable_match = re.fullmatch(
+        r"Observed\s+(.+?)\s+with variable consistency over the lesson\.",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    if variable_match:
+        area = variable_match.group(1).strip()
+        return f"בתחום {area} נראתה עקביות משתנה לאורך השיעור."
+
+    return stripped
+
+
+def _localize_schedule_title(course_name: Optional[str], language: Optional[str]) -> Optional[str]:
+    if not course_name or not _is_hebrew_language(language):
+        return course_name
+
+    title = str(course_name).strip()
+    if title.startswith("Lesson plan reminder: "):
+        subject = title.split(": ", 1)[1].strip()
+        return f"תזכורת לתכנית שיעור: {_localize_subject_label(subject, language)}"
+    if title.startswith("Recording compliance reminder: "):
+        teacher_name = title.split(": ", 1)[1].strip()
+        return f"תזכורת לעמידה במדיניות ההקלטה: {teacher_name}"
+    if title.startswith("Action Plan: "):
+        goal_title = title.split(": ", 1)[1].strip()
+        return f"תכנית פעולה: {goal_title}"
+    if title.startswith("Reminder: "):
+        reminder_name = title.split(": ", 1)[1].strip()
+        return f"תזכורת: {reminder_name}"
+    return title
+
+
+def _localize_teacher_payload(payload: Dict[str, Any], language: Optional[str]) -> Dict[str, Any]:
+    localized = dict(payload)
+    localized["subject"] = _localize_subject_label(localized.get("subject"), language)
+    localized["grade_level"] = _localize_grade_level_label(localized.get("grade_level"), language)
+    localized["department"] = _localize_department_label(localized.get("department"), language)
+    return localized
+
+
+def _localize_schedule_payload(payload: Dict[str, Any], language: Optional[str]) -> Dict[str, Any]:
+    localized = dict(payload)
+    localized["course_name"] = _localize_schedule_title(localized.get("course_name"), language)
+    return localized
+
+
+def _localize_roster_row_payload(payload: Dict[str, Any], language: Optional[str]) -> Dict[str, Any]:
+    localized = dict(payload)
+    localized["subject"] = _localize_subject_label(localized.get("subject"), language)
+    localized["grade_level"] = _localize_grade_level_label(localized.get("grade_level"), language)
+    localized["department"] = _localize_department_label(localized.get("department"), language)
+    localized["recent_observations"] = [
+        {
+            **observation,
+            "summary": _localize_observation_text(observation.get("summary"), language),
+            "admin_comment": _localize_observation_text(observation.get("admin_comment"), language),
+        }
+        for observation in list(localized.get("recent_observations") or [])
+    ]
+    localized["action_items"] = [
+        {
+            **item,
+            "title": _localize_schedule_title(item.get("title"), language),
+        }
+        for item in list(localized.get("action_items") or [])
+    ]
+    return localized
+
+
 def _localize_framework_node_label(node_id: str, fallback: str, framework_type: str, language: Optional[str]) -> str:
     if not _is_hebrew_language(language):
         return fallback
@@ -2619,12 +2770,13 @@ async def update_teacher(
     return TeacherResponse(**teacher)
 
 @api_router.get("/teachers", response_model=List[TeacherResponse])
-async def get_teachers(current_user: dict = Depends(get_current_user)):
+async def get_teachers(request: Request, current_user: dict = Depends(get_current_user)):
     teachers = await db.teachers.find(
         {"created_by": current_user["id"]},
         {"_id": 0, "created_by": 0}
     ).to_list(1000)
-    return [TeacherResponse(**t) for t in teachers]
+    language = _resolve_request_language(request, default="en")
+    return [TeacherResponse(**_localize_teacher_payload(t, language)) for t in teachers]
 
 
 @api_router.post("/schools", response_model=SchoolResponse)
@@ -2654,10 +2806,11 @@ async def list_schools(current_user: dict = Depends(get_current_user)):
     return [SchoolResponse(**s) for s in schools]
 
 @api_router.get("/teachers/{teacher_id}", response_model=TeacherResponse)
-async def get_teacher(teacher_id: str, current_user: dict = Depends(get_current_user)):
+async def get_teacher(teacher_id: str, request: Request, current_user: dict = Depends(get_current_user)):
     teacher = await _get_teacher_or_404(teacher_id, current_user)
     teacher.pop("created_by", None)
-    return TeacherResponse(**teacher)
+    language = _resolve_request_language(request, default="en")
+    return TeacherResponse(**_localize_teacher_payload(teacher, language))
 
 
 @api_router.get("/teachers/{teacher_id}/privacy-profile", response_model=TeacherPrivacyProfileResponse)
@@ -5287,9 +5440,9 @@ async def export_summary_report(
         rows.append(
             {
                 "teacher_name": t.get("name"),
-                "subject": t.get("subject"),
-                "grade_level": t.get("grade_level"),
-                "department": t.get("department"),
+                "subject": _localize_subject_label(t.get("subject"), language),
+                "grade_level": _localize_grade_level_label(t.get("grade_level"), language),
+                "department": _localize_department_label(t.get("department"), language),
                 "latest_score": assessment.get("overall_score") if assessment else None,
                 "average_score": avg_score,
                 "assessment_count": len(teacher_assessments),
@@ -6545,6 +6698,7 @@ async def get_dashboard_leadership_insights(
 # ==================== ROSTER & DASHBOARD ENDPOINTS ====================
 @api_router.get("/roster")
 async def get_teacher_roster(
+    request: Request,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
     current_user: dict = Depends(get_current_user)
@@ -6583,6 +6737,7 @@ async def get_teacher_roster(
         for plan in action_plans:
             action_plan_map[plan["teacher_id"]] = plan
     
+    language = _resolve_request_language(request, default="en")
     roster = []
     for teacher in teachers:
         policy = await _get_recording_policy_for_teacher(current_user["id"], teacher)
@@ -6799,7 +6954,8 @@ async def get_teacher_roster(
         overall_score = round(sum(combined_scores) / len(combined_scores), 2) if combined_scores else None
         
         roster.append(
-            {
+            _localize_roster_row_payload(
+                {
                 "teacher_id": teacher["id"],
                 "teacher_name": teacher["name"],
                 "subject": teacher["subject"],
@@ -6818,7 +6974,9 @@ async def get_teacher_roster(
                 "trend_windows": trend_windows,
                 "recent_observations": recent_observations,
                 "action_items": action_items,
-            }
+                },
+                language,
+            )
         )
     
     return {
@@ -7505,6 +7663,7 @@ async def create_schedule(
 @api_router.get("/schedules", response_model=List[Schedule])
 async def list_schedules(
     teacher_id: Optional[str] = None,
+    request: Request = None,
     current_user: dict = Depends(get_current_user),
 ):
     query: Dict[str, Any] = {"user_id": current_user["id"]}
@@ -7516,7 +7675,8 @@ async def list_schedules(
     ).sort("start_time", 1)
     docs = await cursor.to_list(1000)
     # Pydantic will parse ISO8601 strings into datetime for start_time
-    return [Schedule(**d) for d in docs]
+    language = _resolve_request_language(request, default="en")
+    return [Schedule(**_localize_schedule_payload(d, language)) for d in docs]
 
 
 @api_router.patch("/schedules/{schedule_id}", response_model=Schedule)
