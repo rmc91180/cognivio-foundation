@@ -1,15 +1,11 @@
 # Cognivio
 
-This repository currently contains multiple app stacks.  
-For MVP delivery, the canonical production stack is:
+This repository's canonical production stack is:
 
-- Frontend: `frontend/` (React + CRA)
-- Backend: `backend/` (FastAPI)
+- Frontend: `frontend/`
+- Backend: `backend/`
 
-Legacy stacks remain in-repo but are not the primary MVP target:
-
-- `client/` + `server/`
-- `admin-teacher-assessment/`
+Legacy application stacks are archived under `archive/` and are not part of the active deployment, CI, or development path.
 
 See the baseline lock and program plan:
 
@@ -36,7 +32,7 @@ See the baseline lock and program plan:
 - [Post-Launch Triage](./docs/POST_LAUNCH_TRIAGE.md)
 - [MVP Plan Audit (2026-02-25)](./docs/MVP_PLAN_AUDIT_2026-02-25.md)
 
-## Quick Start (MVP Stack)
+## Quick Start (Production Stack)
 
 ## 1) Backend
 
@@ -45,7 +41,7 @@ cd backend
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m uvicorn server:app --host 0.0.0.0 --port 8000 --reload
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --app-dir backend
 ```
 
 ## 2) Frontend
@@ -78,4 +74,5 @@ npm run dev:frontend:mvp
 npm run dev:backend:mvp
 npm run build:frontend:mvp
 npm run test:backend:mvp
+npm run test:e2e
 ```

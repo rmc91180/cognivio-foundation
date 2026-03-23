@@ -1,34 +1,17 @@
 {
-  "name": "admin-teacher-assessment",
+  "name": "cognivio",
   "version": "1.0.0",
-  "description": "Administrative Teacher Assessment Platform with AI Video Analysis",
+  "description": "Cognivio production stack orchestration",
   "private": true,
-  "workspaces": [
-    "server",
-    "client"
-  ],
   "scripts": {
     "dev:mvp": "concurrently \"npm run dev:backend:mvp\" \"npm run dev:frontend:mvp\"",
     "dev:frontend:mvp": "npm run start --prefix frontend",
-    "dev:backend:mvp": "python -m uvicorn server:app --host 0.0.0.0 --port 8000 --reload --app-dir backend",
+    "dev:backend:mvp": "python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --app-dir backend",
     "build:frontend:mvp": "npm run build --prefix frontend",
     "test:backend:mvp": "python -m pytest backend/tests -q",
-    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
-    "dev:server": "npm run dev --workspace=server",
-    "dev:client": "npm run dev --workspace=client",
-    "build": "npm run build --workspace=server && npm run build --workspace=client",
-    "start": "npm run start --workspace=server",
-    "worker": "npm run worker --workspace=server",
-    "test": "npm run test:server && npm run test:client",
-    "test:server": "npm run test -w server -- --watchAll=false",
-    "test:client": "npm run test -w client -- --run",
     "test:e2e": "npx playwright test --config=e2e/playwright.config.ts",
-    "lint": "npm run lint --workspaces",
-    "db:migrate": "npm run db:migrate --workspace=server",
-    "db:seed": "npm run db:seed --workspace=server",
-    "db:reset": "npm run db:reset --workspace=server",
-    "docker:up": "docker-compose up --build",
-    "docker:down": "docker-compose down -v"
+    "ci:backend": "python -m pytest backend/tests -q",
+    "ci:frontend": "npm run build --prefix frontend"
   },
   "devDependencies": {
     "@playwright/test": "^1.40.0",

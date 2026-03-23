@@ -9,10 +9,11 @@ Use this stack for all MVP work and deployment:
 - Frontend: `frontend/` (React + CRA + CRACO)
 - Backend: `backend/` (FastAPI in `backend/server.py`)
 
-Legacy stacks remain in repo for reference only:
+Legacy stacks are archived under `archive/` for reference only:
 
-- `client/` + `server/`
-- `admin-teacher-assessment/`
+- `archive/client/`
+- `archive/server/`
+- `archive/admin-teacher-assessment/`
 
 No new MVP features should be added to legacy stacks.
 
