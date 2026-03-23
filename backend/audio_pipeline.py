@@ -2,6 +2,7 @@ import os
 import re
 import shutil
 import subprocess
+import wave
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -11,7 +12,7 @@ except Exception:
     OpenAI = None
 
 
-def extract_audio_track(video_path: str, output_path: str) -> Dict[str, Any]:
+def extract_audio_track(video_path: str, output_path: str, max_seconds: Optional[int] = None) -> Dict[str, Any]:
     ffmpeg_path = shutil.which("ffmpeg")
     if not ffmpeg_path:
         raise RuntimeError("ffmpeg is not available for audio extraction")
@@ -23,15 +24,21 @@ def extract_audio_track(video_path: str, output_path: str) -> Dict[str, Any]:
         "-y",
         "-i",
         str(video_path),
-        "-vn",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-c:a",
-        "pcm_s16le",
-        str(output),
     ]
+    if max_seconds and max_seconds > 0:
+        command.extend(["-t", str(int(max_seconds))])
+    command.extend(
+        [
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(output),
+        ]
+    )
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     if completed.returncode != 0 or not output.exists():
         raise RuntimeError(
@@ -56,14 +63,27 @@ def transcribe_audio_file(
         raise RuntimeError("OpenAI SDK is not available for transcription")
 
     client = OpenAI(api_key=api_key)
-    with open(audio_path, "rb") as audio_file:
-        response = client.audio.transcriptions.create(
-            model=model,
-            file=audio_file,
-            response_format="verbose_json",
-            timestamp_granularities=["segment"],
-            language=language or None,
-        )
+    response = None
+    try:
+        with open(audio_path, "rb") as audio_file:
+            response = client.audio.transcriptions.create(
+                model=model,
+                file=audio_file,
+                response_format="verbose_json",
+                timestamp_granularities=["segment"],
+                language=language or None,
+            )
+    except Exception as exc:
+        message = str(exc)
+        if "response_format" not in message or "verbose_json" not in message:
+            raise
+        with open(audio_path, "rb") as audio_file:
+            response = client.audio.transcriptions.create(
+                model=model,
+                file=audio_file,
+                response_format="json",
+                language=language or None,
+            )
 
     segments: List[Dict[str, Any]] = []
     for idx, segment in enumerate(getattr(response, "segments", []) or []):
@@ -83,6 +103,25 @@ def transcribe_audio_file(
         )
 
     transcript_text = str(getattr(response, "text", "") or "").strip()
+    if transcript_text and not segments:
+        duration_sec = 0.0
+        try:
+            with wave.open(audio_path, "rb") as wav_file:
+                frame_rate = wav_file.getframerate() or 0
+                frame_count = wav_file.getnframes() or 0
+                duration_sec = round(frame_count / frame_rate, 2) if frame_rate else 0.0
+        except Exception:
+            duration_sec = 0.0
+        segments.append(
+            {
+                "segment_id": "segment_001",
+                "start_sec": 0.0,
+                "end_sec": max(duration_sec, 0.0),
+                "speaker": "unknown",
+                "text": transcript_text,
+            }
+        )
+
     return {
         "text": transcript_text,
         "segments": segments,

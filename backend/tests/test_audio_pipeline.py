@@ -2,6 +2,7 @@ import importlib.util
 import os
 import sys
 import types
+import wave
 from pathlib import Path
 
 import pytest
@@ -74,6 +75,51 @@ def test_compute_audio_features_counts_questions_and_directives():
     assert features["pause_density"] > 0
 
 
+def test_transcribe_audio_file_falls_back_to_json_and_builds_segment(tmp_path, monkeypatch):
+    audio_path = tmp_path / "sample.wav"
+    with wave.open(str(audio_path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(16000)
+        wav_file.writeframes(b"\x00\x00" * 16000)
+
+    class _Response:
+        def __init__(self, text):
+            self.text = text
+            self.segments = None
+
+    class _Transcriptions:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs.get("response_format") == "verbose_json":
+                raise RuntimeError("response_format 'verbose_json' is not compatible with model 'gpt-4o-mini-transcribe'")
+            return _Response("שלום כיתה, בואו נתחיל.")
+
+    transcriptions = _Transcriptions()
+
+    class _Audio:
+        def __init__(self, transcriptions_obj):
+            self.transcriptions = transcriptions_obj
+
+    class _Client:
+        def __init__(self, api_key):
+            self.audio = _Audio(transcriptions)
+
+    monkeypatch.setattr(audio_pipeline, "OpenAI", _Client)
+
+    result = audio_pipeline.transcribe_audio_file(str(audio_path), "test-key", "gpt-4o-mini-transcribe", "he")
+
+    assert result["text"] == "שלום כיתה, בואו נתחיל."
+    assert len(result["segments"]) == 1
+    assert result["segments"][0]["text"] == "שלום כיתה, בואו נתחיל."
+    assert result["segments"][0]["end_sec"] > 0
+    assert transcriptions.calls[0]["response_format"] == "verbose_json"
+    assert transcriptions.calls[1]["response_format"] == "json"
+
+
 def test_should_run_audio_analysis_requires_flags_and_policy(monkeypatch):
     monkeypatch.setattr(server, "AUDIO_ANALYSIS_ENABLED", True)
     monkeypatch.setattr(server, "AUDIO_ALLOW_STUDENT_VOICE_PROCESSING", True)
@@ -99,7 +145,11 @@ async def test_build_audio_artifacts_returns_transcript_and_features(monkeypatch
     monkeypatch.setattr(
         server,
         "extract_audio_track",
-        lambda video_path, output_path: {"audio_path": output_path, "file_size_bytes": 100, "content_type": "audio/wav"},
+        lambda video_path, output_path, max_seconds=None: {
+            "audio_path": output_path,
+            "file_size_bytes": 100,
+            "content_type": "audio/wav",
+        },
     )
     monkeypatch.setattr(
         server,

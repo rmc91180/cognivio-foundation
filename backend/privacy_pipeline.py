@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import math
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -53,6 +54,60 @@ def _write_placeholder_thumbnail(output_path: str, width: int = 640, height: int
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     image.save(target, format="JPEG", quality=84)
+
+
+def _finalize_redacted_video_with_audio(
+    source_video_path: str,
+    rendered_video_path: Path,
+    output_video_path: Path,
+) -> Dict[str, Any]:
+    """Remux source audio into the redacted render when available.
+
+    OpenCV writes a video-only MP4. We preserve the classroom audio by copying
+    the rendered video stream and optionally mapping the original audio stream
+    back onto the final artifact. Silent source videos still succeed.
+    """
+    mux_command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(rendered_video_path),
+        "-i",
+        str(source_video_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0?",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
+        str(output_video_path),
+    ]
+    try:
+        completed = subprocess.run(
+            mux_command,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        shutil.move(str(rendered_video_path), str(output_video_path))
+        return {"audio_preserved": False, "audio_muxed": False, "audio_mux_error": "ffmpeg_unavailable"}
+
+    if completed.returncode != 0:
+        shutil.move(str(rendered_video_path), str(output_video_path))
+        stderr = (completed.stderr or "").strip()
+        return {
+            "audio_preserved": False,
+            "audio_muxed": False,
+            "audio_mux_error": stderr[:500] if stderr else "ffmpeg_mux_failed",
+        }
+
+    rendered_video_path.unlink(missing_ok=True)
+    return {"audio_preserved": True, "audio_muxed": True, "audio_mux_error": None}
 
 
 def _load_face_cascade():
@@ -359,8 +414,9 @@ def render_redacted_video(
 
     output_path = Path(output_video_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    rendered_video_path = output_path.with_name(f"{output_path.stem}.video_only{output_path.suffix}")
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+    writer = cv2.VideoWriter(str(rendered_video_path), fourcc, fps, (width, height))
     if not writer.isOpened():
         raise RuntimeError("Unable to open output video writer")
 
@@ -424,15 +480,18 @@ def render_redacted_video(
         writer.release()
 
     if not thumbnail_written:
-        cap_thumb = cv2.VideoCapture(str(output_path))
+        cap_thumb = cv2.VideoCapture(str(rendered_video_path))
         ret, frame = cap_thumb.read()
         if ret:
             cv2.imwrite(str(thumbnail_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
         cap_thumb.release()
+
+    audio_stats = _finalize_redacted_video_with_audio(source_video_path, rendered_video_path, output_path)
 
     return {
         "frames_processed": frames_processed,
         "frames_with_teacher_visible": frames_with_teacher_visible,
         "faces_detected_total": faces_detected_total,
         "faces_blurred_total": faces_blurred_total,
+        **audio_stats,
     }
