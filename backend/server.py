@@ -57,6 +57,13 @@ from recognition_engine import (
     build_recognition_eligibility,
     calculate_active_streak,
 )
+from app.observability import (
+    estimate_analysis_usage,
+    log_structured,
+    record_analysis_run,
+    record_worker_result,
+    snapshot as observability_snapshot,
+)
 from share_assets import (
     build_email_signature_html,
     render_email_signature_badge,
@@ -3484,8 +3491,19 @@ async def _video_processing_worker(worker_label: str) -> None:
             video_id = await VIDEO_JOB_QUEUE.get()
             try:
                 await _run_video_job(video_id)
+                record_worker_result(
+                    worker_type="video",
+                    job_id=video_id,
+                    success=True,
+                )
             except Exception as exc:
                 logger.error(f"Video worker {worker_label} failed on {video_id}: {exc}")
+                record_worker_result(
+                    worker_type="video",
+                    job_id=video_id,
+                    success=False,
+                    failure_reason=str(exc),
+                )
             finally:
                 VIDEO_JOB_QUEUE.task_done()
     except asyncio.CancelledError:
@@ -3500,8 +3518,19 @@ async def _video_privacy_worker(worker_label: str) -> None:
             video_id = await VIDEO_PRIVACY_JOB_QUEUE.get()
             try:
                 await _run_video_privacy_job(video_id)
+                record_worker_result(
+                    worker_type="privacy",
+                    job_id=video_id,
+                    success=True,
+                )
             except Exception as exc:
                 logger.error(f"Privacy worker {worker_label} failed on {video_id}: {exc}")
+                record_worker_result(
+                    worker_type="privacy",
+                    job_id=video_id,
+                    success=False,
+                    failure_reason=str(exc),
+                )
             finally:
                 VIDEO_PRIVACY_JOB_QUEUE.task_done()
     except asyncio.CancelledError:
@@ -8178,6 +8207,7 @@ async def get_admin_ops_readiness(current_user: dict = Depends(get_current_user)
         warnings.append(f"{privacy_review_required} video(s) require privacy review.")
     if schedules_upcoming == 0:
         warnings.append("No upcoming recording schedules are set.")
+    observability = observability_snapshot()
 
     return {
         "generated_at": now_iso,
@@ -8198,6 +8228,14 @@ async def get_admin_ops_readiness(current_user: dict = Depends(get_current_user)
             "privacy_failed": privacy_failed,
             "upcoming_schedules": schedules_upcoming,
             "gradebook_connected": gradebook_connected,
+            "analysis_total_runs": observability["analysis"]["total_runs"],
+            "analysis_failed_runs": observability["analysis"]["failed_runs"],
+        },
+        "observability": {
+            "analysis": {
+                "by_mode": observability["analysis"]["by_mode"],
+                "recent_failures": observability["analysis"]["recent_failures"][:5],
+            }
         },
     }
 
@@ -8281,6 +8319,7 @@ async def get_admin_ops_launch_health(current_user: dict = Depends(get_current_u
         actions.append("Verify outbound notification delivery pipeline health.")
     if not actions:
         actions.append("No urgent actions. Continue normal monitoring cadence.")
+    observability = observability_snapshot()
     return {
         "generated_at": now_iso,
         "incident_level": incident_level,
@@ -8294,8 +8333,26 @@ async def get_admin_ops_launch_health(current_user: dict = Depends(get_current_u
             "stale_privacy_jobs": stale_privacy_jobs,
             "privacy_reviews_pending": privacy_reviews_pending,
             "queued_notifications": queued_notifications,
+            "analysis_average_duration_seconds": observability["analysis"]["average_duration_seconds"],
+            "analysis_average_estimated_input_tokens": observability["analysis"]["average_estimated_input_tokens"],
+            "analysis_average_estimated_output_tokens": observability["analysis"]["average_estimated_output_tokens"],
         },
+        "observability": observability,
         "recommended_actions": actions,
+    }
+
+
+@api_router.get("/admin/ops/observability")
+async def get_admin_ops_observability(current_user: dict = Depends(get_current_user)):
+    _require_admin_ops_user(current_user)
+    snapshot = observability_snapshot()
+    snapshot["queues"] = {
+        "video_queue_depth": VIDEO_JOB_QUEUE.qsize(),
+        "privacy_queue_depth": VIDEO_PRIVACY_JOB_QUEUE.qsize(),
+    }
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "observability": snapshot,
     }
 
 
@@ -8477,8 +8534,16 @@ async def analyze_video(
     user_id: str,
 ) -> Tuple[bool, Optional[str]]:
     """Background task to analyze video using AI"""
+    analysis_started_perf = time.perf_counter()
     try:
-        logger.info(f"Starting analysis for video {video_id}")
+        log_structured(
+            logger,
+            "info",
+            "analysis_started",
+            video_id=video_id,
+            teacher_id=teacher_id,
+            user_id=user_id,
+        )
         video = await db.videos.find_one({"id": video_id}, {"_id": 0})
         if not video:
             raise RuntimeError("Video not found")
@@ -8593,6 +8658,11 @@ async def analyze_video(
             current_user=analysis_user,
             multimodal_payload=multimodal_payload,
         )
+        usage_estimate = estimate_analysis_usage(
+            frames=frames,
+            multimodal_payload=multimodal_payload,
+            output_payload=analysis_payload,
+        )
         analysis_metadata = build_analysis_metadata(
             analysis_payload,
             multimodal_payload,
@@ -8688,12 +8758,51 @@ async def analyze_video(
         updated_video = await db.videos.find_one({"id": video_id}, {"_id": 0})
         if updated_video:
             await _sync_video_recognition_state(updated_video)
-        
-        logger.info(f"Completed analysis for video {video_id}")
+
+        duration_seconds = time.perf_counter() - analysis_started_perf
+        record_analysis_run(
+            video_id=video_id,
+            success=True,
+            analysis_mode=analysis_payload.get("analysis_mode", "fallback"),
+            duration_seconds=duration_seconds,
+            modalities_used=analysis_metadata["analysis_modalities_used"],
+            estimated_input_tokens=usage_estimate.get("estimated_input_tokens"),
+            estimated_output_tokens=usage_estimate.get("estimated_output_tokens"),
+        )
+        log_structured(
+            logger,
+            "info",
+            "analysis_completed",
+            video_id=video_id,
+            teacher_id=teacher_id,
+            analysis_mode=analysis_payload.get("analysis_mode", "fallback"),
+            duration_seconds=round(duration_seconds, 3),
+            modalities_used=analysis_metadata["analysis_modalities_used"],
+            estimated_input_tokens=usage_estimate.get("estimated_input_tokens"),
+            estimated_output_tokens=usage_estimate.get("estimated_output_tokens"),
+        )
         return True, None
         
     except Exception as e:
         logger.error(f"Error analyzing video {video_id}: {str(e)}")
+        duration_seconds = time.perf_counter() - analysis_started_perf
+        record_analysis_run(
+            video_id=video_id,
+            success=False,
+            analysis_mode="failed_before_completion",
+            duration_seconds=duration_seconds,
+            modalities_used=["vision"],
+            failure_reason=str(e),
+        )
+        log_structured(
+            logger,
+            "error",
+            "analysis_failed",
+            video_id=video_id,
+            teacher_id=teacher_id,
+            duration_seconds=round(duration_seconds, 3),
+            failure_reason=str(e),
+        )
         failed_at = datetime.now(timezone.utc).isoformat()
         await db.videos.update_one(
             {"id": video_id},

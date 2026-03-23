@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+from typing import Optional
+
+from fastapi import APIRouter, Depends, File, Form, UploadFile
+
+import server as legacy
+
+from app.dependencies import get_current_user
+from app.services.video_service import (
+    get_video_detail,
+    get_video_raw_access,
+    get_video_status,
+    list_videos,
+    retry_video_privacy,
+    retry_video_processing,
+    upload_video,
+)
+
+
+router = APIRouter(tags=["videos"])
+
+
+@router.post("/videos/upload", response_model=legacy.VideoUploadResponse)
+async def upload_video_route(
+    request: legacy.Request,
+    file: UploadFile = File(...),
+    teacher_id: str = Form(...),
+    subject: Optional[str] = Form(None),
+    recorded_at: Optional[str] = Form(None),
+    current_user: dict = Depends(get_current_user),
+):
+    return await upload_video(request, file, teacher_id, subject, recorded_at, current_user)
+
+
+@router.get("/videos")
+async def get_videos_route(
+    teacher_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    return await list_videos(teacher_id, current_user)
+
+
+@router.get("/videos/{video_id}")
+async def get_video_detail_route(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    return await get_video_detail(video_id, current_user)
+
+
+@router.get("/videos/{video_id}/raw-access")
+async def get_video_raw_access_route(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    return await get_video_raw_access(video_id, current_user)
+
+
+@router.get("/videos/{video_id}/status")
+async def get_video_status_route(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    return await get_video_status(video_id, current_user)
+
+
+@router.post("/videos/{video_id}/retry")
+async def retry_video_processing_route(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    return await retry_video_processing(video_id, current_user)
+
+
+@router.post("/videos/{video_id}/privacy/retry")
+async def retry_video_privacy_route(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    return await retry_video_privacy(video_id, current_user)
