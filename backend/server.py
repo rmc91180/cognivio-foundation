@@ -22,6 +22,7 @@ import math
 import re
 import shutil
 import sys
+import time
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from PIL import Image, ImageDraw
@@ -57,6 +58,7 @@ from recognition_engine import (
     build_recognition_eligibility,
     calculate_active_streak,
 )
+from app import metrics as app_metrics
 from app.observability import (
     estimate_analysis_usage,
     log_structured,
@@ -1221,6 +1223,12 @@ ADHERENCE_WEIGHT = float(os.getenv("ADHERENCE_WEIGHT", "0.15"))
 PRIVACY_REQUIRE_PROFILE = os.getenv("PRIVACY_REQUIRE_PROFILE", "true").lower() == "true"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4.1-mini").strip()
+OPENAI_ANALYSIS_INPUT_COST_PER_MILLION_USD = float(
+    os.getenv("OPENAI_ANALYSIS_INPUT_COST_PER_MILLION_USD", "0.40")
+)
+OPENAI_ANALYSIS_OUTPUT_COST_PER_MILLION_USD = float(
+    os.getenv("OPENAI_ANALYSIS_OUTPUT_COST_PER_MILLION_USD", "1.60")
+)
 VIDEO_ANALYSIS_MAX_FRAMES = max(3, int(os.getenv("VIDEO_ANALYSIS_MAX_FRAMES", "6")))
 SMART_FRAME_SELECTION_ENABLED = os.getenv("SMART_FRAME_SELECTION_ENABLED", "false").lower() == "true"
 SMART_FRAME_SELECTION_VERSION = os.getenv("SMART_FRAME_SELECTION_VERSION", "smart_frames_v1").strip() or "smart_frames_v1"
@@ -1295,6 +1303,86 @@ async def health_check():
 async def api_health_check():
     """Health check endpoint under /api prefix"""
     return {"status": "healthy", "service": "cognivio-api"}
+
+
+def _upload_storage_is_healthy() -> bool:
+    if S3_BUCKET:
+        try:
+            _create_s3_client()
+            return True
+        except Exception:
+            return False
+    try:
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        probe_file = UPLOAD_DIR / ".metrics-write-check"
+        probe_file.write_text("ok", encoding="utf-8")
+        probe_file.unlink(missing_ok=True)
+        return True
+    except Exception:
+        return False
+
+
+async def refresh_runtime_metrics() -> None:
+    cutoff_stale = (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat()
+
+    video_processing = await db.video_processing_jobs.count_documents(
+        {"status": VideoProcessingStatus.PROCESSING.value}
+    )
+    video_stuck = await db.video_processing_jobs.count_documents(
+        {
+            "status": VideoProcessingStatus.PROCESSING.value,
+            "started_at": {"$lte": cutoff_stale},
+        }
+    )
+    privacy_processing = await db.video_privacy_jobs.count_documents(
+        {"status": PrivacyProcessingStatus.PROCESSING.value}
+    )
+    privacy_stuck = await db.video_privacy_jobs.count_documents(
+        {
+            "status": PrivacyProcessingStatus.PROCESSING.value,
+            "started_at": {"$lte": cutoff_stale},
+        }
+    )
+    maintenance_processing = sum(1 for task in PRIVACY_MAINTENANCE_TASKS if not task.done())
+
+    app_metrics.set_job_backlog(
+        job_type="video",
+        queued=VIDEO_JOB_QUEUE.qsize(),
+        processing=video_processing,
+        stuck=video_stuck,
+    )
+    app_metrics.set_job_backlog(
+        job_type="privacy",
+        queued=VIDEO_PRIVACY_JOB_QUEUE.qsize(),
+        processing=privacy_processing,
+        stuck=privacy_stuck,
+    )
+    app_metrics.set_job_backlog(
+        job_type="maintenance",
+        queued=0,
+        processing=maintenance_processing,
+        stuck=0,
+    )
+
+    mongo_healthy = True
+    try:
+        await db.command("ping")
+    except Exception:
+        mongo_healthy = False
+
+    app_metrics.set_dependency_health(dependency="mongodb", healthy=mongo_healthy)
+    app_metrics.set_dependency_health(
+        dependency="openai",
+        healthy=bool(OPENAI_API_KEY and AsyncOpenAI is not None),
+    )
+    app_metrics.set_dependency_health(
+        dependency="storage",
+        healthy=_upload_storage_is_healthy(),
+    )
+    app_metrics.set_dependency_health(
+        dependency="railway_runtime",
+        healthy=True,
+    )
 
 # Configure logging
 logging.basicConfig(
@@ -3134,280 +3222,291 @@ async def _run_video_privacy_job(video_id: str) -> None:
     if claim.modified_count == 0:
         return
 
+    privacy_started_perf = time.perf_counter()
+    privacy_mode = "standard"
     finished_at = datetime.now(timezone.utc).isoformat()
     success = False
     error_message: Optional[str] = None
     job_final_status = PrivacyProcessingStatus.FAILED.value
-    try:
-        video = await db.videos.find_one({"id": video_id}, {"_id": 0})
-        if not video:
-            raise RuntimeError("Video not found")
-        manual_override = video.get("privacy_manual_override") or {}
-        reference_docs = await db.teacher_face_references.find(
-            {"teacher_id": job["teacher_id"]},
-            {"_id": 0, "file_path": 1},
-        ).to_list(50)
-        reference_paths = [
-            str(UPLOAD_DIR / doc["file_path"])
-            for doc in reference_docs
-            if doc.get("file_path") and (UPLOAD_DIR / doc["file_path"]).exists()
-        ]
-        if not reference_paths:
-            if PRIVACY_ALLOW_DEGRADED_RUNTIME:
-                logger.warning(
-                    f"Privacy reference fallback activated for {video_id}: no usable teacher references found"
-                )
-            else:
-                raise RuntimeError("Teacher privacy profile has no usable references")
-
-        await db.videos.update_one(
-            {"id": video_id},
-            {
-                "$set": {
-                    "status": VideoProcessingStatus.PROCESSING.value,
-                    "privacy_status": PrivacyProcessingStatus.PROCESSING.value,
-                    "privacy_started_at": now,
-                    "privacy_failed_at": None,
-                    "privacy_completed_at": None,
-                    "privacy_error": None,
-                    "privacy_review_required": False,
-                    "privacy_review_reason": None,
-                    "status_updated_at": now,
-                }
-            },
-        )
-        await db.video_evidence.update_one(
-            {"video_id": video_id, "uploaded_by": job["user_id"]},
-            {"$set": {"privacy_status": PrivacyProcessingStatus.PROCESSING.value, "error_message": None}},
-        )
+    with app_metrics.track_privacy_job(mode="unknown"):
         try:
-            analysis = await asyncio.to_thread(
-                analyze_video_privacy,
-                job["file_path"],
-                reference_paths,
-                PRIVACY_TEACHER_MATCH_THRESHOLD,
-                PRIVACY_AMBIGUOUS_MATCH_THRESHOLD,
-            )
-        except RuntimeError as exc:
-            if _should_use_degraded_privacy_runtime(exc):
-                logger.warning(
-                    f"Privacy analysis runtime fallback activated for {video_id}: {exc}"
-                )
-                analysis = {
-                    "frames_analyzed": 0,
-                    "teacher_track_id": None,
-                    "review_reason": None,
-                    "candidate_tracks": [],
-                    "fallback_mode": "blur_all",
-                    "manifest_tracks": [],
-                    "runtime_fallback": "worker_analysis_fallback",
-                }
-            else:
-                raise
+            video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+            if not video:
+                raise RuntimeError("Video not found")
+            manual_override = video.get("privacy_manual_override") or {}
+            reference_docs = await db.teacher_face_references.find(
+                {"teacher_id": job["teacher_id"]},
+                {"_id": 0, "file_path": 1},
+            ).to_list(50)
+            reference_paths = [
+                str(UPLOAD_DIR / doc["file_path"])
+                for doc in reference_docs
+                if doc.get("file_path") and (UPLOAD_DIR / doc["file_path"]).exists()
+            ]
+            if not reference_paths:
+                if PRIVACY_ALLOW_DEGRADED_RUNTIME:
+                    logger.warning(
+                        f"Privacy reference fallback activated for {video_id}: no usable teacher references found"
+                    )
+                    privacy_mode = "degraded"
+                else:
+                    raise RuntimeError("Teacher privacy profile has no usable references")
 
-        if analysis["review_reason"] and manual_override.get("decision") == "blur_all_and_continue":
-            analysis["review_reason"] = None
-            analysis["fallback_mode"] = "blur_all"
-        if analysis["review_reason"] and manual_override.get("decision") == "approve_teacher_track":
-            analysis["review_reason"] = None
-        if analysis["review_reason"] and PRIVACY_MANUAL_REVIEW_ENABLED:
+            await db.videos.update_one(
+                {"id": video_id},
+                {
+                    "$set": {
+                        "status": VideoProcessingStatus.PROCESSING.value,
+                        "privacy_status": PrivacyProcessingStatus.PROCESSING.value,
+                        "privacy_started_at": now,
+                        "privacy_failed_at": None,
+                        "privacy_completed_at": None,
+                        "privacy_error": None,
+                        "privacy_review_required": False,
+                        "privacy_review_reason": None,
+                        "status_updated_at": now,
+                    }
+                },
+            )
+            await db.video_evidence.update_one(
+                {"video_id": video_id, "uploaded_by": job["user_id"]},
+                {"$set": {"privacy_status": PrivacyProcessingStatus.PROCESSING.value, "error_message": None}},
+            )
+            try:
+                analysis = await asyncio.to_thread(
+                    analyze_video_privacy,
+                    job["file_path"],
+                    reference_paths,
+                    PRIVACY_TEACHER_MATCH_THRESHOLD,
+                    PRIVACY_AMBIGUOUS_MATCH_THRESHOLD,
+                )
+            except RuntimeError as exc:
+                if _should_use_degraded_privacy_runtime(exc):
+                    logger.warning(
+                        f"Privacy analysis runtime fallback activated for {video_id}: {exc}"
+                    )
+                    privacy_mode = "degraded"
+                    analysis = {
+                        "frames_analyzed": 0,
+                        "teacher_track_id": None,
+                        "review_reason": None,
+                        "candidate_tracks": [],
+                        "fallback_mode": "blur_all",
+                        "manifest_tracks": [],
+                        "runtime_fallback": "worker_analysis_fallback",
+                    }
+                else:
+                    raise
+
+            if analysis["review_reason"] and manual_override.get("decision") == "blur_all_and_continue":
+                analysis["review_reason"] = None
+                analysis["fallback_mode"] = "blur_all"
+            if analysis["review_reason"] and manual_override.get("decision") == "approve_teacher_track":
+                analysis["review_reason"] = None
+            if analysis["review_reason"] and PRIVACY_MANUAL_REVIEW_ENABLED:
+                finished_at = datetime.now(timezone.utc).isoformat()
+                await db.videos.update_one(
+                    {"id": video_id},
+                    {
+                        "$set": {
+                            "privacy_status": PrivacyProcessingStatus.REVIEW_REQUIRED.value,
+                            "privacy_review_required": True,
+                            "privacy_review_reason": analysis["review_reason"],
+                            "privacy_candidate_tracks": analysis["candidate_tracks"],
+                            "privacy_manifest": {
+                                "manifest_version": 1,
+                                "created_at": finished_at,
+                                "tracks": analysis["manifest_tracks"],
+                                "fallback_mode": analysis["fallback_mode"],
+                                "teacher_track_id": analysis["teacher_track_id"],
+                            },
+                            "status_updated_at": finished_at,
+                        }
+                    },
+                )
+                await db.video_privacy_jobs.update_one(
+                    {"video_id": video_id},
+                    {
+                        "$set": {
+                            "status": PrivacyProcessingStatus.REVIEW_REQUIRED.value,
+                            "updated_at": finished_at,
+                            "finished_at": finished_at,
+                            "review_required": True,
+                            "review_reason": analysis["review_reason"],
+                            "last_error": None,
+                        }
+                    },
+                )
+                await _log_privacy_audit_event(
+                    "privacy_review_required",
+                    "video",
+                    video_id,
+                    actor_user_id=job["user_id"],
+                    details={"reason": analysis["review_reason"], "candidate_tracks": analysis["candidate_tracks"]},
+                )
+                await db.video_evidence.update_one(
+                    {"video_id": video_id, "uploaded_by": job["user_id"]},
+                    {
+                        "$set": {
+                            "privacy_status": PrivacyProcessingStatus.REVIEW_REQUIRED.value,
+                            "error_message": None,
+                        }
+                    },
+                )
+                job_final_status = PrivacyProcessingStatus.REVIEW_REQUIRED.value
+                return
+
+            redacted_relative_path = f"redacted/{job['teacher_id']}/{video_id}.mp4"
+            redacted_full_path = UPLOAD_DIR / redacted_relative_path
+            redacted_thumbnail_relative_path = f"thumbnails/redacted/{job['teacher_id']}/{video_id}.jpg"
+            redacted_thumbnail_full_path = UPLOAD_DIR / redacted_thumbnail_relative_path
+            try:
+                render_stats = await asyncio.to_thread(
+                    render_redacted_video,
+                    job["file_path"],
+                    str(redacted_full_path),
+                    str(redacted_thumbnail_full_path),
+                    reference_paths,
+                    PRIVACY_TEACHER_MATCH_THRESHOLD,
+                    PRIVACY_AMBIGUOUS_MATCH_THRESHOLD,
+                    analysis["teacher_track_id"],
+                    manual_override.get("decision") == "blur_all_and_continue" or analysis["fallback_mode"] == "blur_all",
+                )
+            except RuntimeError as exc:
+                if _should_use_degraded_privacy_runtime(exc):
+                    logger.warning(
+                        f"Privacy render runtime fallback activated for {video_id}: {exc}"
+                    )
+                    privacy_mode = "degraded"
+                    render_stats = await asyncio.to_thread(
+                        _render_degraded_privacy_assets,
+                        job["file_path"],
+                        str(redacted_full_path),
+                        str(redacted_thumbnail_full_path),
+                    )
+                else:
+                    raise
+
+            redacted_file_url = _to_public_backend_url(f"/uploads/{redacted_relative_path}")
+            redacted_thumbnail_url = _to_public_backend_url(f"/uploads/{redacted_thumbnail_relative_path}")
+            try:
+                _, uploaded_video_url = _upload_path_to_s3(
+                    redacted_full_path,
+                    "redacted-videos",
+                    f"{video_id}.mp4",
+                    video.get("content_type") or "video/mp4",
+                )
+                redacted_file_url = uploaded_video_url or redacted_file_url
+            except Exception as exc:
+                logger.warning(f"Redacted video upload failed for {video_id}: {exc}")
+            try:
+                _, uploaded_thumb_url = _upload_path_to_s3(
+                    redacted_thumbnail_full_path,
+                    "redacted-thumbnails",
+                    f"{video_id}.jpg",
+                    "image/jpeg",
+                )
+                redacted_thumbnail_url = uploaded_thumb_url or redacted_thumbnail_url
+            except Exception as exc:
+                logger.warning(f"Redacted thumbnail upload failed for {video_id}: {exc}")
+
             finished_at = datetime.now(timezone.utc).isoformat()
             await db.videos.update_one(
                 {"id": video_id},
                 {
                     "$set": {
-                        "privacy_status": PrivacyProcessingStatus.REVIEW_REQUIRED.value,
-                        "privacy_review_required": True,
-                        "privacy_review_reason": analysis["review_reason"],
+                        "privacy_status": PrivacyProcessingStatus.COMPLETED.value,
+                        "analysis_status": VideoProcessingStatus.QUEUED.value,
+                        "privacy_completed_at": finished_at,
+                        "privacy_error": None,
+                        "privacy_review_required": False,
+                        "privacy_review_reason": None,
                         "privacy_candidate_tracks": analysis["candidate_tracks"],
+                        "privacy_manual_override": None,
                         "privacy_manifest": {
                             "manifest_version": 1,
                             "created_at": finished_at,
                             "tracks": analysis["manifest_tracks"],
                             "fallback_mode": analysis["fallback_mode"],
                             "teacher_track_id": analysis["teacher_track_id"],
+                            "render_stats": render_stats,
                         },
+                        "redacted_file_path": redacted_relative_path,
+                        "redacted_file_url": redacted_file_url,
+                        "redacted_thumbnail_path": redacted_thumbnail_relative_path,
+                        "redacted_thumbnail_url": redacted_thumbnail_url,
                         "status_updated_at": finished_at,
                     }
                 },
             )
+            await _log_privacy_audit_event(
+                "privacy_processing_completed",
+                "video",
+                video_id,
+                actor_user_id=job["user_id"],
+                details={
+                    "redacted_file_path": redacted_relative_path,
+                    "redacted_thumbnail_path": redacted_thumbnail_relative_path,
+                    "fallback_mode": analysis["fallback_mode"],
+                    "teacher_track_id": analysis["teacher_track_id"],
+                },
+            )
+            await db.video_evidence.update_one(
+                {"video_id": video_id, "uploaded_by": job["user_id"]},
+                {"$set": {"privacy_status": PrivacyProcessingStatus.COMPLETED.value, "error_message": None}},
+            )
+            await _enqueue_video_processing_job(
+                video_id=video_id,
+                teacher_id=job["teacher_id"],
+                user_id=job["user_id"],
+                file_path=str(redacted_full_path),
+            )
+            success = True
+            job_final_status = PrivacyProcessingStatus.COMPLETED.value
+        except Exception as exc:
+            error_message = str(exc)
+            finished_at = datetime.now(timezone.utc).isoformat()
+            await db.videos.update_one(
+                {"id": video_id},
+                {
+                    "$set": {
+                        "status": VideoProcessingStatus.FAILED.value,
+                        "privacy_status": PrivacyProcessingStatus.FAILED.value,
+                        "privacy_failed_at": finished_at,
+                        "privacy_error": error_message,
+                        "status_updated_at": finished_at,
+                    }
+                },
+            )
+            await db.video_evidence.update_one(
+                {"video_id": video_id, "uploaded_by": job.get("user_id")},
+                {"$set": {"privacy_status": PrivacyProcessingStatus.FAILED.value, "error_message": error_message}},
+            )
+            await _log_privacy_audit_event(
+                "privacy_processing_failed",
+                "video",
+                video_id,
+                actor_user_id=job.get("user_id"),
+                details={"error": error_message},
+            )
+            logger.error(f"Privacy worker failed for {video_id}: {error_message}")
+        finally:
             await db.video_privacy_jobs.update_one(
                 {"video_id": video_id},
                 {
                     "$set": {
-                        "status": PrivacyProcessingStatus.REVIEW_REQUIRED.value,
+                        "status": job_final_status,
                         "updated_at": finished_at,
                         "finished_at": finished_at,
-                        "review_required": True,
-                        "review_reason": analysis["review_reason"],
-                        "last_error": None,
+                        "last_error": error_message if not success else None,
                     }
                 },
             )
-            await _log_privacy_audit_event(
-                "privacy_review_required",
-                "video",
-                video_id,
-                actor_user_id=job["user_id"],
-                details={"reason": analysis["review_reason"], "candidate_tracks": analysis["candidate_tracks"]},
+            app_metrics.record_privacy_status_result(
+                status=job_final_status,
+                duration_seconds=time.perf_counter() - privacy_started_perf,
+                mode=privacy_mode,
             )
-            await db.video_evidence.update_one(
-                {"video_id": video_id, "uploaded_by": job["user_id"]},
-                {
-                    "$set": {
-                        "privacy_status": PrivacyProcessingStatus.REVIEW_REQUIRED.value,
-                        "error_message": None,
-                    }
-                },
-            )
-            job_final_status = PrivacyProcessingStatus.REVIEW_REQUIRED.value
-            return
-
-        redacted_relative_path = f"redacted/{job['teacher_id']}/{video_id}.mp4"
-        redacted_full_path = UPLOAD_DIR / redacted_relative_path
-        redacted_thumbnail_relative_path = f"thumbnails/redacted/{job['teacher_id']}/{video_id}.jpg"
-        redacted_thumbnail_full_path = UPLOAD_DIR / redacted_thumbnail_relative_path
-        try:
-            render_stats = await asyncio.to_thread(
-                render_redacted_video,
-                job["file_path"],
-                str(redacted_full_path),
-                str(redacted_thumbnail_full_path),
-                reference_paths,
-                PRIVACY_TEACHER_MATCH_THRESHOLD,
-                PRIVACY_AMBIGUOUS_MATCH_THRESHOLD,
-                analysis["teacher_track_id"],
-                manual_override.get("decision") == "blur_all_and_continue" or analysis["fallback_mode"] == "blur_all",
-            )
-        except RuntimeError as exc:
-            if _should_use_degraded_privacy_runtime(exc):
-                logger.warning(
-                    f"Privacy render runtime fallback activated for {video_id}: {exc}"
-                )
-                render_stats = await asyncio.to_thread(
-                    _render_degraded_privacy_assets,
-                    job["file_path"],
-                    str(redacted_full_path),
-                    str(redacted_thumbnail_full_path),
-                )
-            else:
-                raise
-
-        redacted_file_url = _to_public_backend_url(f"/uploads/{redacted_relative_path}")
-        redacted_thumbnail_url = _to_public_backend_url(f"/uploads/{redacted_thumbnail_relative_path}")
-        try:
-            _, uploaded_video_url = _upload_path_to_s3(
-                redacted_full_path,
-                "redacted-videos",
-                f"{video_id}.mp4",
-                video.get("content_type") or "video/mp4",
-            )
-            redacted_file_url = uploaded_video_url or redacted_file_url
-        except Exception as exc:
-            logger.warning(f"Redacted video upload failed for {video_id}: {exc}")
-        try:
-            _, uploaded_thumb_url = _upload_path_to_s3(
-                redacted_thumbnail_full_path,
-                "redacted-thumbnails",
-                f"{video_id}.jpg",
-                "image/jpeg",
-            )
-            redacted_thumbnail_url = uploaded_thumb_url or redacted_thumbnail_url
-        except Exception as exc:
-            logger.warning(f"Redacted thumbnail upload failed for {video_id}: {exc}")
-
-        finished_at = datetime.now(timezone.utc).isoformat()
-        await db.videos.update_one(
-            {"id": video_id},
-            {
-                "$set": {
-                    "privacy_status": PrivacyProcessingStatus.COMPLETED.value,
-                    "analysis_status": VideoProcessingStatus.QUEUED.value,
-                    "privacy_completed_at": finished_at,
-                    "privacy_error": None,
-                    "privacy_review_required": False,
-                    "privacy_review_reason": None,
-                    "privacy_candidate_tracks": analysis["candidate_tracks"],
-                    "privacy_manual_override": None,
-                    "privacy_manifest": {
-                        "manifest_version": 1,
-                        "created_at": finished_at,
-                        "tracks": analysis["manifest_tracks"],
-                        "fallback_mode": analysis["fallback_mode"],
-                        "teacher_track_id": analysis["teacher_track_id"],
-                        "render_stats": render_stats,
-                    },
-                    "redacted_file_path": redacted_relative_path,
-                    "redacted_file_url": redacted_file_url,
-                    "redacted_thumbnail_path": redacted_thumbnail_relative_path,
-                    "redacted_thumbnail_url": redacted_thumbnail_url,
-                    "status_updated_at": finished_at,
-                }
-            },
-        )
-        await _log_privacy_audit_event(
-            "privacy_processing_completed",
-            "video",
-            video_id,
-            actor_user_id=job["user_id"],
-            details={
-                "redacted_file_path": redacted_relative_path,
-                "redacted_thumbnail_path": redacted_thumbnail_relative_path,
-                "fallback_mode": analysis["fallback_mode"],
-                "teacher_track_id": analysis["teacher_track_id"],
-            },
-        )
-        await db.video_evidence.update_one(
-            {"video_id": video_id, "uploaded_by": job["user_id"]},
-            {"$set": {"privacy_status": PrivacyProcessingStatus.COMPLETED.value, "error_message": None}},
-        )
-        await _enqueue_video_processing_job(
-            video_id=video_id,
-            teacher_id=job["teacher_id"],
-            user_id=job["user_id"],
-            file_path=str(redacted_full_path),
-        )
-        success = True
-        job_final_status = PrivacyProcessingStatus.COMPLETED.value
-    except Exception as exc:
-        error_message = str(exc)
-        finished_at = datetime.now(timezone.utc).isoformat()
-        await db.videos.update_one(
-            {"id": video_id},
-            {
-                "$set": {
-                    "status": VideoProcessingStatus.FAILED.value,
-                    "privacy_status": PrivacyProcessingStatus.FAILED.value,
-                    "privacy_failed_at": finished_at,
-                    "privacy_error": error_message,
-                    "status_updated_at": finished_at,
-                }
-            },
-        )
-        await db.video_evidence.update_one(
-            {"video_id": video_id, "uploaded_by": job.get("user_id")},
-            {"$set": {"privacy_status": PrivacyProcessingStatus.FAILED.value, "error_message": error_message}},
-        )
-        await _log_privacy_audit_event(
-            "privacy_processing_failed",
-            "video",
-            video_id,
-            actor_user_id=job.get("user_id"),
-            details={"error": error_message},
-        )
-        logger.error(f"Privacy worker failed for {video_id}: {error_message}")
-    finally:
-        await db.video_privacy_jobs.update_one(
-            {"video_id": video_id},
-            {
-                "$set": {
-                    "status": job_final_status,
-                    "updated_at": finished_at,
-                    "finished_at": finished_at,
-                    "last_error": error_message if not success else None,
-                }
-            },
-        )
 
 
 async def _enqueue_video_processing_job(
@@ -3777,177 +3876,199 @@ async def upload_video(
     recorded_at: Optional[str] = Form(None),
     current_user: dict = Depends(get_current_user)
 ):
-    if not (file.filename or "").strip():
-        raise HTTPException(status_code=400, detail="Filename is required")
-    file_ext = Path(file.filename or "").suffix.lower()
-    if file_ext not in VIDEO_ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid file type. Allowed: {sorted(VIDEO_ALLOWED_EXTENSIONS)}",
-        )
-    content_type = (file.content_type or "").lower()
-    if content_type and content_type not in VIDEO_ALLOWED_CONTENT_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid content type. Allowed: {sorted(VIDEO_ALLOWED_CONTENT_TYPES)}",
-        )
-    normalized_recorded_at = _parse_optional_iso_datetime(recorded_at, "recorded_at")
-    upload_time = datetime.now(timezone.utc).isoformat()
     preferred_language = _resolve_request_language(request, default="en")
-    
-    # Verify teacher exists (admins can upload for their roster; teachers can upload for themselves)
-    teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
-    if not teacher:
-        raise HTTPException(status_code=404, detail="Teacher not found")
-    role = _get_user_role(current_user)
-    if role == "admin":
-        if teacher.get("created_by") != current_user["id"]:
-            raise HTTPException(status_code=403, detail="Not authorized for this teacher")
-    else:
-        if teacher.get("email", "").lower() != current_user.get("email", "").lower():
-            raise HTTPException(status_code=403, detail="Not authorized for this teacher")
-    active_profile = await _get_active_privacy_profile(teacher_id)
-    if PRIVACY_REQUIRE_PROFILE and not active_profile:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "PRIVACY_PROFILE_REQUIRED",
-                "message": "Teacher privacy profile must be completed before video upload.",
+    try:
+        upload_started_perf = time.perf_counter()
+        upload_source = _get_user_role(current_user)
+        if not (file.filename or "").strip():
+            raise HTTPException(status_code=400, detail="Filename is required")
+        file_ext = Path(file.filename or "").suffix.lower()
+        if file_ext not in VIDEO_ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file type. Allowed: {sorted(VIDEO_ALLOWED_EXTENSIONS)}",
+            )
+        content_type = (file.content_type or "").lower()
+        if content_type and content_type not in VIDEO_ALLOWED_CONTENT_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid content type. Allowed: {sorted(VIDEO_ALLOWED_CONTENT_TYPES)}",
+            )
+        normalized_recorded_at = _parse_optional_iso_datetime(recorded_at, "recorded_at")
+        upload_time = datetime.now(timezone.utc).isoformat()
+
+        teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
+        if not teacher:
+            raise HTTPException(status_code=404, detail="Teacher not found")
+        if upload_source == "admin":
+            if teacher.get("created_by") != current_user["id"]:
+                raise HTTPException(status_code=403, detail="Not authorized for this teacher")
+        else:
+            if teacher.get("email", "").lower() != current_user.get("email", "").lower():
+                raise HTTPException(status_code=403, detail="Not authorized for this teacher")
+        active_profile = await _get_active_privacy_profile(teacher_id)
+        if PRIVACY_REQUIRE_PROFILE and not active_profile:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "PRIVACY_PROFILE_REQUIRED",
+                    "message": "Teacher privacy profile must be completed before video upload.",
+                    "teacher_id": teacher_id,
+                },
+            )
+
+        subject = subject or teacher.get("subject")
+        video_id = str(uuid.uuid4())
+        filename = f"{video_id}{file_ext}"
+        teacher_dir = UPLOAD_DIR / "videos" / teacher_id
+        teacher_dir.mkdir(parents=True, exist_ok=True)
+        file_path = teacher_dir / filename
+        relative_path = f"videos/{teacher_id}/{filename}"
+
+        size = 0
+        async with aiofiles.open(file_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if VIDEO_MAX_UPLOAD_BYTES and size > VIDEO_MAX_UPLOAD_BYTES:
+                    await f.close()
+                    os.remove(file_path)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            f"File too large. Maximum allowed is "
+                            f"{VIDEO_MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
+                        ),
+                    )
+                await f.write(chunk)
+
+        s3_key = None
+        file_url = None
+        try:
+            s3_key, file_url = _upload_path_to_s3(
+                file_path,
+                "videos",
+                filename,
+                content_type or "video/mp4",
+            )
+        except Exception as exc:
+            logger.warning(f"S3 upload failed for video {video_id}: {exc}")
+
+        video_doc = {
+            "id": video_id,
+            "filename": file.filename,
+            "stored_filename": filename,
+            "s3_key": s3_key,
+            "raw_s3_key": s3_key,
+            "file_url": file_url,
+            "raw_file_url": file_url,
+            "file_path": relative_path,
+            "raw_file_path": relative_path,
+            "content_type": content_type or "video/mp4",
+            "file_size_bytes": size,
+            "teacher_id": teacher_id,
+            "uploaded_by": current_user["id"],
+            "status": VideoProcessingStatus.QUEUED.value,
+            "privacy_status": PrivacyProcessingStatus.QUEUED.value,
+            "analysis_status": VideoProcessingStatus.QUEUED.value,
+            "privacy_review_required": False,
+            "privacy_review_reason": None,
+            "privacy_started_at": None,
+            "privacy_completed_at": None,
+            "privacy_failed_at": None,
+            "privacy_error": None,
+            "privacy_profile_version": active_profile.get("profile_version") if active_profile else None,
+            "raw_retention_expires_at": (datetime.now(timezone.utc) + timedelta(days=PRIVACY_RAW_VIDEO_RETENTION_DAYS)).isoformat(),
+            "status_updated_at": upload_time,
+            "processing_started_at": None,
+            "processing_completed_at": None,
+            "processing_failed_at": None,
+            "subject": subject,
+            "recorded_at": normalized_recorded_at,
+            "upload_date": upload_time,
+            "analysis_language": preferred_language,
+        }
+        await db.videos.insert_one(video_doc)
+
+        await db.video_evidence.insert_one({
+            "id": str(uuid.uuid4()),
+            "video_id": video_id,
+            "teacher_id": teacher_id,
+            "file_path": relative_path,
+            "subject": subject,
+            "recorded_at": normalized_recorded_at,
+            "privacy_status": PrivacyProcessingStatus.QUEUED.value,
+            "analysis_status": VideoProcessingStatus.QUEUED.value,
+            "uploaded_by": current_user["id"],
+            "uploaded_at": upload_time,
+        })
+
+        try:
+            admin_id = teacher.get("created_by") or current_user["id"]
+            policy = await _get_recording_policy(admin_id, teacher.get("school_id"))
+            if policy:
+                compliance = await _upsert_recording_compliance(teacher, admin_id, policy)
+                await _refresh_recording_reminders(teacher, admin_id, policy, compliance)
+        except Exception:
+            logger.warning("Unable to update recording compliance after upload")
+
+        await _enqueue_video_privacy_job(
+            video_id=video_id,
+            teacher_id=teacher_id,
+            user_id=current_user["id"],
+            file_path=str(file_path),
+        )
+        await _log_privacy_audit_event(
+            "privacy_video_uploaded",
+            "video",
+            video_id,
+            actor_user_id=current_user["id"],
+            details={
                 "teacher_id": teacher_id,
+                "privacy_status": PrivacyProcessingStatus.QUEUED.value,
+                "raw_retention_expires_at": video_doc["raw_retention_expires_at"],
             },
         )
-    
-    subject = subject or teacher.get("subject")
-    video_id = str(uuid.uuid4())
-    filename = f"{video_id}{file_ext}"
-    teacher_dir = UPLOAD_DIR / "videos" / teacher_id
-    teacher_dir.mkdir(parents=True, exist_ok=True)
-    file_path = teacher_dir / filename
-    relative_path = f"videos/{teacher_id}/{filename}"
-    
-    # Save file with strict byte limit
-    size = 0
-    async with aiofiles.open(file_path, "wb") as f:
-        while True:
-            chunk = await file.read(1024 * 1024)
-            if not chunk:
-                break
-            size += len(chunk)
-            if VIDEO_MAX_UPLOAD_BYTES and size > VIDEO_MAX_UPLOAD_BYTES:
-                await f.close()
-                os.remove(file_path)
-                raise HTTPException(
-                    status_code=413,
-                    detail=(
-                        f"File too large. Maximum allowed is "
-                        f"{VIDEO_MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
-                    ),
-                )
-            await f.write(chunk)
-    
-    s3_key = None
-    file_url = None
-    try:
-        s3_key, file_url = _upload_path_to_s3(
-            file_path,
-            "videos",
-            filename,
-            content_type or "video/mp4",
+        duration_seconds = time.perf_counter() - upload_started_perf
+        app_metrics.record_upload_result(
+            source=upload_source,
+            language=preferred_language,
+            success=True,
+            duration_seconds=duration_seconds,
         )
-    except Exception as exc:
-        logger.warning(f"S3 upload failed for video {video_id}: {exc}")
 
-    video_doc = {
-        "id": video_id,
-        "filename": file.filename,
-        "stored_filename": filename,
-        "s3_key": s3_key,
-        "raw_s3_key": s3_key,
-        "file_url": file_url,
-        "raw_file_url": file_url,
-        "file_path": relative_path,
-        "raw_file_path": relative_path,
-        "content_type": content_type or "video/mp4",
-        "file_size_bytes": size,
-        "teacher_id": teacher_id,
-        "uploaded_by": current_user["id"],
-        "status": VideoProcessingStatus.QUEUED.value,
-        "privacy_status": PrivacyProcessingStatus.QUEUED.value,
-        "analysis_status": VideoProcessingStatus.QUEUED.value,
-        "privacy_review_required": False,
-        "privacy_review_reason": None,
-        "privacy_started_at": None,
-        "privacy_completed_at": None,
-        "privacy_failed_at": None,
-        "privacy_error": None,
-        "privacy_profile_version": active_profile.get("profile_version") if active_profile else None,
-        "raw_retention_expires_at": (datetime.now(timezone.utc) + timedelta(days=PRIVACY_RAW_VIDEO_RETENTION_DAYS)).isoformat(),
-        "status_updated_at": upload_time,
-        "processing_started_at": None,
-        "processing_completed_at": None,
-        "processing_failed_at": None,
-        "subject": subject,
-        "recorded_at": normalized_recorded_at,
-        "upload_date": upload_time,
-        "analysis_language": preferred_language,
-    }
-    await db.videos.insert_one(video_doc)
-
-    await db.video_evidence.insert_one({
-        "id": str(uuid.uuid4()),
-        "video_id": video_id,
-        "teacher_id": teacher_id,
-        "file_path": relative_path,
-        "subject": subject,
-        "recorded_at": normalized_recorded_at,
-        "privacy_status": PrivacyProcessingStatus.QUEUED.value,
-        "analysis_status": VideoProcessingStatus.QUEUED.value,
-        "uploaded_by": current_user["id"],
-        "uploaded_at": upload_time,
-    })
-
-    try:
-        admin_id = teacher.get("created_by") or current_user["id"]
-        policy = await _get_recording_policy(admin_id, teacher.get("school_id"))
-        if policy:
-            compliance = await _upsert_recording_compliance(teacher, admin_id, policy)
-            await _refresh_recording_reminders(teacher, admin_id, policy, compliance)
+        return VideoUploadResponse(
+            id=video_id,
+            filename=file.filename,
+            teacher_id=teacher_id,
+            status=VideoProcessingStatus.QUEUED.value,
+            privacy_status=PrivacyProcessingStatus.QUEUED.value,
+            analysis_status=VideoProcessingStatus.QUEUED.value,
+            upload_date=video_doc["upload_date"],
+            subject=subject,
+            recorded_at=normalized_recorded_at,
+            file_path=relative_path,
+            file_size_bytes=size,
+            content_type=content_type or "video/mp4",
+        )
+    except HTTPException:
+        app_metrics.record_upload_result(
+            source=_get_user_role(current_user),
+            language=preferred_language,
+            success=False,
+            duration_seconds=time.perf_counter() - upload_started_perf,
+        )
+        raise
     except Exception:
-        logger.warning("Unable to update recording compliance after upload")
-    
-    # Queue privacy processing before AI analysis.
-    await _enqueue_video_privacy_job(
-        video_id=video_id,
-        teacher_id=teacher_id,
-        user_id=current_user["id"],
-        file_path=str(file_path),
-    )
-    await _log_privacy_audit_event(
-        "privacy_video_uploaded",
-        "video",
-        video_id,
-        actor_user_id=current_user["id"],
-        details={
-            "teacher_id": teacher_id,
-            "privacy_status": PrivacyProcessingStatus.QUEUED.value,
-            "raw_retention_expires_at": video_doc["raw_retention_expires_at"],
-        },
-    )
-    
-    return VideoUploadResponse(
-        id=video_id,
-        filename=file.filename,
-        teacher_id=teacher_id,
-        status=VideoProcessingStatus.QUEUED.value,
-        privacy_status=PrivacyProcessingStatus.QUEUED.value,
-        analysis_status=VideoProcessingStatus.QUEUED.value,
-        upload_date=video_doc["upload_date"],
-        subject=subject,
-        recorded_at=normalized_recorded_at,
-        file_path=relative_path,
-        file_size_bytes=size,
-        content_type=content_type or "video/mp4",
-    )
+        app_metrics.record_upload_result(
+            source=_get_user_role(current_user),
+            language=preferred_language,
+            success=False,
+            duration_seconds=time.perf_counter() - upload_started_perf,
+        )
+        raise
 
 @api_router.get("/videos")
 async def get_videos(teacher_id: Optional[str] = None, current_user: dict = Depends(get_current_user)):
@@ -5483,199 +5604,220 @@ async def export_summary_report(
     department: Optional[str] = Form(None),
     current_user: dict = Depends(get_current_user),
 ):
+    report_started_perf = time.perf_counter()
     language = _resolve_request_language(request, default="en")
     is_hebrew = _is_hebrew_language(language)
-    def _format_export_datetime(value: Optional[str]) -> Optional[str]:
-        if not value:
-            return value
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return value
-        if is_hebrew:
-            return parsed.astimezone(timezone.utc).strftime("%d/%m/%Y %H:%M")
-        return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    export_format = format.lower()
+    try:
+        def _format_export_datetime(value: Optional[str]) -> Optional[str]:
+            if not value:
+                return value
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return value
+            if is_hebrew:
+                return parsed.astimezone(timezone.utc).strftime("%d/%m/%Y %H:%M")
+            return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
 
-    teacher_query: Dict[str, Any] = {"created_by": current_user["id"]}
-    if teacher_id:
-        teacher_query["id"] = teacher_id
-    if department:
-        teacher_query["department"] = department
-    teachers = await db.teachers.find(teacher_query, {"_id": 0}).to_list(1000)
-    teacher_ids = [t["id"] for t in teachers]
-    assessments = await db.assessments.find(
-        {"user_id": current_user["id"], "teacher_id": {"$in": teacher_ids}},
-        {"_id": 0},
-    ).sort("analyzed_at", -1).to_list(2000)
+        teacher_query: Dict[str, Any] = {"created_by": current_user["id"]}
+        if teacher_id:
+            teacher_query["id"] = teacher_id
+        if department:
+            teacher_query["department"] = department
+        teachers = await db.teachers.find(teacher_query, {"_id": 0}).to_list(1000)
+        teacher_ids = [t["id"] for t in teachers]
+        assessments = await db.assessments.find(
+            {"user_id": current_user["id"], "teacher_id": {"$in": teacher_ids}},
+            {"_id": 0},
+        ).sort("analyzed_at", -1).to_list(2000)
 
-    latest_by_teacher: Dict[str, dict] = {}
-    for assessment in assessments:
-        tid = assessment["teacher_id"]
-        if tid not in latest_by_teacher:
-            latest_by_teacher[tid] = assessment
+        latest_by_teacher: Dict[str, dict] = {}
+        for assessment in assessments:
+            tid = assessment["teacher_id"]
+            if tid not in latest_by_teacher:
+                latest_by_teacher[tid] = assessment
 
-    rows = []
-    for t in teachers:
-        assessment = latest_by_teacher.get(t["id"])
-        evidence_count = await db.assessment_evidence.count_documents(
-            {"teacher_id": t["id"], "user_id": current_user["id"]}
-        )
-        avg_score = None
-        teacher_assessments = [a for a in assessments if a["teacher_id"] == t["id"]]
-        if teacher_assessments:
-            avg_score = round(
-                sum(a.get("overall_score") or 0 for a in teacher_assessments) / len(teacher_assessments),
-                2,
+        rows = []
+        for t in teachers:
+            assessment = latest_by_teacher.get(t["id"])
+            evidence_count = await db.assessment_evidence.count_documents(
+                {"teacher_id": t["id"], "user_id": current_user["id"]}
             )
-        trend_summary = None
-        if len(teacher_assessments) >= 2:
-            # Determine element deltas between earliest and latest assessment
-            earliest = teacher_assessments[-1]
-            latest = teacher_assessments[0]
-            early_scores = {es["element_id"]: es.get("score") for es in earliest.get("element_scores", [])}
-            late_scores = {es["element_id"]: es.get("score") for es in latest.get("element_scores", [])}
-            deltas = []
-            for element_id, late_score in late_scores.items():
-                early_score = early_scores.get(element_id)
-                if early_score is None or late_score is None:
-                    continue
-                deltas.append((element_id, round(late_score - early_score, 2)))
-            deltas.sort(key=lambda x: x[1], reverse=True)
-            gains = [f"{d[0].upper()}({d[1]:+0.2f})" for d in deltas[:2]]
-            declines = [f"{d[0].upper()}({d[1]:+0.2f})" for d in deltas[-2:]] if deltas else []
-            if deltas:
-                trend_summary = (
-                    f"שיפורים: {', '.join(gains)} | ירידות: {', '.join(declines)}"
-                    if is_hebrew
-                    else f"Gains: {', '.join(gains)} | Declines: {', '.join(declines)}"
+            avg_score = None
+            teacher_assessments = [a for a in assessments if a["teacher_id"] == t["id"]]
+            if teacher_assessments:
+                avg_score = round(
+                    sum(a.get("overall_score") or 0 for a in teacher_assessments) / len(teacher_assessments),
+                    2,
                 )
+            trend_summary = None
+            if len(teacher_assessments) >= 2:
+                earliest = teacher_assessments[-1]
+                latest = teacher_assessments[0]
+                early_scores = {es["element_id"]: es.get("score") for es in earliest.get("element_scores", [])}
+                late_scores = {es["element_id"]: es.get("score") for es in latest.get("element_scores", [])}
+                deltas = []
+                for element_id, late_score in late_scores.items():
+                    early_score = early_scores.get(element_id)
+                    if early_score is None or late_score is None:
+                        continue
+                    deltas.append((element_id, round(late_score - early_score, 2)))
+                deltas.sort(key=lambda x: x[1], reverse=True)
+                gains = [f"{d[0].upper()}({d[1]:+0.2f})" for d in deltas[:2]]
+                declines = [f"{d[0].upper()}({d[1]:+0.2f})" for d in deltas[-2:]] if deltas else []
+                if deltas:
+                    trend_summary = (
+                        f"שיפורים: {', '.join(gains)} | ירידות: {', '.join(declines)}"
+                        if is_hebrew
+                        else f"Gains: {', '.join(gains)} | Declines: {', '.join(declines)}"
+                    )
 
-        adherence_score = None
-        if assessment:
-            adherence_doc = await db.curriculum_adherence.find_one(
-                {"assessment_id": assessment["id"], "user_id": current_user["id"]},
-                {"_id": 0, "adherence_score": 1},
-            )
-            if adherence_doc:
-                adherence_score = adherence_doc.get("adherence_score")
-        rows.append(
-            {
-                "teacher_name": t.get("name"),
-                "subject": _localize_subject_label(t.get("subject"), language),
-                "grade_level": _localize_grade_level_label(t.get("grade_level"), language),
-                "department": _localize_department_label(t.get("department"), language),
-                "latest_score": assessment.get("overall_score") if assessment else None,
-                "average_score": avg_score,
-                "assessment_count": len(teacher_assessments),
-                "evidence_count": evidence_count,
-                "adherence_score": adherence_score,
-                "domain_trend_summary": trend_summary,
-                "last_assessment": _format_export_datetime(assessment.get("analyzed_at")) if assessment else None,
-                "detail_url": f"{FRONTEND_URL.rstrip('/')}/teachers/{t['id']}" if FRONTEND_URL else None,
-            }
-        )
-
-    if format.lower() == "csv":
-        localized_rows = []
-        for row in rows:
-            localized_rows.append(
+            adherence_score = None
+            if assessment:
+                adherence_doc = await db.curriculum_adherence.find_one(
+                    {"assessment_id": assessment["id"], "user_id": current_user["id"]},
+                    {"_id": 0, "adherence_score": 1},
+                )
+                if adherence_doc:
+                    adherence_score = adherence_doc.get("adherence_score")
+            rows.append(
                 {
-                    ("שם מורה" if is_hebrew else "teacher_name"): row["teacher_name"],
-                    ("מקצוע" if is_hebrew else "subject"): row["subject"],
-                    ("שכבת גיל" if is_hebrew else "grade_level"): row["grade_level"],
-                    ("מחלקה" if is_hebrew else "department"): row["department"],
-                    ("ציון אחרון" if is_hebrew else "latest_score"): row["latest_score"],
-                    ("ציון ממוצע" if is_hebrew else "average_score"): row["average_score"],
-                    ("מספר הערכות" if is_hebrew else "assessment_count"): row["assessment_count"],
-                    ("מספר ראיות" if is_hebrew else "evidence_count"): row["evidence_count"],
-                    ("ציון התאמה" if is_hebrew else "adherence_score"): row["adherence_score"],
-                    ("סיכום מגמה" if is_hebrew else "domain_trend_summary"): row["domain_trend_summary"],
-                    ("מועד הערכה אחרונה" if is_hebrew else "last_assessment"): row["last_assessment"],
-                    ("קישור פירוט" if is_hebrew else "detail_url"): row["detail_url"],
+                    "teacher_name": t.get("name"),
+                    "subject": _localize_subject_label(t.get("subject"), language),
+                    "grade_level": _localize_grade_level_label(t.get("grade_level"), language),
+                    "department": _localize_department_label(t.get("department"), language),
+                    "latest_score": assessment.get("overall_score") if assessment else None,
+                    "average_score": avg_score,
+                    "assessment_count": len(teacher_assessments),
+                    "evidence_count": evidence_count,
+                    "adherence_score": adherence_score,
+                    "domain_trend_summary": trend_summary,
+                    "last_assessment": _format_export_datetime(assessment.get("analyzed_at")) if assessment else None,
+                    "detail_url": f"{FRONTEND_URL.rstrip('/')}/teachers/{t['id']}" if FRONTEND_URL else None,
                 }
             )
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=list(localized_rows[0].keys()) if localized_rows else [])
-        writer.writeheader()
-        for row in localized_rows:
-            writer.writerow(row)
-        return Response(
-            content=output.getvalue(),
-            media_type="text/csv",
-            headers={"Content-Disposition": "attachment; filename=summary-report.csv"},
-        )
+        if export_format == "csv":
+            localized_rows = []
+            for row in rows:
+                localized_rows.append(
+                    {
+                        ("שם מורה" if is_hebrew else "teacher_name"): row["teacher_name"],
+                        ("מקצוע" if is_hebrew else "subject"): row["subject"],
+                        ("שכבת גיל" if is_hebrew else "grade_level"): row["grade_level"],
+                        ("מחלקה" if is_hebrew else "department"): row["department"],
+                        ("ציון אחרון" if is_hebrew else "latest_score"): row["latest_score"],
+                        ("ציון ממוצע" if is_hebrew else "average_score"): row["average_score"],
+                        ("מספר הערכות" if is_hebrew else "assessment_count"): row["assessment_count"],
+                        ("מספר ראיות" if is_hebrew else "evidence_count"): row["evidence_count"],
+                        ("ציון התאמה" if is_hebrew else "adherence_score"): row["adherence_score"],
+                        ("סיכום מגמה" if is_hebrew else "domain_trend_summary"): row["domain_trend_summary"],
+                        ("מועד הערכה אחרונה" if is_hebrew else "last_assessment"): row["last_assessment"],
+                        ("קישור פירוט" if is_hebrew else "detail_url"): row["detail_url"],
+                    }
+                )
+            output = io.StringIO()
+            writer = csv.DictWriter(output, fieldnames=list(localized_rows[0].keys()) if localized_rows else [])
+            writer.writeheader()
+            for row in localized_rows:
+                writer.writerow(row)
+            app_metrics.record_report_result(
+                format=export_format,
+                language=language,
+                success=True,
+                duration_seconds=time.perf_counter() - report_started_perf,
+            )
+            return Response(
+                content=output.getvalue(),
+                media_type="text/csv",
+                headers={"Content-Disposition": "attachment; filename=summary-report.csv"},
+            )
 
-    if format.lower() == "pdf":
-        if canvas is None:
-            raise HTTPException(status_code=501, detail="PDF export not available")
-        buffer = io.BytesIO()
-        pdf = canvas.Canvas(buffer)
-        title = "דוח סיכום תצפיות Cognivio" if is_hebrew else "Cognivio Summary Report"
-        generated_label = "הופק ב־" if is_hebrew else "Generated"
-        teacher_filter_label = "סינון מורה" if is_hebrew else "Teacher filter"
-        department_filter_label = "סינון מחלקה" if is_hebrew else "Department filter"
-        dept_fallback = "ללא מחלקה" if is_hebrew else "No dept"
-        subject_label = "מקצוע" if is_hebrew else "Subject"
-        grade_label = "שכבת גיל" if is_hebrew else "Grade"
-        latest_score_label = "ציון אחרון" if is_hebrew else "Latest score"
-        avg_score_label = "ציון ממוצע" if is_hebrew else "Avg score"
-        assessments_label = "הערכות" if is_hebrew else "Assessments"
-        evidence_label = "ראיות" if is_hebrew else "Evidence"
-        adherence_label = "התאמה לתוכנית הלימודים" if is_hebrew else "Adherence"
-        trend_label = "מגמות מרכזיות" if is_hebrew else "Trend"
-        detail_label = "קישור לפרופיל" if is_hebrew else "Detail"
-        pdf.setTitle(title)
-        pdf.drawString(50, 800, title)
-        pdf.drawString(50, 785, f"{generated_label} {_format_export_datetime(datetime.now(timezone.utc).isoformat())}")
-        if teacher_id:
-            pdf.drawString(50, 770, f"{teacher_filter_label}: {teacher_id}")
-        if department:
-            pdf.drawString(50, 755, f"{department_filter_label}: {department}")
-        y = 735
-        for row in rows[:30]:
-            pdf.setFont("Helvetica-Bold", 10)
-            pdf.drawString(
-                50,
-                y,
-                f"{row['teacher_name']} ({row['department'] or dept_fallback})",
+        if export_format == "pdf":
+            if canvas is None:
+                raise HTTPException(status_code=501, detail="PDF export not available")
+            buffer = io.BytesIO()
+            pdf = canvas.Canvas(buffer)
+            title = "דוח סיכום תצפיות Cognivio" if is_hebrew else "Cognivio Summary Report"
+            generated_label = "הופק ב־" if is_hebrew else "Generated"
+            teacher_filter_label = "סינון מורה" if is_hebrew else "Teacher filter"
+            department_filter_label = "סינון מחלקה" if is_hebrew else "Department filter"
+            dept_fallback = "ללא מחלקה" if is_hebrew else "No dept"
+            subject_label = "מקצוע" if is_hebrew else "Subject"
+            grade_label = "שכבת גיל" if is_hebrew else "Grade"
+            latest_score_label = "ציון אחרון" if is_hebrew else "Latest score"
+            avg_score_label = "ציון ממוצע" if is_hebrew else "Avg score"
+            assessments_label = "הערכות" if is_hebrew else "Assessments"
+            evidence_label = "ראיות" if is_hebrew else "Evidence"
+            adherence_label = "התאמה לתוכנית הלימודים" if is_hebrew else "Adherence"
+            trend_label = "מגמות מרכזיות" if is_hebrew else "Trend"
+            detail_label = "קישור לפרופיל" if is_hebrew else "Detail"
+            pdf.setTitle(title)
+            pdf.drawString(50, 800, title)
+            pdf.drawString(50, 785, f"{generated_label} {_format_export_datetime(datetime.now(timezone.utc).isoformat())}")
+            if teacher_id:
+                pdf.drawString(50, 770, f"{teacher_filter_label}: {teacher_id}")
+            if department:
+                pdf.drawString(50, 755, f"{department_filter_label}: {department}")
+            y = 735
+            for row in rows[:30]:
+                pdf.setFont("Helvetica-Bold", 10)
+                pdf.drawString(
+                    50,
+                    y,
+                    f"{row['teacher_name']} ({row['department'] or dept_fallback})",
+                )
+                y -= 12
+                pdf.setFont("Helvetica", 9)
+                pdf.drawString(
+                    50,
+                    y,
+                    f"{subject_label}: {row['subject'] or 'N/A'} | {grade_label}: {row['grade_level'] or 'N/A'}",
+                )
+                y -= 12
+                pdf.drawString(
+                    50,
+                    y,
+                    f"{latest_score_label}: {row['latest_score']} | {avg_score_label}: {row['average_score']} | {assessments_label}: {row['assessment_count']} | {evidence_label}: {row['evidence_count']}",
+                )
+                y -= 12
+                pdf.drawString(
+                    50,
+                    y,
+                    f"{adherence_label}: {row.get('adherence_score')} | {trend_label}: {row.get('domain_trend_summary')}",
+                )
+                y -= 12
+                if row.get("detail_url"):
+                    pdf.drawString(50, y, f"{detail_label}: {row['detail_url']}")
+                    y -= 14
+                else:
+                    y -= 8
+                if y < 60:
+                    pdf.showPage()
+                    y = 800
+            pdf.save()
+            buffer.seek(0)
+            app_metrics.record_report_result(
+                format=export_format,
+                language=language,
+                success=True,
+                duration_seconds=time.perf_counter() - report_started_perf,
             )
-            y -= 12
-            pdf.setFont("Helvetica", 9)
-            pdf.drawString(
-                50,
-                y,
-                f"{subject_label}: {row['subject'] or 'N/A'} | {grade_label}: {row['grade_level'] or 'N/A'}",
+            return Response(
+                content=buffer.read(),
+                media_type="application/pdf",
+                headers={"Content-Disposition": "attachment; filename=summary-report.pdf"},
             )
-            y -= 12
-            pdf.drawString(
-                50,
-                y,
-                f"{latest_score_label}: {row['latest_score']} | {avg_score_label}: {row['average_score']} | {assessments_label}: {row['assessment_count']} | {evidence_label}: {row['evidence_count']}",
-            )
-            y -= 12
-            pdf.drawString(
-                50,
-                y,
-                f"{adherence_label}: {row.get('adherence_score')} | {trend_label}: {row.get('domain_trend_summary')}",
-            )
-            y -= 12
-            if row.get("detail_url"):
-                pdf.drawString(50, y, f"{detail_label}: {row['detail_url']}")
-                y -= 14
-            else:
-                y -= 8
-            if y < 60:
-                pdf.showPage()
-                y = 800
-        pdf.save()
-        buffer.seek(0)
-        return Response(
-            content=buffer.read(),
-            media_type="application/pdf",
-            headers={"Content-Disposition": "attachment; filename=summary-report.pdf"},
-        )
 
-    raise HTTPException(status_code=400, detail="Invalid export format. Use pdf or csv.")
+        raise HTTPException(status_code=400, detail="Invalid export format. Use pdf or csv.")
+    except Exception:
+        app_metrics.record_report_result(
+            format=export_format,
+            language=language,
+            success=False,
+            duration_seconds=time.perf_counter() - report_started_perf,
+        )
+        raise
 
 
 @api_router.get("/qa/smoke")
@@ -8535,6 +8677,7 @@ async def analyze_video(
 ) -> Tuple[bool, Optional[str]]:
     """Background task to analyze video using AI"""
     analysis_started_perf = time.perf_counter()
+    analysis_language = "unknown"
     try:
         log_structured(
             logger,
@@ -8599,69 +8742,74 @@ async def analyze_video(
             }
         analysis_user = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
         
-        # Extract frames from video (run in thread to avoid blocking event loop)
-        frames = await asyncio.to_thread(extract_video_frames, file_path, VIDEO_ANALYSIS_MAX_FRAMES)
-        logger.info(f"Extracted {len(frames)} frames from video")
-        sampling_manifest = build_sampling_manifest(video_id, frames)
-        await db.video_sampling_manifests.update_one(
-            {"video_id": video_id, "strategy_version": sampling_manifest["strategy_version"]},
-            {"$set": sampling_manifest},
-            upsert=True,
-        )
-        moment_manifest = build_moment_manifest(video_id, file_path, frames)
-        await db.video_analysis_moments.update_one(
-            {"video_id": video_id, "strategy_version": moment_manifest["strategy_version"]},
-            {"$set": moment_manifest},
-            upsert=True,
-        )
-        frames = attach_moment_metadata_to_frames(frames, moment_manifest)
-        transcript_doc = None
-        feature_doc = None
-        try:
-            transcript_doc, feature_doc = await build_audio_artifacts(
-                video_id,
-                file_path,
-                analysis_user,
-                analysis_language=analysis_language,
-            )
-        except Exception as exc:
-            logger.warning(f"Audio artifact generation failed for {video_id}; continuing with vision-only analysis: {exc}")
-        if transcript_doc:
-            await db.video_audio_transcripts.update_one(
-                {"video_id": video_id},
-                {"$set": transcript_doc},
-                upsert=True,
-            )
-        if feature_doc:
-            await db.video_analysis_features.update_one(
-                {"video_id": video_id},
-                {"$set": feature_doc},
-                upsert=True,
-            )
-        multimodal_payload = build_multimodal_analysis_payload(
-            frames,
-            moment_manifest,
-            transcript_doc,
-            feature_doc,
-        )
-        frames = multimodal_payload.get("frames") or frames
-        
-        # Analyze with AI
-        analysis_payload = await analyze_frames_with_ai(
-            frames,
-            framework,
-            selected_elements,
-            priority_elements=priority_elements,
-            focus_note=focus_note,
+        with app_metrics.track_analysis_run(
+            analysis_mode="unknown",
             language=analysis_language,
-            framework_type=framework_type,
-            current_user=analysis_user,
-            multimodal_payload=multimodal_payload,
-        )
+            modalities=None,
+        ):
+            frames = await asyncio.to_thread(extract_video_frames, file_path, VIDEO_ANALYSIS_MAX_FRAMES)
+            logger.info(f"Extracted {len(frames)} frames from video")
+            sampling_manifest = build_sampling_manifest(video_id, frames)
+            await db.video_sampling_manifests.update_one(
+                {"video_id": video_id, "strategy_version": sampling_manifest["strategy_version"]},
+                {"$set": sampling_manifest},
+                upsert=True,
+            )
+            moment_manifest = build_moment_manifest(video_id, file_path, frames)
+            await db.video_analysis_moments.update_one(
+                {"video_id": video_id, "strategy_version": moment_manifest["strategy_version"]},
+                {"$set": moment_manifest},
+                upsert=True,
+            )
+            frames = attach_moment_metadata_to_frames(frames, moment_manifest)
+            transcript_doc = None
+            feature_doc = None
+            try:
+                transcript_doc, feature_doc = await build_audio_artifacts(
+                    video_id,
+                    file_path,
+                    analysis_user,
+                    analysis_language=analysis_language,
+                )
+            except Exception as exc:
+                logger.warning(f"Audio artifact generation failed for {video_id}; continuing with vision-only analysis: {exc}")
+            if transcript_doc:
+                await db.video_audio_transcripts.update_one(
+                    {"video_id": video_id},
+                    {"$set": transcript_doc},
+                    upsert=True,
+                )
+            if feature_doc:
+                await db.video_analysis_features.update_one(
+                    {"video_id": video_id},
+                    {"$set": feature_doc},
+                    upsert=True,
+                )
+            multimodal_payload = build_multimodal_analysis_payload(
+                frames,
+                moment_manifest,
+                transcript_doc,
+                feature_doc,
+            )
+            frames = multimodal_payload.get("frames") or frames
+
+            analysis_payload = await analyze_frames_with_ai(
+                frames,
+                framework,
+                selected_elements,
+                priority_elements=priority_elements,
+                focus_note=focus_note,
+                language=analysis_language,
+                framework_type=framework_type,
+                current_user=analysis_user,
+                multimodal_payload=multimodal_payload,
+            )
         usage_estimate = estimate_analysis_usage(
             frames=frames,
             multimodal_payload=multimodal_payload,
             output_payload=analysis_payload,
+            input_cost_per_million=OPENAI_ANALYSIS_INPUT_COST_PER_MILLION_USD,
+            output_cost_per_million=OPENAI_ANALYSIS_OUTPUT_COST_PER_MILLION_USD,
         )
         analysis_metadata = build_analysis_metadata(
             analysis_payload,
@@ -8768,6 +8916,9 @@ async def analyze_video(
             modalities_used=analysis_metadata["analysis_modalities_used"],
             estimated_input_tokens=usage_estimate.get("estimated_input_tokens"),
             estimated_output_tokens=usage_estimate.get("estimated_output_tokens"),
+            estimated_cost_usd=usage_estimate.get("estimated_cost_usd"),
+            language=analysis_language,
+            model=OPENAI_VISION_MODEL if analysis_payload.get("analysis_mode") in {"openai", "openai_multimodal"} else "fallback",
         )
         log_structured(
             logger,
@@ -8780,6 +8931,7 @@ async def analyze_video(
             modalities_used=analysis_metadata["analysis_modalities_used"],
             estimated_input_tokens=usage_estimate.get("estimated_input_tokens"),
             estimated_output_tokens=usage_estimate.get("estimated_output_tokens"),
+            estimated_cost_usd=usage_estimate.get("estimated_cost_usd"),
         )
         return True, None
         
@@ -8793,6 +8945,8 @@ async def analyze_video(
             duration_seconds=duration_seconds,
             modalities_used=["vision"],
             failure_reason=str(e),
+            language=analysis_language,
+            model=OPENAI_VISION_MODEL,
         )
         log_structured(
             logger,
@@ -9063,6 +9217,8 @@ async def build_audio_artifacts(
     extracted_audio_path = str(UPLOAD_DIR / "audio" / f"{video_id}.wav")
     transcript_doc: Optional[Dict[str, Any]] = None
     feature_doc: Optional[Dict[str, Any]] = None
+    normalized_language = _normalize_app_language(analysis_language, default="")
+    transcription_started_perf: Optional[float] = None
     try:
         extraction = await asyncio.to_thread(
             extract_audio_track,
@@ -9076,13 +9232,20 @@ async def build_audio_artifacts(
         transcription_model = None
 
         if AUDIO_TRANSCRIPTION_ENABLED and OPENAI_API_KEY:
-            transcription_language = AUDIO_TRANSCRIPTION_LANGUAGE or _normalize_app_language(analysis_language, default="")
+            transcription_language = AUDIO_TRANSCRIPTION_LANGUAGE or normalized_language
+            transcription_started_perf = time.perf_counter()
             transcription = await asyncio.to_thread(
                 transcribe_audio_file,
                 extraction["audio_path"],
                 OPENAI_API_KEY,
                 AUDIO_TRANSCRIPTION_MODEL,
                 transcription_language,
+            )
+            app_metrics.record_transcription_result(
+                language=transcription_language,
+                success=True,
+                duration_seconds=time.perf_counter() - transcription_started_perf,
+                model=AUDIO_TRANSCRIPTION_MODEL,
             )
             transcript_segments = transcription.get("segments") or []
             transcript_text = transcription.get("text") or ""
@@ -9096,7 +9259,7 @@ async def build_audio_artifacts(
             "video_id": video_id,
             "transcript_status": transcription_status,
             "model": transcription_model,
-            "language": AUDIO_TRANSCRIPTION_LANGUAGE or _normalize_app_language(analysis_language, default=""),
+            "language": AUDIO_TRANSCRIPTION_LANGUAGE or normalized_language,
             "segments": transcript_segments,
             "text": transcript_text,
             "retention_expires_at": (
@@ -9116,6 +9279,19 @@ async def build_audio_artifacts(
             }
 
         return transcript_doc, feature_doc
+    except Exception:
+        if AUDIO_TRANSCRIPTION_ENABLED:
+            app_metrics.record_transcription_result(
+                language=AUDIO_TRANSCRIPTION_LANGUAGE or normalized_language,
+                success=False,
+                duration_seconds=(
+                    time.perf_counter() - transcription_started_perf
+                    if transcription_started_perf is not None
+                    else 0.0
+                ),
+                model=AUDIO_TRANSCRIPTION_MODEL,
+            )
+        raise
     finally:
         try:
             if extracted_audio_path and os.path.exists(extracted_audio_path):

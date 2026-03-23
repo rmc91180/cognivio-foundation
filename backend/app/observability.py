@@ -7,6 +7,8 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Optional
 
+from . import metrics
+
 
 _LOCK = threading.Lock()
 _MAX_RECENT_ITEMS = 50
@@ -70,6 +72,8 @@ def record_analysis_run(
     estimated_output_tokens: Optional[int] = None,
     estimated_cost_usd: Optional[float] = None,
     failure_reason: Optional[str] = None,
+    language: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> None:
     with _LOCK:
         analysis = _STATE["analysis"]
@@ -119,6 +123,17 @@ def record_analysis_run(
                     "recorded_at": run_doc["recorded_at"],
                 }
             )
+    metrics.record_analysis_result(
+        analysis_mode=analysis_mode,
+        language=language,
+        modalities=modalities_used,
+        success=success,
+        duration_seconds=duration_seconds,
+        model=model,
+        estimated_input_tokens=estimated_input_tokens,
+        estimated_output_tokens=estimated_output_tokens,
+        estimated_cost_usd=estimated_cost_usd,
+    )
 
 
 def record_worker_result(
@@ -143,6 +158,7 @@ def record_worker_result(
                     "recorded_at": _utc_now_iso(),
                 }
             )
+    metrics.record_worker_result(worker_type=worker_type, success=success)
 
 
 def snapshot() -> Dict[str, Any]:
@@ -164,6 +180,8 @@ def estimate_analysis_usage(
     multimodal_payload: Optional[dict] = None,
     output_payload: Optional[dict] = None,
     input_text_tokens_base: int = 1000,
+    input_cost_per_million: Optional[float] = None,
+    output_cost_per_million: Optional[float] = None,
 ) -> Dict[str, Optional[float]]:
     frame_count = len(frames or [])
     image_input_tokens = frame_count * 486
@@ -185,9 +203,22 @@ def estimate_analysis_usage(
         except Exception:
             estimated_output_tokens = None
 
+    estimated_cost_usd = None
+    if (
+        input_cost_per_million is not None
+        and output_cost_per_million is not None
+        and estimated_output_tokens is not None
+    ):
+        estimated_cost_usd = round(
+            (estimated_input_tokens / 1_000_000.0) * input_cost_per_million
+            + (estimated_output_tokens / 1_000_000.0) * output_cost_per_million,
+            8,
+        )
+
     return {
         "estimated_input_tokens": estimated_input_tokens,
         "estimated_output_tokens": estimated_output_tokens,
+        "estimated_cost_usd": estimated_cost_usd,
         "frame_count": frame_count,
         "transcript_word_count": transcript_word_count,
     }

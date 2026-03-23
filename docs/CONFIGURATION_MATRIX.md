@@ -50,6 +50,8 @@ This document is the source of truth for active Cognivio runtime configuration.
 | --- | --- | --- | --- |
 | `OPENAI_API_KEY` | Optional | OpenAI model access | Required for live paid analysis |
 | `OPENAI_VISION_MODEL` | Optional | Main analysis model | Current production path supports `gpt-4.1-mini` and future replacements |
+| `OPENAI_ANALYSIS_INPUT_COST_PER_MILLION_USD` | Optional | Estimated input-token pricing for observability metrics | Used for Prometheus cost counters; does not affect billing |
+| `OPENAI_ANALYSIS_OUTPUT_COST_PER_MILLION_USD` | Optional | Estimated output-token pricing for observability metrics | Keep aligned with the active model pricing |
 | `PAID_ANALYSIS_ENABLED` | Optional | Master switch for paid model path | Used with allowlist |
 | `PAID_ANALYSIS_ALLOWLIST_EMAILS` | Optional | Demo or pilot email allowlist | Comma-separated |
 | `VIDEO_ANALYSIS_MAX_FRAMES` | Optional | Max sampled frames | Cost/quality control |
@@ -90,4 +92,5 @@ This document is the source of truth for active Cognivio runtime configuration.
 - Keep only active Railway services connected to GitHub.
 - Keep audio feature-flagged until privacy/legal signoff is complete.
 - Monitor `/api/admin/ops/launch-health` and `/api/admin/ops/observability` during rollout.
-
+- Expose `/metrics` only behind trusted network boundaries or a protected scrape path.
+- Keep cost-per-million config aligned with the active OpenAI model to avoid misleading spend estimates.

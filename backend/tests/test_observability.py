@@ -24,6 +24,19 @@ def test_estimate_analysis_usage_includes_frames_and_transcript():
     assert usage["estimated_output_tokens"] is not None
 
 
+def test_estimate_analysis_usage_includes_estimated_cost():
+    usage = observability.estimate_analysis_usage(
+        frames=[{"timestamp": 1}],
+        multimodal_payload={"moments": [{"transcript_excerpt": "shalom class"}]},
+        output_payload={"summary": "abc"},
+        input_cost_per_million=0.4,
+        output_cost_per_million=1.6,
+    )
+    assert usage["estimated_output_tokens"] is not None
+    assert usage["estimated_cost_usd"] is not None
+    assert usage["estimated_cost_usd"] > 0
+
+
 def test_record_analysis_run_updates_snapshot():
     before = observability.snapshot()["analysis"]["total_runs"]
     observability.record_analysis_run(
