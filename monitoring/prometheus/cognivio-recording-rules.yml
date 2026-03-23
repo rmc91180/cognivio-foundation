@@ -1,0 +1,54 @@
+groups:
+  - name: cognivio-recording-rules
+    interval: 1m
+    rules:
+      - record: cognivio:analysis_failure_rate_15m
+        expr: |
+          sum(increase(cognivio_analysis_runs_total{status="failure"}[15m]))
+          /
+          clamp_min(sum(increase(cognivio_analysis_runs_total[15m])), 1)
+
+      - record: cognivio:privacy_failure_rate_15m
+        expr: |
+          sum(increase(cognivio_privacy_jobs_total{status="failure"}[15m]))
+          /
+          clamp_min(sum(increase(cognivio_privacy_jobs_total[15m])), 1)
+
+      - record: cognivio:transcription_failure_rate_15m
+        expr: |
+          sum(increase(cognivio_transcription_runs_total{status="failure"}[15m]))
+          /
+          clamp_min(sum(increase(cognivio_transcription_runs_total[15m])), 1)
+
+      - record: cognivio:analysis_p95_seconds_15m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(cognivio_analysis_duration_seconds_bucket[15m])) by (le)
+          )
+
+      - record: cognivio:privacy_p95_seconds_15m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(cognivio_privacy_duration_seconds_bucket[15m])) by (le)
+          )
+
+      - record: cognivio:report_p95_seconds_15m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(cognivio_report_duration_seconds_bucket[15m])) by (le)
+          )
+
+      - record: cognivio:daily_estimated_cost_usd
+        expr: |
+          sum(increase(cognivio_analysis_estimated_cost_usd_total[24h]))
+
+      - record: cognivio:backlog_total
+        expr: |
+          sum(cognivio_jobs_queued) + sum(cognivio_jobs_processing)
+
+      - record: cognivio:stuck_jobs_total
+        expr: |
+          sum(cognivio_jobs_stuck)

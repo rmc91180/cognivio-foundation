@@ -248,3 +248,9 @@ Allowed values:
 - Backend metrics module: backend platform owner
 - Dashboard and alert definitions: operations owner
 - Cost metric review: product/platform owner
+
+## Related Documents
+
+- [METRICS_STORAGE_SETUP.md](C:/Projects/Cognivio/docs/METRICS_STORAGE_SETUP.md)
+- [METRICS_RUNBOOK.md](C:/Projects/Cognivio/docs/METRICS_RUNBOOK.md)
+- [METRICS_LABEL_DISCIPLINE.md](C:/Projects/Cognivio/docs/METRICS_LABEL_DISCIPLINE.md)

@@ -8487,6 +8487,7 @@ async def get_admin_ops_launch_health(current_user: dict = Depends(get_current_u
 @api_router.get("/admin/ops/observability")
 async def get_admin_ops_observability(current_user: dict = Depends(get_current_user)):
     _require_admin_ops_user(current_user)
+    await refresh_runtime_metrics()
     snapshot = observability_snapshot()
     snapshot["queues"] = {
         "video_queue_depth": VIDEO_JOB_QUEUE.qsize(),
@@ -8495,6 +8496,7 @@ async def get_admin_ops_observability(current_user: dict = Depends(get_current_u
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "observability": snapshot,
+        "persistent_metrics": app_metrics.snapshot_summary(),
     }
 
 

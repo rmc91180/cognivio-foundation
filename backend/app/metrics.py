@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from time import perf_counter
-from typing import Iterator, Optional
+from typing import Any, Dict, Iterator, Optional
 
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 
@@ -245,6 +245,47 @@ def render_latest() -> bytes:
 
 def content_type() -> str:
     return CONTENT_TYPE_LATEST
+
+
+def _counter_total(metric: Any) -> float:
+    total = 0.0
+    for family in metric.collect():
+        for sample in family.samples:
+            if sample.name.endswith("_total"):
+                total += float(sample.value)
+    return round(total, 6)
+
+
+def _labeled_gauge_values(metric: Any, label_name: str) -> Dict[str, float]:
+    values: Dict[str, float] = {}
+    for family in metric.collect():
+        for sample in family.samples:
+            label_value = sample.labels.get(label_name)
+            if label_value is not None:
+                values[label_value] = float(sample.value)
+    return values
+
+
+def snapshot_summary() -> Dict[str, Any]:
+    return {
+        "counters": {
+            "uploads_total": _counter_total(UPLOADS_TOTAL),
+            "privacy_jobs_total": _counter_total(PRIVACY_JOBS_TOTAL),
+            "analysis_runs_total": _counter_total(ANALYSIS_RUNS_TOTAL),
+            "transcription_runs_total": _counter_total(TRANSCRIPTION_RUNS_TOTAL),
+            "reports_generated_total": _counter_total(REPORTS_GENERATED_TOTAL),
+            "analysis_input_tokens_total": _counter_total(ANALYSIS_INPUT_TOKENS_TOTAL),
+            "analysis_output_tokens_total": _counter_total(ANALYSIS_OUTPUT_TOKENS_TOTAL),
+            "analysis_estimated_cost_usd_total": _counter_total(ANALYSIS_ESTIMATED_COST_USD_TOTAL),
+            "worker_jobs_total": _counter_total(WORKER_JOBS_TOTAL),
+        },
+        "queues": {
+            "queued": _labeled_gauge_values(JOBS_QUEUED, "job_type"),
+            "processing": _labeled_gauge_values(JOBS_PROCESSING, "job_type"),
+            "stuck": _labeled_gauge_values(JOBS_STUCK, "job_type"),
+        },
+        "dependencies": _labeled_gauge_values(DEPENDENCY_HEALTH, "dependency"),
+    }
 
 
 @contextmanager

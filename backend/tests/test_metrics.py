@@ -139,3 +139,23 @@ def test_set_job_backlog_and_dependency_health_expose_gauges():
     assert metrics.JOBS_STUCK.labels(job_type="video")._value.get() == 1
     assert metrics.DEPENDENCY_HEALTH.labels(dependency="mongodb")._value.get() == 1
     assert metrics.DEPENDENCY_HEALTH.labels(dependency="openai")._value.get() == 0
+
+
+def test_snapshot_summary_exposes_counter_queue_and_dependency_sections():
+    metrics.record_upload_result(
+        source="admin",
+        language="en",
+        success=True,
+        duration_seconds=0.5,
+    )
+    metrics.set_job_backlog(job_type="privacy", queued=3, processing=1, stuck=0)
+    metrics.set_dependency_health(dependency="storage", healthy=True)
+
+    summary = metrics.snapshot_summary()
+
+    assert "counters" in summary
+    assert "queues" in summary
+    assert "dependencies" in summary
+    assert summary["counters"]["uploads_total"] >= 1
+    assert summary["queues"]["queued"]["privacy"] == 3
+    assert summary["dependencies"]["storage"] == 1

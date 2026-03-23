@@ -1,0 +1,113 @@
+groups:
+  - name: cognivio-alerts
+    interval: 1m
+    rules:
+      - alert: CognivioAnalysisFailureRateHigh
+        expr: cognivio:analysis_failure_rate_15m > 0.20
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: Cognivio analysis failures are elevated
+          description: Analysis failure rate has stayed above 20% for 10 minutes.
+
+      - alert: CognivioPrivacyFailureRateHigh
+        expr: cognivio:privacy_failure_rate_15m > 0.10
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: Cognivio privacy failures are elevated
+          description: Privacy failure rate has stayed above 10% for 10 minutes.
+
+      - alert: CognivioTranscriptionFailureRateHigh
+        expr: cognivio:transcription_failure_rate_15m > 0.15
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: Cognivio transcription failures are elevated
+          description: Transcription failure rate has stayed above 15% for 10 minutes.
+
+      - alert: CognivioAnalysisLatencyP95High
+        expr: cognivio:analysis_p95_seconds_15m > 300
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: Cognivio analysis latency is high
+          description: Analysis p95 latency has stayed above 300 seconds for 15 minutes.
+
+      - alert: CognivioPrivacyLatencyP95High
+        expr: cognivio:privacy_p95_seconds_15m > 180
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: Cognivio privacy latency is high
+          description: Privacy p95 latency has stayed above 180 seconds for 15 minutes.
+
+      - alert: CognivioReportLatencyP95High
+        expr: cognivio:report_p95_seconds_15m > 10
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: Cognivio report generation latency is high
+          description: Report generation p95 latency has stayed above 10 seconds for 15 minutes.
+
+      - alert: CognivioQueuedJobsHigh
+        expr: cognivio:backlog_total > 25
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: Cognivio backlog is growing
+          description: Combined queued and processing jobs have stayed above 25 for 10 minutes.
+
+      - alert: CognivioStuckJobsDetected
+        expr: cognivio:stuck_jobs_total > 0
+        for: 15m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: Cognivio has stuck jobs
+          description: One or more Cognivio jobs have been marked stuck for at least 15 minutes.
+
+      - alert: CognivioDependencyUnhealthy
+        expr: cognivio_dependency_health == 0
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: Cognivio dependency unhealthy
+          description: A required dependency has reported unhealthy for 5 minutes.
+
+      - alert: CognivioDailyCostHigh
+        expr: cognivio:daily_estimated_cost_usd > 25
+        for: 30m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: Cognivio daily estimated AI cost is high
+          description: Estimated AI spend in the trailing 24 hours has exceeded 25 USD.
+
+      - alert: CognivioModelCostSpike
+        expr: sum by (model) (increase(cognivio_analysis_estimated_cost_usd_total[1h])) > 5
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: Cognivio model cost spike detected
+          description: Estimated spend for one model has exceeded 5 USD in the last hour.

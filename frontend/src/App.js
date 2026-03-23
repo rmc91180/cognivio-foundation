@@ -13,6 +13,7 @@ import { FrameworksPage } from "@/pages/FrameworksPage";
 import { PrivacyReviewQueuePage } from "@/pages/PrivacyReviewQueuePage";
 import { RecognitionReviewPage } from "@/pages/RecognitionReviewPage";
 import { ExemplarLibraryPage } from "@/pages/ExemplarLibraryPage";
+import { OpsMetricsPage } from "@/pages/OpsMetricsPage";
 
 function App() {
   return (
@@ -72,6 +73,14 @@ function App() {
           element={
             <ProtectedRoute>
               <RecognitionReviewPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/ops/metrics"
+          element={
+            <ProtectedRoute>
+              <OpsMetricsPage />
             </ProtectedRoute>
           }
         />

@@ -77,6 +77,14 @@ Create at least these panels:
 - dependency health by dependency
 - estimated token and cost totals by model
 
+Concrete starting artifacts are version-controlled here:
+
+- [GRAFANA_DASHBOARD_SPEC.md](C:/Projects/Cognivio/docs/GRAFANA_DASHBOARD_SPEC.md)
+- [cognivio-recording-rules.yml](C:/Projects/Cognivio/monitoring/prometheus/cognivio-recording-rules.yml)
+- [cognivio-alerts.yml](C:/Projects/Cognivio/monitoring/prometheus/cognivio-alerts.yml)
+- [cognivio-operations-dashboard.json](C:/Projects/Cognivio/monitoring/grafana/cognivio-operations-dashboard.json)
+- [cognivio-launch-readiness-dashboard.json](C:/Projects/Cognivio/monitoring/grafana/cognivio-launch-readiness-dashboard.json)
+
 ## Initial Alert Coverage
 
 Start with:
