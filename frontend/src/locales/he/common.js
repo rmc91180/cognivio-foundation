@@ -337,6 +337,54 @@ const he = {
     onboardingEvidenceDescription:
       "לפחות שיעור אחד צריך לעבור דרך העלאה, פרטיות, ניתוח וסקירת ליווי.",
     onboardingOpenVideos: "פתיחת עמוד הווידאו",
+    triageTitle: "להתחיל מאופק הזמן, לא רק מהמספרים",
+    triageDescription:
+      "החלק העליון של לוח הבקרה מפריד בין מה שלמדנו מהשיעור האחרון לבין הדפוסים הארוכים יותר שחוזרים שוב ושוב.",
+    triageFollowUpTitle: "דורש המשך טיפול עכשיו",
+    triageFollowUpDescription:
+      "מורים שהאות האחרון מהשיעור שלהם מצביע על צורך בתגובה מיידית בליווי.",
+    triageRecentSignalsTitle: "אותות חדשים משיעורים",
+    triageRecentSignalsDescription:
+      "מורים שיש להם ראיות חדשות מהשבועיים האחרונים.",
+    triageRecurringThemesTitle: "תמות חוזרות",
+    triageRecurringThemesDescription:
+      "מורים שיש להם יעדים פעילים או דפוסים שחוזרים לאורך כמה תצפיות.",
+    triageMomentumTitle: "מומנטום של שיפור",
+    triageMomentumDescription:
+      "מורים שהראיות האחרונות שלהם נעות בכיוון חזק יותר.",
+    dateUnavailable: "אין תאריך זמין",
+    latestLessonDate: "השיעור האחרון {{date}}",
+    recentLessonSignalsTitle: "אותות מהשיעור האחרון",
+    recentLessonSignalsDescription:
+      "מה למדנו מהשיעור האחרון, מה דורש תגובה מיידית, ולאן נכון להתקדם עכשיו.",
+    recentLessonSignalsEmpty:
+      "עדיין אין אותות מהשיעור האחרון. תצפיות שהושלמו יתחילו למלא את האזור הזה.",
+    recurringPatternsTitle: "דפוסים חוזרים ויעדים מתמשכים",
+    recurringPatternsDescription:
+      "מה ממשיך לחזור לאורך זמן, אילו יעדים עדיין פעילים, ואיפה חשוב לשמור על רצף הליווי.",
+    recurringPatternsEmpty:
+      "עדיין לא התבססו דפוסים חוזרים. החלק הזה יתחזק ככל שיצטברו תצפיות חוזרות.",
+    signalFollowUpNow: "להמשך טיפול עכשיו",
+    signalMonitor: "למעקב",
+    signalImproving: "במגמת שיפור",
+    latestAdminCommentLabel: "הערת המנהל האחרונה",
+    nextImmediateStep: "הצעד המיידי הבא",
+    signalNoImmediateAction: "עדיין לא נרשם צעד מיידי הבא.",
+    signalNoLessonComment: "עדיין לא נשמרה הערה ספציפית לשיעור הזה.",
+    openTeacherDeepDive: "פתיחת עמוד עומק למורה",
+    ongoingGoalLabel: "יעד מתמשך",
+    recurringEvidenceLabel: "ראיה חוזרת",
+    patternStrengthLabel: "חוזק הדפוס",
+    establishedPattern: "דפוס מבוסס",
+    emergingPattern: "דפוס מתהווה",
+    patternEvidenceLine: "{{count}} תצפיות בתמונה",
+    patternTrendUp: "+{{value}} ב־30 הימים האחרונים",
+    patternTrendDown: "-{{value}} ב־30 הימים האחרונים",
+    patternTrendFlat: "יציב ב־30 הימים האחרונים",
+    patternChallenge: "אתגר חוזר",
+    patternEmerging: "דפוס מתהווה",
+    patternNoGoal: "עדיין לא נרשם יעד מתמשך.",
+    patternNoEvidence: "צריך עוד ראיות חוזרות כדי לקבוע דפוס ארוך טווח ברור.",
     kpiTeachersTitle: "מורים",
     kpiTeachersDescription: "מספר המורים הפעילים ברשימה",
     kpiObservationsTitle: "תצפיות",

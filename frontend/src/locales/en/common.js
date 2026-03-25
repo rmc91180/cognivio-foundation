@@ -337,6 +337,54 @@ const en = {
     onboardingEvidenceDescription:
       "At least one completed lesson should flow through upload, privacy, analysis, and coaching review.",
     onboardingOpenVideos: "Open videos",
+    triageTitle: "Start with time horizon, not just totals",
+    triageDescription:
+      "Use the top of the dashboard to separate what came from the latest class from the longer-term themes that keep repeating.",
+    triageFollowUpTitle: "Needs follow-up now",
+    triageFollowUpDescription:
+      "Teachers whose latest class signal suggests an immediate coaching response.",
+    triageRecentSignalsTitle: "New lesson signals",
+    triageRecentSignalsDescription:
+      "Teachers with fresh lesson evidence in the last two weeks.",
+    triageRecurringThemesTitle: "Recurring themes",
+    triageRecurringThemesDescription:
+      "Teachers with active goals or patterns showing up across multiple observations.",
+    triageMomentumTitle: "Improving momentum",
+    triageMomentumDescription:
+      "Teachers whose recent evidence is trending in a stronger direction.",
+    dateUnavailable: "Date unavailable",
+    latestLessonDate: "Latest class {{date}}",
+    recentLessonSignalsTitle: "Recent lesson signals",
+    recentLessonSignalsDescription:
+      "What we learned from the latest class, what needs an immediate response, and where to go next.",
+    recentLessonSignalsEmpty:
+      "No recent lesson signals yet. Completed observations will start filling this lane.",
+    recurringPatternsTitle: "Recurring patterns and ongoing goals",
+    recurringPatternsDescription:
+      "What keeps repeating over time, which goals are still active, and where coaching continuity should stay focused.",
+    recurringPatternsEmpty:
+      "No recurring patterns are established yet. This section strengthens as repeated observations build.",
+    signalFollowUpNow: "Follow up now",
+    signalMonitor: "Monitor",
+    signalImproving: "Improving",
+    latestAdminCommentLabel: "Latest admin comment",
+    nextImmediateStep: "Immediate next step",
+    signalNoImmediateAction: "No immediate next step is recorded yet.",
+    signalNoLessonComment: "No lesson-specific comment has been captured yet.",
+    openTeacherDeepDive: "Open teacher deep dive",
+    ongoingGoalLabel: "Ongoing goal",
+    recurringEvidenceLabel: "Recurring evidence",
+    patternStrengthLabel: "Pattern strength",
+    establishedPattern: "Established pattern",
+    emergingPattern: "Emerging pattern",
+    patternEvidenceLine: "{{count}} observations in view",
+    patternTrendUp: "+{{value}} in the last 30 days",
+    patternTrendDown: "-{{value}} in the last 30 days",
+    patternTrendFlat: "Stable over the last 30 days",
+    patternChallenge: "Recurring challenge",
+    patternEmerging: "Emerging pattern",
+    patternNoGoal: "No ongoing goal is recorded yet.",
+    patternNoEvidence: "More repeated evidence is needed before a long-term pattern is clear.",
     kpiTeachersTitle: "Teachers",
     kpiTeachersDescription: "Active roster count",
     kpiObservationsTitle: "Observations",

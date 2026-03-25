@@ -32,6 +32,23 @@ import { Button, EmptyState, LoadingState, PageHeader, Panel } from "@/component
 import { Link } from "react-router-dom";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 
+const DASHBOARD_SIGNAL_WINDOW_DAYS = 14;
+
+function parseIsoDate(value) {
+  if (!value) return null;
+  try {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  } catch {
+    return null;
+  }
+}
+
+function getTrendDelta(row, windowKey = "30d") {
+  const delta = row?.trend_windows?.[windowKey]?.delta;
+  return typeof delta === "number" ? delta : null;
+}
+
 export function DashboardPage() {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
@@ -58,6 +75,10 @@ export function DashboardPage() {
   );
   const previousRange = useMemo(
     () => ({ start: subDays(now, 60), end: subDays(now, 30) }),
+    [now]
+  );
+  const recentSignalWindowStart = useMemo(
+    () => subDays(now, DASHBOARD_SIGNAL_WINDOW_DAYS),
     [now]
   );
   const [trendWindowMonths, setTrendWindowMonths] = useState(3);
@@ -740,6 +761,149 @@ export function DashboardPage() {
     t,
     teachersMissingPrivacyProfiles,
   ]);
+  const formatShortDate = (value) => {
+    const parsed = parseIsoDate(value);
+    return parsed ? dateFormatter.format(parsed) : t("dashboard.dateUnavailable");
+  };
+  const recentLessonSignals = useMemo(() => {
+    return roster
+      .map((teacher) => {
+        const latestObservation = teacher.recent_observations?.[0] || null;
+        const latestDate = latestObservation?.created_at || teacher.last_assessment_date;
+        const parsedLatestDate = parseIsoDate(latestDate);
+        if (!parsedLatestDate) return null;
+        const delta30 = getTrendDelta(teacher);
+        const overallScore = teacher?.overall_score;
+        const immediateState =
+          (typeof overallScore === "number" && overallScore < 6) ||
+          (typeof delta30 === "number" && delta30 < -0.2)
+            ? "follow_up"
+            : typeof delta30 === "number" && delta30 > 0.3
+              ? "improving"
+              : "monitor";
+        return {
+          teacherId: teacher.teacher_id,
+          teacherName: teacher.teacher_name,
+          subject: teacher.subject || t("labels.noSubject"),
+          latestDate,
+          latestSummary:
+            latestObservation?.summary ||
+            latestObservation?.admin_comment ||
+            t("dashboard.signalNoLessonComment"),
+          latestAdminComment:
+            latestObservation?.admin_comment || latestObservation?.summary || null,
+          nextAction: teacher.action_items?.[0]?.title || null,
+          assessmentCount: teacher.assessment_count || 0,
+          immediateState,
+          isFresh: parsedLatestDate >= recentSignalWindowStart,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => parseIsoDate(b.latestDate) - parseIsoDate(a.latestDate))
+      .slice(0, 4);
+  }, [recentSignalWindowStart, roster, t]);
+  const recurringPatternCards = useMemo(() => {
+    return roster
+      .map((teacher) => {
+        const observationCount = teacher.assessment_count || 0;
+        const delta30 = getTrendDelta(teacher);
+        const latestObservation = teacher.recent_observations?.[0] || null;
+        const ongoingGoal = teacher.action_items?.[0]?.title || null;
+        if (!ongoingGoal && observationCount < 2 && delta30 == null) {
+          return null;
+        }
+        const overallScore = teacher?.overall_score;
+        const patternState =
+          ongoingGoal ||
+          (typeof overallScore === "number" && overallScore < 6) ||
+          (typeof delta30 === "number" && delta30 < -0.2)
+            ? "challenge"
+            : typeof delta30 === "number" && delta30 > 0.3
+              ? "improving"
+              : "emerging";
+        return {
+          teacherId: teacher.teacher_id,
+          teacherName: teacher.teacher_name,
+          subject: teacher.subject || t("labels.noSubject"),
+          ongoingGoal: ongoingGoal || t("dashboard.patternNoGoal"),
+          recurringEvidence:
+            latestObservation?.admin_comment ||
+            latestObservation?.summary ||
+            t("dashboard.patternNoEvidence"),
+          observationCount,
+          delta30,
+          patternState,
+          patternStrength:
+            observationCount >= 4
+              ? t("dashboard.establishedPattern")
+              : t("dashboard.emergingPattern"),
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => {
+        const priority = { challenge: 0, improving: 1, emerging: 2 };
+        const stateDelta = (priority[a.patternState] ?? 9) - (priority[b.patternState] ?? 9);
+        if (stateDelta !== 0) return stateDelta;
+        return (b.observationCount || 0) - (a.observationCount || 0);
+      })
+      .slice(0, 4);
+  }, [roster, t]);
+  const triageCards = useMemo(() => {
+    const freshSignalsCount = roster.filter((teacher) => {
+      const latestDate =
+        teacher.recent_observations?.[0]?.created_at || teacher.last_assessment_date;
+      const parsedLatestDate = parseIsoDate(latestDate);
+      return parsedLatestDate ? parsedLatestDate >= recentSignalWindowStart : false;
+    }).length;
+    const recurringThemesCount = roster.filter((teacher) => {
+      const delta30 = getTrendDelta(teacher);
+      return (
+        (teacher.action_items?.length || 0) > 0 ||
+        (teacher.assessment_count || 0) >= 2 ||
+        delta30 != null
+      );
+    }).length;
+    const improvingMomentumCount = roster.filter((teacher) => {
+      const delta30 = getTrendDelta(teacher);
+      return typeof delta30 === "number" && delta30 > 0.3;
+    }).length;
+    return [
+      {
+        id: "follow-up",
+        title: t("dashboard.triageFollowUpTitle"),
+        description: t("dashboard.triageFollowUpDescription"),
+        value: recentLessonSignals.filter((item) => item.immediateState === "follow_up").length,
+        tone: "rose",
+      },
+      {
+        id: "fresh-signals",
+        title: t("dashboard.triageRecentSignalsTitle"),
+        description: t("dashboard.triageRecentSignalsDescription"),
+        value: freshSignalsCount,
+        tone: "sky",
+      },
+      {
+        id: "recurring-themes",
+        title: t("dashboard.triageRecurringThemesTitle"),
+        description: t("dashboard.triageRecurringThemesDescription"),
+        value: recurringThemesCount,
+        tone: "amber",
+      },
+      {
+        id: "improving-momentum",
+        title: t("dashboard.triageMomentumTitle"),
+        description: t("dashboard.triageMomentumDescription"),
+        value: improvingMomentumCount,
+        tone: "emerald",
+      },
+    ];
+  }, [recentLessonSignals, recentSignalWindowStart, roster, t]);
+  const triageToneClasses = {
+    rose: "border-rose-200 bg-rose-50/70",
+    sky: "border-sky-200 bg-sky-50/70",
+    amber: "border-amber-200 bg-amber-50/70",
+    emerald: "border-emerald-200 bg-emerald-50/70",
+  };
 
   return (
     <LayoutShell>
@@ -1287,6 +1451,253 @@ export function DashboardPage() {
           )
         ) : (
           <>
+            {isAdmin && (
+              <>
+                <section className="mb-6 rounded-xl border border-slate-200 bg-white p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="max-w-3xl">
+                      <h2 className="text-sm font-semibold text-slate-900">
+                        {t("dashboard.triageTitle")}
+                      </h2>
+                      <p className="mt-1 text-xs text-slate-500">
+                        {t("dashboard.triageDescription")}
+                      </p>
+                    </div>
+                    <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">
+                      {t("timeScope.latestClass")} + {t("timeScope.recurringPattern")}
+                    </span>
+                  </div>
+                  <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    {triageCards.map((card) => (
+                      <div
+                        key={card.id}
+                        className={`rounded-xl border px-4 py-4 ${triageToneClasses[card.tone]}`}
+                      >
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                          {card.title}
+                        </div>
+                        <div className="mt-2 text-2xl font-semibold text-slate-900">
+                          {card.value}
+                        </div>
+                        <div className="mt-1 text-xs text-slate-600">{card.description}</div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="mb-6 rounded-xl border border-slate-200 bg-white p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="max-w-3xl">
+                      <div className="mb-2 flex flex-wrap items-center gap-2">
+                        <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-700">
+                          {t("timeScope.fromThisLesson")}
+                        </span>
+                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                          {t("timeScope.immediateFollowUp")}
+                        </span>
+                      </div>
+                      <h2 className="text-sm font-semibold text-slate-900">
+                        {t("dashboard.recentLessonSignalsTitle")}
+                      </h2>
+                      <p className="mt-1 text-xs text-slate-500">
+                        {t("dashboard.recentLessonSignalsDescription")}
+                      </p>
+                    </div>
+                    <Link
+                      to="/teachers"
+                      className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                    >
+                      {t("dashboard.smartQueueOpenTeachers")}
+                    </Link>
+                  </div>
+                  {recentLessonSignals.length === 0 ? (
+                    <div className="mt-4 text-xs text-slate-500">
+                      {t("dashboard.recentLessonSignalsEmpty")}
+                    </div>
+                  ) : (
+                    <div className="mt-4 grid gap-3 md:grid-cols-2">
+                      {recentLessonSignals.map((signal) => (
+                        <div
+                          key={`recent-signal-${signal.teacherId}`}
+                          className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4"
+                        >
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                              <div className="text-sm font-semibold text-slate-900">
+                                {signal.teacherName}
+                              </div>
+                              <div className="mt-1 text-[11px] text-slate-500">
+                                {signal.subject} • {t("dashboard.latestLessonDate", {
+                                  date: formatShortDate(signal.latestDate),
+                                })}
+                              </div>
+                            </div>
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                                signal.immediateState === "follow_up"
+                                  ? "bg-rose-100 text-rose-700"
+                                  : signal.immediateState === "improving"
+                                    ? "bg-emerald-100 text-emerald-700"
+                                    : "bg-slate-200 text-slate-700"
+                              }`}
+                            >
+                              {signal.immediateState === "follow_up"
+                                ? t("dashboard.signalFollowUpNow")
+                                : signal.immediateState === "improving"
+                                  ? t("dashboard.signalImproving")
+                                  : t("dashboard.signalMonitor")}
+                            </span>
+                          </div>
+                          <p className="mt-3 text-sm text-slate-700">{signal.latestSummary}</p>
+                          <div className="mt-3 space-y-2 text-xs text-slate-600">
+                            {signal.latestAdminComment ? (
+                              <div>
+                                <span className="font-semibold text-slate-800">
+                                  {t("dashboard.latestAdminCommentLabel")}:
+                                </span>{" "}
+                                {signal.latestAdminComment}
+                              </div>
+                            ) : null}
+                            <div>
+                              <span className="font-semibold text-slate-800">
+                                {t("dashboard.nextImmediateStep")}:
+                              </span>{" "}
+                              {signal.nextAction || t("dashboard.signalNoImmediateAction")}
+                            </div>
+                            <div className="text-[11px] text-slate-500">
+                              {t("dashboard.patternEvidenceLine", {
+                                count: signal.assessmentCount,
+                              })}
+                            </div>
+                          </div>
+                          <div className="mt-4">
+                            <Link
+                              to={`/teachers/${signal.teacherId}`}
+                              className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                            >
+                              {t("dashboard.openTeacherDeepDive")}
+                            </Link>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                <section className="mb-6 rounded-xl border border-slate-200 bg-white p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="max-w-3xl">
+                      <div className="mb-2 flex flex-wrap items-center gap-2">
+                        <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+                          {t("timeScope.ongoingGoal")}
+                        </span>
+                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                          {t("timeScope.acrossRecentObservations")}
+                        </span>
+                      </div>
+                      <h2 className="text-sm font-semibold text-slate-900">
+                        {t("dashboard.recurringPatternsTitle")}
+                      </h2>
+                      <p className="mt-1 text-xs text-slate-500">
+                        {t("dashboard.recurringPatternsDescription")}
+                      </p>
+                    </div>
+                    <Link
+                      to="/teachers"
+                      className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                    >
+                      {t("dashboard.reviewTeacherRoster")}
+                    </Link>
+                  </div>
+                  {recurringPatternCards.length === 0 ? (
+                    <div className="mt-4 text-xs text-slate-500">
+                      {t("dashboard.recurringPatternsEmpty")}
+                    </div>
+                  ) : (
+                    <div className="mt-4 grid gap-3 md:grid-cols-2">
+                      {recurringPatternCards.map((pattern) => (
+                        <div
+                          key={`recurring-pattern-${pattern.teacherId}`}
+                          className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4"
+                        >
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                              <div className="text-sm font-semibold text-slate-900">
+                                {pattern.teacherName}
+                              </div>
+                              <div className="mt-1 text-[11px] text-slate-500">
+                                {pattern.subject}
+                              </div>
+                            </div>
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                                pattern.patternState === "challenge"
+                                  ? "bg-rose-100 text-rose-700"
+                                  : pattern.patternState === "improving"
+                                    ? "bg-emerald-100 text-emerald-700"
+                                    : "bg-amber-100 text-amber-700"
+                              }`}
+                            >
+                              {pattern.patternState === "challenge"
+                                ? t("dashboard.patternChallenge")
+                                : pattern.patternState === "improving"
+                                  ? t("dashboard.signalImproving")
+                                  : t("dashboard.patternEmerging")}
+                            </span>
+                          </div>
+                          <div className="mt-3 space-y-2 text-xs text-slate-600">
+                            <div>
+                              <span className="font-semibold text-slate-800">
+                                {t("dashboard.ongoingGoalLabel")}:
+                              </span>{" "}
+                              {pattern.ongoingGoal}
+                            </div>
+                            <div>
+                              <span className="font-semibold text-slate-800">
+                                {t("dashboard.recurringEvidenceLabel")}:
+                              </span>{" "}
+                              {pattern.recurringEvidence}
+                            </div>
+                            <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500">
+                              <span>
+                                {t("dashboard.patternStrengthLabel")}: {pattern.patternStrength}
+                              </span>
+                              <span>
+                                {t("dashboard.patternEvidenceLine", {
+                                  count: pattern.observationCount,
+                                })}
+                              </span>
+                              <span>
+                                {typeof pattern.delta30 === "number"
+                                  ? pattern.delta30 > 0
+                                    ? t("dashboard.patternTrendUp", {
+                                        value: pattern.delta30.toFixed(1),
+                                      })
+                                    : pattern.delta30 < 0
+                                      ? t("dashboard.patternTrendDown", {
+                                          value: Math.abs(pattern.delta30).toFixed(1),
+                                        })
+                                      : t("dashboard.patternTrendFlat")
+                                  : t("dashboard.patternTrendFlat")}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="mt-4">
+                            <Link
+                              to={`/teachers/${pattern.teacherId}`}
+                              className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                            >
+                              {t("dashboard.openTeacherDeepDive")}
+                            </Link>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              </>
+            )}
+
             <section className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <button
                 type="button"
