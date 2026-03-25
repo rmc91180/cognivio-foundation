@@ -1142,6 +1142,17 @@ const en = {
     currentTitle: "This week and latest class",
     currentDescription:
       "Start with the most recent lesson, immediate follow-up, and what needs your attention right now.",
+    currentSummaryTitle: "Latest class summary",
+    currentNextStep: "Immediate next step",
+    currentUrgentTitle: "Needs attention now",
+    currentUrgentClear: "Nothing urgent is waiting right now.",
+    currentTeacherResponseTitle: "What I tried / what I will try next",
+    currentTeacherResponsePlaceholder:
+      "Add your response to the latest comment, what you tried, or what you plan to adjust next.",
+    urgentPrivacy: "Finish the privacy profile before the next recording upload.",
+    urgentNoLesson: "Upload or record a lesson so the workspace can show current feedback.",
+    urgentComment: "There is a recent admin comment that should shape your next move.",
+    urgentGoals: "{{count}} ongoing goals still need follow-through.",
     currentItemLatest:
       "Review the latest class summary, strengths, and immediate next steps.",
     currentItemAttention:
@@ -1156,6 +1167,7 @@ const en = {
     goalsItemProgress: "Track progress against current goals over time.",
     goalsItemImplementation:
       "Keep implementation notes close to each long-term goal.",
+    goalsImplementationNotes: "Implementation notes",
     materialsTitle: "My workspace and materials",
     materialsDescription:
       "Manage privacy, videos, and teaching documents from one teacher-owned area.",
@@ -1168,6 +1180,10 @@ const en = {
     historyTitle: "My history",
     historyDescription:
       "Look back at previous lessons, comments, and completed goals without crowding the main workspace.",
+    historyRecentLessons: "Recent lessons",
+    historyRecentFeedback: "Recent feedback",
+    historyCompletedGoals: "Completed goals",
+    noCompletedGoals: "No completed goals yet.",
     historyItemLessons: "Review previous lesson snapshots and evidence.",
     historyItemComments: "Look back at prior comments and responses.",
     historyItemGoals: "See completed goals and older development threads.",
@@ -1177,6 +1193,9 @@ const en = {
     viewHistory: "View my history",
     returnHome: "Return to workspace home",
     workspaceTag: "Teacher-owned workspace",
+    noLinkedTeacherTitle: "Teacher record not linked yet",
+    noLinkedTeacherDescription:
+      "This login does not yet point to a teacher profile. Link the teacher account or matching teacher email before using the workspace.",
   },
   monthlySummary: {
     title: "Performance Summary",

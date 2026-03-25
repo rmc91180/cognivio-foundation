@@ -2010,6 +2010,7 @@ class UserResponse(BaseModel):
     created_at: str
     role: Optional[str] = None
     workspace_mode: Optional[str] = None
+    teacher_id: Optional[str] = None
 
 class TokenResponse(BaseModel):
     token: str
@@ -11529,4 +11530,3 @@ async def _stop_video_workers() -> None:
             task.cancel()
         await asyncio.gather(*PRIVACY_MAINTENANCE_TASKS, return_exceptions=True)
         PRIVACY_MAINTENANCE_TASKS.clear()
-

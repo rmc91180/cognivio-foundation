@@ -1032,7 +1032,7 @@ export function TeacherProfilePage() {
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           <div className="lg:col-span-8 space-y-6">
-            <section className="rounded-xl border border-slate-200 bg-white p-5">
+            <section className={`rounded-xl border border-slate-200 bg-white p-5 ${isAdmin ? "hidden" : ""}`}>
               <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <div className="mb-2 flex flex-wrap gap-2">
@@ -1317,7 +1317,7 @@ export function TeacherProfilePage() {
               </div>
             </section>
 
-            <section className="rounded-xl border border-slate-200 bg-white p-5">
+            <section className={`rounded-xl border border-slate-200 bg-white p-5 ${isAdmin ? "hidden" : ""}`}>
               <div className="mb-3">
                 <div className="mb-2 flex flex-wrap gap-2">
                   <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
@@ -1827,7 +1827,7 @@ export function TeacherProfilePage() {
 
             </section>
 
-            <section className="rounded-xl border border-slate-200 bg-white p-5">
+            <section className={`rounded-xl border border-slate-200 bg-white p-5 ${isAdmin ? "hidden" : ""}`}>
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-900">
@@ -2021,7 +2021,7 @@ export function TeacherProfilePage() {
               )}
             </section>
 
-            <section className="rounded-xl border border-slate-200 bg-white p-5">
+            <section className={`rounded-xl border border-slate-200 bg-white p-5 ${isAdmin ? "hidden" : ""}`}>
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 {t("teacherProfile.supportingMaterials")}
               </h2>
@@ -2587,7 +2587,6 @@ export function TeacherProfilePage() {
                 )}
               </div>
             </section>
-
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 {t("teacherProfile.recordingCompliance")}

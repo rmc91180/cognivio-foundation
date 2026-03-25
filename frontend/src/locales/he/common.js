@@ -1142,6 +1142,17 @@ const he = {
     currentTitle: "השבוע והשיעור האחרון",
     currentDescription:
       "התחילי מהשיעור האחרון, מההמשך המיידי ומה שדורש את תשומת הלב שלך עכשיו.",
+    currentSummaryTitle: "סיכום השיעור האחרון",
+    currentNextStep: "הצעד המיידי הבא",
+    currentUrgentTitle: "מה דורש תשומת לב עכשיו",
+    currentUrgentClear: "כרגע אין דבר דחוף שממתין לך.",
+    currentTeacherResponseTitle: "מה ניסיתי / מה אנסה בהמשך",
+    currentTeacherResponsePlaceholder:
+      "הוסיפי תגובה להערה האחרונה, מה ניסית, או מה את מתכננת לשנות בהמשך.",
+    urgentPrivacy: "השלימי את פרופיל הפרטיות לפני העלאת ההקלטה הבאה.",
+    urgentNoLesson: "העלי או הקליטי שיעור כדי שהמרחב יציג משוב עדכני.",
+    urgentComment: "יש הערת מנהל עדכנית שאמורה להשפיע על הצעד הבא שלך.",
+    urgentGoals: "יש {{count}} יעדים מתמשכים שעדיין דורשים המשך טיפול.",
     currentItemLatest: "סקירת סיכום השיעור האחרון, החוזקות והצעדים הבאים המיידיים.",
     currentItemAttention: "ראי מה עדיין מחכה לתגובה או להמשך טיפול.",
     currentItemNext: "האזור הזה מיועד למה שחשוב עכשיו, לא ליעדים שנתיים.",
@@ -1151,6 +1162,7 @@ const he = {
     goalsItemPattern: "ראי אילו אתגרים חוזרים מספיק כדי להפוך ליעדים מתמשכים.",
     goalsItemProgress: "עקבי אחר ההתקדמות מול היעדים הנוכחיים לאורך זמן.",
     goalsItemImplementation: "שמרי הערות יישום צמוד לכל יעד ארוך טווח.",
+    goalsImplementationNotes: "הערות יישום",
     materialsTitle: "המרחב והחומרים שלי",
     materialsDescription:
       "ניהול פרטיות, סרטונים ומסמכי הוראה מתוך אזור אחד שבבעלות המורה.",
@@ -1160,6 +1172,10 @@ const he = {
     historyTitle: "ההיסטוריה שלי",
     historyDescription:
       "מבט לאחור על שיעורים קודמים, תגובות ויעדים שהושלמו בלי להעמיס על המרחב הראשי.",
+    historyRecentLessons: "שיעורים אחרונים",
+    historyRecentFeedback: "משוב אחרון",
+    historyCompletedGoals: "יעדים שהושלמו",
+    noCompletedGoals: "עדיין אין יעדים שהושלמו.",
     historyItemLessons: "סקירת שיעורים קודמים והראיות שנאספו.",
     historyItemComments: "מבט לאחור על הערות ותגובות קודמות.",
     historyItemGoals: "סקירת יעדים שהושלמו וחוטי התפתחות קודמים.",
@@ -1169,6 +1185,9 @@ const he = {
     viewHistory: "צפי בהיסטוריה שלי",
     returnHome: "חזרה לדף הבית של המרחב",
     workspaceTag: "מרחב בבעלות המורה",
+    noLinkedTeacherTitle: "עדיין אין קישור לפרופיל המורה",
+    noLinkedTeacherDescription:
+      "ההתחברות הזו עדיין לא מקושרת לפרופיל מורה. יש לקשר את חשבון המורה או להתאים כתובת דוא\"ל של מורה לפני השימוש במרחב.",
   },
   monthlySummary: {
     title: "סיכום ביצועים",

@@ -41,9 +41,25 @@ async def enrich_user_with_workspace_mode(user_doc: dict) -> dict:
     if not user_doc:
         return user_doc
     mode = await resolve_workspace_mode(user_doc)
+    teacher_id = user_doc.get("teacher_id")
+    if not teacher_id and legacy._get_user_role(user_doc) == "teacher":
+        email = (user_doc.get("email") or "").strip().lower()
+        teacher_doc = None
+        if email:
+            teacher_doc = await legacy.db.teachers.find_one(
+                {"email": email},
+                {"_id": 0, "id": 1},
+            )
+        if not teacher_doc:
+            teacher_doc = await legacy.db.teachers.find_one(
+                {"created_by": user_doc["id"]},
+                {"_id": 0, "id": 1},
+            )
+        teacher_id = (teacher_doc or {}).get("id")
     return {
         **user_doc,
         "workspace_mode": mode["effective_mode"],
+        "teacher_id": teacher_id,
     }
 
 
