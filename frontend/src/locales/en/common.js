@@ -1016,9 +1016,10 @@ const en = {
     coachingStatusLatestLesson: "Latest reviewed lesson",
     coachingStatusGoals: "Goals in motion",
     coachingStatusConference: "Next conference",
-    conferencePrepTitle: "Conference prep",
+    conferencePrepTitle: "Admin conference prep",
     conferencePrepDescription:
-      "Use one prep surface to connect the latest lesson, active goals, and follow-through before the next coaching conversation.",
+      "Use this admin-only prep surface to connect the latest lesson, active goals, and follow-through before the next coaching conversation. Teachers only see conference status unless a shared agenda is published later.",
+    conferencePrepEyebrow: "Admin prep",
     conferencePrepAgenda: "Suggested agenda",
     conferencePrepContinuity: "Continuity from previous work",
     conferencePrepNoContinuity: "No continuity notes yet. Save action-plan goals or reflections to build conference continuity.",
@@ -1058,7 +1059,8 @@ const en = {
     breakingItDown: "Deeper view",
     breakingItDownDescription: "Drill into evidence, curriculum alignment, and observation notes.",
     actionPlan: "Action plan",
-    actionPlanDescription: "Track practical goals, ownership, and next steps for this teacher.",
+    actionPlanDescription: "This shared coaching plan appears here, in the teacher workspace, and in report snapshots.",
+    actionPlanSyncNotice: "Edits here update the shared action plan the teacher sees in their workspace.",
     saveActionPlan: "Save action plan",
     goalTitlePlaceholder: "Goal title",
     goalDescriptionPlaceholder: "Why this goal matters and what should happen next.",
@@ -1224,13 +1226,29 @@ const en = {
       "Use this area for what matters now, not for year-long goals.",
     goalsTitle: "My growth goals",
     goalsDescription:
-      "Track the longer-term goals and recurring patterns that are staying active over time.",
+      "Review the shared action plan your coach or admin is tracking, and add implementation notes that stay synchronized.",
     goalsItemPattern:
       "See which challenges are repeating enough to become ongoing goals.",
     goalsItemProgress: "Track progress against current goals over time.",
     goalsItemImplementation:
       "Keep implementation notes close to each long-term goal.",
     goalsImplementationNotes: "Implementation notes",
+    goalsImplementationPlaceholder:
+      "Add what you tried, what changed, and what your coach or admin should know before the next check-in.",
+    sharedPlanTitle: "Shared action plan",
+    sharedPlanDescription:
+      "These goals are the same coaching priorities your admin sees on the deep-dive page and in report snapshots.",
+    sharedPlanOwnership:
+      "Your coach or admin updates goal structure. Your implementation notes here stay synchronized.",
+    noSharedGoals: "No shared goals are active yet.",
+    goalUntitled: "Untitled goal",
+    goalNoDescription: "No goal description has been added yet.",
+    saveImplementationNotes: "Save implementation notes",
+    upcomingConferenceTitle: "Upcoming coaching conference",
+    upcomingConferenceStatus: "Scheduled {{date}}",
+    upcomingConferenceNoDate: "No conference is scheduled yet.",
+    upcomingConferenceSyncNote:
+      "Your coach or admin prepares the full conference prep separately. This workspace shows the timing and the shared goals that will inform the conversation.",
     materialsTitle: "My workspace and materials",
     materialsDescription:
       "Manage privacy, videos, and teaching documents from one teacher-owned area.",

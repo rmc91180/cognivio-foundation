@@ -1017,6 +1017,7 @@ export function TeacherProfilePage() {
             <SectionHeader
               title={t("teacherProfile.conferencePrepTitle")}
               description={t("teacherProfile.conferencePrepDescription")}
+              eyebrow={t("teacherProfile.conferencePrepEyebrow")}
               actions={
                 conferencePrepRes?.next_conference ? (
                   <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-[11px] text-slate-600">
@@ -1761,6 +1762,9 @@ export function TeacherProfilePage() {
                   </button>
                 }
               />
+              <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
+                {t("teacherProfile.actionPlanSyncNotice")}
+              </div>
 
               <div className="mt-4 space-y-3 text-xs">
                 {actionPlanGoals.map((goal) => (

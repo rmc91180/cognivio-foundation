@@ -56,6 +56,7 @@ export function TeacherWorkspacePage() {
     return assessments.length ? assessments[assessments.length - 1] : null;
   }, [dashboardRes]);
   const latestReviewedAt = latestAssessment?.analyzed_at || latestAssessment?.recorded_at || latestAssessment?.created_at || null;
+  const nextConferenceAt = teacherRes?.next_coaching_conference || null;
   const privacyReady = privacyProfileRes?.status === "active";
   const openGoals = state.actionPlanGoals.filter((goal) => goal?.status !== "complete" && goal?.status !== "implemented");
   const completedGoals = state.actionPlanGoals.filter((goal) => goal?.status === "complete" || goal?.status === "implemented");
@@ -232,19 +233,46 @@ export function TeacherWorkspacePage() {
             <WorkspaceSection title={t("teacherWorkspace.goalsTitle")} description={t("teacherWorkspace.goalsDescription")} tags={[t("timeScope.ongoingGoal"), t("timeScope.recurringPattern")]} active={activeSection === "goals"} activeLabel={t("teacherWorkspace.activeSectionLabel")}>
               <div className="grid gap-4 lg:grid-cols-2">
                 <Panel><div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-amber-700">{t("teacherProfile.recurringChallenges")}</div>{recurringChallenges.length ? <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>{recurringChallenges.slice(0, 3).map((item, idx) => <li key={idx}>{item}</li>)}</ul> : <div className="text-xs text-slate-500">{t("teacherProfile.noRecurringChallenges")}</div>}</Panel>
-                <Panel><div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.goalsImplementationNotes")}</div><textarea rows={4} value={state.actionPlanNotes} onChange={(e) => state.setActionPlanNotes(e.target.value)} className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800" placeholder={t("teacherProfile.actionPlanNotesPlaceholder")} /></Panel>
+                <Panel><div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.goalsImplementationNotes")}</div><textarea rows={4} value={state.actionPlanNotes} onChange={(e) => state.setActionPlanNotes(e.target.value)} className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800" placeholder={t("teacherWorkspace.goalsImplementationPlaceholder")} /></Panel>
               </div>
+              <Panel>
+                <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.sharedPlanTitle")}</div>
+                <div className="text-xs text-slate-600">{t("teacherWorkspace.sharedPlanDescription")}</div>
+                <div className="mt-2 text-[11px] text-slate-500">{t("teacherWorkspace.sharedPlanOwnership")}</div>
+              </Panel>
+              <Panel>
+                <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.upcomingConferenceTitle")}</div>
+                <div className="text-xs text-slate-700">
+                  {nextConferenceAt
+                    ? t("teacherWorkspace.upcomingConferenceStatus", { date: formatDateTime(nextConferenceAt) })
+                    : t("teacherWorkspace.upcomingConferenceNoDate")}
+                </div>
+                <div className="mt-2 text-[11px] text-slate-500">{t("teacherWorkspace.upcomingConferenceSyncNote")}</div>
+              </Panel>
               <div className="space-y-3 text-xs">
-                {state.actionPlanGoals.map((goal) => (
+                {state.actionPlanGoals.length ? state.actionPlanGoals.map((goal) => (
                   <Panel key={goal.id}>
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <input type="text" value={goal.title} onChange={(e) => state.setActionPlanGoals((prev) => prev.map((item) => item.id === goal.id ? { ...item, title: e.target.value } : item))} placeholder={t("teacherProfile.goalTitlePlaceholder")} className="flex-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800" />
-                      <select value={goal.status || "planned"} onChange={(e) => state.setActionPlanGoals((prev) => prev.map((item) => item.id === goal.id ? { ...item, status: e.target.value } : item))} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"><option value="planned">{t("teacherProfile.goalStatusPlanned")}</option><option value="in_progress">{t("teacherProfile.goalStatusInProgress")}</option><option value="complete">{t("teacherProfile.goalStatusComplete")}</option></select>
+                      <div className="flex-1 text-sm font-medium text-slate-900">{goal.title || t("teacherWorkspace.goalUntitled")}</div>
+                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-600">
+                        {goal.status === "complete"
+                          ? t("teacherProfile.goalStatusComplete")
+                          : goal.status === "in_progress"
+                            ? t("teacherProfile.goalStatusInProgress")
+                            : t("teacherProfile.goalStatusPlanned")}
+                      </span>
                     </div>
-                    <textarea rows={2} value={goal.description || ""} onChange={(e) => state.setActionPlanGoals((prev) => prev.map((item) => item.id === goal.id ? { ...item, description: e.target.value } : item))} placeholder={t("teacherProfile.goalDescriptionPlaceholder")} className="mt-2 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800" />
+                    <div className="mt-2 text-xs text-slate-700">{goal.description || t("teacherWorkspace.goalNoDescription")}</div>
+                    {goal.due_date ? (
+                      <div className="mt-2 text-[11px] text-slate-500">
+                        {t("teacherProfile.dueDate")}: {goal.due_date}
+                      </div>
+                    ) : null}
                   </Panel>
-                ))}
-                <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" onClick={() => state.setActionPlanGoals((prev) => [...prev, { id: `goal_${Date.now()}`, title: "", description: "", due_date: "", status: "planned" }])}>{t("teacherProfile.addGoal")}</Button><Button size="sm" onClick={() => mutations.saveActionPlanMutation.mutate({ goals: state.actionPlanGoals, notes: state.actionPlanNotes })} disabled={mutations.saveActionPlanMutation.isPending}>{mutations.saveActionPlanMutation.isPending ? t("teachersPage.saving") : t("teacherProfile.saveActionPlan")}</Button></div>
+                )) : (
+                  <div className="text-xs text-slate-500">{t("teacherWorkspace.noSharedGoals")}</div>
+                )}
+                <div className="flex flex-wrap gap-2"><Button size="sm" onClick={() => mutations.saveActionPlanMutation.mutate({ goals: state.actionPlanGoals, notes: state.actionPlanNotes })} disabled={mutations.saveActionPlanMutation.isPending}>{mutations.saveActionPlanMutation.isPending ? t("teachersPage.saving") : t("teacherWorkspace.saveImplementationNotes")}</Button></div>
               </div>
             </WorkspaceSection>
 
