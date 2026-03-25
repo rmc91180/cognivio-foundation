@@ -24,6 +24,7 @@ import shutil
 import sys
 import time
 import boto3
+from contextlib import asynccontextmanager
 from botocore.exceptions import BotoCoreError, ClientError
 from PIL import Image, ImageDraw
 try:
@@ -1280,9 +1281,6 @@ LEADERSHIP_INSIGHTS_CACHE_TTL_SECONDS = max(
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(ROOT_DIR / "uploads"))).expanduser()
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# Create the main app
-app = FastAPI(title="Cognivio API", description="Teacher Assessment Platform")
-
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
@@ -1292,6 +1290,62 @@ VIDEO_WORKER_TASKS: List[asyncio.Task] = []
 VIDEO_PRIVACY_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 VIDEO_PRIVACY_WORKER_TASKS: List[asyncio.Task] = []
 PRIVACY_MAINTENANCE_TASKS: List[asyncio.Task] = []
+
+
+async def _app_startup() -> None:
+    _validate_s3_config()
+    await _ensure_database_indexes()
+    await _start_privacy_maintenance_tasks()
+    await _start_privacy_workers()
+    await _start_video_workers()
+    await _rehydrate_video_privacy_queue()
+    await _rehydrate_video_processing_queue()
+    if not DEMO_MODE:
+        return
+    for demo in DEMO_USERS:
+        existing = await db.users.find_one({"email": demo["email"]})
+        if existing:
+            # Ensure demo roles are correct
+            desired_role = "admin" if demo["email"] == "principal@demo.cognivio.app" else "teacher"
+            updates = {}
+            if existing.get("role") != desired_role:
+                updates["role"] = desired_role
+            if updates:
+                await db.users.update_one({"email": demo["email"]}, {"$set": updates})
+            continue
+        user_id = str(uuid.uuid4())
+        user_doc = {
+            "id": user_id,
+            "email": demo["email"],
+            "name": demo["name"],
+            "password": hash_password(demo["password"]),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "is_demo": True,
+            "role": demo.get("role", "teacher"),
+        }
+        await db.users.insert_one(user_doc)
+
+
+async def _app_shutdown() -> None:
+    await _stop_video_workers()
+    client.close()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await _app_startup()
+    try:
+        yield
+    finally:
+        await _app_shutdown()
+
+
+# Create the main app
+app = FastAPI(
+    title="Cognivio API",
+    description="Teacher Assessment Platform",
+    lifespan=lifespan,
+)
 
 # Health check endpoint (at root level for Railway)
 @app.get("/health")
@@ -11476,43 +11530,3 @@ async def _stop_video_workers() -> None:
         await asyncio.gather(*PRIVACY_MAINTENANCE_TASKS, return_exceptions=True)
         PRIVACY_MAINTENANCE_TASKS.clear()
 
-
-@app.on_event("startup")
-async def ensure_demo_users():
-    _validate_s3_config()
-    await _ensure_database_indexes()
-    await _start_privacy_maintenance_tasks()
-    await _start_privacy_workers()
-    await _start_video_workers()
-    await _rehydrate_video_privacy_queue()
-    await _rehydrate_video_processing_queue()
-    if not DEMO_MODE:
-        return
-    for demo in DEMO_USERS:
-        existing = await db.users.find_one({"email": demo["email"]})
-        if existing:
-            # Ensure demo roles are correct
-            desired_role = "admin" if demo["email"] == "principal@demo.cognivio.app" else "teacher"
-            updates = {}
-            if existing.get("role") != desired_role:
-                updates["role"] = desired_role
-            if updates:
-                await db.users.update_one({"email": demo["email"]}, {"$set": updates})
-            continue
-        user_id = str(uuid.uuid4())
-        user_doc = {
-            "id": user_id,
-            "email": demo["email"],
-            "name": demo["name"],
-            "password": hash_password(demo["password"]),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "is_demo": True,
-            "role": demo.get("role", "teacher"),
-        }
-        await db.users.insert_one(user_doc)
-
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    await _stop_video_workers()
-    client.close()
