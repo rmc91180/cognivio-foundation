@@ -1955,6 +1955,7 @@ class UserResponse(BaseModel):
     name: str
     created_at: str
     role: Optional[str] = None
+    workspace_mode: Optional[str] = None
 
 class TokenResponse(BaseModel):
     token: str
@@ -2068,14 +2069,64 @@ class SyllabusUploadResponse(BaseModel):
 
 
 class AdminScoreOverride(BaseModel):
-    domain_id: str
-    original_score: float
-    adjusted_score: float
+    domain_id: Optional[str] = None
+    original_score: Optional[float] = None
+    adjusted_score: Optional[float] = None
+    override_type: str = "score"
+    target_type: str = "element"
+    target_id: Optional[str] = None
+    original_value: Optional[Any] = None
+    adjusted_value: Optional[Any] = None
     rationale: Optional[str] = None
+    metadata: Dict[str, Any] = {}
 
 
 class AdminScoringPreference(BaseModel):
     scoring_mode: str  # "override" or "coexist"
+
+
+class WorkspaceModePreferencePayload(BaseModel):
+    mode: Optional[str] = None
+    use_org_default: bool = False
+    set_org_default: bool = False
+
+
+class WorkspaceModePreferenceResponse(BaseModel):
+    effective_mode: str
+    user_override_mode: Optional[str] = None
+    org_default_mode: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class AssessmentFeedbackUpsert(BaseModel):
+    target_type: str
+    target_id: Optional[str] = None
+    feedback_value: str
+    rationale: Optional[str] = None
+    source_surface: Optional[str] = None
+    metadata: Dict[str, Any] = {}
+
+
+class AssessmentFeedbackRecord(BaseModel):
+    id: str
+    assessment_id: str
+    teacher_id: Optional[str] = None
+    video_id: Optional[str] = None
+    user_id: str
+    user_role: str
+    target_type: str
+    target_id: Optional[str] = None
+    feedback_value: str
+    rationale: Optional[str] = None
+    source_surface: Optional[str] = None
+    metadata: Dict[str, Any] = {}
+    created_at: str
+    updated_at: str
+
+
+class AssessmentFeedbackListResponse(BaseModel):
+    feedback: List[AssessmentFeedbackRecord] = []
+
 
 class ElementScore(BaseModel):
     """
@@ -2646,6 +2697,8 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 # ==================== AUTH ENDPOINTS ====================
 @api_router.post("/auth/register", response_model=TokenResponse)
 async def register(user: UserCreate):
+    from app.services.workspace_service import enrich_user_with_workspace_mode
+
     if DEMO_MODE:
         raise HTTPException(status_code=403, detail="Registration is disabled for demo mode")
     existing = await db.users.find_one({"email": user.email})
@@ -2662,40 +2715,58 @@ async def register(user: UserCreate):
         "role": "admin" if user.email.lower() in ADMIN_EMAILS else "teacher",
     }
     await db.users.insert_one(user_doc)
+    enriched_user = await enrich_user_with_workspace_mode(user_doc)
     
     token = create_token(user_id)
     return TokenResponse(
         token=token,
         user=UserResponse(
-            id=user_id,
-            email=user.email,
-            name=user.name,
-            created_at=user_doc["created_at"],
-            role=_get_user_role(user_doc),
+            **enriched_user,
         )
     )
 
 @api_router.post("/auth/login", response_model=TokenResponse)
 async def login(user: UserLogin):
+    from app.services.workspace_service import enrich_user_with_workspace_mode
+
     db_user = await db.users.find_one({"email": user.email})
     if not db_user or not verify_password(user.password, db_user["password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
+    db_user.pop("_id", None)
+    db_user.pop("password", None)
+    db_user["role"] = _get_user_role(db_user)
+    enriched_user = await enrich_user_with_workspace_mode(db_user)
+
     token = create_token(db_user["id"])
     return TokenResponse(
         token=token,
-        user=UserResponse(
-            id=db_user["id"],
-            email=db_user["email"],
-            name=db_user["name"],
-            created_at=db_user["created_at"],
-            role=_get_user_role(db_user),
-        )
+        user=UserResponse(**enriched_user)
     )
 
 @api_router.get("/auth/me", response_model=UserResponse)
 async def get_me(current_user: dict = Depends(get_current_user)):
-    return UserResponse(**current_user)
+    from app.services.workspace_service import enrich_user_with_workspace_mode
+
+    return UserResponse(**(await enrich_user_with_workspace_mode(current_user)))
+
+
+@api_router.get("/user/workspace-mode", response_model=WorkspaceModePreferenceResponse)
+async def get_user_workspace_mode(current_user: dict = Depends(get_current_user)):
+    from app.services.workspace_service import resolve_workspace_mode
+
+    return WorkspaceModePreferenceResponse(**(await resolve_workspace_mode(current_user)))
+
+
+@api_router.post("/user/workspace-mode", response_model=WorkspaceModePreferenceResponse)
+async def set_user_workspace_mode(
+    payload: WorkspaceModePreferencePayload,
+    current_user: dict = Depends(get_current_user),
+):
+    from app.services.workspace_service import set_workspace_mode
+
+    return WorkspaceModePreferenceResponse(
+        **(await set_workspace_mode(current_user, payload.model_dump()))
+    )
 
 # ==================== FRAMEWORK ENDPOINTS ====================
 @api_router.get("/frameworks")
@@ -2832,6 +2903,8 @@ async def get_framework_details(
 
 @api_router.post("/frameworks/selection")
 async def save_framework_selection(selection: FrameworkSelection, current_user: dict = Depends(get_current_user)):
+    from app.services.workspace_service import sync_framework_memory
+
     selected_elements = []
     seen_selected = set()
     for element_id in selection.selected_elements or []:
@@ -2862,6 +2935,7 @@ async def save_framework_selection(selection: FrameworkSelection, current_user: 
         {"$set": selection_doc},
         upsert=True
     )
+    await sync_framework_memory(current_user, selection_doc)
     return {"message": "Selection saved", "selection": selection_doc}
 
 @api_router.get("/frameworks/selection/current")
@@ -5354,21 +5428,9 @@ async def create_admin_override(
     payload: AdminScoreOverride,
     current_user: dict = Depends(get_current_user),
 ):
-    role = _get_user_role(current_user)
-    if role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    doc = {
-        "id": str(uuid.uuid4()),
-        "assessment_id": assessment_id,
-        "admin_id": current_user["id"],
-        "domain_id": payload.domain_id,
-        "original_score": payload.original_score,
-        "adjusted_score": payload.adjusted_score,
-        "rationale": payload.rationale,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    await db.admin_assessment_overrides.insert_one(doc)
-    return _to_json_safe({"override": doc})
+    from app.services.assessment_service import create_admin_override as modular_create_admin_override
+
+    return await modular_create_admin_override(assessment_id, payload, current_user)
 
 
 @api_router.get("/assessments/{assessment_id}/admin-overrides")
@@ -5376,14 +5438,34 @@ async def list_admin_overrides(
     assessment_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    role = _get_user_role(current_user)
-    if role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    docs = await db.admin_assessment_overrides.find(
-        {"assessment_id": assessment_id, "admin_id": current_user["id"]},
-        {"_id": 0},
-    ).sort("created_at", -1).to_list(1000)
-    return {"overrides": docs}
+    from app.services.assessment_service import list_admin_overrides as modular_list_admin_overrides
+
+    return await modular_list_admin_overrides(assessment_id, current_user)
+
+
+@api_router.post("/assessments/{assessment_id}/feedback", response_model=AssessmentFeedbackListResponse)
+async def upsert_assessment_feedback(
+    assessment_id: str,
+    payload: AssessmentFeedbackUpsert,
+    current_user: dict = Depends(get_current_user),
+):
+    from app.services.assessment_service import (
+        list_assessment_feedback as modular_list_assessment_feedback,
+        upsert_assessment_feedback as modular_upsert_assessment_feedback,
+    )
+
+    await modular_upsert_assessment_feedback(assessment_id, payload, current_user)
+    return await modular_list_assessment_feedback(assessment_id, current_user)
+
+
+@api_router.get("/assessments/{assessment_id}/feedback", response_model=AssessmentFeedbackListResponse)
+async def list_assessment_feedback(
+    assessment_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    from app.services.assessment_service import list_assessment_feedback as modular_list_assessment_feedback
+
+    return await modular_list_assessment_feedback(assessment_id, current_user)
 
 
 @api_router.post("/admin/preferences/scoring-mode")
@@ -5419,12 +5501,40 @@ async def _get_admin_scoring_mode(admin_id: str) -> str:
     return "override"
 
 
+@api_router.get("/admin/organization-memory")
+async def get_admin_organization_memory(
+    scope_type: Optional[str] = None,
+    scope_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_admin_ops_user(current_user)
+    from app.services.workspace_service import list_organization_memory
+
+    entries = await list_organization_memory(current_user, scope_type=scope_type, scope_id=scope_id)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "entries": entries,
+    }
+
+
+@api_router.get("/admin/feedback-digest")
+async def get_admin_feedback_digest(current_user: dict = Depends(get_current_user)):
+    _require_admin_ops_user(current_user)
+    from app.services.workspace_service import build_feedback_digest
+
+    return await build_feedback_digest(current_user)
+
+
 def _apply_admin_overrides(
     element_scores: List[dict],
     overrides: List[dict],
     scoring_mode: str,
 ) -> Tuple[List[dict], Optional[float]]:
-    override_map = {o["domain_id"]: o for o in overrides}
+    override_map = {
+        o["domain_id"]: o
+        for o in overrides
+        if o.get("override_type", "score") == "score" and o.get("domain_id")
+    }
     adjusted_scores = []
     for es in element_scores:
         override = override_map.get(es["element_id"])
@@ -5865,6 +5975,8 @@ async def get_teacher_summary_insights(
     request: Request,
     current_user: dict = Depends(get_current_user),
 ):
+    from app.services.workspace_service import build_analysis_context
+
     """
     Aggregate insights across multiple lessons for a teacher.
     Used for monthly/periodic 'Summary AI Insight' on the profile.
@@ -5914,14 +6026,25 @@ async def get_teacher_summary_insights(
         )
 
     language = _resolve_request_language(request, default="en")
-    summary_text = generate_summary(synthetic_element_scores, overall_trend or 0, language=language)
-    recs = generate_recommendations(synthetic_element_scores, language=language)
+    analysis_context = await build_analysis_context(current_user, teacher_id)
+    summary_text = generate_summary(
+        synthetic_element_scores,
+        overall_trend or 0,
+        language=language,
+        analysis_context=analysis_context,
+    )
+    recs = generate_recommendations(
+        synthetic_element_scores,
+        language=language,
+        analysis_context=analysis_context,
+    )
 
     return {
         "teacher_id": teacher_id,
         "overall_trend_score": overall_trend,
         "summary": summary_text,
         "recommendations": recs,
+        "analysis_context": analysis_context,
     }
 
 
@@ -5951,6 +6074,8 @@ async def upsert_teacher_summary_reflection(
     payload: SummaryReflectionUpsert,
     current_user: dict = Depends(get_current_user),
 ):
+    from app.services.workspace_service import sync_summary_reflection_memory
+
     now = datetime.now(timezone.utc).isoformat()
     existing = await db.summary_reflections.find_one(
         {"teacher_id": teacher_id, "user_id": current_user["id"]}
@@ -5970,6 +6095,7 @@ async def upsert_teacher_summary_reflection(
         existing.update(update_fields)
         existing.pop("_id", None)
         existing.pop("user_id", None)
+        await sync_summary_reflection_memory(current_user, teacher_id, existing)
         return SummaryReflection(**existing)
 
     doc = {
@@ -5982,6 +6108,7 @@ async def upsert_teacher_summary_reflection(
         "updated_at": None,
     }
     await db.summary_reflections.insert_one(doc)
+    await sync_summary_reflection_memory(current_user, teacher_id, doc)
     doc.pop("_id", None)
     doc.pop("user_id", None)
     return SummaryReflection(**doc)
@@ -6958,6 +7085,233 @@ async def get_dashboard_leadership_insights(
     return final_payload
 
 
+@api_router.get("/dashboard/cohort-analytics")
+async def get_dashboard_cohort_analytics(
+    window_months: int = Query(6, ge=1, le=12),
+    current_user: dict = Depends(get_current_user),
+):
+    teachers = await db.teachers.find(
+        {"created_by": current_user["id"]},
+        {"_id": 0},
+    ).to_list(1000)
+    teacher_ids = [teacher["id"] for teacher in teachers]
+    assessments = await db.assessments.find(
+        {"user_id": current_user["id"], "teacher_id": {"$in": teacher_ids or ["__none__"]}},
+        {"_id": 0, "user_id": 0},
+    ).sort("analyzed_at", -1).to_list(3000)
+    roster_payload = await get_roster(current_user=current_user)
+    roster_rows = roster_payload.get("roster", [])
+
+    category_breakdown: Dict[str, Dict[str, Any]] = {}
+    department_breakdown: Dict[str, Dict[str, Any]] = {}
+    for row in roster_rows:
+        category = row.get("category_custom") or row.get("category") or "uncategorized"
+        category_bucket = category_breakdown.setdefault(
+            category,
+            {"category": category, "teacher_count": 0, "scores": [], "improving_count": 0},
+        )
+        category_bucket["teacher_count"] += 1
+        if isinstance(row.get("overall_score"), (int, float)):
+            category_bucket["scores"].append(row["overall_score"])
+        if row.get("trend_30d") == "improving":
+            category_bucket["improving_count"] += 1
+
+        department = row.get("department") or "Unassigned"
+        department_bucket = department_breakdown.setdefault(
+            department,
+            {"department": department, "teacher_count": 0, "scores": []},
+        )
+        department_bucket["teacher_count"] += 1
+        if isinstance(row.get("overall_score"), (int, float)):
+            department_bucket["scores"].append(row["overall_score"])
+
+    category_rows = [
+        {
+            **bucket,
+            "average_score": round(sum(bucket["scores"]) / len(bucket["scores"]), 2)
+            if bucket["scores"]
+            else None,
+        }
+        for bucket in category_breakdown.values()
+    ]
+    department_rows = [
+        {
+            **bucket,
+            "average_score": round(sum(bucket["scores"]) / len(bucket["scores"]), 2)
+            if bucket["scores"]
+            else None,
+        }
+        for bucket in department_breakdown.values()
+    ]
+    category_rows.sort(key=lambda item: ((item.get("average_score") or 0), item["category"]))
+    department_rows.sort(key=lambda item: ((item.get("average_score") or 0), item["department"]))
+
+    element_scores: Dict[str, Dict[str, Any]] = {}
+    for assessment in assessments:
+        for es in assessment.get("element_scores", []):
+            bucket = element_scores.setdefault(
+                es["element_id"],
+                {"element_id": es["element_id"], "element_name": es["element_name"], "scores": []},
+            )
+            if isinstance(es.get("score"), (int, float)):
+                bucket["scores"].append(es["score"])
+    skill_gaps = []
+    for bucket in element_scores.values():
+        if not bucket["scores"]:
+            continue
+        skill_gaps.append(
+            {
+                "element_id": bucket["element_id"],
+                "element_name": bucket["element_name"],
+                "average_score": round(sum(bucket["scores"]) / len(bucket["scores"]), 2),
+                "assessment_count": len(bucket["scores"]),
+            }
+        )
+    skill_gaps.sort(key=lambda item: (item["average_score"], item["element_name"]))
+
+    windows = _build_month_windows(window_months)
+    trend_points = []
+    for window in windows:
+        scores = []
+        for assessment in assessments:
+            analyzed_at = _parse_iso_datetime(assessment.get("analyzed_at"))
+            if not analyzed_at or not (window["start"] <= analyzed_at < window["end"]):
+                continue
+            if isinstance(assessment.get("overall_score"), (int, float)):
+                scores.append(assessment["overall_score"])
+        trend_points.append(
+            {
+                "label": window["label"],
+                "average_score": round(sum(scores) / len(scores), 2) if scores else None,
+                "assessment_count": len(scores),
+            }
+        )
+
+    support_count = sum(
+        1 for row in roster_rows if isinstance(row.get("overall_score"), (int, float)) and row["overall_score"] < 6
+    )
+    improving_count = sum(1 for row in roster_rows if row.get("trend_30d") == "improving")
+    return _to_json_safe(
+        {
+            "overview": {
+                "teacher_count": len(teachers),
+                "assessment_count": len(assessments),
+                "support_count": support_count,
+                "improving_count": improving_count,
+                "category_count": len(category_rows),
+            },
+            "category_breakdown": category_rows[:6],
+            "department_breakdown": department_rows[:6],
+            "skill_gaps": skill_gaps[:5],
+            "trend_points": trend_points,
+        }
+    )
+
+
+@api_router.get("/dashboard/supervisor-calibration")
+async def get_dashboard_supervisor_calibration(
+    current_user: dict = Depends(get_current_user),
+):
+    teachers = await db.teachers.find(
+        {"created_by": current_user["id"]},
+        {"_id": 0, "id": 1},
+    ).to_list(1000)
+    teacher_ids = [teacher["id"] for teacher in teachers]
+    assessment_ids = [
+        item["id"]
+        for item in await db.assessments.find(
+            {"user_id": current_user["id"], "teacher_id": {"$in": teacher_ids or ["__none__"]}},
+            {"_id": 0, "id": 1},
+        ).to_list(3000)
+    ]
+    observations = await db.observations.find(
+        {"teacher_id": {"$in": teacher_ids or ["__none__"]}},
+        {"_id": 0},
+    ).to_list(3000)
+    feedback_docs = await db.assessment_report_feedback.find(
+        {"teacher_id": {"$in": teacher_ids or ["__none__"]}},
+        {"_id": 0},
+    ).to_list(3000)
+    override_docs = await db.admin_assessment_overrides.find(
+        {"assessment_id": {"$in": assessment_ids or ["__none__"]}},
+        {"_id": 0},
+    ).to_list(3000)
+
+    reviewer_rows: Dict[str, Dict[str, Any]] = {}
+
+    def get_reviewer_row(reviewer_id: Optional[str]) -> Dict[str, Any]:
+        reviewer_key = reviewer_id or "unknown"
+        return reviewer_rows.setdefault(
+            reviewer_key,
+            {
+                "reviewer_id": reviewer_key,
+                "observation_count": 0,
+                "feedback_count": 0,
+                "override_count": 0,
+                "useful_feedback_count": 0,
+                "rewrite_override_count": 0,
+            },
+        )
+
+    for item in observations:
+        row = get_reviewer_row(item.get("user_id"))
+        row["observation_count"] += 1
+    for item in feedback_docs:
+        row = get_reviewer_row(item.get("user_id"))
+        row["feedback_count"] += 1
+        if item.get("feedback_value") == "useful":
+            row["useful_feedback_count"] += 1
+    for item in override_docs:
+        row = get_reviewer_row(item.get("admin_id"))
+        row["override_count"] += 1
+        if item.get("override_type") == "recommendation_usefulness" and item.get("adjusted_value") == "needs_rewrite":
+            row["rewrite_override_count"] += 1
+
+    user_ids = [reviewer_id for reviewer_id in reviewer_rows.keys() if reviewer_id != "unknown"]
+    users = await db.users.find({"id": {"$in": user_ids or ["__none__"]}}, {"_id": 0, "id": 1, "name": 1}).to_list(200)
+    user_name_map = {item["id"]: item.get("name") or item["id"] for item in users}
+
+    rendered_rows = []
+    for row in reviewer_rows.values():
+        feedback_count = row["feedback_count"]
+        useful_rate = round(row["useful_feedback_count"] / feedback_count, 2) if feedback_count else None
+        recommendation_override_total = row["rewrite_override_count"] + max(
+            0, row["override_count"] - row["rewrite_override_count"]
+        )
+        rewrite_rate = (
+            round(row["rewrite_override_count"] / recommendation_override_total, 2)
+            if recommendation_override_total
+            else None
+        )
+        note = "Balanced review pattern."
+        if rewrite_rate is not None and rewrite_rate >= 0.4:
+            note = "Recommendation phrasing is being challenged often."
+        elif useful_rate is not None and useful_rate >= 0.7:
+            note = "Signals show strong reviewer trust in the current outputs."
+        rendered_rows.append(
+            {
+                **row,
+                "reviewer_name": user_name_map.get(row["reviewer_id"], row["reviewer_id"]),
+                "useful_feedback_rate": useful_rate,
+                "rewrite_override_rate": rewrite_rate,
+                "calibration_note": note,
+            }
+        )
+    rendered_rows.sort(key=lambda item: (-item["override_count"], -item["feedback_count"], item["reviewer_name"]))
+
+    return _to_json_safe(
+        {
+            "overview": {
+                "reviewer_count": len(rendered_rows),
+                "observation_count": sum(item["observation_count"] for item in rendered_rows),
+                "feedback_count": sum(item["feedback_count"] for item in rendered_rows),
+                "override_count": sum(item["override_count"] for item in rendered_rows),
+            },
+            "reviewers": rendered_rows[:8],
+        }
+    )
+
+
 # ==================== ROSTER & DASHBOARD ENDPOINTS ====================
 @api_router.get("/roster")
 async def get_teacher_roster(
@@ -7507,6 +7861,8 @@ async def save_action_plan(
     payload: ActionPlanUpsert,
     current_user: dict = Depends(get_current_user),
 ):
+    from app.services.workspace_service import sync_action_plan_memory
+
     teacher = await _get_teacher_or_404(teacher_id, current_user)
     role = _get_user_role(current_user)
     plan_owner_id = teacher.get("created_by") if role == "teacher" and teacher.get("created_by") else current_user["id"]
@@ -7593,7 +7949,94 @@ async def save_action_plan(
     )
     if not result:
         raise HTTPException(status_code=500, detail="Action plan save failed")
+    await sync_action_plan_memory(current_user, teacher, result)
     return ActionPlan(**result)
+
+
+@api_router.get("/teachers/{teacher_id}/conference-prep")
+async def get_teacher_conference_prep(
+    teacher_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    language = _resolve_request_language(request, default="en")
+    action_plan = await db.action_plans.find_one(
+        {"teacher_id": teacher_id, "user_id": current_user["id"]},
+        {"_id": 0, "user_id": 0},
+    ) or {"goals": [], "notes": None}
+    assessments = await db.assessments.find(
+        {"teacher_id": teacher_id, "user_id": current_user["id"]},
+        {"_id": 0, "user_id": 0},
+    ).sort("analyzed_at", -1).to_list(5)
+    observations = await db.observations.find(
+        {"teacher_id": teacher_id, "user_id": current_user["id"]},
+        {"_id": 0, "user_id": 0},
+    ).sort("created_at", -1).to_list(8)
+    latest = assessments[0] if assessments else None
+    previous = assessments[1] if len(assessments) > 1 else None
+    open_goals = [
+        goal for goal in action_plan.get("goals", [])
+        if goal.get("title") and goal.get("status") not in {"complete", "implemented"}
+    ]
+    latest_summary = (
+        generate_summary(
+            latest.get("element_scores", []),
+            latest.get("overall_score") or 0,
+            provided_summary=latest.get("summary"),
+            priority_element_ids=latest.get("priority_elements"),
+            focus_note=latest.get("focus_note"),
+            language=language,
+        )
+        if latest
+        else ""
+    )
+    comparison_lines = []
+    if latest and previous:
+        latest_score = latest.get("overall_score")
+        previous_score = previous.get("overall_score")
+        if isinstance(latest_score, (int, float)) and isinstance(previous_score, (int, float)):
+            delta = round(latest_score - previous_score, 2)
+            if _is_hebrew_language(language):
+                comparison_lines.append(f"שינוי מאז השיעור הקודם: {delta:+}/10.")
+            else:
+                comparison_lines.append(f"Change since the previous reviewed lesson: {delta:+}/10.")
+    if open_goals:
+        joined = ", ".join(goal.get("title") for goal in open_goals[:3])
+        if _is_hebrew_language(language):
+            comparison_lines.append(f"יעדי המעקב הפעילים: {joined}.")
+        else:
+            comparison_lines.append(f"Current follow-up goals: {joined}.")
+    if action_plan.get("notes"):
+        if _is_hebrew_language(language):
+            comparison_lines.append(f"הערות תוכנית הפעולה: {action_plan.get('notes')}")
+        else:
+            comparison_lines.append(f"Action-plan notes: {action_plan.get('notes')}")
+    agenda = []
+    if latest_summary:
+        agenda.append(latest_summary)
+    for obs in observations[:3]:
+        summary = obs.get("admin_comment") or obs.get("teacher_response")
+        if summary:
+            agenda.append(summary)
+    if open_goals:
+        for goal in open_goals[:2]:
+            if _is_hebrew_language(language):
+                agenda.append(f"בדקו התקדמות מול היעד: {goal.get('title')}.")
+            else:
+                agenda.append(f"Check progress against the goal: {goal.get('title')}.")
+    return _to_json_safe({
+        "teacher_id": teacher_id,
+        "teacher_name": teacher.get("name"),
+        "latest_assessment_id": latest.get("id") if latest else None,
+        "latest_assessment_date": latest.get("analyzed_at") if latest else None,
+        "summary": latest_summary,
+        "continuity_lines": comparison_lines,
+        "agenda": agenda[:6],
+        "open_goals": open_goals[:4],
+        "recent_observations": observations[:4],
+        "next_conference": teacher.get("next_coaching_conference"),
+    })
 
 @api_router.get("/teachers/{teacher_id}/peer-recommendations")
 async def get_peer_recommendations(
@@ -8493,11 +8936,21 @@ async def get_admin_ops_observability(current_user: dict = Depends(get_current_u
         "video_queue_depth": VIDEO_JOB_QUEUE.qsize(),
         "privacy_queue_depth": VIDEO_PRIVACY_JOB_QUEUE.qsize(),
     }
+    specialist_activity = await _get_specialist_activity_snapshot(current_user)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "observability": snapshot,
         "persistent_metrics": app_metrics.snapshot_summary(),
+        "specialist_activity": specialist_activity,
     }
+
+
+@api_router.get("/admin/ops/ai-quality")
+async def get_admin_ops_ai_quality(current_user: dict = Depends(get_current_user)):
+    _require_admin_ops_user(current_user)
+    from app.services.workspace_service import get_ai_quality_snapshot
+
+    return await get_ai_quality_snapshot(current_user)
 
 
 @api_router.get("/admin/ops/privacy-runtime")
@@ -8799,6 +9252,7 @@ async def analyze_video(
                 frames,
                 framework,
                 selected_elements,
+                teacher_id=teacher_id,
                 priority_elements=priority_elements,
                 focus_note=focus_note,
                 language=analysis_language,
@@ -8832,6 +9286,7 @@ async def analyze_video(
             priority_element_ids=priority_elements,
             focus_note=focus_note,
             language=analysis_language,
+            analysis_context=analysis_payload.get("analysis_context"),
         )
         summary_text = generate_summary(
             element_scores,
@@ -8840,6 +9295,7 @@ async def analyze_video(
             priority_element_ids=priority_elements,
             focus_note=focus_note,
             language=analysis_language,
+            analysis_context=analysis_payload.get("analysis_context"),
         )
         observation_summary = build_observation_summary_packet(
             element_scores,
@@ -8871,6 +9327,8 @@ async def analyze_video(
             "analysis_mode": analysis_payload.get("analysis_mode", "fallback"),
             "analysis_confidence": analysis_metadata["analysis_confidence"],
             "analysis_modalities_used": analysis_metadata["analysis_modalities_used"],
+            "specialist_orchestrator": analysis_metadata["specialist_orchestrator"],
+            "specialist_trace": analysis_metadata["specialist_trace"],
         }
         
         await db.assessments.insert_one(assessment_doc)
@@ -9048,6 +9506,46 @@ def _build_focus_instruction(
                 "Admin observation note, preserved as originally written: "
                 f"\"{normalized_note}\". Use it directly as guidance and do not normalize it into another wording style."
             )
+    return "\n".join(parts).strip()
+
+
+def _build_analysis_context_instruction(analysis_context: Optional[dict], language: str = "en") -> str:
+    if not analysis_context:
+        return ""
+    parts: List[str] = []
+    active_goals = [str(item).strip() for item in analysis_context.get("active_goals", []) if str(item).strip()]
+    notes = str(analysis_context.get("action_plan_notes") or "").strip()
+    signal_guidance = [
+        str(item).strip()
+        for item in ((analysis_context.get("signal_summary") or {}).get("guidance") or [])
+        if str(item).strip()
+    ]
+    reflection = analysis_context.get("reflection_summary") or {}
+    reflection_takeaways = [
+        str(reflection.get("self_reflection") or "").strip(),
+        str(reflection.get("actions_taken") or "").strip(),
+    ]
+    reflection_takeaways = [item for item in reflection_takeaways if item]
+    if active_goals:
+        if _is_hebrew_language(language):
+            parts.append(f"יעדי הליווי הפעילים כרגע עבור המורה הם: {', '.join(active_goals[:3])}.")
+        else:
+            parts.append(f"Current coaching goals for this teacher are: {', '.join(active_goals[:3])}.")
+    if notes:
+        if _is_hebrew_language(language):
+            parts.append(f"הערות תוכנית הפעולה האחרונות: {notes}")
+        else:
+            parts.append(f"Recent action-plan notes: {notes}")
+    if reflection_takeaways:
+        if _is_hebrew_language(language):
+            parts.append(f"משוב ההמשך האנושי שכדאי לקחת בחשבון: {' | '.join(reflection_takeaways[:2])}.")
+        else:
+            parts.append(f"Human follow-through context to consider: {' | '.join(reflection_takeaways[:2])}.")
+    if signal_guidance:
+        if _is_hebrew_language(language):
+            parts.append("העדפות הסוקרים מהמשוב האחרון: " + " ".join(signal_guidance[:2]))
+        else:
+            parts.append("Reviewer guidance from recent feedback: " + " ".join(signal_guidance[:2]))
     return "\n".join(parts).strip()
 
 
@@ -9342,7 +9840,123 @@ def build_analysis_metadata(
             "degradation_reasons": degradation_reasons,
         },
         "audio_transcript_status": transcript_status,
+        "specialist_orchestrator": analysis_payload.get("specialist_orchestrator"),
+        "specialist_trace": analysis_payload.get("specialist_trace") or [],
     }
+
+
+def _summarize_specialist_activity(
+    assessment_docs: List[Dict[str, Any]],
+    *,
+    recent_limit: int = 5,
+) -> Dict[str, Any]:
+    versions: Dict[str, int] = {}
+    specialists: Dict[str, Dict[str, Any]] = {}
+    recent_traces: List[Dict[str, Any]] = []
+    orchestrated_assessment_count = 0
+    total_specialist_steps = 0
+
+    for doc in assessment_docs or []:
+        orchestrator = doc.get("specialist_orchestrator") or {}
+        trace = list(doc.get("specialist_trace") or [])
+        if not trace and not orchestrator.get("enabled"):
+            continue
+
+        orchestrated_assessment_count += 1
+        version = str(orchestrator.get("version") or "unknown").strip() or "unknown"
+        versions[version] = versions.get(version, 0) + 1
+
+        trace_preview: List[Dict[str, Any]] = []
+        for item in trace:
+            specialist_id = str(item.get("specialist_id") or "unknown").strip() or "unknown"
+            row = specialists.setdefault(
+                specialist_id,
+                {
+                    "specialist_id": specialist_id,
+                    "name": str(item.get("name") or specialist_id).strip() or specialist_id,
+                    "invocations": 0,
+                    "owned_fields": list(item.get("owned_fields") or []),
+                    "recent_notes": [],
+                    "last_seen_at": None,
+                },
+            )
+            row["invocations"] += 1
+            row["last_seen_at"] = doc.get("analyzed_at") or row["last_seen_at"]
+            if not row["owned_fields"]:
+                row["owned_fields"] = list(item.get("owned_fields") or [])
+            for note in item.get("notes") or []:
+                note_text = str(note or "").strip()
+                if note_text and note_text not in row["recent_notes"]:
+                    row["recent_notes"].append(note_text)
+            total_specialist_steps += 1
+            trace_preview.append(
+                {
+                    "specialist_id": specialist_id,
+                    "name": str(item.get("name") or specialist_id).strip() or specialist_id,
+                    "notes": [str(note or "").strip() for note in (item.get("notes") or []) if str(note or "").strip()],
+                    "payload_delta": item.get("payload_delta") or {},
+                }
+            )
+
+        recent_traces.append(
+            {
+                "assessment_id": doc.get("id"),
+                "teacher_id": doc.get("teacher_id"),
+                "video_id": doc.get("video_id"),
+                "analyzed_at": doc.get("analyzed_at"),
+                "analysis_mode": doc.get("analysis_mode"),
+                "version": version,
+                "specialists": trace_preview,
+            }
+        )
+
+    return {
+        "sample_size": len(assessment_docs or []),
+        "orchestrated_assessment_count": orchestrated_assessment_count,
+        "total_specialist_steps": total_specialist_steps,
+        "versions": sorted(
+            [{"version": version, "count": count} for version, count in versions.items()],
+            key=lambda item: (-int(item["count"]), item["version"]),
+        ),
+        "specialists": sorted(
+            [
+                {
+                    **row,
+                    "recent_notes": row["recent_notes"][:3],
+                }
+                for row in specialists.values()
+            ],
+            key=lambda item: (-int(item.get("invocations") or 0), str(item.get("specialist_id") or "")),
+        ),
+        "recent_traces": recent_traces[:recent_limit],
+    }
+
+
+async def _get_specialist_activity_snapshot(
+    current_user: Dict[str, Any],
+    *,
+    sample_limit: int = 12,
+) -> Dict[str, Any]:
+    assessment_docs = await db.assessments.find(
+        {
+            "user_id": current_user["id"],
+            "$or": [
+                {"specialist_orchestrator.enabled": True},
+                {"specialist_trace.0": {"$exists": True}},
+            ],
+        },
+        {
+            "_id": 0,
+            "id": 1,
+            "teacher_id": 1,
+            "video_id": 1,
+            "analyzed_at": 1,
+            "analysis_mode": 1,
+            "specialist_orchestrator": 1,
+            "specialist_trace": 1,
+        },
+    ).sort("analyzed_at", -1).to_list(sample_limit)
+    return _summarize_specialist_activity(assessment_docs, recent_limit=5)
 
 
 def _extract_json_object(text: str) -> Optional[dict]:
@@ -9684,6 +10298,7 @@ async def analyze_frames_with_ai(
     frames: List[dict],
     framework: dict,
     selected_elements: List[str],
+    teacher_id: Optional[str] = None,
     priority_elements: Optional[List[str]] = None,
     focus_note: Optional[str] = None,
     language: str = "en",
@@ -9692,6 +10307,8 @@ async def analyze_frames_with_ai(
     multimodal_payload: Optional[dict] = None,
 ) -> dict:
     """Analyze extracted video frames and return normalized assessment output."""
+    from app.analysis.specialist_orchestrator import orchestrate_specialists
+
     elements_to_analyze = _build_elements_to_analyze(
         framework,
         selected_elements,
@@ -9707,6 +10324,18 @@ async def analyze_frames_with_ai(
         focus_note=focus_note,
         language=language,
     )
+    analysis_context = None
+    if current_user and teacher_id:
+        try:
+            from app.services.workspace_service import build_analysis_context
+
+            analysis_context = await build_analysis_context(current_user, teacher_id)
+        except Exception as exc:
+            logger.warning(f"Unable to build adaptive analysis context: {exc}")
+    context_instruction = _build_analysis_context_instruction(analysis_context, language=language)
+    combined_instruction = "\n".join(
+        item for item in [focus_instruction, context_instruction] if item
+    ).strip()
 
     paid_analysis_allowed = _is_paid_analysis_allowed_for_user(current_user)
     if multimodal_payload:
@@ -9727,7 +10356,7 @@ async def analyze_frames_with_ai(
             payload = await _analyze_frames_with_openai(
                 frames,
                 elements_to_analyze,
-                focus_instruction=focus_instruction,
+                focus_instruction=combined_instruction,
                 language=language,
             )
             normalized = _normalize_model_analysis(
@@ -9739,7 +10368,14 @@ async def analyze_frames_with_ai(
             )
             if multimodal_payload and "audio" in (multimodal_payload.get("modalities_used") or []):
                 normalized["analysis_mode"] = "openai_multimodal"
-            return normalized
+            normalized["analysis_context"] = analysis_context
+            return orchestrate_specialists(
+                normalized,
+                language=language,
+                priority_element_ids=priority_elements,
+                focus_note=focus_note,
+                analysis_context=analysis_context,
+            )
         except Exception as exc:
             logger.error(f"OpenAI video analysis failed; falling back to heuristic analysis: {exc}")
             fallback_mode = "fallback_model_error"
@@ -9755,7 +10391,7 @@ async def analyze_frames_with_ai(
     logger.warning(
         f"Real analysis model path unavailable ({fallback_mode}); using fallback analysis output"
     )
-    return _normalize_model_analysis(
+    normalized = _normalize_model_analysis(
         {
             "summary": None,
             "recommendations": [],
@@ -9765,6 +10401,14 @@ async def analyze_frames_with_ai(
         frames,
         analysis_mode=fallback_mode,
         language=language,
+    )
+    normalized["analysis_context"] = analysis_context
+    return orchestrate_specialists(
+        normalized,
+        language=language,
+        priority_element_ids=priority_elements,
+        focus_note=focus_note,
+        analysis_context=analysis_context,
     )
 
 
@@ -9854,6 +10498,83 @@ def _observation_focus_label(item: dict, priority_element_ids: Optional[List[str
     if bool(item.get("priority")) or item.get("element_id") in set(priority_element_ids or []):
         return "Priority focus"
     return "Observation area"
+
+
+def _priority_focus_names(element_scores: List[dict], priority_element_ids: Optional[List[str]] = None) -> List[str]:
+    priority_set = set(priority_element_ids or [])
+    names: List[str] = []
+    for item in element_scores or []:
+        if not (bool(item.get("priority")) or item.get("element_id") in priority_set):
+            continue
+        name = str(item.get("element_name") or item.get("element_id") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _build_priority_focus_summary_sentence(
+    element_scores: List[dict],
+    priority_element_ids: Optional[List[str]] = None,
+    language: str = "en",
+) -> Optional[str]:
+    priority_set = set(priority_element_ids or [])
+    priority_items = [
+        item
+        for item in element_scores or []
+        if bool(item.get("priority")) or item.get("element_id") in priority_set
+    ]
+    if not priority_items:
+        return None
+
+    current_strengths = [
+        str(item.get("element_name") or item.get("element_id") or "").strip()
+        for item in priority_items
+        if float(item.get("score", 0.0) or 0.0) >= 7.0
+    ]
+    coaching_needs = [
+        str(item.get("element_name") or item.get("element_id") or "").strip()
+        for item in priority_items
+        if float(item.get("score", 0.0) or 0.0) < 7.0
+    ]
+    current_strengths = [name for idx, name in enumerate(current_strengths) if name and name not in current_strengths[:idx]][:2]
+    coaching_needs = [name for idx, name in enumerate(coaching_needs) if name and name not in coaching_needs[:idx]][:2]
+
+    if _is_hebrew_language(language):
+        if current_strengths and coaching_needs:
+            return (
+                f"בתוך מוקד התצפית, החוזקות הנראות ביותר היו {', '.join(current_strengths)}, "
+                f"ובעוד שעדיין נדרש ליווי פדגוגי סביב {', '.join(coaching_needs)}."
+            )
+        if current_strengths:
+            return f"בתוך מוקד התצפית, החוזקות הנראות ביותר היו {', '.join(current_strengths)}."
+        if coaching_needs:
+            return f"בתוך מוקד התצפית, עדיין נדרש ליווי פדגוגי סביב {', '.join(coaching_needs)}."
+        return None
+
+    if current_strengths and coaching_needs:
+        return (
+            f"Within the selected focus, current strengths were {', '.join(current_strengths)}, "
+            f"while coaching attention is still needed in {', '.join(coaching_needs)}."
+        )
+    if current_strengths:
+        return f"Within the selected focus, current strengths were {', '.join(current_strengths)}."
+    if coaching_needs:
+        return f"Within the selected focus, coaching attention is still needed in {', '.join(coaching_needs)}."
+    return None
+
+
+def _apply_priority_recommendation_context(
+    text: str,
+    element_name: Optional[str],
+    is_priority: bool,
+    language: str = "en",
+) -> str:
+    clean_text = str(text or "").strip()
+    if not clean_text or not is_priority or not element_name:
+        return clean_text
+    if _is_hebrew_language(language):
+        return f"מוקד עדיפות - {element_name}: {clean_text}"
+    return f"Priority focus on {element_name}: {clean_text}"
 
 
 def build_observation_summary_packet(
@@ -10026,6 +10747,7 @@ def generate_summary(
     priority_element_ids: Optional[List[str]] = None,
     focus_note: Optional[str] = None,
     language: str = "en",
+    analysis_context: Optional[dict] = None,
 ) -> str:
     """Generate an evidence-grounded summary of the assessment."""
     if provided_summary:
@@ -10055,11 +10777,7 @@ def generate_summary(
     else:
         summary_parts = [f"Overall performance: {level.replace('_', ' ').title()} (Score: {overall_score}/10)."]
     if priority_element_ids:
-        focus_names = [
-            item["element_name"]
-            for item in element_scores
-            if item.get("element_id") in set(priority_element_ids)
-        ]
+        focus_names = _priority_focus_names(element_scores, priority_element_ids)
         if focus_names:
             if _is_hebrew_language(language):
                 summary_parts.append(f"מוקד התצפית הושם על {', '.join(focus_names[:3])}.")
@@ -10070,6 +10788,13 @@ def generate_summary(
             summary_parts.append(f"הערת מיקוד לתצפית: {focus_note.rstrip('.')}.")
         else:
             summary_parts.append(f"Observation focus note: {focus_note.rstrip('.')}.")
+    priority_focus_sentence = _build_priority_focus_summary_sentence(
+        element_scores,
+        priority_element_ids=priority_element_ids,
+        language=language,
+    )
+    if priority_focus_sentence:
+        summary_parts.append(priority_focus_sentence)
 
     if strengths:
         strength_notes = []
@@ -10097,6 +10822,17 @@ def generate_summary(
         else:
             summary_parts.append(f"Priority growth areas are {', '.join(growth_notes)}.")
 
+    active_goals = [
+        str(item).strip()
+        for item in ((analysis_context or {}).get("active_goals") or [])
+        if str(item).strip()
+    ]
+    if active_goals:
+        if _is_hebrew_language(language):
+            summary_parts.append(f"יעדי הליווי הפעילים כרגע הם {', '.join(active_goals[:2])}.")
+        else:
+            summary_parts.append(f"Current coaching goals are {', '.join(active_goals[:2])}.")
+
     return " ".join(summary_parts)
 
 
@@ -10106,11 +10842,16 @@ def generate_recommendations(
     priority_element_ids: Optional[List[str]] = None,
     focus_note: Optional[str] = None,
     language: str = "en",
+    analysis_context: Optional[dict] = None,
 ) -> List[str]:
     """Generate timestamped, evidence-grounded recommendations."""
     if provided_recommendations:
         rendered = []
         priority_set = set(priority_element_ids or [])
+        element_name_by_id = {
+            str(item.get("element_id") or ""): str(item.get("element_name") or "").strip()
+            for item in element_scores or []
+        }
         sorted_recommendations = sorted(
             [item for item in provided_recommendations if isinstance(item, dict)],
             key=lambda item: (
@@ -10122,10 +10863,25 @@ def generate_recommendations(
             text = str(item.get("text") or "").strip()
             if not text:
                 continue
+            linked_element_id = str(item.get("linked_element_id") or "")
+            is_priority = linked_element_id in priority_set
+            element_name = element_name_by_id.get(linked_element_id)
+            text = _apply_priority_recommendation_context(text, element_name, is_priority, language)
             start_sec = int(float(item.get("start_sec", 0)))
             end_sec = int(float(item.get("end_sec", start_sec + 30)))
             rendered.append(f"[{_format_timestamp(start_sec)}–{_format_timestamp(end_sec)}] {text}")
         if rendered:
+            rendered = rendered[:3]
+            signal_guidance = [
+                str(item).strip()
+                for item in ((analysis_context or {}).get("signal_summary") or {}).get("guidance", [])
+                if str(item).strip()
+            ]
+            if signal_guidance:
+                if _is_hebrew_language(language):
+                    rendered.append(f"[00:15–00:30] העדפת הסוקרים: {signal_guidance[0].rstrip('.')}.")
+                else:
+                    rendered.append(f"[00:15–00:30] Reviewer guidance: {signal_guidance[0].rstrip('.')}.")
             return rendered[:3]
 
     recommendations: List[str] = []
@@ -10146,14 +10902,17 @@ def generate_recommendations(
             else "Visible evidence was limited."
         )
         observation = str((es.get("observations") or [default_observation])[0]).strip()
+        is_priority = bool(es.get("priority")) or es.get("element_id") in priority_set
         if _is_hebrew_language(language):
             action = _build_recommendation_text_hebrew(es["element_name"], observation)
+            action = _apply_priority_recommendation_context(action, es.get("element_name"), is_priority, language)
             recommendations.append(
                 f"[{_format_timestamp(start_sec)}–{_format_timestamp(end_sec)}] {action} "
                 f"ראיה שנצפתה: {observation.rstrip('.')}."
             )
         else:
             action = _build_recommendation_text(es["element_name"], observation)
+            action = _apply_priority_recommendation_context(action, es.get("element_name"), is_priority, language)
             recommendations.append(
                 f"[{_format_timestamp(start_sec)}–{_format_timestamp(end_sec)}] {action} "
                 f"Observed evidence: {observation.rstrip('.')}."
@@ -10170,7 +10929,23 @@ def generate_recommendations(
                 closing_note = f"Maintain the strongest routines visible in the lesson while keeping the observation focus on {focus_note.rstrip('.')}."
         recommendations.append(f"[00:30–01:00] {closing_note}")
 
-    return recommendations
+    active_goals = [
+        str(item).strip()
+        for item in ((analysis_context or {}).get("active_goals") or [])
+        if str(item).strip()
+    ]
+    if active_goals:
+        goal_text = active_goals[0]
+        if _is_hebrew_language(language):
+            recommendations.append(
+                f"[01:00–01:20] חברו את המשוב לשיעור ליעד הפעיל: {goal_text}."
+            )
+        else:
+            recommendations.append(
+                f"[01:00–01:20] Connect the next coaching move to the active goal: {goal_text}."
+            )
+
+    return recommendations[:3]
 
 
 def _clamp_demo_value(value: float, minimum: float, maximum: float) -> float:
@@ -10649,6 +11424,12 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.videos, [("status", 1), ("upload_date", -1)])
     await _safe_create_index(db.videos, [("privacy_status", 1), ("upload_date", -1)])
     await _safe_create_index(db.assessments, [("teacher_id", 1), ("analyzed_at", -1)])
+    await _safe_create_index(
+        db.assessment_report_feedback,
+        [("assessment_id", 1), ("user_id", 1), ("target_type", 1), ("target_id", 1)],
+        unique=True,
+    )
+    await _safe_create_index(db.assessment_report_feedback, [("assessment_id", 1), ("updated_at", -1)])
     await _safe_create_index(db.observations, [("video_id", 1), ("created_at", -1)])
     await _safe_create_index(db.video_processing_jobs, [("video_id", 1)], unique=True)
     await _safe_create_index(db.video_processing_jobs, [("status", 1), ("updated_at", -1)])

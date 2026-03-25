@@ -25,6 +25,20 @@ function MetricCard({ title, value, hint }) {
   );
 }
 
+function formatTimestamp(value, locale) {
+  if (!value) {
+    return "—";
+  }
+  try {
+    return new Intl.DateTimeFormat(locale, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(new Date(value));
+  } catch (error) {
+    return "—";
+  }
+}
+
 export function OpsMetricsPage() {
   const { t, i18n } = useTranslation();
   const { user } = useAuth();
@@ -35,6 +49,12 @@ export function OpsMetricsPage() {
     queryKey: ["ops-observability"],
     enabled: isAdmin,
     queryFn: () => opsApi.observability().then((res) => res.data),
+    refetchInterval: 30000,
+  });
+  const { data: aiQualityData } = useQuery({
+    queryKey: ["ops-ai-quality"],
+    enabled: isAdmin,
+    queryFn: () => opsApi.aiQuality().then((res) => res.data),
     refetchInterval: 30000,
   });
 
@@ -51,6 +71,13 @@ export function OpsMetricsPage() {
   const dependencies = persistentMetrics.dependencies || {};
   const observability = data?.observability || {};
   const recentFailures = observability.analysis?.recent_failures || [];
+  const aiQuality = aiQualityData?.metrics || {};
+  const specialistActivity = data?.specialist_activity || {};
+  const specialistVersions = specialistActivity.versions || [];
+  const specialists = specialistActivity.specialists || [];
+  const recentTraces = specialistActivity.recent_traces || [];
+  const topSpecialist = specialists[0];
+  const activeVersion = specialistVersions[0]?.version || "—";
 
   if (!isAdmin) {
     return (
@@ -115,6 +142,171 @@ export function OpsMetricsPage() {
                 value={`$${formatNumber(counters.analysis_estimated_cost_usd_total || 0, locale)}`}
                 hint={t("opsMetrics.trailingCostHint")}
               />
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <MetricCard
+                title={t("opsMetrics.aiFeedbackTotal")}
+                value={formatNumber(aiQuality.total_feedback || 0, locale)}
+                hint={t("opsMetrics.aiFeedbackHint")}
+              />
+              <MetricCard
+                title={t("opsMetrics.aiUsefulRate")}
+                value={
+                  aiQuality.useful_feedback_rate != null
+                    ? `${formatNumber((aiQuality.useful_feedback_rate || 0) * 100, locale)}%`
+                    : "—"
+                }
+                hint={t("opsMetrics.aiUsefulRateHint")}
+              />
+              <MetricCard
+                title={t("opsMetrics.aiOverridesTotal")}
+                value={formatNumber(aiQuality.total_overrides || 0, locale)}
+                hint={t("opsMetrics.aiOverridesHint")}
+              />
+              <MetricCard
+                title={t("opsMetrics.aiRewriteSignals")}
+                value={formatNumber(aiQuality.override_breakdown?.recommendation_usefulness || 0, locale)}
+                hint={t("opsMetrics.aiRewriteSignalsHint")}
+              />
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <MetricCard
+                title={t("opsMetrics.specialistAssessments")}
+                value={formatNumber(specialistActivity.orchestrated_assessment_count || 0, locale)}
+                hint={t("opsMetrics.specialistAssessmentsHint", {
+                  count: formatNumber(specialistActivity.sample_size || 0, locale),
+                })}
+              />
+              <MetricCard
+                title={t("opsMetrics.specialistSteps")}
+                value={formatNumber(specialistActivity.total_specialist_steps || 0, locale)}
+                hint={t("opsMetrics.specialistStepsHint")}
+              />
+              <MetricCard
+                title={t("opsMetrics.specialistTop")}
+                value={topSpecialist?.name || "—"}
+                hint={t("opsMetrics.specialistTopHint")}
+              />
+              <MetricCard
+                title={t("opsMetrics.specialistVersion")}
+                value={activeVersion}
+                hint={t("opsMetrics.specialistVersionHint")}
+              />
+            </div>
+
+            <div className="grid gap-6 xl:grid-cols-2">
+              <Panel className="space-y-4">
+                <div>
+                  <h2 className="text-lg font-semibold text-slate-900">{t("opsMetrics.specialistActivityTitle")}</h2>
+                  <p className="text-sm text-slate-500">{t("opsMetrics.specialistActivityDescription")}</p>
+                </div>
+                {specialists.length ? (
+                  <div className="space-y-3">
+                    {specialists.map((specialist) => (
+                      <div
+                        key={specialist.specialist_id}
+                        className="rounded-xl border border-slate-200 bg-slate-50 p-4"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-semibold text-slate-800">{specialist.name}</div>
+                            <div className="text-xs uppercase tracking-wide text-slate-400">
+                              {specialist.specialist_id}
+                            </div>
+                          </div>
+                          <div className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-600">
+                            {t("opsMetrics.invocations")}: {formatNumber(specialist.invocations || 0, locale)}
+                          </div>
+                        </div>
+                        <div className="mt-3 grid gap-3 md:grid-cols-2">
+                          <div className="text-sm text-slate-600">
+                            <div className="font-medium text-slate-700">{t("opsMetrics.ownedFields")}</div>
+                            <div className="mt-1">
+                              {(specialist.owned_fields || []).length
+                                ? specialist.owned_fields.join(", ")
+                                : "—"}
+                            </div>
+                          </div>
+                          <div className="text-sm text-slate-600">
+                            <div className="font-medium text-slate-700">{t("opsMetrics.latestSeen")}</div>
+                            <div className="mt-1">{formatTimestamp(specialist.last_seen_at, locale)}</div>
+                          </div>
+                        </div>
+                        <div className="mt-3 space-y-2 text-sm text-slate-600">
+                          {(specialist.recent_notes || []).length ? (
+                            specialist.recent_notes.map((note, index) => (
+                              <div key={`${specialist.specialist_id}-note-${index}`}>{note}</div>
+                            ))
+                          ) : (
+                            <div>{t("opsMetrics.noSpecialistNotes")}</div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+                    {t("opsMetrics.noSpecialistActivity")}
+                  </div>
+                )}
+              </Panel>
+
+              <Panel className="space-y-4">
+                <div>
+                  <h2 className="text-lg font-semibold text-slate-900">{t("opsMetrics.specialistRecentTitle")}</h2>
+                  <p className="text-sm text-slate-500">{t("opsMetrics.specialistRecentDescription")}</p>
+                </div>
+                {recentTraces.length ? (
+                  <div className="space-y-3">
+                    {recentTraces.map((trace, index) => (
+                      <div
+                        key={trace.assessment_id || trace.video_id || `trace-${index}`}
+                        className="rounded-xl border border-slate-200 bg-slate-50 p-4"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="space-y-1 text-sm text-slate-600">
+                            <div className="font-semibold text-slate-800">
+                              {t("opsMetrics.assessmentLabel")}: {trace.assessment_id || "—"}
+                            </div>
+                            <div>{t("opsMetrics.teacherLabel")}: {trace.teacher_id || "—"}</div>
+                            <div>{t("opsMetrics.videoLabel")}: {trace.video_id || "—"}</div>
+                          </div>
+                          <div className="space-y-1 text-right text-xs text-slate-500">
+                            <div>{t("opsMetrics.orchestratorVersionLabel")}: {trace.version || "—"}</div>
+                            <div>{t("opsMetrics.analysisModeLabel")}: {trace.analysis_mode || "—"}</div>
+                            <div>{formatTimestamp(trace.analyzed_at, locale)}</div>
+                          </div>
+                        </div>
+                        <div className="mt-3 space-y-3">
+                          {(trace.specialists || []).map((item) => (
+                            <div key={`${trace.assessment_id}-${item.specialist_id}`} className="rounded-lg bg-white p-3">
+                              <div className="text-sm font-medium text-slate-800">{item.name}</div>
+                              <div className="mt-1 space-y-1 text-sm text-slate-600">
+                                {(item.notes || []).length ? (
+                                  item.notes.map((note, index) => (
+                                    <div key={`${trace.assessment_id}-${item.specialist_id}-note-${index}`}>{note}</div>
+                                  ))
+                                ) : (
+                                  <div>{t("opsMetrics.noSpecialistNotes")}</div>
+                                )}
+                              </div>
+                              <div className="mt-2 text-xs text-slate-400">
+                                {t("opsMetrics.payloadDelta")}: {JSON.stringify(item.payload_delta || {})}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+                    {t("opsMetrics.noSpecialistActivity")}
+                  </div>
+                )}
+              </Panel>
             </div>
 
             <div className="grid gap-6 xl:grid-cols-2">
@@ -234,4 +426,3 @@ export function OpsMetricsPage() {
     </LayoutShell>
   );
 }
-

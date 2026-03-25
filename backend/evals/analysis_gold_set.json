@@ -1,0 +1,578 @@
+{
+  "version": "2026-03-24.phase3",
+  "cases": [
+    {
+      "id": "summary_priority_alignment_en",
+      "kind": "summary",
+      "language": "en",
+      "description": "English summary should name the configured focus and describe how that focus is currently performing.",
+      "input": {
+        "element_scores": [
+          {
+            "element_id": "2b",
+            "element_name": "Questioning",
+            "priority": true,
+            "score": 8.2,
+            "observations": [
+              "Teacher used follow-up questions to press for reasoning."
+            ]
+          },
+          {
+            "element_id": "3c",
+            "element_name": "Engagement",
+            "score": 6.1,
+            "observations": [
+              "Only a small subset of students appeared to participate."
+            ]
+          }
+        ],
+        "overall_score": 7.1,
+        "priority_element_ids": [
+          "2b"
+        ],
+        "focus_note": "Pay particular attention to questioning and checks for understanding.",
+        "language": "en"
+      },
+      "checks": {
+        "specificity": {
+          "includes": [
+            "Observation emphasis was placed on Questioning.",
+            "Within the selected focus, current strengths were Questioning."
+          ]
+        },
+        "evidence_grounding": {
+          "includes": [
+            "Teacher used follow-up questions to press for reasoning",
+            "Only a small subset of students appeared to participate"
+          ]
+        },
+        "usefulness": {
+          "includes": [
+            "Strongest visible practices were",
+            "Priority growth areas are"
+          ]
+        },
+        "modality_discipline": {
+          "excludes": [
+            "Audio transcript",
+            "Students said"
+          ]
+        }
+      }
+    },
+    {
+      "id": "summary_priority_alignment_he",
+      "kind": "summary",
+      "language": "he",
+      "description": "Hebrew summary should preserve the teacher-observation framing and the admin focus note.",
+      "input": {
+        "element_scores": [
+          {
+            "element_id": "2b",
+            "element_name": "שימוש בשאלות ובדיון",
+            "priority": true,
+            "score": 8.2,
+            "observations": [
+              "המורה השתמשה בשאלות המשך כדי להעמיק את החשיבה."
+            ]
+          },
+          {
+            "element_id": "3c",
+            "element_name": "מעורבות תלמידים בלמידה",
+            "score": 6.1,
+            "observations": [
+              "רק חלק קטן מהתלמידים השתתף באופן פעיל."
+            ]
+          }
+        ],
+        "overall_score": 7.1,
+        "priority_element_ids": [
+          "2b"
+        ],
+        "focus_note": "לשים לב במיוחד לאיכות הדיון.",
+        "language": "he"
+      },
+      "checks": {
+        "specificity": {
+          "includes": [
+            "מוקד התצפית הושם על שימוש בשאלות ובדיון.",
+            "בתוך מוקד התצפית"
+          ]
+        },
+        "evidence_grounding": {
+          "includes": [
+            "המורה השתמשה בשאלות המשך כדי להעמיק את החשיבה",
+            "רק חלק קטן מהתלמידים השתתף באופן פעיל"
+          ]
+        },
+        "usefulness": {
+          "includes": [
+            "נקודות החוזקה הבולטות ביותר היו",
+            "תחומי הצמיחה המרכזיים הם"
+          ]
+        },
+        "modality_discipline": {
+          "excludes": [
+            "תמלול",
+            "התלמידים אמרו"
+          ]
+        }
+      }
+    },
+    {
+      "id": "recommendations_priority_alignment_en",
+      "kind": "recommendations",
+      "language": "en",
+      "description": "Priority-linked recommendations should be timestamped, evidence-grounded, and clearly tied to the selected focus.",
+      "input": {
+        "element_scores": [
+          {
+            "element_id": "3c",
+            "element_name": "Engagement",
+            "score": 6.0,
+            "observations": [
+              "Student participation cues were uneven across the sampled frames."
+            ],
+            "evidence_segments": [
+              {
+                "start_sec": 95,
+                "end_sec": 125,
+                "summary": "Only a small cluster of students responded during the task.",
+                "rationale": "model-observed"
+              }
+            ]
+          }
+        ],
+        "priority_element_ids": [
+          "3c"
+        ],
+        "language": "en"
+      },
+      "checks": {
+        "specificity": {
+          "includes": [
+            "Priority focus on Engagement"
+          ]
+        },
+        "evidence_grounding": {
+          "includes": [
+            "[01:35–02:05]",
+            "Observed evidence: Student participation cues were uneven across the sampled frames."
+          ]
+        },
+        "usefulness": {
+          "includes": [
+            "so more students contribute"
+          ]
+        },
+        "modality_discipline": {
+          "excludes": [
+            "audio",
+            "students said"
+          ]
+        }
+      }
+    },
+    {
+      "id": "recommendations_priority_alignment_he",
+      "kind": "recommendations",
+      "language": "he",
+      "description": "Hebrew recommendations should keep the same priority, timestamp, and evidence discipline.",
+      "input": {
+        "element_scores": [
+          {
+            "element_id": "3c",
+            "element_name": "מעורבות תלמידים בלמידה",
+            "score": 6.0,
+            "observations": [
+              "נראו סימני השתתפות לא אחידים בין קבוצות התלמידים."
+            ],
+            "evidence_segments": [
+              {
+                "start_sec": 95,
+                "end_sec": 125,
+                "summary": "רק קבוצה קטנה של תלמידים הגיבה במהלך המשימה.",
+                "rationale": "model-observed"
+              }
+            ]
+          }
+        ],
+        "priority_element_ids": [
+          "3c"
+        ],
+        "language": "he"
+      },
+      "checks": {
+        "specificity": {
+          "includes": [
+            "מוקד עדיפות - מעורבות תלמידים בלמידה"
+          ]
+        },
+        "evidence_grounding": {
+          "includes": [
+            "[01:35–02:05]",
+            "ראיה שנצפתה: נראו סימני השתתפות לא אחידים בין קבוצות התלמידים."
+          ]
+        },
+        "usefulness": {
+          "includes": [
+            "לחזק את מעורבות תלמידים בלמידה"
+          ]
+        },
+        "modality_discipline": {
+          "excludes": [
+            "אודיו",
+            "התלמידים אמרו"
+          ]
+        }
+      }
+    },
+    {
+      "id": "packet_confidence_note_audio_unavailable_en",
+      "kind": "packet",
+      "language": "en",
+      "description": "The observation packet should stay honest about missing audio and point reviewers back to visual evidence.",
+      "output_key": "confidence_note",
+      "input": {
+        "element_scores": [
+          {
+            "element_id": "2b",
+            "element_name": "Questioning",
+            "priority": true,
+            "score": 6.7,
+            "observations": [
+              "Teacher cold-called a small group and then moved on quickly."
+            ]
+          }
+        ],
+        "overall_score": 6.7,
+        "summary_text": "Questioning routines were visible but uneven.",
+        "recommendations": [
+          "[01:20–01:50] Priority focus on Questioning: Extend wait time after cold calls."
+        ],
+        "priority_element_ids": [
+          "2b"
+        ],
+        "focus_note": "Watch the depth of questioning.",
+        "analysis_confidence": {
+          "degradation_reasons": [
+            "audio_unavailable"
+          ]
+        },
+        "language": "en"
+      },
+      "checks": {
+        "evidence_grounding": {
+          "includes": [
+            "Audio was unavailable",
+            "visual evidence"
+          ]
+        },
+        "modality_discipline": {
+          "excludes": [
+            "transcript",
+            "students said"
+          ]
+        }
+      }
+    },
+    {
+      "id": "packet_priority_alignment_en",
+      "kind": "packet",
+      "language": "en",
+      "description": "Priority alignment lines should distinguish between current strength and coaching need within the selected focus.",
+      "output_key": "priority_alignment",
+      "input": {
+        "element_scores": [
+          {
+            "element_id": "2b",
+            "element_name": "Questioning",
+            "priority": true,
+            "score": 8.1,
+            "observations": [
+              "Teacher used probing follow-up questions."
+            ]
+          },
+          {
+            "element_id": "3c",
+            "element_name": "Engagement",
+            "priority": true,
+            "score": 6.2,
+            "observations": [
+              "Only a small subset of students participated."
+            ]
+          }
+        ],
+        "overall_score": 7.0,
+        "summary_text": "Questioning was stronger than engagement in the sampled lesson.",
+        "recommendations": [
+          "[01:35–02:05] Priority focus on Engagement: Expand participation cues."
+        ],
+        "priority_element_ids": [
+          "2b",
+          "3c"
+        ],
+        "language": "en"
+      },
+      "checks": {
+        "specificity": {
+          "includes": [
+            "Questioning: currently strong (8.1/10)",
+            "Engagement: needs coaching attention (6.2/10)"
+          ]
+        },
+        "usefulness": {
+          "includes": [
+            "needs coaching attention"
+          ]
+        }
+      }
+    },
+    {
+      "id": "summary_active_goals_en",
+      "kind": "summary",
+      "language": "en",
+      "description": "Summaries should carry forward current coaching goals when bounded analysis context is available.",
+      "input": {
+        "element_scores": [
+          {
+            "element_id": "2b",
+            "element_name": "Questioning",
+            "priority": true,
+            "score": 6.4,
+            "observations": [
+              "Teacher mostly used short recall prompts."
+            ]
+          },
+          {
+            "element_id": "3c",
+            "element_name": "Engagement",
+            "score": 7.6,
+            "observations": [
+              "Most students tracked the task and transitions."
+            ]
+          }
+        ],
+        "overall_score": 7.0,
+        "priority_element_ids": [
+          "2b"
+        ],
+        "focus_note": "Watch whether questions require extended student thinking.",
+        "language": "en",
+        "analysis_context": {
+          "active_goals": [
+            "Increase probing questions",
+            "Protect student think time"
+          ]
+        }
+      },
+      "checks": {
+        "specificity": {
+          "includes": [
+            "Observation emphasis was placed on Questioning.",
+            "Within the selected focus, coaching attention is still needed in Questioning."
+          ]
+        },
+        "evidence_grounding": {
+          "includes": [
+            "Teacher mostly used short recall prompts",
+            "Most students tracked the task and transitions"
+          ]
+        },
+        "usefulness": {
+          "includes": [
+            "Current coaching goals are Increase probing questions, Protect student think time."
+          ]
+        },
+        "modality_discipline": {
+          "excludes": [
+            "Audio transcript",
+            "students said"
+          ]
+        }
+      }
+    },
+    {
+      "id": "recommendations_with_reviewer_guidance_en",
+      "kind": "recommendations",
+      "language": "en",
+      "description": "Rendered recommendations should preserve priority ordering and append bounded reviewer guidance.",
+      "input": {
+        "element_scores": [
+          {
+            "element_id": "2b",
+            "element_name": "Questioning",
+            "score": 6.1,
+            "observations": [
+              "Teacher mostly asked short recall questions."
+            ]
+          },
+          {
+            "element_id": "3c",
+            "element_name": "Engagement",
+            "score": 6.4,
+            "observations": [
+              "Participation stayed concentrated in one part of the room."
+            ]
+          }
+        ],
+        "priority_element_ids": [
+          "2b"
+        ],
+        "language": "en",
+        "provided_recommendations": [
+          {
+            "start_sec": 150,
+            "end_sec": 185,
+            "text": "Broaden participation routines so more students contribute during engagement.",
+            "linked_element_id": "3c"
+          },
+          {
+            "start_sec": 90,
+            "end_sec": 120,
+            "text": "Increase probing questions and wait time to strengthen questioning.",
+            "linked_element_id": "2b"
+          }
+        ],
+        "analysis_context": {
+          "signal_summary": {
+            "guidance": [
+              "Keep the next move concrete and brief."
+            ]
+          }
+        }
+      },
+      "checks": {
+        "specificity": {
+          "includes": [
+            "[01:30–02:00] Priority focus on Questioning: Increase probing questions and wait time to strengthen questioning.",
+            "[00:15–00:30] Reviewer guidance: Keep the next move concrete and brief."
+          ]
+        },
+        "evidence_grounding": {
+          "includes": [
+            "[02:30–03:05] Broaden participation routines so more students contribute during engagement."
+          ]
+        },
+        "usefulness": {
+          "includes": [
+            "Priority focus on Questioning"
+          ]
+        },
+        "modality_discipline": {
+          "excludes": [
+            "audio",
+            "students said"
+          ]
+        }
+      }
+    },
+    {
+      "id": "recommendations_active_goal_fallback_en",
+      "kind": "recommendations",
+      "language": "en",
+      "description": "Fallback recommendations should still connect the next move to the active goal when no structured AI recommendations are supplied.",
+      "input": {
+        "element_scores": [
+          {
+            "element_id": "3c",
+            "element_name": "Engagement",
+            "priority": true,
+            "score": 6.2,
+            "observations": [
+              "Participation was concentrated in one student group."
+            ],
+            "evidence_segments": [
+              {
+                "start_sec": 110,
+                "end_sec": 145,
+                "summary": "Only one cluster of students responded during partner share.",
+                "rationale": "model-observed"
+              }
+            ]
+          }
+        ],
+        "priority_element_ids": [
+          "3c"
+        ],
+        "language": "en",
+        "analysis_context": {
+          "active_goals": [
+            "Broaden cold-call participation"
+          ]
+        }
+      },
+      "checks": {
+        "specificity": {
+          "includes": [
+            "[01:50–02:25] Priority focus on Engagement",
+            "[01:00–01:20] Connect the next coaching move to the active goal: Broaden cold-call participation."
+          ]
+        },
+        "evidence_grounding": {
+          "includes": [
+            "Observed evidence: Participation was concentrated in one student group."
+          ]
+        },
+        "usefulness": {
+          "includes": [
+            "so more students contribute"
+          ]
+        },
+        "modality_discipline": {
+          "excludes": [
+            "audio",
+            "students said"
+          ]
+        }
+      }
+    },
+    {
+      "id": "packet_partial_evidence_he",
+      "kind": "packet",
+      "language": "he",
+      "description": "Hebrew packets should acknowledge partial evidence without inventing transcript-based detail.",
+      "output_key": "confidence_note",
+      "input": {
+        "element_scores": [
+          {
+            "element_id": "2d",
+            "element_name": "שימוש במשוב ללמידה",
+            "priority": true,
+            "score": 6.5,
+            "observations": [
+              "נראו רק מעט רגעים שבהם המשוב הוביל לתיקון נראה לעין."
+            ]
+          }
+        ],
+        "overall_score": 6.5,
+        "summary_text": "המשוב היה נוכח אך לא תמיד הוביל לתגובה נראית לעין.",
+        "recommendations": [
+          "[02:00–02:30] מוקד עדיפות - שימוש במשוב ללמידה: להפוך את המשוב למדויק וישים יותר."
+        ],
+        "priority_element_ids": [
+          "2d"
+        ],
+        "analysis_confidence": {
+          "degradation_reasons": [
+            "audio_transcript_processing"
+          ]
+        },
+        "language": "he"
+      },
+      "checks": {
+        "evidence_grounding": {
+          "includes": [
+            "התצפית הושלמה על סמך ראיות חלקיות"
+          ]
+        },
+        "modality_discipline": {
+          "excludes": [
+            "תמלול",
+            "התלמידים אמרו"
+          ]
+        }
+      }
+    }
+  ]
+}
