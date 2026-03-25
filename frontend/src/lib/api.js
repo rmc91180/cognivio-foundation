@@ -27,6 +27,8 @@ export const authApi = {
   login: (payload) => api.post("/api/auth/login", payload),
   register: (payload) => api.post("/api/auth/register", payload),
   me: () => api.get("/api/auth/me"),
+  getWorkspaceMode: () => api.get("/api/user/workspace-mode"),
+  setWorkspaceMode: (payload) => api.post("/api/user/workspace-mode", payload),
 };
 
 export { assessmentApi, adherenceApi };
@@ -79,12 +81,15 @@ export const gradebookApi = {
 export const adminApi = {
   setScoringMode: (scoring_mode) =>
     api.post("/api/admin/preferences/scoring-mode", { scoring_mode }),
+  feedbackDigest: () => api.get("/api/admin/feedback-digest"),
+  organizationMemory: (params) => api.get("/api/admin/organization-memory", { params }),
 };
 
 export const opsApi = {
   readiness: () => api.get("/api/admin/ops/readiness"),
   launchHealth: () => api.get("/api/admin/ops/launch-health"),
   observability: () => api.get("/api/admin/ops/observability"),
+  aiQuality: () => api.get("/api/admin/ops/ai-quality"),
   backlogPriorities: () => api.get("/api/admin/ops/backlog-priorities"),
 };
 

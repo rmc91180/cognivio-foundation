@@ -13,6 +13,7 @@ import { Link } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { Button, EmptyState, LoadingState, PageHeader, Panel } from "@/components/ui";
 import { useTranslation } from "react-i18next";
+import { runtimeConfig } from "@/lib/runtimeConfig";
 
 export function TeachersPage() {
   const { t, i18n } = useTranslation();
@@ -21,6 +22,8 @@ export function TeachersPage() {
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
   const isRtl = i18n.dir() === "rtl";
   const locale = i18n.language?.startsWith("he") ? "he-IL" : "en-US";
+  const trainingModeFoundationEnabled =
+    user?.workspace_mode === "training" || runtimeConfig.trainingModeFoundationEnabled;
   const { data: teachersData, isLoading } = useQuery({
     queryKey: ["teachers"],
     queryFn: () => teacherApi.list().then((res) => res.data),
@@ -340,29 +343,68 @@ export function TeachersPage() {
     }
   };
 
+  const pageTitle = trainingModeFoundationEnabled
+    ? t("teachersPage.trainingTitle")
+    : t("teachersPage.title");
+  const pageDescription = trainingModeFoundationEnabled
+    ? t("teachersPage.trainingDescription")
+    : t("teachersPage.description");
+  const addTeacherLabel = trainingModeFoundationEnabled
+    ? t("teachersPage.trainingAddTeacher")
+    : t("teachersPage.addTeacher");
+  const hideAddTeacherLabel = trainingModeFoundationEnabled
+    ? t("teachersPage.trainingHideAddTeacher")
+    : t("teachersPage.hideAddTeacher");
+  const addTeacherPanelLabel = trainingModeFoundationEnabled
+    ? t("teachersPage.trainingAddTeacherPanel")
+    : t("teachersPage.addTeacherPanel");
+  const rosterLabel = trainingModeFoundationEnabled
+    ? t("teachersPage.trainingRoster")
+    : t("teachersPage.roster");
+  const teacherColumnLabel = trainingModeFoundationEnabled
+    ? t("teachersPage.trainingTeacherLabel")
+    : t("teachersPage.teacher");
+  const exportUnitLabel = trainingModeFoundationEnabled
+    ? t("teachersPage.trainingExportUnit")
+    : t("teachersPage.exportUnit");
+  const coursesLabel = trainingModeFoundationEnabled
+    ? t("teachersPage.trainingCourses")
+    : t("teachersPage.courses");
+  const noTeachersTitle = trainingModeFoundationEnabled
+    ? t("teachersPage.trainingNoTeachersTitle")
+    : t("teachersPage.noTeachersTitle");
+  const noTeachersMessage = trainingModeFoundationEnabled
+    ? t("teachersPage.trainingNoTeachersMessage")
+    : t("teachersPage.noTeachersMessage");
+
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
         <PageHeader
-          title={t("teachersPage.title")}
-          description={t("teachersPage.description")}
+          title={pageTitle}
+          description={pageDescription}
           actions={
             <Button
               variant="secondary"
               size="sm"
               onClick={() => setShowAddTeacher((prev) => !prev)}
             >
-              {showAddTeacher ? t("teachersPage.hideAddTeacher") : t("teachersPage.addTeacher")}
+              {showAddTeacher ? hideAddTeacherLabel : addTeacherLabel}
             </Button>
           }
         />
+        {trainingModeFoundationEnabled && (
+          <div className="mb-4 inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[11px] font-medium text-emerald-700">
+            {t("teachersPage.trainingModeBadge")}
+          </div>
+        )}
 
         <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
           {showAddTeacher && (
             <div className="md:col-span-4">
               <Panel>
                 <h2 className="mb-3 text-sm font-semibold text-slate-900">
-                  {t("teachersPage.addTeacherPanel")}
+                  {addTeacherPanelLabel}
                 </h2>
                 <form onSubmit={onSubmit} className="space-y-3 text-sm">
                   <Input
@@ -484,7 +526,7 @@ export function TeachersPage() {
           <div className={showAddTeacher ? "md:col-span-8" : "md:col-span-12"}>
             <Panel>
               <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <h2 className="text-sm font-semibold text-slate-900">{t("teachersPage.roster")}</h2>
+                <h2 className="text-sm font-semibold text-slate-900">{rosterLabel}</h2>
                 <div className="flex flex-wrap items-center gap-2 text-xs">
                   <div className="flex items-center gap-1">
                     <span className="text-slate-500">{t("teachersPage.department")}</span>
@@ -606,7 +648,7 @@ export function TeachersPage() {
                     </button>
                   </div>
                   <div className="flex items-center gap-1">
-                    <span className="text-slate-500">{t("teachersPage.exportUnit")}</span>
+                    <span className="text-slate-500">{exportUnitLabel}</span>
                     <button
                       type="button"
                       onClick={async () => {
@@ -681,8 +723,8 @@ export function TeachersPage() {
                 <LoadingState message={t("labels.loadingTeachers")} />
               ) : tableRows.length === 0 ? (
                 <EmptyState
-                  title={t("teachersPage.noTeachersTitle")}
-                  message={t("teachersPage.noTeachersMessage")}
+                  title={noTeachersTitle}
+                  message={noTeachersMessage}
                 />
               ) : (
                 <>
@@ -760,13 +802,13 @@ export function TeachersPage() {
                     <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
                       <tr>
                         <th className="px-3 py-2 w-8"></th>
-                        <th className="px-3 py-2">{t("teachersPage.teacher")}</th>
+                        <th className="px-3 py-2">{teacherColumnLabel}</th>
                         <th className="px-3 py-2">{t("teachersPage.dept")}</th>
                         <th className="px-3 py-2">{t("teachersPage.flag")}</th>
                         <th className="px-3 py-2">{t("teachersPage.recentObservations")}</th>
                         <th className="px-3 py-2">{t("teachersPage.trends")}</th>
                         <th className="px-3 py-2">{t("teachersPage.actionItems")}</th>
-                        <th className="px-3 py-2">{t("teachersPage.courses")}</th>
+                        <th className="px-3 py-2">{coursesLabel}</th>
                       </tr>
                     </thead>
                     <tbody>

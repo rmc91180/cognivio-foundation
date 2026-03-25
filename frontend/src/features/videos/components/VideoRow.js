@@ -36,15 +36,25 @@ export function VideoRow({
       }),
     [i18n.language]
   );
-  const formatStatus = (value) => {
+  const formatAnalysisStatus = (value) => {
     const map = {
-      queued: t("labels.queued"),
-      processing: t("labels.processing"),
-      completed: t("labels.completed"),
-      failed: t("labels.failed"),
-      error: t("labels.error"),
-      review_required: t("labels.reviewRequired"),
-      pending_admin_review: t("labels.pendingAdminReview"),
+      queued: t("videosPage.analysisQueued"),
+      processing: t("videosPage.analysisProcessing"),
+      completed: t("videosPage.analysisReady"),
+      failed: t("videosPage.analysisFailed"),
+      error: t("videosPage.analysisFailed"),
+    };
+    return map[value] || value || t("videosPage.unknown");
+  };
+  const formatPrivacyStatus = (value) => {
+    const map = {
+      queued: t("videosPage.privacyQueued"),
+      processing: t("videosPage.privacyProcessing"),
+      completed: t("videosPage.privacyReadyLabel"),
+      review_required: t("videosPage.privacyNeedsReview"),
+      failed: t("videosPage.privacyFailedLabel"),
+      error: t("videosPage.privacyFailedLabel"),
+      pending_admin_review: t("videosPage.privacyNeedsReview"),
     };
     return map[value] || value || t("videosPage.unknown");
   };
@@ -124,7 +134,7 @@ export function VideoRow({
           </div>
         </div>
         <div className="flex items-center gap-2 text-[11px] text-slate-600">
-          <Badge variant={statusVariant}>{formatStatus(video.status)}</Badge>
+          <Badge variant={statusVariant}>{formatAnalysisStatus(video.status)}</Badge>
           <Badge
             variant={
               video.privacy_status === "completed"
@@ -136,7 +146,7 @@ export function VideoRow({
                     : "neutral"
             }
           >
-            {t("videosPage.privacy")} {formatStatus(video.privacy_status)}
+            {t("videosPage.privacy")} {formatPrivacyStatus(video.privacy_status)}
           </Badge>
           {assessment && (
             <Badge variant="success">

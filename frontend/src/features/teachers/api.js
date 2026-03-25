@@ -5,6 +5,7 @@ export const teacherApi = {
   create: (payload) => api.post("/api/teachers", payload),
   get: (id) => api.get(`/api/teachers/${id}`),
   update: (id, payload) => api.patch(`/api/teachers/${id}`, payload),
+  conferencePrep: (id) => api.get(`/api/teachers/${id}/conference-prep`),
   getPeerRecommendations: (id) =>
     api.get(`/api/teachers/${id}/peer-recommendations`),
 };

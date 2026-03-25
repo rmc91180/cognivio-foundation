@@ -227,10 +227,10 @@ export function VideosPage() {
                     size="sm"
                   >
                     <option value="all">{t("teachersPage.all")}</option>
-                    <option value="queued">{t("videosPage.queued")}</option>
-                    <option value="processing">{t("videosPage.processing")}</option>
-                    <option value="completed">{t("videosPage.completed")}</option>
-                    <option value="failed">{t("videosPage.failed")}</option>
+                    <option value="queued">{t("videosPage.analysisQueued")}</option>
+                    <option value="processing">{t("videosPage.analysisProcessing")}</option>
+                    <option value="completed">{t("videosPage.analysisReady")}</option>
+                    <option value="failed">{t("videosPage.analysisFailed")}</option>
                   </Select>
                 </Field>
                 <Field label={t("videosPage.timeRange")}>

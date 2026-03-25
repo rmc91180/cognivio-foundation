@@ -35,17 +35,6 @@ function OpsMetric({ label, value, tone = "neutral" }) {
 function ReviewCard({ item, onResolve, onRetryPrivacy, resolving, retrying }) {
   const { t } = useTranslation();
   const firstTrack = item.candidate_tracks?.[0];
-  const formatStatus = (value) => {
-    const map = {
-      review_required: t("labels.reviewRequired"),
-      pending_admin_review: t("labels.pendingAdminReview"),
-      queued: t("labels.queued"),
-      processing: t("labels.processing"),
-      completed: t("labels.completed"),
-      failed: t("labels.failed"),
-    };
-    return map[value] || value || t("privacyReview.unknown");
-  };
 
   return (
     <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-4">
@@ -60,7 +49,7 @@ function ReviewCard({ item, onResolve, onRetryPrivacy, resolving, retrying }) {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="warning">{t("privacyReview.privacyReviewRequired")}</Badge>
-          <Badge variant="neutral">{formatStatus(item.privacy_review_reason) || t("privacyReview.manualReview")}</Badge>
+          <Badge variant="neutral">{t("privacyReview.manualDecisionNeeded")}</Badge>
           <Link
             to={`/videos/${item.video_id}`}
             className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100"

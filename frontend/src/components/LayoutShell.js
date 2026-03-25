@@ -1,15 +1,32 @@
 import React from "react";
+import { useMutation } from "@tanstack/react-query";
 import { NavLink } from "react-router-dom";
 import { BookOpen, Layers, LayoutDashboard, PlayCircle, ShieldCheck, Trophy, Users } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "@/hooks/useAuth";
 import { BrandMark } from "@/components/BrandMark";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { authApi } from "@/lib/api";
+import { toast } from "sonner";
 
 export function LayoutShell({ children }) {
   const { t } = useTranslation();
-  const { user, logout } = useAuth();
+  const { user, logout, setUserProfile } = useAuth();
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
+  const workspaceMode = user?.workspace_mode || "school";
+  const workspaceModeMutation = useMutation({
+    mutationFn: (payload) => authApi.setWorkspaceMode(payload),
+    onSuccess: (res) => {
+      setUserProfile({
+        ...user,
+        workspace_mode: res.data.effective_mode,
+      });
+      toast.success(t("nav.workspaceModeUpdated"));
+    },
+    onError: () => {
+      toast.error(t("nav.workspaceModeUpdateFailed"));
+    },
+  });
 
   return (
     <div className="flex h-screen bg-slate-50 text-slate-900">
@@ -27,6 +44,27 @@ export function LayoutShell({ children }) {
           {isAdmin && <NavItem to="/recognition-review" icon={Trophy} label={t("nav.recognitionReview")} />}
           <NavItem to="/school-setup" icon={Layers} label={t("nav.schoolSetup")} />
         </nav>
+        {isAdmin && (
+          <div className="mx-3 mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              {t("nav.workspaceMode")}
+            </div>
+            <select
+              value={workspaceMode}
+              onChange={(e) =>
+                workspaceModeMutation.mutate({
+                  mode: e.target.value,
+                  set_org_default: true,
+                })
+              }
+              disabled={workspaceModeMutation.isPending}
+              className="mt-2 w-full rounded-md border border-slate-200 bg-white px-2 py-2 text-sm text-slate-700"
+            >
+              <option value="school">{t("nav.workspaceModeSchool")}</option>
+              <option value="training">{t("nav.workspaceModeTraining")}</option>
+            </select>
+          </div>
+        )}
         <div className="mt-auto border-t border-slate-200 px-4 py-3 text-xs text-slate-500 bg-slate-50/70">
           {user ? (
             <div className="flex items-center justify-between gap-2">

@@ -12,20 +12,27 @@ export function AuthProvider({ children }) {
   const [initializing, setInitializing] = useState(true);
   const queryClient = useQueryClient();
 
+  const refreshUser = () =>
+    authApi
+      .me()
+      .then((res) => {
+        setUser(res.data);
+        return res.data;
+      })
+      .catch((error) => {
+        localStorage.removeItem("cognivio_token");
+        setUser(null);
+        throw error;
+      });
+
   useEffect(() => {
     const token = localStorage.getItem("cognivio_token");
     if (!token) {
       setInitializing(false);
       return;
     }
-    authApi
-      .me()
-      .then((res) => {
-        setUser(res.data);
-      })
-      .catch(() => {
-        localStorage.removeItem("cognivio_token");
-      })
+    refreshUser()
+      .catch(() => {})
       .finally(() => setInitializing(false));
   }, []);
 
@@ -69,6 +76,8 @@ export function AuthProvider({ children }) {
     loggingIn: loginMutation.isPending,
     registering: registerMutation.isPending,
     logout,
+    refreshUser,
+    setUserProfile: (nextUser) => setUser(nextUser),
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

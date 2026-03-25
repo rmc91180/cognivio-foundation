@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   assessmentApi,
+  adminApi,
   frameworkApi,
   reportApi,
   gradebookApi,
@@ -156,6 +157,21 @@ export function DashboardPage() {
     enabled: isAdmin,
     queryFn: () => recognitionApi.reviewQueue().then((res) => res.data),
     refetchInterval: 30000,
+  });
+  const { data: cohortAnalyticsRes } = useQuery({
+    queryKey: ["dashboard-cohort-analytics"],
+    enabled: isAdmin && (user?.workspace_mode === "training" || runtimeConfig.trainingModeFoundationEnabled),
+    queryFn: () => assessmentApi.cohortAnalytics().then((res) => res.data),
+  });
+  const { data: supervisorCalibrationRes } = useQuery({
+    queryKey: ["dashboard-supervisor-calibration"],
+    enabled: isAdmin && (user?.workspace_mode === "training" || runtimeConfig.trainingModeFoundationEnabled),
+    queryFn: () => assessmentApi.supervisorCalibration().then((res) => res.data),
+  });
+  const { data: feedbackDigestRes } = useQuery({
+    queryKey: ["admin-feedback-digest"],
+    enabled: isAdmin,
+    queryFn: () => adminApi.feedbackDigest().then((res) => res.data),
   });
 
   const roster = useMemo(() => currentData?.roster ?? [], [currentData]);
@@ -520,12 +536,217 @@ export function DashboardPage() {
     }
   };
 
+  const dashboardRoleShellEnabled = runtimeConfig.dashboardRoleShellEnabled;
+  const dashboardSmartQueueEnabled = runtimeConfig.dashboardSmartQueueEnabled;
+  const guidedOnboardingEnabled = runtimeConfig.guidedOnboardingEnabled;
+  const improvedEmptyStatesEnabled = runtimeConfig.improvedEmptyStatesEnabled;
+  const trainingModeFoundationEnabled =
+    user?.workspace_mode === "training" || runtimeConfig.trainingModeFoundationEnabled;
+  const pageTitle = trainingModeFoundationEnabled
+    ? t("dashboard.trainingTitle")
+    : t("dashboard.title");
+  const pageDescription = trainingModeFoundationEnabled
+    ? t("dashboard.trainingDescription")
+    : t("dashboard.description");
+  const hasTeachers = teacherOptions.length > 0;
+  const hasAnyObservations = roster.some((teacher) => (teacher.assessment_count || 0) > 0);
+  const focusAreasConfigured =
+    selectedElementsState.length > 0 ||
+    Boolean(selectedElements.length) ||
+    Boolean(frameworkSelectionRes?.selected_elements?.length);
+  const teachersMissingPrivacyProfiles =
+    opsReadinessRes?.metrics?.teachers_missing_privacy_profiles ?? 0;
+  const privacyReviewsPending = opsHealthRes?.metrics?.privacy_reviews_pending ?? 0;
+  const workspaceModeLabel = trainingModeFoundationEnabled
+    ? t("dashboard.workspaceModeProgram")
+    : t("dashboard.workspaceModeSchool");
+  const workspaceStatusLabel = !hasTeachers
+    ? t("dashboard.workspaceStatusSetup")
+    : teachersMissingPrivacyProfiles > 0 ||
+        behindComplianceRows.length > 0 ||
+        privacyReviewsPending > 0
+      ? t("dashboard.workspaceStatusAttention")
+      : t("dashboard.workspaceStatusReady");
+  const workspaceRoleLabel = isAdmin
+    ? t("dashboard.workspaceRoleAdmin")
+    : t("dashboard.workspaceRoleTeacher");
+  const workspaceTitle = isAdmin
+    ? t("dashboard.workspaceTitleAdmin")
+    : t("dashboard.workspaceTitleTeacher");
+  const workspaceDescription = isAdmin
+    ? t("dashboard.workspaceDescriptionAdmin")
+    : t("dashboard.workspaceDescriptionTeacher");
+  const smartQueueItems = useMemo(() => {
+    if (isAdmin) {
+      const items = [];
+      if (!hasTeachers) {
+        items.push({
+          id: "seed-demo",
+          title: t("dashboard.smartQueueSeedTitle"),
+          description: t("dashboard.smartQueueSeedDescription"),
+          actionLabel: t("dashboard.seedDemoData"),
+          actionType: "seed",
+        });
+      } else {
+        items.push({
+          id: "review-roster",
+          title: t("dashboard.smartQueueRosterTitle"),
+          description: t("dashboard.smartQueueRosterDescription", {
+            count: teacherOptions.length,
+          }),
+          actionLabel: t("dashboard.smartQueueOpenTeachers"),
+          to: "/teachers",
+        });
+      }
+      if (!focusAreasConfigured) {
+        items.push({
+          id: "configure-focus",
+          title: t("dashboard.smartQueueFocusTitle"),
+          description: t("dashboard.smartQueueFocusDescription"),
+          actionLabel: t("dashboard.smartQueueOpenSetup"),
+          to: "/school-setup",
+        });
+      }
+      if (teachersMissingPrivacyProfiles > 0) {
+        items.push({
+          id: "privacy-profiles",
+          title: t("dashboard.smartQueuePrivacyTitle"),
+          description: t("dashboard.smartQueuePrivacyDescription", {
+            count: teachersMissingPrivacyProfiles,
+          }),
+          actionLabel: t("dashboard.smartQueueOpenTeachers"),
+          to: "/teachers",
+        });
+      }
+      if (!hasAnyObservations) {
+        items.push({
+          id: "capture-evidence",
+          title: t("dashboard.smartQueueEvidenceTitle"),
+          description: t("dashboard.smartQueueEvidenceDescription"),
+          actionLabel: t("dashboard.smartQueueOpenVideos"),
+          to: "/videos",
+        });
+      }
+      if (privacyReviewsPending > 0) {
+        items.push({
+          id: "privacy-review",
+          title: t("dashboard.smartQueuePrivacyReviewTitle"),
+          description: t("dashboard.smartQueuePrivacyReviewDescription", {
+            count: privacyReviewsPending,
+          }),
+          actionLabel: t("dashboard.openPrivacyReview"),
+          to: "/privacy-review",
+        });
+      }
+      if (!items.length) {
+        items.push(
+          {
+            id: "open-videos",
+            title: t("dashboard.smartQueueReviewEvidenceTitle"),
+            description: t("dashboard.smartQueueReviewEvidenceDescription"),
+            actionLabel: t("dashboard.smartQueueOpenVideos"),
+            to: "/videos",
+          },
+          {
+            id: "open-teachers",
+            title: t("dashboard.smartQueueCoachingTitle"),
+            description: t("dashboard.smartQueueCoachingDescription"),
+            actionLabel: t("dashboard.smartQueueOpenTeachers"),
+            to: "/teachers",
+          },
+          {
+            id: "open-setup",
+            title: t("dashboard.smartQueueTuneSetupTitle"),
+            description: t("dashboard.smartQueueTuneSetupDescription"),
+            actionLabel: t("dashboard.smartQueueOpenSetup"),
+            to: "/school-setup",
+          }
+        );
+      }
+      return items.slice(0, 3);
+    }
+
+    return [
+      {
+        id: "teacher-videos",
+        title: t("dashboard.smartQueueTeacherVideosTitle"),
+        description: hasAnyObservations
+          ? t("dashboard.smartQueueTeacherVideosReady")
+          : t("dashboard.smartQueueTeacherVideosDescription"),
+        actionLabel: t("dashboard.smartQueueOpenVideos"),
+        to: "/videos",
+      },
+      {
+        id: "teacher-dashboard",
+        title: t("dashboard.smartQueueTeacherDashboardTitle"),
+        description: t("dashboard.smartQueueTeacherDashboardDescription"),
+        actionLabel: t("dashboard.smartQueueRefreshDashboard"),
+        to: "/dashboard",
+      },
+    ];
+  }, [
+    focusAreasConfigured,
+    hasAnyObservations,
+    hasTeachers,
+    isAdmin,
+    privacyReviewsPending,
+    t,
+    teacherOptions.length,
+    teachersMissingPrivacyProfiles,
+  ]);
+  const onboardingItems = useMemo(() => {
+    if (!isAdmin) return [];
+    return [
+      {
+        id: "teachers",
+        title: t("dashboard.onboardingTeachersTitle"),
+        description: t("dashboard.onboardingTeachersDescription"),
+        complete: hasTeachers,
+        actionLabel: hasTeachers
+          ? t("dashboard.onboardingReviewTeachers")
+          : t("dashboard.onboardingAddTeachers"),
+        to: "/teachers",
+      },
+      {
+        id: "focus",
+        title: t("dashboard.onboardingFocusTitle"),
+        description: t("dashboard.onboardingFocusDescription"),
+        complete: focusAreasConfigured,
+        actionLabel: t("dashboard.onboardingOpenSetup"),
+        to: "/school-setup",
+      },
+      {
+        id: "privacy",
+        title: t("dashboard.onboardingPrivacyTitle"),
+        description: t("dashboard.onboardingPrivacyDescription"),
+        complete: hasTeachers && teachersMissingPrivacyProfiles === 0,
+        actionLabel: t("dashboard.onboardingReviewTeachers"),
+        to: "/teachers",
+      },
+      {
+        id: "evidence",
+        title: t("dashboard.onboardingEvidenceTitle"),
+        description: t("dashboard.onboardingEvidenceDescription"),
+        complete: hasAnyObservations,
+        actionLabel: t("dashboard.onboardingOpenVideos"),
+        to: "/videos",
+      },
+    ];
+  }, [
+    focusAreasConfigured,
+    hasAnyObservations,
+    hasTeachers,
+    isAdmin,
+    t,
+    teachersMissingPrivacyProfiles,
+  ]);
+
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
         <PageHeader
-          title={t("dashboard.title")}
-          description={t("dashboard.description")}
+          title={pageTitle}
+          description={pageDescription}
           meta={buildStamp ? t("dashboard.buildMeta", { build: buildStamp }) : null}
           actions={
             <Button
@@ -538,6 +759,244 @@ export function DashboardPage() {
             </Button>
           }
         />
+
+        {dashboardRoleShellEnabled && (
+          <Panel className="mb-6 border border-slate-200 bg-gradient-to-br from-white via-slate-50 to-emerald-50/60">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="max-w-3xl">
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                    {workspaceRoleLabel}
+                  </span>
+                  <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700">
+                    {workspaceModeLabel}
+                  </span>
+                  <span className="rounded-full border border-slate-200 bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">
+                    {workspaceStatusLabel}
+                  </span>
+                </div>
+                <h2 className="text-lg font-semibold text-slate-900">{workspaceTitle}</h2>
+                <p className="mt-1 text-sm text-slate-600">{workspaceDescription}</p>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white/80 px-4 py-3 text-right">
+                <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                  {t("dashboard.workspaceFocusLabel")}
+                </div>
+                <div className="mt-1 text-sm font-semibold text-slate-900">
+                  {focusAreasConfigured
+                    ? t("dashboard.workspaceFocusConfigured")
+                    : t("dashboard.workspaceFocusNotConfigured")}
+                </div>
+              </div>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
+              <div className="rounded-xl border border-slate-200 bg-white/80 px-4 py-4">
+                <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                  {t("dashboard.workspaceTeachersLabel")}
+                </div>
+                <div className="mt-1 text-2xl font-semibold text-slate-900">
+                  {teacherOptions.length}
+                </div>
+                <div className="mt-1 text-xs text-slate-500">
+                  {t("dashboard.workspaceTeachersDescription")}
+                </div>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white/80 px-4 py-4">
+                <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                  {t("dashboard.workspaceEvidenceLabel")}
+                </div>
+                <div className="mt-1 text-2xl font-semibold text-slate-900">
+                  {focusSummary.assessmentCount}
+                </div>
+                <div className="mt-1 text-xs text-slate-500">
+                  {t("dashboard.workspaceEvidenceDescription")}
+                </div>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white/80 px-4 py-4">
+                <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                  {t("dashboard.workspaceAttentionLabel")}
+                </div>
+                <div className="mt-1 text-2xl font-semibold text-slate-900">
+                  {teachersMissingPrivacyProfiles + behindComplianceRows.length}
+                </div>
+                <div className="mt-1 text-xs text-slate-500">
+                  {t("dashboard.workspaceAttentionDescription")}
+                </div>
+              </div>
+            </div>
+          </Panel>
+        )}
+
+        {isAdmin && trainingModeFoundationEnabled && (
+          <div className="mb-6 grid gap-4 xl:grid-cols-2">
+            <Panel>
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">
+                  {t("dashboard.cohortAnalyticsTitle")}
+                </h2>
+                <p className="text-xs text-slate-500">
+                  {t("dashboard.cohortAnalyticsDescription")}
+                </p>
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                    {t("dashboard.cohortTeacherCount")}
+                  </div>
+                  <div className="mt-1 text-xl font-semibold text-slate-900">
+                    {cohortAnalyticsRes?.overview?.teacher_count ?? 0}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                    {t("dashboard.cohortAssessmentCount")}
+                  </div>
+                  <div className="mt-1 text-xl font-semibold text-slate-900">
+                    {cohortAnalyticsRes?.overview?.assessment_count ?? 0}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                    {t("dashboard.cohortSupportCount")}
+                  </div>
+                  <div className="mt-1 text-xl font-semibold text-rose-700">
+                    {cohortAnalyticsRes?.overview?.support_count ?? 0}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                    {t("dashboard.cohortImprovingCount")}
+                  </div>
+                  <div className="mt-1 text-xl font-semibold text-emerald-700">
+                    {cohortAnalyticsRes?.overview?.improving_count ?? 0}
+                  </div>
+                </div>
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                <div>
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("dashboard.cohortSkillGaps")}
+                  </div>
+                  <div className="space-y-2">
+                    {(cohortAnalyticsRes?.skill_gaps || []).map((item) => (
+                      <div key={item.element_id} className="rounded-lg border border-slate-200 bg-white px-3 py-3">
+                        <div className="text-sm font-medium text-slate-800">{item.element_name}</div>
+                        <div className="mt-1 text-xs text-slate-500">
+                          {t("dashboard.cohortAverageScore", {
+                            score: item.average_score ?? "—",
+                            count: item.assessment_count ?? 0,
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("dashboard.cohortBreakdown")}
+                  </div>
+                  <div className="space-y-2">
+                    {(cohortAnalyticsRes?.category_breakdown || []).map((item) => (
+                      <div key={item.category} className="rounded-lg border border-slate-200 bg-white px-3 py-3">
+                        <div className="text-sm font-medium text-slate-800">{item.category}</div>
+                        <div className="mt-1 text-xs text-slate-500">
+                          {t("dashboard.cohortCategoryLine", {
+                            teachers: item.teacher_count ?? 0,
+                            score: item.average_score ?? "—",
+                            improving: item.improving_count ?? 0,
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </Panel>
+
+            <Panel>
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">
+                  {t("dashboard.calibrationTitle")}
+                </h2>
+                <p className="text-xs text-slate-500">
+                  {t("dashboard.calibrationDescription")}
+                </p>
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-3">
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                    {t("dashboard.calibrationReviewerCount")}
+                  </div>
+                  <div className="mt-1 text-xl font-semibold text-slate-900">
+                    {supervisorCalibrationRes?.overview?.reviewer_count ?? 0}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                    {t("dashboard.calibrationFeedbackCount")}
+                  </div>
+                  <div className="mt-1 text-xl font-semibold text-slate-900">
+                    {supervisorCalibrationRes?.overview?.feedback_count ?? 0}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                    {t("dashboard.calibrationOverrideCount")}
+                  </div>
+                  <div className="mt-1 text-xl font-semibold text-slate-900">
+                    {supervisorCalibrationRes?.overview?.override_count ?? 0}
+                  </div>
+                </div>
+              </div>
+              <div className="mt-4 space-y-2">
+                {(supervisorCalibrationRes?.reviewers || []).map((row) => (
+                  <div key={row.reviewer_id} className="rounded-lg border border-slate-200 bg-white px-3 py-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-sm font-medium text-slate-800">{row.reviewer_name}</div>
+                      <div className="text-[11px] text-slate-500">
+                        {t("dashboard.calibrationReviewerLine", {
+                          observations: row.observation_count ?? 0,
+                          feedback: row.feedback_count ?? 0,
+                          overrides: row.override_count ?? 0,
+                        })}
+                      </div>
+                    </div>
+                    <div className="mt-1 text-xs text-slate-600">{row.calibration_note}</div>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+          </div>
+        )}
+
+        {isAdmin && feedbackDigestRes?.items?.length ? (
+          <Panel className="mb-6">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">
+                  {t("dashboard.feedbackDigestTitle")}
+                </h2>
+                <p className="text-xs text-slate-500">
+                  {t("dashboard.feedbackDigestDescription")}
+                </p>
+              </div>
+              <div className="text-[11px] text-slate-500">
+                {t("dashboard.feedbackDigestCounts", {
+                  feedback: feedbackDigestRes?.totals?.feedback_records ?? 0,
+                  overrides: feedbackDigestRes?.totals?.override_records ?? 0,
+                })}
+              </div>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
+              {feedbackDigestRes.items.slice(0, 3).map((item) => (
+                <div key={item.id} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-sm font-medium text-slate-800">{item.title}</div>
+                  <div className="mt-1 text-xs text-slate-600">{item.summary}</div>
+                </div>
+              ))}
+            </div>
+          </Panel>
+        ) : null}
 
         {isAdmin && (
           <div className="mb-6 grid gap-4 xl:grid-cols-2">
@@ -627,14 +1086,205 @@ export function DashboardPage() {
           </div>
         )}
 
+        {!isLoading && dashboardSmartQueueEnabled && smartQueueItems.length > 0 && (
+          <Panel className="mb-6 border border-slate-200 bg-white">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">
+                  {t("dashboard.smartQueueTitle")}
+                </h2>
+                <p className="text-xs text-slate-500">
+                  {t("dashboard.smartQueueDescription")}
+                </p>
+              </div>
+              <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">
+                {t("dashboard.smartQueueCount", { count: smartQueueItems.length })}
+              </span>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
+              {smartQueueItems.map((item) => (
+                <div
+                  key={item.id}
+                  className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4"
+                >
+                  <h3 className="text-sm font-semibold text-slate-900">{item.title}</h3>
+                  <p className="mt-1 text-xs text-slate-500">{item.description}</p>
+                  <div className="mt-4">
+                    {item.actionType === "seed" ? (
+                      <Button
+                        variant="success"
+                        size="sm"
+                        onClick={() => seedDemoMutation.mutate()}
+                        disabled={seedDemoMutation.isPending}
+                      >
+                        {seedDemoMutation.isPending
+                          ? t("dashboard.seedingData")
+                          : item.actionLabel}
+                      </Button>
+                    ) : (
+                      <Link
+                        to={item.to}
+                        className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                      >
+                        {item.actionLabel}
+                      </Link>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Panel>
+        )}
+
+        {!isLoading && guidedOnboardingEnabled && isAdmin && onboardingItems.length > 0 && (
+          <Panel className="mb-6 border border-slate-200 bg-white">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">
+                  {t("dashboard.onboardingTitle")}
+                </h2>
+                <p className="text-xs text-slate-500">
+                  {t("dashboard.onboardingDescription")}
+                </p>
+              </div>
+              <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700">
+                {t("dashboard.onboardingProgress", {
+                  completed: onboardingItems.filter((item) => item.complete).length,
+                  total: onboardingItems.length,
+                })}
+              </span>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              {onboardingItems.map((item) => (
+                <div
+                  key={item.id}
+                  className={`rounded-xl border px-4 py-4 ${
+                    item.complete
+                      ? "border-emerald-200 bg-emerald-50/70"
+                      : "border-slate-200 bg-slate-50"
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-sm font-semibold text-slate-900">{item.title}</h3>
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                        item.complete
+                          ? "bg-emerald-100 text-emerald-700"
+                          : "bg-amber-100 text-amber-700"
+                      }`}
+                    >
+                      {item.complete
+                        ? t("dashboard.onboardingDone")
+                        : t("dashboard.onboardingNext")}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">{item.description}</p>
+                  <div className="mt-4">
+                    <Link
+                      to={item.to}
+                      className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                    >
+                      {item.actionLabel}
+                    </Link>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Panel>
+        )}
+
         {isLoading ? (
           <LoadingState className="mt-8" message={t("dashboard.loadingRoster")} />
         ) : roster.length === 0 ? (
-          <EmptyState
-            className="mt-8"
-            title={t("dashboard.noTeachersTitle")}
-            message={t("dashboard.noTeachersMessage")}
-          />
+          improvedEmptyStatesEnabled ? (
+            <Panel className="mt-8 border border-dashed border-slate-300 bg-white">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div className="max-w-2xl">
+                  <h2 className="text-lg font-semibold text-slate-900">
+                    {hasTeachers
+                      ? t("dashboard.emptyRosterTitle")
+                      : t("dashboard.noTeachersTitle")}
+                  </h2>
+                  <p className="mt-1 text-sm text-slate-600">
+                    {hasTeachers
+                      ? t("dashboard.emptyRosterMessage")
+                      : t("dashboard.noTeachersMessage")}
+                  </p>
+                </div>
+                <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">
+                  {t("dashboard.emptyStateStatus")}
+                </span>
+              </div>
+              <div className="mt-5 grid gap-3 md:grid-cols-3">
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+                  <h3 className="text-sm font-semibold text-slate-900">
+                    {t("dashboard.emptyStateTeachersTitle")}
+                  </h3>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {t("dashboard.emptyStateTeachersDescription")}
+                  </p>
+                  <div className="mt-4">
+                    <Link
+                      to="/teachers"
+                      className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                    >
+                      {t("dashboard.smartQueueOpenTeachers")}
+                    </Link>
+                  </div>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+                  <h3 className="text-sm font-semibold text-slate-900">
+                    {t("dashboard.emptyStateVideosTitle")}
+                  </h3>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {t("dashboard.emptyStateVideosDescription")}
+                  </p>
+                  <div className="mt-4">
+                    <Link
+                      to="/videos"
+                      className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                    >
+                      {t("dashboard.smartQueueOpenVideos")}
+                    </Link>
+                  </div>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+                  <h3 className="text-sm font-semibold text-slate-900">
+                    {t("dashboard.emptyStateSetupTitle")}
+                  </h3>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {t("dashboard.emptyStateSetupDescription")}
+                  </p>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <Link
+                      to="/school-setup"
+                      className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                    >
+                      {t("dashboard.smartQueueOpenSetup")}
+                    </Link>
+                    {!hasTeachers && (
+                      <Button
+                        variant="success"
+                        size="sm"
+                        onClick={() => seedDemoMutation.mutate()}
+                        disabled={seedDemoMutation.isPending}
+                      >
+                        {seedDemoMutation.isPending
+                          ? t("dashboard.seedingData")
+                          : t("dashboard.seedDemoData")}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </Panel>
+          ) : (
+            <EmptyState
+              className="mt-8"
+              title={t("dashboard.noTeachersTitle")}
+              message={t("dashboard.noTeachersMessage")}
+            />
+          )
         ) : (
           <>
             <section className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">

@@ -19,11 +19,14 @@ import {
   recognitionApi,
 } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
+import { AssessmentFeedbackWidget } from "@/components/assessment/AssessmentFeedbackWidget";
+import { ObservationFocusPanel } from "@/components/assessment/ObservationFocusPanel";
 import { MonthlySummary } from "@/components/MonthlySummary";
 import { VideoRecorder } from "@/components/VideoRecorder";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
 import { useTranslation } from "react-i18next";
+import { runtimeConfig } from "@/lib/runtimeConfig";
 
 export function TeacherProfilePage() {
   const { t, i18n } = useTranslation();
@@ -74,6 +77,10 @@ export function TeacherProfilePage() {
     queryKey: ["teacher-summary-insights", teacherId],
     queryFn: () =>
       assessmentApi.teacherSummaryInsights(teacherId).then((r) => r.data),
+  });
+  const { data: conferencePrepRes } = useQuery({
+    queryKey: ["teacher-conference-prep", teacherId],
+    queryFn: () => teacherApi.conferencePrep(teacherId).then((r) => r.data),
   });
 
   const { data: summaryReflectionRes } = useQuery({
@@ -147,6 +154,8 @@ export function TeacherProfilePage() {
     if (!dashboardRes?.assessments?.length) return null;
     return dashboardRes.assessments[dashboardRes.assessments.length - 1];
   }, [dashboardRes]);
+  const assessmentFeedbackEnabled = runtimeConfig.assessmentFeedbackEnabled;
+  const experimentalMomentRankingEnabled = runtimeConfig.experimentalMomentRankingEnabled;
 
   const adminOverrideMutation = useMutation({
     mutationFn: (payload) =>
@@ -155,6 +164,7 @@ export function TeacherProfilePage() {
       toast.success(t("teacherProfile.adminAdjustmentSaved"));
       queryClient.invalidateQueries({ queryKey: ["teacher-dashboard", teacherId] });
       queryClient.invalidateQueries({ queryKey: ["roster"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-overrides", latestAssessmentId] });
     },
     onError: () => {
       toast.error(t("teacherProfile.adminAdjustmentFailed"));
@@ -261,6 +271,7 @@ export function TeacherProfilePage() {
   const curriculumInputRef = useRef(null);
   const lessonPlanInputRef = useRef(null);
   const syllabusInputRef = useRef(null);
+  const actionPlanSectionRef = useRef(null);
 
   const makeGoalId = () => {
     if (typeof crypto !== "undefined" && crypto.randomUUID) {
@@ -340,6 +351,20 @@ export function TeacherProfilePage() {
     queryFn: () =>
       assessmentApi.listAdminOverrides(latestAssessmentId).then((r) => r.data),
   });
+  const { data: assessmentFeedbackRes } = useQuery({
+    queryKey: ["assessment-feedback", latestAssessmentId],
+    enabled: Boolean(latestAssessmentId) && assessmentFeedbackEnabled,
+    queryFn: () => assessmentApi.listFeedback(latestAssessmentId).then((r) => r.data),
+  });
+  const { data: analysisMomentsRes } = useQuery({
+    queryKey: ["analysis-moments", latestAssessment?.video_id],
+    enabled:
+      Boolean(latestAssessment?.video_id) &&
+      isAdmin &&
+      experimentalMomentRankingEnabled,
+    retry: false,
+    queryFn: () => videoApi.analysisMoments(latestAssessment.video_id).then((r) => r.data),
+  });
 
   const { data: privacyProfileRes } = useQuery({
     queryKey: ["teacher-privacy-profile", teacherId],
@@ -382,7 +407,20 @@ export function TeacherProfilePage() {
     const map = {};
     const overrides = adminOverridesRes?.overrides || [];
     overrides.forEach((ov) => {
+      if ((ov.override_type || "score") !== "score") return;
+      if (!ov.domain_id) return;
       map[ov.domain_id] = ov;
+    });
+    return map;
+  }, [adminOverridesRes]);
+  const overrideByTarget = useMemo(() => {
+    const map = {};
+    const overrides = adminOverridesRes?.overrides || [];
+    overrides.forEach((ov) => {
+      const key = `${ov.override_type || "score"}:${ov.target_type || "element"}:${
+        ov.target_id || ov.domain_id || ""
+      }`;
+      map[key] = ov;
     });
     return map;
   }, [adminOverridesRes]);
@@ -402,6 +440,81 @@ export function TeacherProfilePage() {
     }
     return items;
   }, [actionPlanGoals, nextStepsNote]);
+  const openGoalsCount = useMemo(
+    () =>
+      actionPlanGoals.filter(
+        (goal) => goal?.status !== "complete" && goal?.status !== "implemented"
+      ).length,
+    [actionPlanGoals]
+  );
+  const completedGoalsCount = useMemo(
+    () =>
+      actionPlanGoals.filter(
+        (goal) => goal?.status === "complete" || goal?.status === "implemented"
+      ).length,
+    [actionPlanGoals]
+  );
+  const activeGoalTitles = useMemo(
+    () =>
+      actionPlanGoals
+        .filter(
+          (goal) =>
+            goal?.title &&
+            goal?.status !== "complete" &&
+            goal?.status !== "implemented"
+        )
+        .slice(0, 3)
+        .map((goal) => goal.title),
+    [actionPlanGoals]
+  );
+  const aiSuggestedFocus = useMemo(() => {
+    const fromRecommendations = summaryInsightsRes?.recommendations?.[0];
+    if (fromRecommendations) return fromRecommendations;
+    return summaryInsightsRes?.summary || "";
+  }, [summaryInsightsRes]);
+  const recommendedMoments = useMemo(
+    () => analysisMomentsRes?.moments || [],
+    [analysisMomentsRes]
+  );
+  const formatMomentPhase = (value) => {
+    const map = {
+      lesson_launch: t("videoPlayer.momentPhases.lesson_launch"),
+      modeling: t("videoPlayer.momentPhases.modeling"),
+      guided_practice: t("videoPlayer.momentPhases.guided_practice"),
+      student_work: t("videoPlayer.momentPhases.student_work"),
+      check_for_understanding: t("videoPlayer.momentPhases.check_for_understanding"),
+      closure: t("videoPlayer.momentPhases.closure"),
+    };
+    return map[value] || String(value || "").replace(/_/g, " ");
+  };
+  const formatMomentReason = (value) => {
+    const map = {
+      participant_density_change: t("videoPlayer.momentReasons.participant_density_change"),
+      board_content_change: t("videoPlayer.momentReasons.board_content_change"),
+      teacher_prominence: t("videoPlayer.momentReasons.teacher_prominence"),
+      visual_novelty: t("videoPlayer.momentReasons.visual_novelty"),
+      high_activity_window: t("videoPlayer.momentReasons.high_activity_window"),
+      scene_transition: t("videoPlayer.momentReasons.scene_transition"),
+      timeline_coverage: t("videoPlayer.momentReasons.timeline_coverage"),
+    };
+    return map[value] || String(value || "").replace(/_/g, " ");
+  };
+  const recommendedMomentNoteLines = useMemo(
+    () =>
+      recommendedMoments.slice(0, 3).map((moment) => {
+        const jumpTime =
+          typeof moment.representative_frame_sec === "number"
+            ? moment.representative_frame_sec
+            : moment.start_sec;
+        return `${formatClock(moment.start_sec)}-${formatClock(moment.end_sec)} • ${formatMomentPhase(
+          moment.phase
+        )} • ${formatMomentReason(moment.selection_reason)} • ${t(
+          "videoPlayer.representativeMoment",
+          { time: formatClock(jumpTime) }
+        )}`;
+      }),
+    [recommendedMoments, t]
+  );
 
   const privacyProfileReady = privacyProfileRes?.status === "active";
   const privacyProfileLabel = privacyProfileReady
@@ -411,6 +524,10 @@ export function TeacherProfilePage() {
     : t("teacherProfile.notConfigured");
   const recognitionSummary = recognitionSummaryRes?.summary || {};
   const recognitionBadges = recognitionSummaryRes?.badges || [];
+  const feedbackByTarget = {};
+  (assessmentFeedbackRes?.feedback || []).forEach((item) => {
+    feedbackByTarget[`${item.target_type}:${item.target_id || ""}`] = item;
+  });
 
   const formatDate = (value) => {
     if (!value) return t("teacherProfile.notConfigured");
@@ -585,6 +702,39 @@ export function TeacherProfilePage() {
       notes: actionPlanNotes,
     });
   };
+  const handleMoveDraftToActionPlanNotes = () => {
+    const draft = nextStepsNote.trim();
+    if (!draft) return;
+    setActionPlanNotes((prev) => (prev?.trim() ? `${prev.trim()}\n\n${draft}` : draft));
+    toast.success(t("teacherProfile.movedToActionPlanNotes"));
+  };
+  const handleAddRecommendedMomentsToDraft = () => {
+    if (!recommendedMomentNoteLines.length) return;
+    setNextStepsNote((prev) => {
+      const existing = prev?.trim() ? prev.trim().split("\n").filter(Boolean) : [];
+      const merged = [...existing];
+      recommendedMomentNoteLines.forEach((line) => {
+        if (!merged.includes(line)) {
+          merged.push(line);
+        }
+      });
+      return merged.join("\n");
+    });
+  };
+  const handleAddRecommendedMomentsToActionPlanNotes = () => {
+    if (!recommendedMomentNoteLines.length) return;
+    setActionPlanNotes((prev) => {
+      const existing = prev?.trim() ? prev.trim().split("\n").filter(Boolean) : [];
+      const merged = [...existing];
+      recommendedMomentNoteLines.forEach((line) => {
+        if (!merged.includes(line)) {
+          merged.push(line);
+        }
+      });
+      return merged.join("\n");
+    });
+    toast.success(t("teacherProfile.momentsAddedToActionPlanNotes"));
+  };
 
   const updateGoal = (goalId, patch) => {
     setActionPlanGoals((prev) =>
@@ -716,6 +866,129 @@ export function TeacherProfilePage() {
           </div>
         </div>
 
+        <section className="mb-6 rounded-xl border border-slate-200 bg-gradient-to-br from-white via-slate-50 to-emerald-50/60 p-5">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="max-w-3xl">
+              <h2 className="text-sm font-semibold text-slate-900">
+                {t("teacherProfile.coachingWorkspace")}
+              </h2>
+              <p className="mt-1 text-xs text-slate-500">
+                {t("teacherProfile.coachingWorkspaceDescription")}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {latestAssessment?.video_id && (
+                <Link
+                  to={`/videos/${latestAssessment.video_id}`}
+                  className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                >
+                  {t("teacherProfile.openLatestLesson")}
+                </Link>
+              )}
+              <button
+                type="button"
+                onClick={() =>
+                  actionPlanSectionRef.current?.scrollIntoView({
+                    behavior: "smooth",
+                    block: "start",
+                  })
+                }
+                className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+              >
+                {t("teacherProfile.jumpToActionPlan")}
+              </button>
+            </div>
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-3">
+            <div className="rounded-xl border border-slate-200 bg-white/80 px-4 py-4">
+              <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                {t("teacherProfile.coachingStatusLatestLesson")}
+              </div>
+              <div className="mt-1 text-sm font-semibold text-slate-900">
+                {latestAssessment?.analyzed_at
+                  ? formatDateTime(latestAssessment.analyzed_at)
+                  : t("teacherProfile.noLessonReviewedYet")}
+              </div>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white/80 px-4 py-4">
+              <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                {t("teacherProfile.coachingStatusGoals")}
+              </div>
+              <div className="mt-1 text-sm font-semibold text-slate-900">
+                {t("teacherProfile.goalsInMotionCount", {
+                  open: openGoalsCount,
+                  completed: completedGoalsCount,
+                })}
+              </div>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white/80 px-4 py-4">
+              <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                {t("teacherProfile.coachingStatusConference")}
+              </div>
+              <div className="mt-1 text-sm font-semibold text-slate-900">
+                {nextCoachingConference
+                  ? t("teacherProfile.nextConferenceScheduled", {
+                      date: formatDateTime(nextCoachingConference),
+                    })
+                  : t("teacherProfile.nextConferenceNotScheduled")}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {conferencePrepRes?.agenda?.length ? (
+          <section className="mb-6 rounded-xl border border-slate-200 bg-white p-5">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">
+                  {t("teacherProfile.conferencePrepTitle")}
+                </h2>
+                <p className="mt-1 text-xs text-slate-500">
+                  {t("teacherProfile.conferencePrepDescription")}
+                </p>
+              </div>
+              {conferencePrepRes?.next_conference ? (
+                <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-[11px] text-slate-600">
+                  {t("teacherProfile.nextConferenceScheduled", {
+                    date: formatDateTime(conferencePrepRes.next_conference),
+                  })}
+                </div>
+              ) : null}
+            </div>
+            <div className="mt-4 grid gap-4 lg:grid-cols-2">
+              <div>
+                <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  {t("teacherProfile.conferencePrepAgenda")}
+                </div>
+                <div className="space-y-2">
+                  {(conferencePrepRes?.agenda || []).map((item, idx) => (
+                    <div key={idx} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-700">
+                      {item}
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  {t("teacherProfile.conferencePrepContinuity")}
+                </div>
+                <div className="space-y-2">
+                  {(conferencePrepRes?.continuity_lines || []).map((item, idx) => (
+                    <div key={idx} className="rounded-lg border border-slate-200 bg-white px-3 py-3 text-xs text-slate-700">
+                      {item}
+                    </div>
+                  ))}
+                  {!(conferencePrepRes?.continuity_lines || []).length && (
+                    <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-500">
+                      {t("teacherProfile.conferencePrepNoContinuity")}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </section>
+        ) : null}
+
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           <div className="lg:col-span-8 space-y-6">
             <section className="rounded-xl border border-slate-200 bg-white p-5">
@@ -725,73 +998,199 @@ export function TeacherProfilePage() {
               <p className="mb-3 text-xs text-slate-500">
                 {t("teacherProfile.aiInsightsDescription")}
               </p>
-              {summaryInsightsRes ? (
-                <div className="space-y-3 text-xs text-slate-700">
-                  <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-                    <div className="text-[11px] uppercase tracking-wide text-slate-500">
-                      {t("teacherProfile.recentPerformanceSummary")}
+              <div className="space-y-3 text-xs text-slate-700">
+                <ObservationFocusPanel
+                  frameworkType={latestAssessment?.framework_type}
+                  priorityElements={latestAssessment?.priority_elements}
+                  focusNote={latestAssessment?.focus_note}
+                  title={t("teacherProfile.focusContextTitle")}
+                  description={t("teacherProfile.focusContextDescription")}
+                />
+                {summaryInsightsRes ? (
+                  <>
+                    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                      <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                        {t("teacherProfile.recentPerformanceSummary")}
+                      </div>
+                      <div className="mt-1 text-xs text-slate-700">
+                        {summaryInsightsRes.summary}
+                      </div>
+                      {assessmentFeedbackEnabled && latestAssessmentId && (
+                        <AssessmentFeedbackWidget
+                          assessmentId={latestAssessmentId}
+                          targetType="summary"
+                          targetId="teacher-summary"
+                          surface="teacher_profile"
+                          metadata={{ section: "teacher_summary_insights" }}
+                          existingFeedback={feedbackByTarget["summary:teacher-summary"]}
+                        />
+                      )}
                     </div>
-                    <div className="mt-1 text-xs text-slate-700">
-                      {summaryInsightsRes.summary}
-                    </div>
-                  </div>
-                  {summaryInsightsRes.recommendations?.length ? (
+                    {summaryInsightsRes.recommendations?.length ? (
+                      <div>
+                        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                          {t("teacherProfile.longTermGoals")}
+                        </div>
+                        <ul className="space-y-2 text-xs text-slate-700">
+                          {summaryInsightsRes.recommendations.slice(0, 4).map((r, idx) => (
+                            <li
+                              key={idx}
+                              className="rounded-md border border-slate-200 bg-white px-3 py-3"
+                            >
+                              {(() => {
+                                const recommendationTargetId = `teacher-recommendation-${idx}`;
+                                const recommendationOverride =
+                                  overrideByTarget[
+                                    `recommendation_usefulness:recommendation:${recommendationTargetId}`
+                                  ];
+                                return (
+                                  <>
+                              <div>{r}</div>
+                              {assessmentFeedbackEnabled && latestAssessmentId && (
+                                <AssessmentFeedbackWidget
+                                  assessmentId={latestAssessmentId}
+                                  targetType="recommendation"
+                                  targetId={recommendationTargetId}
+                                  surface="teacher_profile"
+                                  metadata={{
+                                    section: "teacher_recommendations",
+                                    recommendation_index: idx,
+                                  }}
+                                  existingFeedback={
+                                    feedbackByTarget[
+                                      `recommendation:teacher-recommendation-${idx}`
+                                    ]
+                                  }
+                                  compact
+                                />
+                              )}
+                              {isAdmin && latestAssessmentId && (
+                                <div className="mt-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-2 text-[11px]">
+                                  <div className="font-semibold text-slate-700">
+                                    {t("teacherProfile.recommendationOverrideTitle")}
+                                  </div>
+                                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        adminOverrideMutation.mutate({
+                                          override_type: "recommendation_usefulness",
+                                          target_type: "recommendation",
+                                          target_id: recommendationTargetId,
+                                          original_value: "ai_generated",
+                                          adjusted_value: "useful",
+                                          rationale: t(
+                                            "teacherProfile.recommendationMarkedUsefulRationale"
+                                          ),
+                                          metadata: {
+                                            section: "teacher_recommendations",
+                                            recommendation_index: idx,
+                                          },
+                                        })
+                                      }
+                                      className="rounded-md border border-emerald-200 bg-white px-2 py-1 text-[11px] font-medium text-emerald-700 hover:bg-emerald-50"
+                                    >
+                                      {t("teacherProfile.markRecommendationUseful")}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        adminOverrideMutation.mutate({
+                                          override_type: "recommendation_usefulness",
+                                          target_type: "recommendation",
+                                          target_id: recommendationTargetId,
+                                          original_value: "ai_generated",
+                                          adjusted_value: "needs_rewrite",
+                                          rationale: t(
+                                            "teacherProfile.recommendationNeedsRewriteRationale"
+                                          ),
+                                          metadata: {
+                                            section: "teacher_recommendations",
+                                            recommendation_index: idx,
+                                          },
+                                        })
+                                      }
+                                      className="rounded-md border border-amber-200 bg-white px-2 py-1 text-[11px] font-medium text-amber-700 hover:bg-amber-50"
+                                    >
+                                      {t("teacherProfile.markRecommendationNeedsRewrite")}
+                                    </button>
+                                  </div>
+                                  {recommendationOverride && (
+                                    <div className="mt-2 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-2 text-[11px] text-emerald-800">
+                                      <div className="font-semibold">
+                                        {t("teacherProfile.overrideHistory")}
+                                      </div>
+                                      <div>
+                                        {recommendationOverride.adjusted_value === "useful"
+                                          ? t("teacherProfile.recommendationMarkedUseful")
+                                          : t("teacherProfile.recommendationNeedsRewrite")}
+                                      </div>
+                                      {recommendationOverride.rationale && (
+                                        <div className="text-[10px] text-emerald-700">
+                                          {recommendationOverride.rationale}
+                                        </div>
+                                      )}
+                                      <div className="text-[10px] text-emerald-700">
+                                        {formatDateTime(recommendationOverride.created_at)}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                                  </>
+                                );
+                              })()}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
                     <div>
                       <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                        {t("teacherProfile.longTermGoals")}
+                        {t("teacherProfile.observationHighlights")}
                       </div>
-                      <ul className={`list-disc space-y-1 text-xs text-slate-700 ${isRtl ? "pr-5" : "pl-5"}`}>
-                        {summaryInsightsRes.recommendations.slice(0, 4).map((r, idx) => (
-                          <li key={idx}>{r}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  ) : null}
-                  <div>
-                    <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                      {t("teacherProfile.observationHighlights")}
-                    </div>
-                    {(dashboardRes?.recent_video_highlights || []).length ? (
-                      <ul className="space-y-2 text-xs text-slate-700">
-                        {dashboardRes.recent_video_highlights.map((h, idx) => (
-                          <li
-                            key={`${h.video_id}-${idx}`}
-                            className="rounded-md border border-slate-200 bg-white px-3 py-2"
-                          >
-                            <div className="text-[11px] text-slate-500">
-                              {formatDateTime(h.created_at)}
-                              {typeof h.timestamp_seconds === "number" && (
-                                <span className={isRtl ? "mr-2" : "ml-2"}>
-                                  • {formatClock(h.timestamp_seconds)}
-                                </span>
+                      {(dashboardRes?.recent_video_highlights || []).length ? (
+                        <ul className="space-y-2 text-xs text-slate-700">
+                          {dashboardRes.recent_video_highlights.map((h, idx) => (
+                            <li
+                              key={`${h.video_id}-${idx}`}
+                              className="rounded-md border border-slate-200 bg-white px-3 py-2"
+                            >
+                              <div className="text-[11px] text-slate-500">
+                                {formatDateTime(h.created_at)}
+                                {typeof h.timestamp_seconds === "number" && (
+                                  <span className={isRtl ? "mr-2" : "ml-2"}>
+                                    • {formatClock(h.timestamp_seconds)}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="mt-1 text-xs text-slate-700">
+                                {h.summary}
+                              </div>
+                              {h.video_id && (
+                                <Link
+                                  to={`/videos/${h.video_id}`}
+                                  className="mt-1 inline-flex text-[11px] text-primary hover:underline"
+                                >
+                                  {t("teacherProfile.watchClip")}
+                                </Link>
                               )}
-                            </div>
-                            <div className="mt-1 text-xs text-slate-700">
-                              {h.summary}
-                            </div>
-                            {h.video_id && (
-                              <Link
-                                to={`/videos/${h.video_id}`}
-                                className="mt-1 inline-flex text-[11px] text-primary hover:underline"
-                              >
-                                {t("teacherProfile.watchClip")}
-                              </Link>
-                            )}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <div className="text-xs text-slate-500">
-                        {t("teacherProfile.noRecentHighlights")}
-                      </div>
-                    )}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="text-xs text-slate-500">
+                          {t("teacherProfile.noRecentHighlights")}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-xs text-slate-500">
+                    {t("teacherProfile.noSummaryData")}
                   </div>
-                </div>
-              ) : (
-                <div className="text-xs text-slate-500">
-                  {t("teacherProfile.noSummaryData")}
-                </div>
-              )}
+                )}
+              </div>
             </section>
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
@@ -861,45 +1260,147 @@ export function TeacherProfilePage() {
                 {t("teacherProfile.nextSteps")}
               </h2>
               <p className="mb-3 text-xs text-slate-500">
-                {t("teacherProfile.actionPlanNotes")}
+                {t("teacherProfile.nextStepsDescription")}
               </p>
-              {nextStepsItems.length > 0 ? (
-                <ul className={`list-disc space-y-1 text-xs text-slate-700 ${isRtl ? "pr-5" : "pl-5"}`}>
-                  {nextStepsItems.map((item, idx) => (
-                    <li key={idx}>{item}</li>
-                  ))}
-                </ul>
-              ) : (
-                <div className="text-xs text-slate-500">
-                  Add next steps to combine with AI recommendations.
+              <div className="space-y-3">
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("teacherProfile.aiSuggestedFocus")}
+                  </div>
+                  <div className="mt-1 text-xs text-slate-700">
+                    {aiSuggestedFocus || t("teacherProfile.noSummaryData")}
+                  </div>
                 </div>
-              )}
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("teacherProfile.actionPlanFocus")}
+                  </div>
+                  {activeGoalTitles.length > 0 ? (
+                    <ul className={`mt-2 list-disc space-y-1 text-xs text-slate-700 ${isRtl ? "pr-5" : "pl-5"}`}>
+                      {activeGoalTitles.map((item, idx) => (
+                        <li key={idx}>{item}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="mt-1 text-xs text-slate-500">
+                      {t("teacherProfile.noNextStepsYet")}
+                    </div>
+                  )}
+                </div>
+                {recommendedMoments.length > 0 && latestAssessment?.video_id ? (
+                  <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      {t("teacherProfile.recommendedMomentsTitle")}
+                    </div>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {t("teacherProfile.recommendedMomentsDescription")}
+                    </p>
+                    <ul className="mt-2 space-y-2 text-xs text-slate-700">
+                      {recommendedMoments.slice(0, 3).map((moment) => {
+                        const jumpTime =
+                          typeof moment.representative_frame_sec === "number"
+                            ? moment.representative_frame_sec
+                            : moment.start_sec;
+                        return (
+                          <li
+                            key={moment.moment_id}
+                            className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="font-medium text-slate-900">
+                                {formatClock(moment.start_sec)}-{formatClock(moment.end_sec)}
+                              </span>
+                              <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                                {formatMomentPhase(moment.phase)}
+                              </span>
+                            </div>
+                            <div className="mt-1 text-[11px] text-slate-600">
+                              {formatMomentReason(moment.selection_reason)}
+                            </div>
+                            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                              <span className="text-slate-500">
+                                {t("videoPlayer.representativeMoment", {
+                                  time: formatClock(jumpTime),
+                                })}
+                              </span>
+                              <Link
+                                to={`/videos/${latestAssessment.video_id}?t=${Math.round(jumpTime)}`}
+                                className="font-medium text-primary hover:underline"
+                              >
+                                {t("teacherProfile.openMoment")}
+                              </Link>
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={handleAddRecommendedMomentsToDraft}
+                        className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                      >
+                        {t("teacherProfile.addMomentsToDraft")}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleAddRecommendedMomentsToActionPlanNotes}
+                        className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                      >
+                        {t("teacherProfile.addMomentsToActionPlanNotes")}
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                {nextStepsItems.length > 0 && (
+                  <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      {t("teacherProfile.coachingActions")}
+                    </div>
+                    <ul className={`mt-2 list-disc space-y-1 text-xs text-slate-700 ${isRtl ? "pr-5" : "pl-5"}`}>
+                      {nextStepsItems.map((item, idx) => (
+                        <li key={idx}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
               <div className="mt-3">
                 <label className="mb-1 block text-[11px] font-medium text-slate-600">
-                  Final edit (admin)
+                  {t("teacherProfile.finalNextStepDraft")}
                 </label>
                 <textarea
                   rows={2}
                   value={nextStepsNote}
                   onChange={(e) => setNextStepsNote(e.target.value)}
                   className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
-                  placeholder="Add a final edited summary of next steps."
+                  placeholder={t("teacherProfile.nextStepsPlaceholder")}
                 />
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleMoveDraftToActionPlanNotes}
+                  disabled={!nextStepsNote.trim()}
+                  className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+                >
+                  {t("teacherProfile.moveToActionPlanNotes")}
+                </button>
               </div>
             </section>
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                Next coaching conference
+                {t("teacherProfile.nextConferenceTitle")}
               </h2>
               <p className="mb-3 text-xs text-slate-500">
-                Scheduled coaching checkpoint for this teacher.
+                {t("teacherProfile.nextConferenceDescription")}
               </p>
               <div className="space-y-2 text-xs text-slate-700">
                 <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
                   {nextCoachingConference
-                    ? nextCoachingConference
-                    : "Not scheduled yet."}
+                    ? formatDateTime(nextCoachingConference)
+                    : t("teacherProfile.nextConferenceNotScheduled")}
                 </div>
                 {isAdmin && (
                   <div className="space-y-2">
@@ -944,7 +1445,10 @@ export function TeacherProfilePage() {
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           <div className="lg:col-span-8 space-y-6">
-            <section className="rounded-xl border border-slate-200 bg-white p-5">
+            <section
+              ref={actionPlanSectionRef}
+              className="rounded-xl border border-slate-200 bg-white p-5"
+            >
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-900">

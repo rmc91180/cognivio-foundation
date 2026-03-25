@@ -8,6 +8,10 @@ export const assessmentApi = {
     api.get("/api/dashboard/domain-trends", { params }),
   dashboardLeadershipInsights: (params) =>
     api.get("/api/dashboard/leadership-insights", { params }),
+  cohortAnalytics: (params) =>
+    api.get("/api/dashboard/cohort-analytics", { params }),
+  supervisorCalibration: () =>
+    api.get("/api/dashboard/supervisor-calibration"),
   seedDemoData: () => api.post("/api/seed-demo-data"),
   teacherDashboard: (teacherId, params) =>
     api.get(`/api/teachers/${teacherId}/dashboard`, { params }),
@@ -21,6 +25,10 @@ export const assessmentApi = {
     api.post(`/api/assessments/${assessmentId}/admin-override`, payload),
   listAdminOverrides: (assessmentId) =>
     api.get(`/api/assessments/${assessmentId}/admin-overrides`),
+  submitFeedback: (assessmentId, payload) =>
+    api.post(`/api/assessments/${assessmentId}/feedback`, payload),
+  listFeedback: (assessmentId) =>
+    api.get(`/api/assessments/${assessmentId}/feedback`),
 };
 
 export const adherenceApi = {

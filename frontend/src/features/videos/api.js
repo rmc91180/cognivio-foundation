@@ -11,6 +11,7 @@ export const videoApi = {
   detail: (videoId) => api.get(`/api/videos/${videoId}`),
   retry: (videoId) => api.post(`/api/videos/${videoId}/retry`),
   retryPrivacy: (videoId) => api.post(`/api/videos/${videoId}/privacy/retry`),
+  analysisMoments: (videoId) => api.get(`/api/admin/videos/${videoId}/analysis-moments`),
 };
 
 export const evidenceApi = {

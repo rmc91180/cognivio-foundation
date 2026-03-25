@@ -3,6 +3,8 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { assessmentApi, exemplarApi, observationApi, recognitionApi, shareAssetApi, videoApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
+import { AssessmentFeedbackWidget } from "@/components/assessment/AssessmentFeedbackWidget";
+import { ObservationFocusPanel } from "@/components/assessment/ObservationFocusPanel";
 import { VideoTimeline } from "@/components/VideoTimeline";
 import { useAuth } from "@/hooks/useAuth";
 import { toast } from "sonner";
@@ -15,6 +17,7 @@ export function VideoPlayerPage() {
   const { videoId } = useParams();
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
   const [searchParams] = useSearchParams();
   const videoRef = useRef(null);
   const [currentTime, setCurrentTime] = useState(0);
@@ -31,7 +34,35 @@ export function VideoPlayerPage() {
     minimumFractionDigits: 1,
     maximumFractionDigits: 1,
   });
-  const formatStatus = useCallback(
+  const formatAnalysisStatus = useCallback(
+    (value) => {
+      const map = {
+        queued: t("videoPlayer.analysisQueued"),
+        processing: t("videoPlayer.analysisProcessing"),
+        completed: t("videoPlayer.analysisReady"),
+        failed: t("videoPlayer.analysisFailed"),
+        error: t("videoPlayer.analysisFailed"),
+      };
+      return map[value] || value || t("videosPage.unknown");
+    },
+    [t]
+  );
+  const formatPrivacyStatus = useCallback(
+    (value) => {
+      const map = {
+        queued: t("videoPlayer.privacyQueued"),
+        processing: t("videoPlayer.privacyProcessing"),
+        completed: t("videoPlayer.privacyReadyLabel"),
+        failed: t("videoPlayer.privacyFailedLabel"),
+        error: t("videoPlayer.privacyFailedLabel"),
+        review_required: t("videoPlayer.privacyNeedsReview"),
+        pending_admin_review: t("videoPlayer.privacyNeedsReview"),
+      };
+      return map[value] || value || t("videosPage.unknown");
+    },
+    [t]
+  );
+  const formatGeneralStatus = useCallback(
     (value) => {
       const map = {
         queued: t("labels.queued"),
@@ -46,6 +77,35 @@ export function VideoPlayerPage() {
         not_evaluated: t("labels.notEvaluated"),
       };
       return map[value] || value || t("videosPage.unknown");
+    },
+    [t]
+  );
+  const formatMomentPhase = useCallback(
+    (value) => {
+      const map = {
+        lesson_launch: t("videoPlayer.momentPhases.lesson_launch"),
+        modeling: t("videoPlayer.momentPhases.modeling"),
+        guided_practice: t("videoPlayer.momentPhases.guided_practice"),
+        student_work: t("videoPlayer.momentPhases.student_work"),
+        check_for_understanding: t("videoPlayer.momentPhases.check_for_understanding"),
+        closure: t("videoPlayer.momentPhases.closure"),
+      };
+      return map[value] || String(value || "").replace(/_/g, " ");
+    },
+    [t]
+  );
+  const formatMomentReason = useCallback(
+    (value) => {
+      const map = {
+        participant_density_change: t("videoPlayer.momentReasons.participant_density_change"),
+        board_content_change: t("videoPlayer.momentReasons.board_content_change"),
+        teacher_prominence: t("videoPlayer.momentReasons.teacher_prominence"),
+        visual_novelty: t("videoPlayer.momentReasons.visual_novelty"),
+        high_activity_window: t("videoPlayer.momentReasons.high_activity_window"),
+        scene_transition: t("videoPlayer.momentReasons.scene_transition"),
+        timeline_coverage: t("videoPlayer.momentReasons.timeline_coverage"),
+      };
+      return map[value] || String(value || "").replace(/_/g, " ");
     },
     [t]
   );
@@ -168,6 +228,24 @@ export function VideoPlayerPage() {
     queryKey: ["assessment", assessmentId],
     enabled: !!assessmentId,
     queryFn: () => assessmentApi.get(assessmentId).then((r) => r.data),
+  });
+  const assessmentFeedbackEnabled = runtimeConfig.assessmentFeedbackEnabled;
+  const { data: assessmentFeedbackRes } = useQuery({
+    queryKey: ["assessment-feedback", assessmentId],
+    enabled: Boolean(assessmentId) && assessmentFeedbackEnabled,
+    queryFn: () => assessmentApi.listFeedback(assessmentId).then((r) => r.data),
+  });
+  const experimentalMomentRankingEnabled = runtimeConfig.experimentalMomentRankingEnabled;
+  const analysisMomentsEnabled =
+    Boolean(videoId) &&
+    isAdmin &&
+    experimentalMomentRankingEnabled &&
+    videoStatus === "completed";
+  const { data: analysisMomentsRes, isLoading: analysisMomentsLoading } = useQuery({
+    queryKey: ["analysis-moments", videoId],
+    enabled: analysisMomentsEnabled,
+    retry: false,
+    queryFn: () => videoApi.analysisMoments(videoId).then((r) => r.data),
   });
   const { data: recognitionRes } = useQuery({
     queryKey: ["video-recognition", videoId],
@@ -302,6 +380,16 @@ export function VideoPlayerPage() {
     const observations = observationsRes ?? [];
     const assessment = assessmentRes;
     const reportSummary = observationSummary?.executive_summary || assessment?.summary || "";
+    const recommendedMomentsSection = recommendedMomentNoteLines.length
+      ? `
+          <div class="section">
+            <h2>${t("videoPlayer.recommendedMoments")}</h2>
+            <ul>
+              ${recommendedMomentNoteLines.map((item) => `<li>${item}</li>`).join("")}
+            </ul>
+          </div>
+        `
+      : "";
     const html = `
       <html lang="${i18n.language}" dir="${i18n.dir()}">
         <head>
@@ -343,6 +431,7 @@ export function VideoPlayerPage() {
                 .join("")}
             </ul>
           </div>
+          ${recommendedMomentsSection}
           <div class="section">
             <h2>${t("videoPlayer.reportActionItems")}</h2>
             <p>${actionItems || ""}</p>
@@ -355,14 +444,43 @@ export function VideoPlayerPage() {
     win.focus();
     win.print();
   };
+  const handleAddRecommendedMomentsToActionItems = () => {
+    if (!recommendedMomentNoteLines.length) return;
+    setActionItems((prev) => {
+      const existing = prev?.trim() ? prev.trim().split("\n").filter(Boolean) : [];
+      const merged = [...existing];
+      recommendedMomentNoteLines.forEach((line) => {
+        if (!merged.includes(line)) {
+          merged.push(line);
+        }
+      });
+      return merged.join("\n");
+    });
+  };
 
   const observations = observationsRes ?? [];
-  const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
   const recognitionStatus = recognitionRes?.recognition?.status || "not_evaluated";
   const recognitionEligible = Boolean(recognitionRes?.eligibility?.is_eligible);
   const recognitionReasons = recognitionRes?.eligibility?.reasons || [];
   const publicationStatus = recognitionRes?.publication?.submission_status || "not_submitted";
   const observationSummary = assessmentRes?.observation_summary;
+  const recommendedMoments = analysisMomentsRes?.moments || [];
+  const recommendedMomentNoteLines = recommendedMoments.slice(0, 3).map((moment) => {
+    const jumpTime =
+      typeof moment.representative_frame_sec === "number"
+        ? moment.representative_frame_sec
+        : moment.start_sec;
+    return `${formatClock(moment.start_sec)}-${formatClock(moment.end_sec)} • ${formatMomentPhase(
+      moment.phase
+    )} • ${formatMomentReason(moment.selection_reason)} • ${t(
+      "videoPlayer.representativeMoment",
+      { time: formatClock(jumpTime) }
+    )}`;
+  });
+  const feedbackByTarget = {};
+  (assessmentFeedbackRes?.feedback || []).forEach((item) => {
+    feedbackByTarget[`${item.target_type}:${item.target_id || ""}`] = item;
+  });
   const canSubmitExemplar = recognitionStatus === "awarded" && teacherOptIn;
   const recognitionBadgeLabel =
     recognitionStatus === "awarded"
@@ -405,10 +523,10 @@ export function VideoPlayerPage() {
         <PageHeader title={t("videoPlayer.lessonRecording")} compact className="mb-4" />
         <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-slate-600">
           <Badge variant={statusVariant}>
-            {t("videoPlayer.status", { status: formatStatus(videoStatus) })}
+            {t("videoPlayer.status", { status: formatAnalysisStatus(videoStatus) })}
           </Badge>
           <Badge variant={privacyStatus === "completed" ? "success" : privacyStatus === "failed" ? "danger" : "warning"}>
-            {t("videoPlayer.privacy", { status: formatStatus(privacyStatus) })}
+            {t("videoPlayer.privacy", { status: formatPrivacyStatus(privacyStatus) })}
           </Badge>
           <Badge variant={recognitionBadgeVariant}>
             {recognitionBadgeLabel}
@@ -534,12 +652,24 @@ export function VideoPlayerPage() {
                 <div className="mt-3 rounded-md border border-slate-200 bg-white px-3 py-3 text-sm leading-6 text-slate-700">
                   {observationSummary?.executive_summary || assessmentRes?.summary || t("videoPlayer.noSummaryAvailable")}
                 </div>
-                {observationSummary?.focus_note && (
-                  <div className="mt-3 rounded-md border border-sky-200 bg-sky-50 px-3 py-3 text-[11px] text-sky-800">
-                    <div className="font-semibold text-sky-900">{t("videoPlayer.adminFocus")}</div>
-                    <div className="mt-1">{observationSummary.focus_note}</div>
-                  </div>
+                {assessmentFeedbackEnabled && assessmentId && (
+                  <AssessmentFeedbackWidget
+                    assessmentId={assessmentId}
+                    targetType="summary"
+                    targetId="video-summary"
+                    surface="video_player"
+                    metadata={{ section: "observation_summary" }}
+                    existingFeedback={feedbackByTarget["summary:video-summary"]}
+                  />
                 )}
+                <ObservationFocusPanel
+                  className="mt-3"
+                  frameworkType={assessmentRes?.framework_type}
+                  priorityElements={assessmentRes?.priority_elements}
+                  focusNote={observationSummary?.focus_note || assessmentRes?.focus_note}
+                  title={t("videoPlayer.focusContextTitle")}
+                  description={t("videoPlayer.focusContextDescription")}
+                />
                 {observationSummary?.confidence_note && (
                   <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-[11px] text-amber-800">
                     {observationSummary.confidence_note}
@@ -579,9 +709,32 @@ export function VideoPlayerPage() {
                       {t("videoPlayer.coachingMoves")}
                     </div>
                     {observationSummary?.coaching_actions?.length ? (
-                      <ul className="mt-2 list-disc space-y-1 ps-4 text-xs text-slate-700">
+                      <ul className="mt-2 space-y-2 text-xs text-slate-700">
                         {observationSummary.coaching_actions.map((item, idx) => (
-                          <li key={idx}>{item}</li>
+                          <li
+                            key={idx}
+                            className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3"
+                          >
+                            <div>{item}</div>
+                            {assessmentFeedbackEnabled && assessmentId && (
+                              <AssessmentFeedbackWidget
+                                assessmentId={assessmentId}
+                                targetType="recommendation"
+                                targetId={`video-coaching-action-${idx}`}
+                                surface="video_player"
+                                metadata={{
+                                  section: "coaching_actions",
+                                  recommendation_index: idx,
+                                }}
+                                existingFeedback={
+                                  feedbackByTarget[
+                                    `recommendation:video-coaching-action-${idx}`
+                                  ]
+                                }
+                                compact
+                              />
+                            )}
+                          </li>
                         ))}
                       </ul>
                     ) : (
@@ -605,18 +758,23 @@ export function VideoPlayerPage() {
                 </div>
               </div>
 
-              <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-4">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <h2 className="text-sm font-semibold text-slate-900">
-                      {t("videoPlayer.recognitionSharing")}
-                    </h2>
-                    <p className="mt-1 text-xs text-slate-600">
-                      {t("videoPlayer.recognitionSharingDescription")}
-                    </p>
+              <details
+                className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-4"
+                open={recognitionStatus === "awarded" || recognitionStatus === "pending_admin_review"}
+              >
+                <summary className="cursor-pointer list-none">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h2 className="text-sm font-semibold text-slate-900">
+                        {t("videoPlayer.recognitionSharing")}
+                      </h2>
+                      <p className="mt-1 text-xs text-slate-600">
+                        {t("videoPlayer.recognitionSharingDescription")}
+                      </p>
+                    </div>
+                    <Badge variant={recognitionBadgeVariant}>{formatGeneralStatus(recognitionStatus)}</Badge>
                   </div>
-                  <Badge variant={recognitionBadgeVariant}>{formatStatus(recognitionStatus)}</Badge>
-                </div>
+                </summary>
                 <div className="mt-3 text-xs text-slate-700">
                   {recognitionEligible ? (
                     <div className="rounded-md border border-emerald-200 bg-white px-3 py-2 text-emerald-700">
@@ -722,9 +880,9 @@ export function VideoPlayerPage() {
                           <div className="text-xs font-semibold text-slate-800">
                             {t("videoPlayer.allStarSubmission")}
                           </div>
-                    <div className="mt-1 text-[11px] text-slate-500">
-                      {t("videoPlayer.currentStatus", { status: formatStatus(publicationStatus) })}
-                    </div>
+                          <div className="mt-1 text-[11px] text-slate-500">
+                            {t("videoPlayer.currentStatus", { status: formatGeneralStatus(publicationStatus) })}
+                          </div>
                         </div>
                         {publicationStatus === "published" && (
                           <Link
@@ -862,37 +1020,78 @@ export function VideoPlayerPage() {
                     </div>
                   </>
                 )}
-              </div>
-
-              <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                {t("videoPlayer.summaryActionItems")}
-              </h2>
-              <div className="mb-2 text-xs text-slate-600">
-                {observationSummary?.executive_summary || assessmentRes?.summary}
-              </div>
-              <Field label={t("videoPlayer.additionalSummaryNotes")} className="mb-2">
-                <Textarea
-                  rows={2}
-                  value={summaryNotes}
-                  onChange={(e) => setSummaryNotes(e.target.value)}
-                  size="sm"
-                />
-              </Field>
-              <Field label={t("videoPlayer.actionItemsNextLesson")} className="mb-3">
-                <Textarea
-                  rows={2}
-                  value={actionItems}
-                  onChange={(e) => setActionItems(e.target.value)}
-                  size="sm"
-                />
-              </Field>
-              <Button size="sm" onClick={handleGenerateReport}>
-                {t("videoPlayer.generateReport")}
-              </Button>
+              </details>
             </Panel>
           </section>
 
           <section className="md:col-span-5 space-y-3">
+            {analysisMomentsEnabled && (
+              <Panel className="p-4 text-xs">
+                <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <h2 className="text-sm font-semibold text-slate-900">
+                      {t("videoPlayer.recommendedMoments")}
+                    </h2>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {t("videoPlayer.recommendedMomentsDescription")}
+                    </p>
+                  </div>
+                  {analysisMomentsRes?.strategy_version ? (
+                    <Badge variant="neutral">{analysisMomentsRes.strategy_version}</Badge>
+                  ) : null}
+                </div>
+                {analysisMomentsLoading ? (
+                  <div className="text-xs text-slate-500">
+                    {t("videoPlayer.loadingRecommendedMoments")}
+                  </div>
+                ) : recommendedMoments.length ? (
+                  <ul className="space-y-2">
+                    {recommendedMoments.slice(0, 5).map((moment) => (
+                      <li key={moment.moment_id}>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleSeek(
+                              typeof moment.representative_frame_sec === "number"
+                                ? moment.representative_frame_sec
+                                : moment.start_sec
+                            )
+                          }
+                          className={`w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 hover:border-slate-300 hover:bg-slate-100 ${isRtl ? "text-right" : "text-left"}`}
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="font-semibold text-slate-900">
+                              {formatClock(moment.start_sec)}-{formatClock(moment.end_sec)}
+                            </span>
+                            <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                              {formatMomentPhase(moment.phase)}
+                            </span>
+                          </div>
+                          <div className="mt-1 text-[11px] text-slate-600">
+                            {formatMomentReason(moment.selection_reason)}
+                          </div>
+                          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                            <span className="text-slate-500">
+                              {t("videoPlayer.representativeMoment", {
+                                time: formatClock(moment.representative_frame_sec || moment.start_sec),
+                              })}
+                            </span>
+                            <span className="font-medium text-primary">
+                              {t("videoPlayer.jumpToMoment")}
+                            </span>
+                          </div>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="text-xs text-slate-500">
+                    {t("videoPlayer.noRecommendedMoments")}
+                  </div>
+                )}
+              </Panel>
+            )}
+
             <Panel className="p-4 text-xs">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 {t("videoPlayer.timestampedObservations")}
@@ -921,6 +1120,57 @@ export function VideoPlayerPage() {
                   ))}
                 </ul>
               )}
+            </Panel>
+
+            <Panel className="p-4 text-xs">
+              <h2 className="mb-2 text-sm font-semibold text-slate-900">
+                {t("videoPlayer.summaryActionItems")}
+              </h2>
+              <div className="mb-2 text-xs text-slate-600">
+                {observationSummary?.executive_summary || assessmentRes?.summary}
+              </div>
+              {recommendedMomentNoteLines.length ? (
+                <div className="mb-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                        {t("videoPlayer.recommendedMomentsForConference")}
+                      </div>
+                      <ul className="mt-2 space-y-1 text-xs text-slate-700">
+                        {recommendedMomentNoteLines.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={handleAddRecommendedMomentsToActionItems}
+                    >
+                      {t("videoPlayer.addMomentsToActionItems")}
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+              <Field label={t("videoPlayer.additionalSummaryNotes")} className="mb-2">
+                <Textarea
+                  rows={2}
+                  value={summaryNotes}
+                  onChange={(e) => setSummaryNotes(e.target.value)}
+                  size="sm"
+                />
+              </Field>
+              <Field label={t("videoPlayer.actionItemsNextLesson")} className="mb-3">
+                <Textarea
+                  rows={2}
+                  value={actionItems}
+                  onChange={(e) => setActionItems(e.target.value)}
+                  size="sm"
+                />
+              </Field>
+              <Button size="sm" onClick={handleGenerateReport}>
+                {t("videoPlayer.generateReport")}
+              </Button>
             </Panel>
 
             <Panel className="p-4 text-xs">
