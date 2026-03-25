@@ -1847,7 +1847,8 @@ export function TeacherProfilePage() {
 
             </section>
 
-            <section className={`rounded-xl border border-slate-200 bg-white p-5 ${isAdmin ? "hidden" : ""}`}>
+            {!isAdmin && (
+            <section className="rounded-xl border border-slate-200 bg-white p-5">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-900">
@@ -2040,8 +2041,10 @@ export function TeacherProfilePage() {
                 </div>
               )}
             </section>
+            )}
 
-            <section className={`rounded-xl border border-slate-200 bg-white p-5 ${isAdmin ? "hidden" : ""}`}>
+            {!isAdmin && (
+            <section className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 {t("teacherProfile.supportingMaterials")}
               </h2>
@@ -2050,58 +2053,56 @@ export function TeacherProfilePage() {
               </p>
               
 
-              {(isAdmin || user?.role === "teacher") && (
-                <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs">
-                  <div className="mb-2 font-semibold text-slate-700">{t("teacherProfile.curriculum")}</div>
-                  <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
-                    <input
-                      type="text"
-                      placeholder={t("teacherProfile.curriculumTitle")}
-                      value={curriculumTitle}
-                      onChange={(e) => setCurriculumTitle(e.target.value)}
-                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
-                    />
-                    <input
-                      ref={curriculumInputRef}
-                      type="file"
-                      accept=".pdf,.docx,.pptx,.jpeg,.jpg"
-                      onChange={(e) => setCurriculumFile(e.target.files?.[0] || null)}
-                      className="hidden"
-                    />
-                    <div className="md:col-span-2 flex flex-wrap items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => curriculumInputRef.current?.click()}
-                        className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
-                      >
-                        {t("teacherProfile.chooseFile")}
-                      </button>
-                      <span className="text-[11px] text-slate-500">
-                        {curriculumFile ? curriculumFile.name : t("teacherProfile.noFileSelected")}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="mt-2 flex justify-end">
+              <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs">
+                <div className="mb-2 font-semibold text-slate-700">{t("teacherProfile.curriculum")}</div>
+                <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                  <input
+                    type="text"
+                    placeholder={t("teacherProfile.curriculumTitle")}
+                    value={curriculumTitle}
+                    onChange={(e) => setCurriculumTitle(e.target.value)}
+                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                  />
+                  <input
+                    ref={curriculumInputRef}
+                    type="file"
+                    accept=".pdf,.docx,.pptx,.jpeg,.jpg"
+                    onChange={(e) => setCurriculumFile(e.target.files?.[0] || null)}
+                    className="hidden"
+                  />
+                  <div className="md:col-span-2 flex flex-wrap items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => {
-                        if (!curriculumFile) {
-                          toast.error(t("teacherProfile.selectCurriculumFile"));
-                          return;
-                        }
-                        const formData = new FormData();
-                        formData.append("teacher_id", teacherId);
-                        formData.append("title", curriculumTitle || "");
-                        formData.append("file", curriculumFile);
-                        uploadCurriculumMutation.mutate(formData);
-                      }}
-                      className="rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90"
+                      onClick={() => curriculumInputRef.current?.click()}
+                      className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
                     >
-                      {t("teacherProfile.uploadCurriculum")}
+                      {t("teacherProfile.chooseFile")}
                     </button>
+                    <span className="text-[11px] text-slate-500">
+                      {curriculumFile ? curriculumFile.name : t("teacherProfile.noFileSelected")}
+                    </span>
                   </div>
                 </div>
-              )}
+                <div className="mt-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!curriculumFile) {
+                        toast.error(t("teacherProfile.selectCurriculumFile"));
+                        return;
+                      }
+                      const formData = new FormData();
+                      formData.append("teacher_id", teacherId);
+                      formData.append("title", curriculumTitle || "");
+                      formData.append("file", curriculumFile);
+                      uploadCurriculumMutation.mutate(formData);
+                    }}
+                    className="rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90"
+                  >
+                    {t("teacherProfile.uploadCurriculum")}
+                  </button>
+                </div>
+              </div>
 
               {user?.role === "teacher" && (
                 <div className="space-y-4">
@@ -2224,6 +2225,7 @@ export function TeacherProfilePage() {
                 })}
               </div>
             </section>
+            )}
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <SectionHeader
