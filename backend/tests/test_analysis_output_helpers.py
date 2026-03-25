@@ -71,6 +71,7 @@ def test_generate_summary_uses_10_point_thresholds_and_observations():
     assert "Overall performance" in summary
     assert "Observation emphasis was placed on Questioning" in summary
     assert "Observation focus note" in summary
+    assert "Within the selected focus, current strengths were Questioning." in summary
     assert "Strongest visible practices" in summary
     assert "Priority growth areas" in summary
     assert "Questioning" in summary
@@ -102,6 +103,7 @@ def test_generate_summary_supports_hebrew_output():
     assert "התרשמות כללית" in summary
     assert "מוקד התצפית" in summary
     assert "הערת מיקוד לתצפית" in summary
+    assert "בתוך מוקד התצפית" in summary
 
 
 def test_generate_recommendations_uses_evidence_segments_and_not_canned_defaults():
@@ -127,6 +129,7 @@ def test_generate_recommendations_uses_evidence_segments_and_not_canned_defaults
 
     assert recommendations
     assert recommendations[0].startswith("[01:35–02:05]")
+    assert "Priority focus on Engagement" in recommendations[0]
     assert "Engagement".lower() in recommendations[0].lower()
     assert "Observed evidence" in recommendations[0]
     assert "Continue modeling strong routines" not in recommendations[0]
@@ -155,6 +158,7 @@ def test_generate_recommendations_supports_hebrew_output():
     )
 
     assert recommendations
+    assert "מוקד עדיפות" in recommendations[0]
     assert "ראיה שנצפתה" in recommendations[0]
 
 
@@ -195,6 +199,7 @@ def test_generate_recommendations_prioritizes_admin_pressure_points_when_model_o
     )
 
     assert recommendations[0].endswith("Increase probing questions and wait time.")
+    assert "Priority focus on Questioning" in recommendations[0]
 
 
 def test_normalize_analysis_score_scales_legacy_four_point_scores():
@@ -256,6 +261,8 @@ async def test_analyze_frames_with_ai_marks_multimodal_mode_when_audio_present(m
     )
 
     assert result["analysis_mode"] == "openai_multimodal"
+    assert result["specialist_orchestrator"]["enabled"] is True
+    assert result["specialist_trace"]
 
 
 def test_build_elements_to_analyze_marks_priority_items_first():
@@ -505,3 +512,23 @@ def test_build_analysis_metadata_tracks_modality_confidence_and_degradation(monk
     assert metadata["analysis_confidence"]["overall"] == 70.0
     assert "audio_unavailable" in metadata["analysis_confidence"]["degradation_reasons"]
     assert metadata["analysis_confidence"]["by_modality"]["vision"] == 70.0
+
+
+def test_build_analysis_metadata_includes_specialist_trace_when_present():
+    metadata = server.build_analysis_metadata(
+        analysis_payload={
+            "element_scores": [{"confidence": 80}],
+            "specialist_orchestrator": {
+                "enabled": True,
+                "version": "specialist_orchestrator_v1",
+                "specialist_ids": ["evidence_grounding"],
+            },
+            "specialist_trace": [{"specialist_id": "evidence_grounding", "notes": ["ok"]}],
+        },
+        multimodal_payload={"modalities_used": ["vision"]},
+        transcript_doc=None,
+        feature_doc=None,
+    )
+
+    assert metadata["specialist_orchestrator"]["enabled"] is True
+    assert metadata["specialist_trace"][0]["specialist_id"] == "evidence_grounding"

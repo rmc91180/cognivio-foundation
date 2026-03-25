@@ -8,4 +8,6 @@ __all__ = [
     "moment_sampler",
     "multimodal_analysis",
     "recognition_engine",
+    "specialist_contracts",
+    "specialist_orchestrator",
 ]

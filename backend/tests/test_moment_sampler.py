@@ -81,3 +81,42 @@ def test_select_lesson_moments_keeps_timeline_anchors_and_diverse_phases():
     assert [moment["phase"] for moment in moments] == ["lesson_launch", "modeling", "closure"]
     assert moments[0]["moment_id"] == "moment_01"
     assert moments[-1]["end_sec"] == 60.0
+
+
+def test_score_windows_prioritizes_coachable_instructional_moments_over_activity_only_windows():
+    windows = [
+        {"window_id": "window_00", "start_sec": 0.0, "end_sec": 20.0, "duration_sec": 20.0},
+        {"window_id": "window_01", "start_sec": 20.0, "end_sec": 40.0, "duration_sec": 20.0},
+    ]
+    frames = [
+        {
+            "timestamp_sec": 5.0,
+            "selection_score": 0.74,
+            "selection_reason": "high_activity_window",
+            "selection_features": {
+                "motion_score": 0.9,
+                "teacher_prominence_score": 0.2,
+                "participant_density_score": 0.1,
+                "board_text_density_score": 0.0,
+            },
+        },
+        {
+            "timestamp_sec": 28.0,
+            "selection_score": 0.7,
+            "selection_reason": "participant_density_change",
+            "selection_features": {
+                "motion_score": 0.3,
+                "teacher_prominence_score": 0.6,
+                "participant_density_score": 0.8,
+                "board_text_density_score": 0.35,
+            },
+        },
+    ]
+
+    scored = moment_sampler.score_windows(windows, frames)
+
+    assert scored[0]["phase"] == "guided_practice"
+    assert scored[1]["phase"] == "student_work"
+    assert scored[1]["score"] > scored[0]["score"]
+    assert scored[1]["supporting_features"]["raw_selection_score"] == 0.7
+    assert scored[1]["supporting_features"]["evidence_density_score"] > 0

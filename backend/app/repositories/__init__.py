@@ -5,4 +5,5 @@ __all__ = [
     "recognition_repository",
     "teacher_repository",
     "video_repository",
+    "workspace_repository",
 ]

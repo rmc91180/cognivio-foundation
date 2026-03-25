@@ -3,6 +3,10 @@ from typing import Any, Dict, List
 import cv2
 
 
+def _clamp_score(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
+    return max(minimum, min(maximum, value))
+
+
 def segment_video_windows(video_path: str, window_sec: float = 20.0) -> List[Dict[str, Any]]:
     windows: List[Dict[str, Any]] = []
     cap = cv2.VideoCapture(video_path)
@@ -51,6 +55,82 @@ def _infer_phase(start_sec: float, end_sec: float, total_duration_sec: float, do
     return "closure"
 
 
+def _reason_priority_weight(reason: str) -> float:
+    return {
+        "participant_density_change": 0.08,
+        "board_content_change": 0.08,
+        "teacher_prominence": 0.05,
+        "visual_novelty": 0.04,
+        "high_activity_window": 0.01,
+        "scene_transition": -0.03,
+        "timeline_coverage": -0.04,
+    }.get(reason or "", 0.0)
+
+
+def _phase_priority_weight(phase: str) -> float:
+    return {
+        "check_for_understanding": 0.08,
+        "student_work": 0.06,
+        "guided_practice": 0.05,
+        "modeling": 0.04,
+        "closure": 0.02,
+        "lesson_launch": 0.0,
+    }.get(phase or "", 0.0)
+
+
+def _score_window_for_coaching(
+    assigned: List[Dict[str, Any]],
+    dominant_frame: Dict[str, Any],
+    window_phase: str,
+) -> Dict[str, float]:
+    raw_peak_score = max(
+        (float(frame.get("selection_score", 0.0) or 0.0) for frame in assigned),
+        default=float(dominant_frame.get("selection_score", 0.0) or 0.0),
+    )
+    top_scores = sorted(
+        [float(frame.get("selection_score", 0.0) or 0.0) for frame in assigned],
+        reverse=True,
+    )[:2]
+    average_top_score = sum(top_scores) / len(top_scores) if top_scores else raw_peak_score
+
+    feature_frames = assigned or [dominant_frame]
+    participant_density = max(
+        float((frame.get("selection_features") or {}).get("participant_density_score", 0.0) or 0.0)
+        for frame in feature_frames
+    )
+    board_density = max(
+        float((frame.get("selection_features") or {}).get("board_text_density_score", 0.0) or 0.0)
+        for frame in feature_frames
+    )
+    teacher_prominence = max(
+        float((frame.get("selection_features") or {}).get("teacher_prominence_score", 0.0) or 0.0)
+        for frame in feature_frames
+    )
+    evidence_density = _clamp_score(len(assigned) / 3.0 if assigned else 0.0)
+
+    dominant_reason = str(dominant_frame.get("selection_reason") or "timeline_coverage")
+    score = (
+        0.48 * raw_peak_score
+        + 0.20 * average_top_score
+        + 0.12 * participant_density
+        + 0.08 * board_density
+        + 0.05 * teacher_prominence
+        + 0.05 * evidence_density
+        + _reason_priority_weight(dominant_reason)
+        + _phase_priority_weight(window_phase)
+    )
+
+    return {
+        "score": round(_clamp_score(score), 4),
+        "raw_selection_score": round(raw_peak_score, 4),
+        "average_selection_score": round(average_top_score, 4),
+        "participant_density_score": round(participant_density, 4),
+        "board_text_density_score": round(board_density, 4),
+        "teacher_prominence_score": round(teacher_prominence, 4),
+        "evidence_density_score": round(evidence_density, 4),
+    }
+
+
 def score_windows(windows: List[Dict[str, Any]], frames: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not windows:
         return []
@@ -73,21 +153,33 @@ def score_windows(windows: List[Dict[str, Any]], frames: List[Dict[str, Any]]) -
             dominant_frame = min(frames, key=lambda item: abs(float(item.get("timestamp_sec", 0.0)) - midpoint))
 
         features = dict((dominant_frame or {}).get("selection_features") or {})
-        window_score = max((float(frame.get("selection_score", 0.0)) for frame in assigned), default=float((dominant_frame or {}).get("selection_score", 0.0) or 0.0))
         window_phase = _infer_phase(
             float(window["start_sec"]),
             float(window["end_sec"]),
             total_duration_sec,
             dominant_frame or {},
         )
+        ranking_details = _score_window_for_coaching(
+            assigned,
+            dominant_frame or {},
+            window_phase,
+        )
         enriched_windows.append(
             {
                 **window,
-                "score": round(window_score, 4),
+                "score": ranking_details["score"],
                 "phase": window_phase,
                 "selection_reason": (dominant_frame or {}).get("selection_reason") or "timeline_coverage",
                 "representative_frame_sec": float((dominant_frame or {}).get("timestamp_sec", window["start_sec"])),
-                "supporting_features": features,
+                "supporting_features": {
+                    **features,
+                    "raw_selection_score": ranking_details["raw_selection_score"],
+                    "average_selection_score": ranking_details["average_selection_score"],
+                    "participant_density_score": ranking_details["participant_density_score"],
+                    "board_text_density_score": ranking_details["board_text_density_score"],
+                    "teacher_prominence_score": ranking_details["teacher_prominence_score"],
+                    "evidence_density_score": ranking_details["evidence_density_score"],
+                },
             }
         )
     return enriched_windows

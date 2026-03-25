@@ -10,4 +10,5 @@ __all__ = [
     "report_service",
     "teacher_service",
     "video_service",
+    "workspace_service",
 ]

@@ -12,8 +12,10 @@ from app.services.assessment_service import (
     get_assessment,
     get_assessment_evidence,
     get_curriculum_adherence,
+    list_assessment_feedback,
     list_admin_overrides,
     list_assessments,
+    upsert_assessment_feedback,
 )
 
 
@@ -61,6 +63,30 @@ async def list_admin_overrides_route(
     current_user: dict = Depends(get_current_user),
 ):
     return await list_admin_overrides(assessment_id, current_user)
+
+
+@router.post(
+    "/assessments/{assessment_id}/feedback",
+    response_model=legacy.AssessmentFeedbackListResponse,
+)
+async def upsert_assessment_feedback_route(
+    assessment_id: str,
+    payload: legacy.AssessmentFeedbackUpsert,
+    current_user: dict = Depends(get_current_user),
+):
+    await upsert_assessment_feedback(assessment_id, payload, current_user)
+    return await list_assessment_feedback(assessment_id, current_user)
+
+
+@router.get(
+    "/assessments/{assessment_id}/feedback",
+    response_model=legacy.AssessmentFeedbackListResponse,
+)
+async def list_assessment_feedback_route(
+    assessment_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    return await list_assessment_feedback(assessment_id, current_user)
 
 
 @router.get("/assessments/{assessment_id}/curriculum-adherence")
