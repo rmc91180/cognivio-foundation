@@ -2,6 +2,7 @@ import React from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "@/hooks/useAuth";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
+import { useAuth } from "@/hooks/useAuth";
 import { AuthPage } from "@/pages/AuthPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { TeachersPage } from "@/pages/TeachersPage";
@@ -14,6 +15,22 @@ import { PrivacyReviewQueuePage } from "@/pages/PrivacyReviewQueuePage";
 import { RecognitionReviewPage } from "@/pages/RecognitionReviewPage";
 import { ExemplarLibraryPage } from "@/pages/ExemplarLibraryPage";
 import { OpsMetricsPage } from "@/pages/OpsMetricsPage";
+import { TeacherWorkspacePage } from "@/pages/TeacherWorkspacePage";
+import { getDefaultHomeRoute } from "@/lib/userRoutes";
+
+function HomeRedirect() {
+  const { user, initializing } = useAuth();
+
+  if (initializing) {
+    return null;
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return <Navigate to={getDefaultHomeRoute(user)} replace />;
+}
 
 function App() {
   return (
@@ -23,7 +40,7 @@ function App() {
         <Route
           path="/dashboard"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute adminOnly>
               <DashboardPage />
             </ProtectedRoute>
           }
@@ -31,7 +48,7 @@ function App() {
         <Route
           path="/teachers"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute adminOnly>
               <TeachersPage />
             </ProtectedRoute>
           }
@@ -39,8 +56,24 @@ function App() {
         <Route
           path="/teachers/:teacherId"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute adminOnly>
               <TeacherProfilePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/my-workspace"
+          element={
+            <ProtectedRoute>
+              <TeacherWorkspacePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/my-workspace/:section"
+          element={
+            <ProtectedRoute>
+              <TeacherWorkspacePage />
             </ProtectedRoute>
           }
         />
@@ -63,7 +96,7 @@ function App() {
         <Route
           path="/privacy-review"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute adminOnly>
               <PrivacyReviewQueuePage />
             </ProtectedRoute>
           }
@@ -71,7 +104,7 @@ function App() {
         <Route
           path="/recognition-review"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute adminOnly>
               <RecognitionReviewPage />
             </ProtectedRoute>
           }
@@ -79,7 +112,7 @@ function App() {
         <Route
           path="/ops/metrics"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute adminOnly>
               <OpsMetricsPage />
             </ProtectedRoute>
           }
@@ -95,22 +128,22 @@ function App() {
         <Route
           path="/school-setup"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute adminOnly>
               <FrameworksPage />
             </ProtectedRoute>
           }
         />
-        <Route path="/frameworks" element={<Navigate to="/school-setup" replace />} />
+        <Route path="/frameworks" element={<HomeRedirect />} />
         <Route
           path="/master-schedule"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute adminOnly>
               <MasterSchedulePage />
             </ProtectedRoute>
           }
         />
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/" element={<HomeRedirect />} />
+        <Route path="*" element={<HomeRedirect />} />
       </Routes>
     </AuthProvider>
   );

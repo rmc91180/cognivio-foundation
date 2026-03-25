@@ -1,18 +1,29 @@
 import React from "react";
 import { useMutation } from "@tanstack/react-query";
 import { NavLink } from "react-router-dom";
-import { BookOpen, Layers, LayoutDashboard, PlayCircle, ShieldCheck, Trophy, Users } from "lucide-react";
+import {
+  BookOpen,
+  ClipboardList,
+  History,
+  Layers,
+  LayoutDashboard,
+  PlayCircle,
+  ShieldCheck,
+  Trophy,
+  Users,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "@/hooks/useAuth";
 import { BrandMark } from "@/components/BrandMark";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { authApi } from "@/lib/api";
 import { toast } from "sonner";
+import { isAdminUser } from "@/lib/userRoutes";
 
 export function LayoutShell({ children }) {
   const { t } = useTranslation();
   const { user, logout, setUserProfile } = useAuth();
-  const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
+  const isAdmin = isAdminUser(user);
   const workspaceMode = user?.workspace_mode || "school";
   const workspaceModeMutation = useMutation({
     mutationFn: (payload) => authApi.setWorkspaceMode(payload),
@@ -36,13 +47,25 @@ export function LayoutShell({ children }) {
           <LanguageSwitcher compact />
         </div>
         <nav className="mt-5 space-y-1.5 px-3 text-sm">
-          <NavItem to="/dashboard" icon={LayoutDashboard} label={t("nav.dashboard")} />
-          <NavItem to="/teachers" icon={Users} label={t("nav.teachers")} />
-          <NavItem to="/videos" icon={PlayCircle} label={t("nav.videos")} />
-          <NavItem to="/all-star-library" icon={BookOpen} label={t("nav.allStarLibrary")} />
-          {isAdmin && <NavItem to="/privacy-review" icon={ShieldCheck} label={t("nav.privacyReview")} />}
-          {isAdmin && <NavItem to="/recognition-review" icon={Trophy} label={t("nav.recognitionReview")} />}
-          <NavItem to="/school-setup" icon={Layers} label={t("nav.schoolSetup")} />
+          {isAdmin ? (
+            <>
+              <NavItem to="/dashboard" icon={LayoutDashboard} label={t("nav.dashboard")} />
+              <NavItem to="/teachers" icon={Users} label={t("nav.teachers")} />
+              <NavItem to="/videos" icon={PlayCircle} label={t("nav.videos")} />
+              <NavItem to="/all-star-library" icon={BookOpen} label={t("nav.allStarLibrary")} />
+              <NavItem to="/privacy-review" icon={ShieldCheck} label={t("nav.privacyReview")} />
+              <NavItem to="/recognition-review" icon={Trophy} label={t("nav.recognitionReview")} />
+              <NavItem to="/school-setup" icon={Layers} label={t("nav.schoolSetup")} />
+            </>
+          ) : (
+            <>
+              <NavItem to="/my-workspace" icon={LayoutDashboard} label={t("nav.myWorkspace")} />
+              <NavItem to="/videos" icon={PlayCircle} label={t("nav.myVideos")} />
+              <NavItem to="/my-workspace/materials" icon={BookOpen} label={t("nav.myMaterials")} />
+              <NavItem to="/my-workspace/goals" icon={ClipboardList} label={t("nav.myGoals")} />
+              <NavItem to="/my-workspace/history" icon={History} label={t("nav.myHistory")} />
+            </>
+          )}
         </nav>
         {isAdmin && (
           <div className="mx-3 mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">

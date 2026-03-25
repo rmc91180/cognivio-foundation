@@ -6,6 +6,7 @@ import { BrandMark } from "@/components/BrandMark";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { Button, Field, Input, Panel } from "@/components/ui";
 import { runtimeConfig } from "@/lib/runtimeConfig";
+import { getDefaultHomeRoute } from "@/lib/userRoutes";
 
 export function AuthPage() {
   const { t } = useTranslation();
@@ -17,7 +18,7 @@ export function AuthPage() {
 
   useEffect(() => {
     if (user) {
-      navigate("/dashboard", { replace: true });
+      navigate(getDefaultHomeRoute(user), { replace: true });
     }
   }, [navigate, user]);
 

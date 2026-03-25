@@ -54,6 +54,11 @@ const en = {
     dashboard: "Dashboard",
     teachers: "Teachers",
     videos: "Videos & Assessments",
+    myWorkspace: "My Workspace",
+    myVideos: "My Videos",
+    myMaterials: "My Materials",
+    myGoals: "My Goals",
+    myHistory: "My History",
     allStarLibrary: "All-Star Library",
     privacyReview: "Privacy Review",
     recognitionReview: "Recognition Review",
@@ -65,6 +70,15 @@ const en = {
     workspaceModeUpdateFailed: "Failed to update workspace mode",
     logout: "Logout",
     notAuthenticated: "Not authenticated",
+  },
+  timeScope: {
+    latestClass: "Latest class",
+    fromThisLesson: "From this lesson",
+    immediateFollowUp: "Immediate follow-up",
+    ongoingGoal: "Ongoing goal",
+    recurringPattern: "Recurring pattern",
+    acrossRecentObservations: "Across recent observations",
+    longTermFocus: "Long-term development focus",
   },
   opsMetrics: {
     title: "Ops metrics",
@@ -1079,6 +1093,61 @@ const en = {
     privacyReady: "Ready • {{count}} references",
     nextConferenceTitle: "Next coaching conference",
     nextConferenceDescription: "Scheduled coaching checkpoint for this teacher.",
+  },
+  teacherWorkspace: {
+    title: "My teaching workspace",
+    description:
+      "Keep your latest class feedback, ongoing goals, and teaching materials in one working space.",
+    roleMeta: "Teacher-owned workspace",
+    roleBadge: "Teacher workspace",
+    fallbackName: "Teacher",
+    welcomeTitle: "Welcome back, {{name}}",
+    welcomeDescription:
+      "Start with what happened most recently, then move into the goals and materials you are building over time.",
+    summaryLatest: "Latest class feedback lives here",
+    summaryGoals: "Ongoing goals stay separate",
+    summaryUploads: "Uploads and privacy stay teacher-owned",
+    sectionsTitle: "Workspace sections",
+    sectionsDescription:
+      "Use these sections to move between immediate feedback and long-term development work.",
+    currentTitle: "This week and latest class",
+    currentDescription:
+      "Start with the most recent lesson, immediate follow-up, and what needs your attention right now.",
+    currentItemLatest:
+      "Review the latest class summary, strengths, and immediate next steps.",
+    currentItemAttention:
+      "See anything that still needs your response or follow-up.",
+    currentItemNext:
+      "Use this area for what matters now, not for year-long goals.",
+    goalsTitle: "My growth goals",
+    goalsDescription:
+      "Track the longer-term goals and recurring patterns that are staying active over time.",
+    goalsItemPattern:
+      "See which challenges are repeating enough to become ongoing goals.",
+    goalsItemProgress: "Track progress against current goals over time.",
+    goalsItemImplementation:
+      "Keep implementation notes close to each long-term goal.",
+    materialsTitle: "My workspace and materials",
+    materialsDescription:
+      "Manage privacy, videos, and teaching documents from one teacher-owned area.",
+    materialsItemPrivacy:
+      "Privacy setup and teacher identity materials belong here.",
+    materialsItemVideo:
+      "Upload and review lesson recordings from your own workspace.",
+    materialsItemDocuments:
+      "Keep lesson plans, curriculum, and syllabus materials together.",
+    historyTitle: "My history",
+    historyDescription:
+      "Look back at previous lessons, comments, and completed goals without crowding the main workspace.",
+    historyItemLessons: "Review previous lesson snapshots and evidence.",
+    historyItemComments: "Look back at prior comments and responses.",
+    historyItemGoals: "See completed goals and older development threads.",
+    openVideos: "Open my videos",
+    openMaterials: "Open materials",
+    viewGoals: "View my goals",
+    viewHistory: "View my history",
+    returnHome: "Return to workspace home",
+    workspaceTag: "Teacher-owned workspace",
   },
   monthlySummary: {
     title: "Performance Summary",
