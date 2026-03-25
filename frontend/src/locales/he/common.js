@@ -251,6 +251,7 @@ const he = {
     workspaceEvidenceDescription: "ראיות שהושלמו וזמינות למגמות ולתהליכי ליווי.",
     workspaceAttentionLabel: "פריטים שמצריכים המשך טיפול",
     workspaceAttentionDescription: "פערי פרטיות ועמידה במדיניות שעלולים לעכב הטמעה חלקה.",
+    dashboardSupportOverviewDescription: "מורים שכרגע זקוקים לתגובה ליוויית חזקה יותר.",
     cohortAnalyticsTitle: "אנליטיקת קוהורט",
     cohortAnalyticsDescription:
       "סקירת התקדמות ברמת התוכנית, פערי מיומנות, והמקום שבו הקוהורט זקוק לדחיפת הליווי הבאה.",
@@ -315,6 +316,28 @@ const he = {
     smartQueueTeacherDashboardTitle: "השתמשו בלוח הבקרה כבסיס לליווי",
     smartQueueTeacherDashboardDescription:
       "חזרו לכאן כדי לעקוב אחרי מה כבר נצפה, מה עדיין חסר, ועל מה כדאי לדבר עכשיו.",
+    taskQueueTitle: "מה דורש פעולה עכשיו",
+    taskQueueDescription:
+      "שמרו את התור הזה מוגבל למשימות אמיתיות שנוצרו מהראיות, מבדיקת מנהל או מחסמי תהליך.",
+    taskQueueClear: "כרגע אין חסמים דחופים שממתינים. השתמשו בשאר לוח הבקרה כדי לסקור דפוסים ולתכנן את הליווי הבא.",
+    taskQueueOpenTeacher: "פתיחת עמוד המורה",
+    taskQueueResolveNow: "לטפל עכשיו",
+    taskQueueFollowUpTitle: "מעקב על השיעור האחרון של {{name}}",
+    taskQueuePrivacyTitle: "השלמת הגדרות פרטיות למורים",
+    taskQueuePrivacyDescription:
+      "ל־{{count}} מורים עדיין חסרות הגדרות פרטיות לפני שהעלאות השיעורים יזרמו בצורה תקינה לסקירה.",
+    taskQueuePrivacyReviewTitle: "בדיקת תור הפרטיות",
+    taskQueuePrivacyReviewDescription:
+      "{{count}} הקלטות ממתינות לבדיקת פרטיות לפני שאפשר להסתמך עליהן בביטחון.",
+    taskQueueEvidenceTitle: "להעביר את השיעור הראשון דרך כל המערכת",
+    taskQueueEvidenceDescription:
+      "לוח הבקרה נעשה שימושי הרבה יותר ברגע שיש שיעור שהושלם וזמין לסקירת ראיות וליווי.",
+    taskQueueFocusTitle: "להגדיר מוקדי תצפית לפני המחזור הבא",
+    taskQueueFocusDescription:
+      "הגדירו את מוקדי הרובריקה שצריכים לעצב את מה שקוגניביו מציפה ואת מה שהמנהלים מלווים סביבו.",
+    taskQueueSupportTitle: "סקירת התמיכה המתמשכת עבור {{name}}",
+    taskQueueSupportDescription:
+      "המורה הזה נמצא כרגע בטווח התמיכה עם ציון כולל של {{score}}.",
     onboardingTitle: "צ'ק-ליסט התחלה",
     onboardingDescription:
       "אלה צעדי המינימום שיגרמו לקוגניביו להרגיש קלה לאימוץ עבור מנהלים ומדריכי מורים.",

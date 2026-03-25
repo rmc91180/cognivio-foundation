@@ -591,130 +591,6 @@ export function DashboardPage() {
   const workspaceRoleLabel = isAdmin
     ? t("dashboard.workspaceRoleAdmin")
     : t("dashboard.workspaceRoleTeacher");
-  const workspaceTitle = isAdmin
-    ? t("dashboard.workspaceTitleAdmin")
-    : t("dashboard.workspaceTitleTeacher");
-  const workspaceDescription = isAdmin
-    ? t("dashboard.workspaceDescriptionAdmin")
-    : t("dashboard.workspaceDescriptionTeacher");
-  const smartQueueItems = useMemo(() => {
-    if (isAdmin) {
-      const items = [];
-      if (!hasTeachers) {
-        items.push({
-          id: "seed-demo",
-          title: t("dashboard.smartQueueSeedTitle"),
-          description: t("dashboard.smartQueueSeedDescription"),
-          actionLabel: t("dashboard.seedDemoData"),
-          actionType: "seed",
-        });
-      } else {
-        items.push({
-          id: "review-roster",
-          title: t("dashboard.smartQueueRosterTitle"),
-          description: t("dashboard.smartQueueRosterDescription", {
-            count: teacherOptions.length,
-          }),
-          actionLabel: t("dashboard.smartQueueOpenTeachers"),
-          to: "/teachers",
-        });
-      }
-      if (!focusAreasConfigured) {
-        items.push({
-          id: "configure-focus",
-          title: t("dashboard.smartQueueFocusTitle"),
-          description: t("dashboard.smartQueueFocusDescription"),
-          actionLabel: t("dashboard.smartQueueOpenSetup"),
-          to: "/school-setup",
-        });
-      }
-      if (teachersMissingPrivacyProfiles > 0) {
-        items.push({
-          id: "privacy-profiles",
-          title: t("dashboard.smartQueuePrivacyTitle"),
-          description: t("dashboard.smartQueuePrivacyDescription", {
-            count: teachersMissingPrivacyProfiles,
-          }),
-          actionLabel: t("dashboard.smartQueueOpenTeachers"),
-          to: "/teachers",
-        });
-      }
-      if (!hasAnyObservations) {
-        items.push({
-          id: "capture-evidence",
-          title: t("dashboard.smartQueueEvidenceTitle"),
-          description: t("dashboard.smartQueueEvidenceDescription"),
-          actionLabel: t("dashboard.smartQueueOpenVideos"),
-          to: "/videos",
-        });
-      }
-      if (privacyReviewsPending > 0) {
-        items.push({
-          id: "privacy-review",
-          title: t("dashboard.smartQueuePrivacyReviewTitle"),
-          description: t("dashboard.smartQueuePrivacyReviewDescription", {
-            count: privacyReviewsPending,
-          }),
-          actionLabel: t("dashboard.openPrivacyReview"),
-          to: "/privacy-review",
-        });
-      }
-      if (!items.length) {
-        items.push(
-          {
-            id: "open-videos",
-            title: t("dashboard.smartQueueReviewEvidenceTitle"),
-            description: t("dashboard.smartQueueReviewEvidenceDescription"),
-            actionLabel: t("dashboard.smartQueueOpenVideos"),
-            to: "/videos",
-          },
-          {
-            id: "open-teachers",
-            title: t("dashboard.smartQueueCoachingTitle"),
-            description: t("dashboard.smartQueueCoachingDescription"),
-            actionLabel: t("dashboard.smartQueueOpenTeachers"),
-            to: "/teachers",
-          },
-          {
-            id: "open-setup",
-            title: t("dashboard.smartQueueTuneSetupTitle"),
-            description: t("dashboard.smartQueueTuneSetupDescription"),
-            actionLabel: t("dashboard.smartQueueOpenSetup"),
-            to: "/school-setup",
-          }
-        );
-      }
-      return items.slice(0, 3);
-    }
-
-    return [
-      {
-        id: "teacher-videos",
-        title: t("dashboard.smartQueueTeacherVideosTitle"),
-        description: hasAnyObservations
-          ? t("dashboard.smartQueueTeacherVideosReady")
-          : t("dashboard.smartQueueTeacherVideosDescription"),
-        actionLabel: t("dashboard.smartQueueOpenVideos"),
-        to: "/videos",
-      },
-      {
-        id: "teacher-dashboard",
-        title: t("dashboard.smartQueueTeacherDashboardTitle"),
-        description: t("dashboard.smartQueueTeacherDashboardDescription"),
-        actionLabel: t("dashboard.smartQueueRefreshDashboard"),
-        to: "/dashboard",
-      },
-    ];
-  }, [
-    focusAreasConfigured,
-    hasAnyObservations,
-    hasTeachers,
-    isAdmin,
-    privacyReviewsPending,
-    t,
-    teacherOptions.length,
-    teachersMissingPrivacyProfiles,
-  ]);
   const onboardingItems = useMemo(() => {
     if (!isAdmin) return [];
     return [
@@ -904,6 +780,171 @@ export function DashboardPage() {
     amber: "border-amber-200 bg-amber-50/70",
     emerald: "border-emerald-200 bg-emerald-50/70",
   };
+  const attentionCount =
+    teachersMissingPrivacyProfiles + behindComplianceRows.length + privacyReviewsPending;
+  const dashboardOverviewCards = useMemo(
+    () => [
+      {
+        id: "teachers",
+        title: t("dashboard.workspaceTeachersLabel"),
+        value: teacherOptions.length,
+        description: t("dashboard.workspaceTeachersDescription"),
+        to: "/teachers",
+      },
+      {
+        id: "evidence",
+        title: t("dashboard.workspaceEvidenceLabel"),
+        value: focusSummary.assessmentCount,
+        description: t("dashboard.workspaceEvidenceDescription"),
+        to: "/videos",
+      },
+      {
+        id: "attention",
+        title: t("dashboard.workspaceAttentionLabel"),
+        value: attentionCount,
+        description: t("dashboard.workspaceAttentionDescription"),
+        to: privacyReviewsPending > 0 ? "/privacy-review" : "/teachers",
+      },
+      {
+        id: "support",
+        title: t("dashboard.kpiSupportTitle"),
+        value: prioritySupportCount,
+        description: t("dashboard.dashboardSupportOverviewDescription"),
+        to: supportKpiRows[0]?.id ? `/teachers/${supportKpiRows[0].id}` : "/teachers",
+      },
+    ],
+    [
+      attentionCount,
+      focusSummary.assessmentCount,
+      prioritySupportCount,
+      privacyReviewsPending,
+      supportKpiRows,
+      t,
+      teacherOptions.length,
+    ]
+  );
+  const smartQueueItems = useMemo(() => {
+    if (isAdmin) {
+      const items = [];
+      const followUpTeacher = recentLessonSignals.find(
+        (signal) => signal.immediateState === "follow_up"
+      );
+      if (followUpTeacher) {
+        items.push({
+          id: `follow-up-${followUpTeacher.teacherId}`,
+          title: t("dashboard.taskQueueFollowUpTitle", {
+            name: followUpTeacher.teacherName,
+          }),
+          description:
+            followUpTeacher.nextAction ||
+            followUpTeacher.latestAdminComment ||
+            followUpTeacher.latestSummary,
+          actionLabel: t("dashboard.taskQueueOpenTeacher"),
+          to: `/teachers/${followUpTeacher.teacherId}`,
+          tone: "rose",
+        });
+      }
+      if (teachersMissingPrivacyProfiles > 0) {
+        items.push({
+          id: "privacy-profiles",
+          title: t("dashboard.taskQueuePrivacyTitle"),
+          description: t("dashboard.taskQueuePrivacyDescription", {
+            count: teachersMissingPrivacyProfiles,
+          }),
+          actionLabel: t("dashboard.taskQueueResolveNow"),
+          to: "/teachers",
+          tone: "amber",
+        });
+      }
+      if (privacyReviewsPending > 0) {
+        items.push({
+          id: "privacy-review",
+          title: t("dashboard.taskQueuePrivacyReviewTitle"),
+          description: t("dashboard.taskQueuePrivacyReviewDescription", {
+            count: privacyReviewsPending,
+          }),
+          actionLabel: t("dashboard.openPrivacyReview"),
+          to: "/privacy-review",
+          tone: "amber",
+        });
+      }
+      if (!hasAnyObservations) {
+        items.push({
+          id: "capture-evidence",
+          title: t("dashboard.taskQueueEvidenceTitle"),
+          description: t("dashboard.taskQueueEvidenceDescription"),
+          actionLabel: t("dashboard.smartQueueOpenVideos"),
+          to: "/videos",
+          tone: "sky",
+        });
+      }
+      if (!focusAreasConfigured) {
+        items.push({
+          id: "configure-focus",
+          title: t("dashboard.taskQueueFocusTitle"),
+          description: t("dashboard.taskQueueFocusDescription"),
+          actionLabel: t("dashboard.smartQueueOpenSetup"),
+          to: "/school-setup",
+          tone: "sky",
+        });
+      }
+      if (!items.length && prioritySupportCount > 0 && supportKpiRows[0]?.id) {
+        items.push({
+          id: `support-${supportKpiRows[0].id}`,
+          title: t("dashboard.taskQueueSupportTitle", {
+            name: supportKpiRows[0].name,
+          }),
+          description: t("dashboard.taskQueueSupportDescription", {
+            score:
+              typeof supportKpiRows[0].overallScore === "number"
+                ? supportKpiRows[0].overallScore.toFixed(1)
+                : "—",
+          }),
+          actionLabel: t("dashboard.taskQueueOpenTeacher"),
+          to: `/teachers/${supportKpiRows[0].id}`,
+          tone: "rose",
+        });
+      }
+      return items.slice(0, 4);
+    }
+
+    return [
+      {
+        id: "teacher-videos",
+        title: t("dashboard.smartQueueTeacherVideosTitle"),
+        description: hasAnyObservations
+          ? t("dashboard.smartQueueTeacherVideosReady")
+          : t("dashboard.smartQueueTeacherVideosDescription"),
+        actionLabel: t("dashboard.smartQueueOpenVideos"),
+        to: "/videos",
+        tone: "sky",
+      },
+      {
+        id: "teacher-dashboard",
+        title: t("dashboard.smartQueueTeacherDashboardTitle"),
+        description: t("dashboard.smartQueueTeacherDashboardDescription"),
+        actionLabel: t("dashboard.smartQueueRefreshDashboard"),
+        to: "/dashboard",
+        tone: "emerald",
+      },
+    ];
+  }, [
+    focusAreasConfigured,
+    hasAnyObservations,
+    isAdmin,
+    prioritySupportCount,
+    privacyReviewsPending,
+    recentLessonSignals,
+    supportKpiRows,
+    t,
+    teachersMissingPrivacyProfiles,
+  ]);
+  const queueToneClasses = {
+    rose: "border-rose-200 bg-rose-50/70",
+    amber: "border-amber-200 bg-amber-50/70",
+    sky: "border-sky-200 bg-sky-50/70",
+    emerald: "border-emerald-200 bg-emerald-50/70",
+  };
 
   return (
     <LayoutShell>
@@ -925,68 +966,36 @@ export function DashboardPage() {
         />
 
         {dashboardRoleShellEnabled && (
-          <Panel className="mb-6 border border-slate-200 bg-gradient-to-br from-white via-slate-50 to-emerald-50/60">
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <div className="max-w-3xl">
-                <div className="mb-2 flex flex-wrap items-center gap-2">
-                  <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
-                    {workspaceRoleLabel}
-                  </span>
-                  <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700">
-                    {workspaceModeLabel}
-                  </span>
-                  <span className="rounded-full border border-slate-200 bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">
-                    {workspaceStatusLabel}
-                  </span>
-                </div>
-                <h2 className="text-lg font-semibold text-slate-900">{workspaceTitle}</h2>
-                <p className="mt-1 text-sm text-slate-600">{workspaceDescription}</p>
-              </div>
-              <div className="rounded-xl border border-slate-200 bg-white/80 px-4 py-3 text-right">
-                <div className="text-[11px] uppercase tracking-wide text-slate-500">
-                  {t("dashboard.workspaceFocusLabel")}
-                </div>
-                <div className="mt-1 text-sm font-semibold text-slate-900">
-                  {focusAreasConfigured
-                    ? t("dashboard.workspaceFocusConfigured")
-                    : t("dashboard.workspaceFocusNotConfigured")}
-                </div>
-              </div>
+          <Panel className="mb-6 border border-slate-200 bg-white">
+            <div className="mb-4 flex flex-wrap items-center gap-2">
+              <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                {workspaceRoleLabel}
+              </span>
+              <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700">
+                {workspaceModeLabel}
+              </span>
+              <span className="rounded-full border border-slate-200 bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">
+                {workspaceStatusLabel}
+              </span>
             </div>
-            <div className="mt-4 grid gap-3 md:grid-cols-3">
-              <div className="rounded-xl border border-slate-200 bg-white/80 px-4 py-4">
-                <div className="text-[11px] uppercase tracking-wide text-slate-500">
-                  {t("dashboard.workspaceTeachersLabel")}
-                </div>
-                <div className="mt-1 text-2xl font-semibold text-slate-900">
-                  {teacherOptions.length}
-                </div>
-                <div className="mt-1 text-xs text-slate-500">
-                  {t("dashboard.workspaceTeachersDescription")}
-                </div>
-              </div>
-              <div className="rounded-xl border border-slate-200 bg-white/80 px-4 py-4">
-                <div className="text-[11px] uppercase tracking-wide text-slate-500">
-                  {t("dashboard.workspaceEvidenceLabel")}
-                </div>
-                <div className="mt-1 text-2xl font-semibold text-slate-900">
-                  {focusSummary.assessmentCount}
-                </div>
-                <div className="mt-1 text-xs text-slate-500">
-                  {t("dashboard.workspaceEvidenceDescription")}
-                </div>
-              </div>
-              <div className="rounded-xl border border-slate-200 bg-white/80 px-4 py-4">
-                <div className="text-[11px] uppercase tracking-wide text-slate-500">
-                  {t("dashboard.workspaceAttentionLabel")}
-                </div>
-                <div className="mt-1 text-2xl font-semibold text-slate-900">
-                  {teachersMissingPrivacyProfiles + behindComplianceRows.length}
-                </div>
-                <div className="mt-1 text-xs text-slate-500">
-                  {t("dashboard.workspaceAttentionDescription")}
-                </div>
-              </div>
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              {dashboardOverviewCards.map((card) => (
+                <Link
+                  key={card.id}
+                  to={card.to}
+                  className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4 transition-colors hover:bg-slate-100"
+                >
+                  <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                    {card.title}
+                  </div>
+                  <div className="mt-1 text-2xl font-semibold text-slate-900">
+                    {card.value}
+                  </div>
+                  <div className="mt-1 text-xs text-slate-500">
+                    {card.description}
+                  </div>
+                </Link>
+              ))}
             </div>
           </Panel>
         )}
@@ -1250,53 +1259,48 @@ export function DashboardPage() {
           </div>
         )}
 
-        {!isLoading && dashboardSmartQueueEnabled && smartQueueItems.length > 0 && (
+        {!isLoading && dashboardSmartQueueEnabled && (
           <Panel className="mb-6 border border-slate-200 bg-white">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-sm font-semibold text-slate-900">
-                  {t("dashboard.smartQueueTitle")}
+                  {t("dashboard.taskQueueTitle")}
                 </h2>
                 <p className="text-xs text-slate-500">
-                  {t("dashboard.smartQueueDescription")}
+                  {t("dashboard.taskQueueDescription")}
                 </p>
               </div>
-              <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">
-                {t("dashboard.smartQueueCount", { count: smartQueueItems.length })}
-              </span>
+              {smartQueueItems.length > 0 ? (
+                <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">
+                  {t("dashboard.smartQueueCount", { count: smartQueueItems.length })}
+                </span>
+              ) : null}
             </div>
-            <div className="mt-4 grid gap-3 md:grid-cols-3">
-              {smartQueueItems.map((item) => (
-                <div
-                  key={item.id}
-                  className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4"
-                >
-                  <h3 className="text-sm font-semibold text-slate-900">{item.title}</h3>
-                  <p className="mt-1 text-xs text-slate-500">{item.description}</p>
-                  <div className="mt-4">
-                    {item.actionType === "seed" ? (
-                      <Button
-                        variant="success"
-                        size="sm"
-                        onClick={() => seedDemoMutation.mutate()}
-                        disabled={seedDemoMutation.isPending}
-                      >
-                        {seedDemoMutation.isPending
-                          ? t("dashboard.seedingData")
-                          : item.actionLabel}
-                      </Button>
-                    ) : (
+            {smartQueueItems.length > 0 ? (
+              <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                {smartQueueItems.map((item) => (
+                  <div
+                    key={item.id}
+                    className={`rounded-xl border px-4 py-4 ${queueToneClasses[item.tone] || "border-slate-200 bg-slate-50"}`}
+                  >
+                    <h3 className="text-sm font-semibold text-slate-900">{item.title}</h3>
+                    <p className="mt-1 text-xs text-slate-600">{item.description}</p>
+                    <div className="mt-4">
                       <Link
                         to={item.to}
                         className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
                       >
                         {item.actionLabel}
                       </Link>
-                    )}
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            ) : (
+              <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm text-emerald-800">
+                {t("dashboard.taskQueueClear")}
+              </div>
+            )}
           </Panel>
         )}
 

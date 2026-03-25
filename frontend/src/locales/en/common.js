@@ -251,6 +251,7 @@ const en = {
     workspaceEvidenceDescription: "Completed evidence available for trend and coaching workflows.",
     workspaceAttentionLabel: "Items needing follow-up",
     workspaceAttentionDescription: "Missing privacy setup and compliance follow-up that may block clean adoption.",
+    dashboardSupportOverviewDescription: "Teachers who currently need a stronger coaching response.",
     cohortAnalyticsTitle: "Cohort analytics",
     cohortAnalyticsDescription:
       "Review program-level progress, skill gaps, and where the cohort needs the next coaching push.",
@@ -315,6 +316,28 @@ const en = {
     smartQueueTeacherDashboardTitle: "Use the dashboard as your coaching home base",
     smartQueueTeacherDashboardDescription:
       "Return here to track what has been observed, what still needs evidence, and what to discuss next.",
+    taskQueueTitle: "What needs action now",
+    taskQueueDescription:
+      "Keep this queue limited to real follow-up work triggered by evidence, admin review, or workflow blockers.",
+    taskQueueClear: "No acute blockers are waiting right now. Use the rest of the dashboard for pattern review and coaching planning.",
+    taskQueueOpenTeacher: "Open teacher page",
+    taskQueueResolveNow: "Resolve now",
+    taskQueueFollowUpTitle: "Follow up on {{name}}'s latest lesson",
+    taskQueuePrivacyTitle: "Complete teacher privacy setup",
+    taskQueuePrivacyDescription:
+      "{{count}} teachers still need privacy setup before lesson uploads can move cleanly through review.",
+    taskQueuePrivacyReviewTitle: "Review the privacy queue",
+    taskQueuePrivacyReviewDescription:
+      "{{count}} recordings are waiting on privacy review before they can be used confidently.",
+    taskQueueEvidenceTitle: "Get the first reviewed lesson through the system",
+    taskQueueEvidenceDescription:
+      "The dashboard becomes much more useful once a completed lesson is available for evidence and coaching review.",
+    taskQueueFocusTitle: "Set observation priorities before the next cycle",
+    taskQueueFocusDescription:
+      "Configure the rubric priorities that should shape what Cognivio surfaces and what admins coach toward.",
+    taskQueueSupportTitle: "Review ongoing support for {{name}}",
+    taskQueueSupportDescription:
+      "This teacher is currently in the support range with an overall score of {{score}}.",
     onboardingTitle: "First-run checklist",
     onboardingDescription:
       "These are the minimum setup steps to make Cognivio feel easy to adopt for administrators and teacher trainers.",
