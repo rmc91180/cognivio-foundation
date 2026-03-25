@@ -233,8 +233,6 @@ export function DashboardPage() {
   const [gradebookProvider, setGradebookProvider] = useState("powerschool");
   const [gradebookApiKey, setGradebookApiKey] = useState("");
   const [expandedComplianceTeacherId, setExpandedComplianceTeacherId] = useState("");
-  const [selectedKpi, setSelectedKpi] = useState("teachers");
-
   // Focus areas are driven by framework selection
   const seedDemoMutation = useMutation({
     mutationFn: () => assessmentApi.seedDemoData(),
@@ -403,10 +401,6 @@ export function DashboardPage() {
         })
         .sort((a, b) => a.name.localeCompare(b.name)),
     [roster, teacherMetaById]
-  );
-  const observationKpiRows = useMemo(
-    () => teacherKpiRows.filter((row) => row.assessmentCount > 0),
-    [teacherKpiRows]
   );
   const supportKpiRows = useMemo(
     () =>
@@ -1039,16 +1033,12 @@ export function DashboardPage() {
 
         {dashboardRoleShellEnabled && (
           <Panel className="mb-6 border border-slate-200 bg-white">
-            <div className="mb-4 flex flex-wrap items-center gap-2">
-              <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
-                {workspaceRoleLabel}
-              </span>
-              <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700">
-                {workspaceModeLabel}
-              </span>
-              <span className="rounded-full border border-slate-200 bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">
-                {workspaceStatusLabel}
-              </span>
+            <div className="mb-4 flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+              <span>{workspaceRoleLabel}</span>
+              <span className="text-slate-300">/</span>
+              <span className="text-emerald-700">{workspaceModeLabel}</span>
+              <span className="text-slate-300">/</span>
+              <span>{workspaceStatusLabel}</span>
             </div>
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
               {dashboardOverviewCards.map((card) => (
@@ -1590,12 +1580,12 @@ export function DashboardPage() {
                               </div>
                             </div>
                             <span
-                              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                              className={`text-[10px] font-semibold uppercase tracking-[0.14em] ${
                                 signal.immediateState === "follow_up"
-                                  ? "bg-rose-100 text-rose-700"
+                                  ? "text-rose-700"
                                   : signal.immediateState === "improving"
-                                    ? "bg-emerald-100 text-emerald-700"
-                                    : "bg-slate-200 text-slate-700"
+                                    ? "text-emerald-700"
+                                    : "text-slate-500"
                               }`}
                             >
                               {signal.immediateState === "follow_up"
@@ -1743,179 +1733,6 @@ export function DashboardPage() {
                 </section>
               </>
             )}
-
-            <section className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <button
-                type="button"
-                onClick={() => setSelectedKpi("teachers")}
-                className={`rounded-xl border bg-white p-4 text-left transition-colors ${
-                  selectedKpi === "teachers"
-                    ? "border-primary/40 ring-2 ring-primary/20"
-                    : "border-slate-200 hover:bg-slate-50"
-                }`}
-              >
-                <div className="text-[11px] uppercase tracking-wide text-slate-500">
-                  {t("dashboard.kpiTeachersTitle")}
-                </div>
-                <div className="mt-1 text-2xl font-semibold text-slate-900">
-                  {focusSummary.teacherCount}
-                </div>
-                <div className="text-[11px] text-slate-500">
-                  {t("dashboard.kpiTeachersDescription")}
-                </div>
-              </button>
-              <button
-                type="button"
-                onClick={() => setSelectedKpi("observations")}
-                className={`rounded-xl border bg-white p-4 text-left transition-colors ${
-                  selectedKpi === "observations"
-                    ? "border-primary/40 ring-2 ring-primary/20"
-                    : "border-slate-200 hover:bg-slate-50"
-                }`}
-              >
-                <div className="text-[11px] uppercase tracking-wide text-slate-500">
-                  {t("dashboard.kpiObservationsTitle")}
-                </div>
-                <div className="mt-1 text-2xl font-semibold text-slate-900">
-                  {focusSummary.assessmentCount}
-                </div>
-                <div className="text-[11px] text-slate-500">
-                  {t("dashboard.kpiObservationsDescription")}
-                </div>
-              </button>
-              <button
-                type="button"
-                onClick={() => setSelectedKpi("departments")}
-                className={`rounded-xl border bg-white p-4 text-left transition-colors ${
-                  selectedKpi === "departments"
-                    ? "border-primary/40 ring-2 ring-primary/20"
-                    : "border-slate-200 hover:bg-slate-50"
-                }`}
-              >
-                <div className="text-[11px] uppercase tracking-wide text-slate-500">
-                  {t("dashboard.kpiDepartmentsTitle")}
-                </div>
-                <div className="mt-1 text-2xl font-semibold text-slate-900">
-                  {focusSummary.deptCount}
-                </div>
-                <div className="text-[11px] text-slate-500">
-                  {t("dashboard.kpiDepartmentsDescription")}
-                </div>
-              </button>
-              <button
-                type="button"
-                onClick={() => setSelectedKpi("support")}
-                className={`rounded-xl border bg-white p-4 text-left transition-colors ${
-                  selectedKpi === "support"
-                    ? "border-primary/40 ring-2 ring-primary/20"
-                    : "border-slate-200 hover:bg-slate-50"
-                }`}
-              >
-                <div className="text-[11px] uppercase tracking-wide text-slate-500">
-                  {t("dashboard.kpiSupportTitle")}
-                </div>
-                <div className="mt-1 text-2xl font-semibold text-rose-700">
-                  {prioritySupportCount}
-                </div>
-                <div className="text-[11px] text-slate-500">
-                  {t("dashboard.kpiSupportDescription")}
-                </div>
-              </button>
-            </section>
-
-            <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
-              {selectedKpi === "teachers" && (
-                <>
-                  <h2 className="text-sm font-semibold text-slate-900">
-                    {t("dashboard.teachersInRoster")}
-                  </h2>
-                  <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
-                    {teacherKpiRows.map((row) => (
-                      <div
-                        key={`teacher-kpi-${row.id}`}
-                        className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700"
-                      >
-                        <div className="font-semibold text-slate-900">{row.name}</div>
-                        <div className="text-[11px] text-slate-500">
-                          {row.subject} • {row.department}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-              {selectedKpi === "observations" && (
-                <>
-                  <h2 className="text-sm font-semibold text-slate-900">
-                    {t("dashboard.observationCountByTeacher")}
-                  </h2>
-                  <div className="mt-3 space-y-2">
-                    {observationKpiRows.map((row) => (
-                      <div
-                        key={`obs-kpi-${row.id}`}
-                        className="flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700"
-                      >
-                        <span className="font-medium text-slate-900">{row.name}</span>
-                        <span>{t("dashboard.observationsCount", { count: row.assessmentCount })}</span>
-                      </div>
-                    ))}
-                    {observationKpiRows.length === 0 && (
-                      <div className="text-xs text-slate-500">
-                        {t("dashboard.noObservationData")}
-                      </div>
-                    )}
-                  </div>
-                </>
-              )}
-              {selectedKpi === "departments" && (
-                <>
-                  <h2 className="text-sm font-semibold text-slate-900">
-                    {t("dashboard.departmentsRepresented")}
-                  </h2>
-                  <div className="mt-3 space-y-2">
-                    {departmentKpiRows.map((row) => (
-                      <div
-                        key={`dept-kpi-${row.department}`}
-                        className="flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700"
-                      >
-                        <span className="font-medium text-slate-900">{row.department}</span>
-                        <span>
-                          {t("dashboard.teachersCount", { count: row.teacherCount })}
-                          {typeof row.averageScore === "number"
-                            ? ` • ${t("dashboard.averageScoreShort", {
-                                score: row.averageScore.toFixed(1),
-                              })}`
-                            : ""}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-              {selectedKpi === "support" && (
-                <>
-                  <h2 className="text-sm font-semibold text-slate-900">
-                    {t("dashboard.kpiSupportDescription")}
-                  </h2>
-                  <div className="mt-3 space-y-2">
-                    {supportKpiRows.map((row) => (
-                      <div
-                        key={`support-kpi-${row.id}`}
-                        className="flex items-center justify-between rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700"
-                      >
-                        <span className="font-medium">{row.name}</span>
-                        <span>{row.overallScore.toFixed(1)}</span>
-                      </div>
-                    ))}
-                    {supportKpiRows.length === 0 && (
-                      <div className="text-xs text-slate-500">
-                        {t("dashboard.noTeachersInSupportRange")}
-                      </div>
-                    )}
-                  </div>
-                </>
-              )}
-            </section>
 
             <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
               <div className="flex flex-wrap items-center gap-2">

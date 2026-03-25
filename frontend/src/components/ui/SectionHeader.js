@@ -10,18 +10,15 @@ export function SectionHeader({
     <div className={["flex flex-wrap items-start justify-between gap-3", className].join(" ").trim()}>
       <div className="max-w-3xl">
         {eyebrow || tags.length ? (
-          <div className="mb-2 flex flex-wrap items-center gap-2">
-            {eyebrow ? (
-              <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
-                {eyebrow}
-              </span>
-            ) : null}
-            {tags.map((tag) => (
-              <span
-                key={`${title}-${tag}`}
-                className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-600"
-              >
-                {tag}
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+            {eyebrow ? <span>{eyebrow}</span> : null}
+            {eyebrow && tags.length ? <span className="text-slate-300">/</span> : null}
+            {tags.map((tag, index) => (
+              <span key={`${title}-${tag}`} className="contents">
+                <span>{tag}</span>
+                {index < tags.length - 1 ? (
+                  <span className="text-slate-300">/</span>
+                ) : null}
               </span>
             ))}
           </div>

@@ -49,6 +49,8 @@ export function TeacherProfilePage() {
   });
   const [periodMonths, setPeriodMonths] = useState(3);
   const [nextCoachingConference, setNextCoachingConference] = useState("");
+  const [showEvidenceOverTime, setShowEvidenceOverTime] = useState(false);
+  const [showHumanObservations, setShowHumanObservations] = useState(false);
 
   const { data: teacherRes } = useQuery({
     queryKey: ["teacher", teacherId],
@@ -1079,16 +1081,17 @@ export function TeacherProfilePage() {
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <div className="mb-2 flex flex-wrap gap-2">
-                    <span className="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">
-                      {t("timeScope.fromThisLesson")}
-                    </span>
+                  <div className="mb-2 flex flex-wrap items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                    <span>{t("timeScope.fromThisLesson")}</span>
                     {latestReviewedAt ? (
-                      <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
-                        {t("teacherProfile.latestLessonDate", {
-                          date: formatDateTime(latestReviewedAt),
-                        })}
-                      </span>
+                      <>
+                        <span className="text-slate-300">/</span>
+                        <span>
+                          {t("teacherProfile.latestLessonDate", {
+                            date: formatDateTime(latestReviewedAt),
+                          })}
+                        </span>
+                      </>
                     ) : null}
                   </div>
                   <h2 className="text-sm font-semibold text-slate-900">
@@ -1442,13 +1445,10 @@ export function TeacherProfilePage() {
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <div className="mb-3">
-                <div className="mb-2 flex flex-wrap gap-2">
-                  <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
-                    {t("timeScope.ongoingGoal")}
-                  </span>
-                  <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
-                    {patternStrengthLabel}
-                  </span>
+                <div className="mb-2 flex flex-wrap items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                  <span>{t("timeScope.ongoingGoal")}</span>
+                  <span className="text-slate-300">/</span>
+                  <span>{patternStrengthLabel}</span>
                 </div>
                 <h2 className="text-sm font-semibold text-slate-900">
                   {isAdmin
@@ -2258,29 +2258,46 @@ export function TeacherProfilePage() {
                 description={t("teacherProfile.evidenceOverTimeDescription")}
                 tags={[t("timeScope.acrossRecentObservations"), patternStrengthLabel]}
                 actions={
-                  <div className="flex items-center gap-2 text-xs">
-                    <label className="text-slate-600">{t("teacherProfile.period")}</label>
-                    <select
-                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
-                      value={periodMonths}
-                      onChange={(e) => setPeriodMonths(Number(e.target.value))}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowEvidenceOverTime((prev) => !prev)}
+                      className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
                     >
-                      <option value={1}>{t("teacherProfile.month1")}</option>
-                      <option value={3}>{t("teacherProfile.month3")}</option>
-                      <option value={6}>{t("teacherProfile.month6")}</option>
-                      <option value={12}>{t("teacherProfile.month12")}</option>
-                    </select>
+                      {t(showEvidenceOverTime ? "teachersPage.collapse" : "teachersPage.expand")}
+                    </button>
+                    {showEvidenceOverTime ? (
+                      <div className="flex items-center gap-2 text-xs">
+                        <label className="text-slate-600">{t("teacherProfile.period")}</label>
+                        <select
+                          className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                          value={periodMonths}
+                          onChange={(e) => setPeriodMonths(Number(e.target.value))}
+                        >
+                          <option value={1}>{t("teacherProfile.month1")}</option>
+                          <option value={3}>{t("teacherProfile.month3")}</option>
+                          <option value={6}>{t("teacherProfile.month6")}</option>
+                          <option value={12}>{t("teacherProfile.month12")}</option>
+                        </select>
+                      </div>
+                    ) : null}
                   </div>
                 }
               />
-              <MonthlySummary
-                dashboardRes={dashboardRes}
-                periodMonths={periodMonths}
-                evidenceByElement={evidenceByElement}
-                onViewEvidence={setSelectedEvidenceElement}
-              />
+              {showEvidenceOverTime ? (
+                <MonthlySummary
+                  dashboardRes={dashboardRes}
+                  periodMonths={periodMonths}
+                  evidenceByElement={evidenceByElement}
+                  onViewEvidence={setSelectedEvidenceElement}
+                />
+              ) : (
+                <div className="mt-4 text-xs text-slate-500">
+                  {t("teacherProfile.breakingItDownDescription")}
+                </div>
+              )}
             </section>
-            {selectedEvidenceElement && (
+            {showEvidenceOverTime && selectedEvidenceElement && (
               <section className="rounded-xl border border-slate-200 bg-white p-5">
                 <div className="mb-2 flex items-center justify-between">
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
@@ -2425,16 +2442,26 @@ export function TeacherProfilePage() {
             )}
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
-              <h2 className="mb-3 text-sm font-semibold text-slate-900">
-                {t("teacherProfile.humanObservations")}
-              </h2>
-              {observations.length === 0 ? (
-                <div className="text-xs text-slate-500">
-                  {t("teacherProfile.noObservations")}
-                </div>
-              ) : (
-                <div className="space-y-2 text-xs">
-                  {observations.map((obs) => {
+              <SectionHeader
+                title={t("teacherProfile.humanObservations")}
+                actions={
+                  <button
+                    type="button"
+                    onClick={() => setShowHumanObservations((prev) => !prev)}
+                    className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                  >
+                    {t(showHumanObservations ? "teachersPage.collapse" : "teachersPage.expand")}
+                  </button>
+                }
+              />
+              {showHumanObservations ? (
+                observations.length === 0 ? (
+                  <div className="text-xs text-slate-500">
+                    {t("teacherProfile.noObservations")}
+                  </div>
+                ) : (
+                  <div className="space-y-2 text-xs">
+                    {observations.map((obs) => {
                     const needsAttention =
                       !obs.teacher_response ||
                       (obs.implementation_status &&
@@ -2449,7 +2476,7 @@ export function TeacherProfilePage() {
                           <span>{formatDateTime(obs.created_at)}</span>
                           <div className="flex items-center gap-2">
                             {needsAttention && (
-                              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+                              <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-amber-700">
                                 {t("teacherProfile.needsAttention")}
                               </span>
                             )}
@@ -2457,8 +2484,8 @@ export function TeacherProfilePage() {
                               <span
                                 className={
                                   obs.implementation_status === "implemented"
-                                    ? "rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700"
-                                    : "rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700"
+                                    ? "text-[10px] font-semibold uppercase tracking-[0.14em] text-emerald-700"
+                                    : "text-[10px] font-semibold uppercase tracking-[0.14em] text-amber-700"
                                 }
                               >
                                 {formatImplementationStatus(obs.implementation_status)}
@@ -2532,6 +2559,11 @@ export function TeacherProfilePage() {
                       </div>
                     );
                   })}
+                  </div>
+                )
+              ) : (
+                <div className="mt-4 text-xs text-slate-500">
+                  {t("teacherProfile.breakingItDownDescription")}
                 </div>
               )}
             </section>
