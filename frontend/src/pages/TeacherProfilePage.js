@@ -468,11 +468,6 @@ export function TeacherProfilePage() {
         .map((goal) => goal.title),
     [actionPlanGoals]
   );
-  const aiSuggestedFocus = useMemo(() => {
-    const fromRecommendations = summaryInsightsRes?.recommendations?.[0];
-    if (fromRecommendations) return fromRecommendations;
-    return summaryInsightsRes?.summary || "";
-  }, [summaryInsightsRes]);
   const recommendedMoments = useMemo(
     () => analysisMomentsRes?.moments || [],
     [analysisMomentsRes]
@@ -651,6 +646,23 @@ export function TeacherProfilePage() {
     if (count <= 3) return t("teacherProfile.emergingPattern");
     return t("teacherProfile.establishedPattern");
   }, [dashboardRes, t]);
+  const longTermChallengeItems = useMemo(() => {
+    const activeGoals = actionPlanGoals
+      .filter(
+        (goal) =>
+          goal?.title &&
+          goal?.status !== "complete" &&
+          goal?.status !== "implemented"
+      )
+      .map((goal) => goal.title);
+    if (activeGoals.length) {
+      return activeGoals.slice(0, 3);
+    }
+    return recurringPatternSummary.challenges
+      .map((item) => item.label)
+      .filter(Boolean)
+      .slice(0, 3);
+  }, [actionPlanGoals, recurringPatternSummary]);
 
   const handleSaveReflection = (e) => {
     e.preventDefault();
@@ -1064,7 +1076,7 @@ export function TeacherProfilePage() {
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           <div className="lg:col-span-8 space-y-6">
-            <section className={`rounded-xl border border-slate-200 bg-white p-5 ${isAdmin ? "hidden" : ""}`}>
+            <section className="rounded-xl border border-slate-200 bg-white p-5">
               <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <div className="mb-2 flex flex-wrap gap-2">
@@ -1080,10 +1092,14 @@ export function TeacherProfilePage() {
                     ) : null}
                   </div>
                   <h2 className="text-sm font-semibold text-slate-900">
-                    {t("teacherProfile.latestClassReview")}
+                    {isAdmin
+                      ? t("teacherProfile.latestVideoReview")
+                      : t("teacherProfile.latestClassReview")}
                   </h2>
                   <p className="mt-1 text-xs text-slate-500">
-                    {t("teacherProfile.latestClassReviewDescription")}
+                    {isAdmin
+                      ? t("teacherProfile.latestVideoReviewDescription")
+                      : t("teacherProfile.latestClassReviewDescription")}
                   </p>
                 </div>
                 {latestAssessment?.video_id ? (
@@ -1096,6 +1112,16 @@ export function TeacherProfilePage() {
                 ) : null}
               </div>
               <div className="space-y-3 text-xs text-slate-700">
+                {isAdmin && latestAssessment?.video_id ? (
+                  <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-3 text-xs text-sky-900">
+                    <div className="font-semibold">
+                      {t("teacherProfile.latestVideoReviewNoteTitle")}
+                    </div>
+                    <div className="mt-1 text-sky-800">
+                      {t("teacherProfile.latestVideoReviewNoteDescription")}
+                    </div>
+                  </div>
+                ) : null}
                 <ObservationFocusPanel
                   frameworkType={latestAssessment?.framework_type}
                   priorityElements={latestAssessment?.priority_elements}
@@ -1164,7 +1190,7 @@ export function TeacherProfilePage() {
                     {summaryInsightsRes.recommendations?.length ? (
                       <div>
                         <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                          {t("teacherProfile.longTermGoals")}
+                          {t("teacherProfile.latestVideoCoachingMoves")}
                         </div>
                         <ul className="space-y-2 text-xs text-slate-700">
                           {summaryInsightsRes.recommendations.slice(0, 4).map((r, idx) => (
@@ -1319,6 +1345,71 @@ export function TeacherProfilePage() {
                             {t("teacherProfile.noRecentHighlights")}
                           </div>
                         )}
+                        {isAdmin && recommendedMoments.length > 0 && latestAssessment?.video_id ? (
+                          <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                            <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                              {t("teacherProfile.recommendedMomentsTitle")}
+                            </div>
+                            <p className="text-[11px] text-slate-500">
+                              {t("teacherProfile.recommendedMomentsDescription")}
+                            </p>
+                            <ul className="mt-2 space-y-2 text-xs text-slate-700">
+                              {recommendedMoments.slice(0, 3).map((moment) => {
+                                const jumpTime =
+                                  typeof moment.representative_frame_sec === "number"
+                                    ? moment.representative_frame_sec
+                                    : moment.start_sec;
+                                return (
+                                  <li
+                                    key={moment.moment_id}
+                                    className="rounded-md border border-slate-200 bg-white px-3 py-3"
+                                  >
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                      <span className="font-medium text-slate-900">
+                                        {formatClock(moment.start_sec)}-{formatClock(moment.end_sec)}
+                                      </span>
+                                      <span className="rounded-full bg-slate-50 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                                        {formatMomentPhase(moment.phase)}
+                                      </span>
+                                    </div>
+                                    <div className="mt-1 text-[11px] text-slate-600">
+                                      {formatMomentReason(moment.selection_reason)}
+                                    </div>
+                                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                                      <span className="text-slate-500">
+                                        {t("videoPlayer.representativeMoment", {
+                                          time: formatClock(jumpTime),
+                                        })}
+                                      </span>
+                                      <Link
+                                        to={`/videos/${latestAssessment.video_id}?t=${Math.round(jumpTime)}`}
+                                        className="font-medium text-primary hover:underline"
+                                      >
+                                        {t("teacherProfile.openMoment")}
+                                      </Link>
+                                    </div>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                onClick={handleAddRecommendedMomentsToDraft}
+                                className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                              >
+                                {t("teacherProfile.addMomentsToDraft")}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={handleAddRecommendedMomentsToActionPlanNotes}
+                                className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                              >
+                                {t("teacherProfile.addMomentsToActionPlanNotes")}
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
                       </div>
                       <div className="space-y-3">
                         <div>
@@ -1349,7 +1440,7 @@ export function TeacherProfilePage() {
               </div>
             </section>
 
-            <section className={`rounded-xl border border-slate-200 bg-white p-5 ${isAdmin ? "hidden" : ""}`}>
+            <section className="rounded-xl border border-slate-200 bg-white p-5">
               <div className="mb-3">
                 <div className="mb-2 flex flex-wrap gap-2">
                   <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
@@ -1360,12 +1451,21 @@ export function TeacherProfilePage() {
                   </span>
                 </div>
                 <h2 className="text-sm font-semibold text-slate-900">
-                  {t("teacherProfile.ongoingCoachingRecord")}
+                  {isAdmin
+                    ? t("teacherProfile.longTermGoalsAndAdherence")
+                    : t("teacherProfile.ongoingCoachingRecord")}
                 </h2>
                 <p className="mt-1 text-xs text-slate-500">
-                  {t("teacherProfile.ongoingCoachingRecordDescription")}
+                  {isAdmin
+                    ? t("teacherProfile.longTermGoalsAndAdherenceDescription")
+                    : t("teacherProfile.ongoingCoachingRecordDescription")}
                 </p>
               </div>
+              {isAdmin ? (
+                <div className="mb-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
+                  {t("teacherProfile.longTermGoalsEvidenceNote")}
+                </div>
+              ) : null}
               <div className="mb-4 grid gap-3 md:grid-cols-2">
                 <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
                   <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
@@ -1422,16 +1522,10 @@ export function TeacherProfilePage() {
                   <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-amber-700">
                     {t("teacherProfile.recurringChallenges")}
                   </div>
-                  {summaryInsightsRes?.recommendations?.length ? (
+                  {longTermChallengeItems.length ? (
                     <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>
-                      {summaryInsightsRes.recommendations.slice(0, 3).map((item, idx) => (
+                      {longTermChallengeItems.map((item, idx) => (
                         <li key={`ongoing-challenge-${idx}`}>{item}</li>
-                      ))}
-                    </ul>
-                  ) : recurringPatternSummary.challenges.length ? (
-                    <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>
-                      {recurringPatternSummary.challenges.map((item) => (
-                        <li key={`pattern-challenge-${item.elementId}`}>{item.label}</li>
                       ))}
                     </ul>
                   ) : (
@@ -1564,14 +1658,6 @@ export function TeacherProfilePage() {
               <div className="space-y-3">
                 <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                    {t("teacherProfile.aiSuggestedFocus")}
-                  </div>
-                  <div className="mt-1 text-xs text-slate-700">
-                    {aiSuggestedFocus || t("teacherProfile.noSummaryData")}
-                  </div>
-                </div>
-                <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                     {t("teacherProfile.actionPlanFocus")}
                   </div>
                   {activeGoalTitles.length > 0 ? (
@@ -1586,71 +1672,6 @@ export function TeacherProfilePage() {
                     </div>
                   )}
                 </div>
-                {recommendedMoments.length > 0 && latestAssessment?.video_id ? (
-                  <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
-                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                      {t("teacherProfile.recommendedMomentsTitle")}
-                    </div>
-                    <p className="mt-1 text-xs text-slate-500">
-                      {t("teacherProfile.recommendedMomentsDescription")}
-                    </p>
-                    <ul className="mt-2 space-y-2 text-xs text-slate-700">
-                      {recommendedMoments.slice(0, 3).map((moment) => {
-                        const jumpTime =
-                          typeof moment.representative_frame_sec === "number"
-                            ? moment.representative_frame_sec
-                            : moment.start_sec;
-                        return (
-                          <li
-                            key={moment.moment_id}
-                            className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3"
-                          >
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                              <span className="font-medium text-slate-900">
-                                {formatClock(moment.start_sec)}-{formatClock(moment.end_sec)}
-                              </span>
-                              <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-medium text-slate-600">
-                                {formatMomentPhase(moment.phase)}
-                              </span>
-                            </div>
-                            <div className="mt-1 text-[11px] text-slate-600">
-                              {formatMomentReason(moment.selection_reason)}
-                            </div>
-                            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                              <span className="text-slate-500">
-                                {t("videoPlayer.representativeMoment", {
-                                  time: formatClock(jumpTime),
-                                })}
-                              </span>
-                              <Link
-                                to={`/videos/${latestAssessment.video_id}?t=${Math.round(jumpTime)}`}
-                                className="font-medium text-primary hover:underline"
-                              >
-                                {t("teacherProfile.openMoment")}
-                              </Link>
-                            </div>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        onClick={handleAddRecommendedMomentsToDraft}
-                        className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
-                      >
-                        {t("teacherProfile.addMomentsToDraft")}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleAddRecommendedMomentsToActionPlanNotes}
-                        className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
-                      >
-                        {t("teacherProfile.addMomentsToActionPlanNotes")}
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
                 {nextStepsItems.length > 0 && (
                   <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">

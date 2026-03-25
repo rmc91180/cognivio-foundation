@@ -936,8 +936,15 @@ const he = {
     latestClassReview: "סקירת השיעור האחרון",
     latestClassReviewDescription:
       "החלק הזה צריך להישאר צמוד לשיעור האחרון שנבדק, לראיות ממנו ולהמשך המיידי.",
+    latestVideoReview: "סקירת הווידאו האחרון",
+    latestVideoReviewDescription:
+      "כל מה שמופיע בחלק הזה צריך להגיע משיעור אחד שנבדק, עם קישורים ישירים בחזרה לראיות מהווידאו.",
+    latestVideoReviewNoteTitle: "סקירה תחומה לשיעור אחד",
+    latestVideoReviewNoteDescription:
+      "חותמות הזמן והקישורים לקטעים בחלק הזה שייכים רק לשיעור האחרון שנבדק. לעיון המלא בשיעור, עברו לעמוד הווידאו.",
     latestLessonDate: "עודכן לאחרונה {{date}}",
     latestLessonSummary: "מה למדנו מהשיעור האחרון",
+    latestVideoCoachingMoves: "כיווני ליווי מתוך הווידאו האחרון",
     latestStrengths: "חוזקות מיידיות",
     immediateConcerns: "נקודות לטיפול מיידי",
     timestampedEvidence: "ראיות עם חותמות זמן מהשיעור האחרון",
@@ -947,6 +954,11 @@ const he = {
     ongoingCoachingRecord: "רשומת ליווי מתמשכת",
     ongoingCoachingRecordDescription:
       "החלק הזה מיועד לדפוסים חוזרים, ליעדים פעילים ולרצף של הליווי לאורך זמן.",
+    longTermGoalsAndAdherence: "יעדים ארוכי טווח ועמידה בהם",
+    longTermGoalsAndAdherenceDescription:
+      "החלק הזה מיועד ליעדים שחוזרים בין שיעורים, לראיות שמחזיקות אותם פעילים, ולמידת העקביות של ההמשך לאורך זמן.",
+    longTermGoalsEvidenceNote:
+      "זהו חלק מצטבר. הוא צריך לשקף ראיות שחוזרות לאורך זמן, מעקב אחר תוכנית הפעולה ורפלקציות של המנהל או המורה, ולא חותמות זמן חד-פעמיות משיעור בודד.",
     recurringStrengths: "חוזקות חוזרות",
     recurringChallenges: "אתגרים חוזרים",
     noRecurringStrengths: "עדיין לא זוהו חוזקות חוזרות מבוססות.",

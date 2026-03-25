@@ -936,8 +936,15 @@ const en = {
     latestClassReview: "Latest class review",
     latestClassReviewDescription:
       "Keep this section anchored to the most recently reviewed lesson, its evidence, and the immediate follow-up.",
+    latestVideoReview: "Latest video review",
+    latestVideoReviewDescription:
+      "Everything in this section should come from one reviewed lesson only, with direct links back to the video evidence.",
+    latestVideoReviewNoteTitle: "Lesson-scoped review",
+    latestVideoReviewNoteDescription:
+      "Timestamps and clip links in this section belong only to the latest reviewed lesson. Use the video page for the full per-lesson review.",
     latestLessonDate: "Latest reviewed {{date}}",
     latestLessonSummary: "What we learned from the latest class",
+    latestVideoCoachingMoves: "Coaching moves from the latest video",
     latestStrengths: "Immediate strengths",
     immediateConcerns: "Immediate concerns",
     timestampedEvidence: "Timestamped evidence from the latest class",
@@ -947,6 +954,11 @@ const en = {
     ongoingCoachingRecord: "Ongoing coaching record",
     ongoingCoachingRecordDescription:
       "Use this section for recurring patterns, active goals, and the continuity of coaching over time.",
+    longTermGoalsAndAdherence: "Long-term goals and adherence",
+    longTermGoalsAndAdherenceDescription:
+      "Use this section for goals that repeat across lessons, the evidence that keeps them active, and how well follow-through is holding over time.",
+    longTermGoalsEvidenceNote:
+      "This section is cumulative. It should reflect repeated evidence, action-plan follow-through, and admin or teacher reflections over time, not one-off timestamps from a single lesson.",
     recurringStrengths: "Recurring strengths",
     recurringChallenges: "Recurring challenges",
     noRecurringStrengths: "No recurring strengths are established yet.",
