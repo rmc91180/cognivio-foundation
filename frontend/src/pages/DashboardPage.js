@@ -49,6 +49,10 @@ function getTrendDelta(row, windowKey = "30d") {
   return typeof delta === "number" ? delta : null;
 }
 
+function formatScoreShort(value) {
+  return typeof value === "number" ? value.toFixed(1) : "—";
+}
+
 export function DashboardPage() {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
@@ -84,6 +88,8 @@ export function DashboardPage() {
   const [trendWindowMonths, setTrendWindowMonths] = useState(3);
   const [trendTeacherId, setTrendTeacherId] = useState("");
   const [trendSubjects, setTrendSubjects] = useState([]);
+  const [domainTrendViewMode, setDomainTrendViewMode] = useState("chart");
+  const [departmentProgressViewMode, setDepartmentProgressViewMode] = useState("chart");
   const trendSubjectsParam = useMemo(
     () => trendSubjects.slice().sort((a, b) => a.localeCompare(b)).join(","),
     [trendSubjects]
@@ -433,6 +439,55 @@ export function DashboardPage() {
       return row;
     });
   }, [trendPeriods, trendDomains]);
+  const domainTrendEvidenceLines = useMemo(() => {
+    if (!trendPeriods.length || !trendDomains.length) return [];
+    const firstPeriod = trendPeriods[0];
+    const lastPeriod = trendPeriods[trendPeriods.length - 1];
+    const lines = [
+      t("dashboard.domainTrendEvidenceOverview", {
+        start: firstPeriod.label,
+        end: lastPeriod.label,
+        teachers: focusSummary.teacherCount,
+        observations: focusSummary.assessmentCount,
+      }),
+    ];
+    trendDomains.forEach((domain) => {
+      const allStart = firstPeriod.all_teachers?.domain_scores?.[domain.id];
+      const allEnd = lastPeriod.all_teachers?.domain_scores?.[domain.id];
+      if (typeof allStart === "number" && typeof allEnd === "number") {
+        lines.push(
+          t("dashboard.domainTrendEvidenceLine", {
+            domain: domain.name,
+            start: formatScoreShort(allStart),
+            end: formatScoreShort(allEnd),
+          })
+        );
+      }
+      if (trendTeacherId) {
+        const teacherStart = firstPeriod.selected_teacher?.domain_scores?.[domain.id];
+        const teacherEnd = lastPeriod.selected_teacher?.domain_scores?.[domain.id];
+        if (typeof teacherStart === "number" && typeof teacherEnd === "number") {
+          lines.push(
+            t("dashboard.domainTrendEvidenceCompareLine", {
+              teacher: selectedTrendTeacherName,
+              domain: domain.name,
+              start: formatScoreShort(teacherStart),
+              end: formatScoreShort(teacherEnd),
+            })
+          );
+        }
+      }
+    });
+    return lines;
+  }, [
+    focusSummary.assessmentCount,
+    focusSummary.teacherCount,
+    selectedTrendTeacherName,
+    t,
+    trendDomains,
+    trendPeriods,
+    trendTeacherId,
+  ]);
   const achievements = useMemo(() => {
     if (!focusAreaData.length) return [];
     const sorted = [...focusAreaData]
@@ -524,6 +579,23 @@ export function DashboardPage() {
     () => recognitionQueueRes?.items || [],
     [recognitionQueueRes]
   );
+  const departmentProgressEvidenceLines = useMemo(() => {
+    if (!departmentData.length) return [];
+    return departmentData.map((row) =>
+      t("dashboard.departmentProgressEvidenceLine", {
+        department: row.department,
+        teachers: departmentKpiRows.find((item) => item.department === row.department)?.teacherCount || 0,
+        current: formatScoreShort(row.averageScore),
+        previous: formatScoreShort(row.previousAverage),
+        delta:
+          typeof row.delta === "number"
+            ? row.delta > 0
+              ? `+${row.delta.toFixed(1)}`
+              : row.delta.toFixed(1)
+            : "—",
+      })
+    );
+  }, [departmentData, departmentKpiRows, t]);
   const behindComplianceRows = useMemo(
     () => complianceSummaryRows.filter((row) => (row.missing_subjects?.length || 0) > 0),
     [complianceSummaryRows]
@@ -1891,6 +1963,30 @@ export function DashboardPage() {
                       </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex items-center rounded-md border border-slate-200 bg-slate-50 p-1">
+                        <button
+                          type="button"
+                          onClick={() => setDomainTrendViewMode("evidence")}
+                          className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${
+                            domainTrendViewMode === "evidence"
+                              ? "bg-white text-slate-900 shadow-sm"
+                              : "text-slate-600"
+                          }`}
+                        >
+                          {t("dashboard.evidenceView")}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDomainTrendViewMode("chart")}
+                          className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${
+                            domainTrendViewMode === "chart"
+                              ? "bg-white text-slate-900 shadow-sm"
+                              : "text-slate-600"
+                          }`}
+                        >
+                          {t("dashboard.graphView")}
+                        </button>
+                      </div>
                       <label className="text-[11px] text-slate-500">
                         {t("dashboard.trendWindow")}
                         <select
@@ -1947,13 +2043,37 @@ export function DashboardPage() {
                     <span>•</span>
                     <span>{t("dashboard.departmentsRepresentedCount", { count: focusSummary.deptCount })}</span>
                   </div>
-                  <DomainTrendsChart
-                    chartData={domainTrendChartData}
-                    domains={trendDomains}
-                    selectedTeacherId={trendTeacherId}
-                    selectedTeacherName={selectedTrendTeacherName}
-                    isLoading={domainTrendsLoading}
-                  />
+                  {domainTrendViewMode === "chart" ? (
+                    <DomainTrendsChart
+                      chartData={domainTrendChartData}
+                      domains={trendDomains}
+                      selectedTeacherId={trendTeacherId}
+                      selectedTeacherName={selectedTrendTeacherName}
+                      isLoading={domainTrendsLoading}
+                    />
+                  ) : (
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+                      <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                        {t("dashboard.whatInformedThisChart")}
+                      </div>
+                      {domainTrendEvidenceLines.length ? (
+                        <ul className="space-y-2 text-sm text-slate-700">
+                          {domainTrendEvidenceLines.map((line, idx) => (
+                            <li
+                              key={`domain-trend-evidence-${idx}`}
+                              className="rounded-md border border-slate-200 bg-white px-3 py-2"
+                            >
+                              {line}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="text-xs text-slate-500">
+                          {t("dashboard.noTrendDataForFilters")}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </section>
                 </>
               ) : (
@@ -2027,12 +2147,40 @@ export function DashboardPage() {
               )}
 
             <section className="md:col-span-12 rounded-xl border border-slate-200 bg-white p-5">
-              <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                {t("dashboard.departmentalProgressTitle")}
-              </h2>
-              <p className="mb-2 text-xs text-slate-500">
-                {t("dashboard.departmentalProgressDescription")}
-              </p>
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">
+                    {t("dashboard.departmentalProgressTitle")}
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    {t("dashboard.departmentalProgressDescription")}
+                  </p>
+                </div>
+                <div className="flex items-center rounded-md border border-slate-200 bg-slate-50 p-1">
+                  <button
+                    type="button"
+                    onClick={() => setDepartmentProgressViewMode("evidence")}
+                    className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${
+                      departmentProgressViewMode === "evidence"
+                        ? "bg-white text-slate-900 shadow-sm"
+                        : "text-slate-600"
+                    }`}
+                  >
+                    {t("dashboard.evidenceView")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDepartmentProgressViewMode("chart")}
+                    className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${
+                      departmentProgressViewMode === "chart"
+                        ? "bg-white text-slate-900 shadow-sm"
+                        : "text-slate-600"
+                    }`}
+                  >
+                    {t("dashboard.graphView")}
+                  </button>
+                </div>
+              </div>
               <p className="mb-4 text-[11px] text-slate-500">
                 {t("dashboard.departmentalProgressRange", {
                   previousStart: dateFormatter.format(previousRange.start),
@@ -2044,6 +2192,22 @@ export function DashboardPage() {
               {departmentData.length === 0 ? (
                 <div className="text-xs text-slate-500">
                   {t("dashboard.noDepartmentalData")}
+                </div>
+              ) : departmentProgressViewMode === "evidence" ? (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("dashboard.whatInformedThisChart")}
+                  </div>
+                  <ul className="space-y-2 text-sm text-slate-700">
+                    {departmentProgressEvidenceLines.map((line, idx) => (
+                      <li
+                        key={`department-evidence-${idx}`}
+                        className="rounded-md border border-slate-200 bg-white px-3 py-2"
+                      >
+                        {line}
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               ) : (
                 <div className="h-64">

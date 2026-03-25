@@ -443,6 +443,15 @@ const he = {
     leadershipBulletFallbackAction: "הגדירו צעד הנהלתי הבא ובדקו התקדמות בישיבת ההנהלה הקרובה.",
     domainTrendsTitle: "מגמות לפי תחומי רובריקה",
     domainTrendsDescription: "מבט חודשי על המגמות לאורך {{count}} חודשים, עם אפשרות להשוואה למורה מסוים.",
+    graphView: "תצוגת גרף",
+    evidenceView: "מה ביסס את זה",
+    whatInformedThisChart: "מה ביסס את התצוגה הזו",
+    domainTrendEvidenceOverview:
+      "התצוגה הזו משקפת {{teachers}} מורים ו־{{observations}} תצפיות שנותחו בין {{start}} ל־{{end}}.",
+    domainTrendEvidenceLine:
+      "{{domain}} נע בין {{start}} ל־{{end}} לאורך חלון הזמן שנבחר.",
+    domainTrendEvidenceCompareLine:
+      "{{teacher}} נע בין {{start}} ל־{{end}} ב־{{domain}} לאורך אותו חלון זמן.",
     trendWindow: "חלון זמן",
     monthsOption: "{{count}} חודשים",
     teacherFilter: "מורה",
@@ -466,6 +475,8 @@ const he = {
     departmentalProgressTitle: "התקדמות לפי מחלקות",
     departmentalProgressDescription: "השוו ממוצעי ביצועים בין המחלקות כדי לזהות מוקדי חוזק ותחומים הדורשים תמיכה.",
     departmentalProgressRange: "השוואה בין {{previousStart}}–{{previousEnd}} לבין {{currentStart}}–{{currentEnd}}.",
+    departmentProgressEvidenceLine:
+      "{{department}} מבוססת על {{teachers}} מורים, ונעה מ־{{previous}} בחלון הקודם ל־{{current}} בחלון הנוכחי ({{delta}}).",
     noDepartmentalData: "עדיין אין נתונים ברמת המחלקות.",
     currentPeriod: "התקופה הנוכחית",
     previousPeriod: "התקופה הקודמת",

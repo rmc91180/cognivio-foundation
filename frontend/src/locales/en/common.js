@@ -443,6 +443,15 @@ const en = {
     leadershipBulletFallbackAction: "Decide the next principal-led action and review progress in the next leadership meeting.",
     domainTrendsTitle: "Domain trends",
     domainTrendsDescription: "Monthly domain trajectory over the last {{count}} months with optional teacher comparison.",
+    graphView: "Graph view",
+    evidenceView: "What informed this",
+    whatInformedThisChart: "What informed this view",
+    domainTrendEvidenceOverview:
+      "This view reflects {{teachers}} teachers and {{observations}} analyzed observations between {{start}} and {{end}}.",
+    domainTrendEvidenceLine:
+      "{{domain}} moved from {{start}} to {{end}} across the selected window.",
+    domainTrendEvidenceCompareLine:
+      "{{teacher}} moved from {{start}} to {{end}} in {{domain}} across the same window.",
     trendWindow: "Window",
     monthsOption: "{{count}} months",
     teacherFilter: "Teacher",
@@ -466,6 +475,8 @@ const en = {
     departmentalProgressTitle: "Departmental progress",
     departmentalProgressDescription: "Compare average performance across departments to identify pockets of strength and support needs.",
     departmentalProgressRange: "Showing {{previousStart}}–{{previousEnd}} vs {{currentStart}}–{{currentEnd}}.",
+    departmentProgressEvidenceLine:
+      "{{department}} is based on {{teachers}} teachers, moving from {{previous}} in the previous window to {{current}} in the current window ({{delta}}).",
     noDepartmentalData: "No departmental data yet.",
     currentPeriod: "Current",
     previousPeriod: "Previous",
