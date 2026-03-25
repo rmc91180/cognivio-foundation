@@ -569,6 +569,88 @@ export function TeacherProfilePage() {
     return map[value] || value || t("teacherProfile.notConfigured");
   };
 
+  const latestReviewedAt =
+    latestAssessment?.analyzed_at ||
+    latestAssessment?.recorded_at ||
+    latestAssessment?.created_at ||
+    null;
+  const latestHighlights = useMemo(
+    () => (dashboardRes?.recent_video_highlights || []).slice(0, 3),
+    [dashboardRes]
+  );
+  const sortedObservations = useMemo(
+    () =>
+      [...observations].sort(
+        (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)
+      ),
+    [observations]
+  );
+  const latestObservation = sortedObservations[0] || null;
+  const elementNameById = useMemo(
+    () =>
+      (dashboardRes?.element_summary || []).reduce((acc, item) => {
+        if (item?.element_id) {
+          acc[item.element_id] = item.element_name || item.element_id;
+        }
+        return acc;
+      }, {}),
+    [dashboardRes]
+  );
+  const latestLessonSignals = useMemo(() => {
+    const rows = latestAssessment?.element_scores || [];
+    const ranked = rows
+      .map((row) => ({
+        ...row,
+        label: elementNameById[row.element_id] || row.element_name || row.element_id,
+      }))
+      .filter((row) => row.label && Number.isFinite(Number(row.score)));
+    const strengths = [...ranked]
+      .sort((a, b) => Number(b.score) - Number(a.score))
+      .slice(0, 2);
+    const concerns = [...ranked]
+      .sort((a, b) => Number(a.score) - Number(b.score))
+      .slice(0, 2);
+    return { strengths, concerns };
+  }, [latestAssessment, elementNameById]);
+  const recurringPatternSummary = useMemo(() => {
+    const trendData = dashboardRes?.trend_data || [];
+    const domainStats = {};
+    trendData.forEach((point) => {
+      Object.entries(point.element_scores || {}).forEach(([elementId, score]) => {
+        if (!domainStats[elementId]) {
+          domainStats[elementId] = {
+            elementId,
+            baseline: score,
+            latest: score,
+          };
+        } else {
+          domainStats[elementId].latest = score;
+        }
+      });
+    });
+    const deltas = Object.values(domainStats).map((item) => ({
+      ...item,
+      label: elementNameById[item.elementId] || item.elementId,
+      delta: Number(item.latest || 0) - Number(item.baseline || 0),
+    }));
+    return {
+      strengths: [...deltas]
+        .filter((item) => item.delta > 0.2)
+        .sort((a, b) => b.delta - a.delta)
+        .slice(0, 3),
+      challenges: [...deltas]
+        .filter((item) => item.delta < -0.2)
+        .sort((a, b) => a.delta - b.delta)
+        .slice(0, 3),
+    };
+  }, [dashboardRes, elementNameById]);
+  const patternStrengthLabel = useMemo(() => {
+    const count = dashboardRes?.assessments?.length || 0;
+    if (count <= 1) return t("teacherProfile.singleObservation");
+    if (count <= 3) return t("teacherProfile.emergingPattern");
+    return t("teacherProfile.establishedPattern");
+  }, [dashboardRes, t]);
+
   const handleSaveReflection = (e) => {
     e.preventDefault();
     saveReflectionMutation.mutate({
@@ -749,46 +831,48 @@ export function TeacherProfilePage() {
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
-        <header className="mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h1 className="font-heading text-2xl font-semibold text-slate-900">
-              {t("teacherProfile.title", {
-                name: teacherRes?.name || t("teacherProfile.fallbackTeacher"),
-              })}
-            </h1>
-            <p className="mt-1 text-sm text-slate-600">
-              {t("teacherProfile.subtitle")}
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={handleScheduleConference}
-              disabled={scheduleConferenceMutation.isPending}
-              className="inline-flex items-center rounded-md bg-primary px-4 py-2 text-xs font-medium text-white shadow-lg shadow-primary/30 hover:bg-primary/90 disabled:opacity-60"
-            >
-              {t("teacherProfile.scheduleConference")}
-            </button>
-            <Link
-              to="/master-schedule"
-              className="text-xs text-slate-500 underline underline-offset-4"
-            >
-              {t("teacherProfile.viewMasterSchedule")}
-            </Link>
-            <button
-              type="button"
-              onClick={() => handleExportReport("pdf", { teacher_id: teacherId })}
-              className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
-            >
-              {t("teacherProfile.exportPdf")}
-            </button>
-            <button
-              type="button"
-              onClick={() => handleExportReport("csv", { teacher_id: teacherId })}
-              className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
-            >
-              {t("teacherProfile.exportCsv")}
-            </button>
+        <header className="mb-6 rounded-2xl border border-slate-200 bg-gradient-to-br from-white via-slate-50 to-emerald-50/60 p-5">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="max-w-3xl">
+              <div className="mb-2 flex flex-wrap gap-2">
+                <span className="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">
+                  {t("timeScope.latestClass")}
+                </span>
+                <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+                  {t("timeScope.longTermFocus")}
+                </span>
+              </div>
+              <h1 className="font-heading text-2xl font-semibold text-slate-900">
+                {t("teacherProfile.title", {
+                  name: teacherRes?.name || t("teacherProfile.fallbackTeacher"),
+                })}
+              </h1>
+              <p className="mt-1 text-sm text-slate-600">{t("teacherProfile.subtitle")}</p>
+            </div>
+            <div className="grid min-w-[250px] gap-2 text-right text-xs text-slate-600">
+              <div className="rounded-xl border border-slate-200 bg-white/90 px-4 py-3">
+                <div className="uppercase tracking-wide text-slate-500">
+                  {t("teacherProfile.coachingStatusLatestLesson")}
+                </div>
+                <div className="mt-1 font-semibold text-slate-900">
+                  {latestReviewedAt
+                    ? formatDateTime(latestReviewedAt)
+                    : t("teacherProfile.noLessonReviewedYet")}
+                </div>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white/90 px-4 py-3">
+                <div className="uppercase tracking-wide text-slate-500">
+                  {t("teacherProfile.coachingStatusConference")}
+                </div>
+                <div className="mt-1 font-semibold text-slate-900">
+                  {nextCoachingConference
+                    ? t("teacherProfile.nextConferenceScheduled", {
+                        date: formatDateTime(nextCoachingConference),
+                      })
+                    : t("teacherProfile.nextConferenceNotScheduled")}
+                </div>
+              </div>
+            </div>
           </div>
         </header>
 
@@ -822,49 +906,6 @@ export function TeacherProfilePage() {
             </div>
           </details>
         )}
-
-        <div className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <div className="text-sm font-semibold text-slate-900">
-                {t("teacherProfile.performanceSummaryPeriod")}
-              </div>
-              <div className="text-xs text-slate-500">
-                {t("teacherProfile.performanceSummaryDescription")}
-              </div>
-            </div>
-            <div className="flex items-center gap-2 text-xs">
-              <label className="text-slate-600">{t("teacherProfile.period")}</label>
-              <select
-                className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
-                value={periodMonths}
-                onChange={(e) => setPeriodMonths(Number(e.target.value))}
-              >
-                <option value={1}>{t("teacherProfile.month1")}</option>
-                <option value={3}>{t("teacherProfile.month3")}</option>
-                <option value={6}>{t("teacherProfile.month6")}</option>
-                <option value={12}>{t("teacherProfile.month12")}</option>
-              </select>
-            </div>
-            {isAdmin && (
-              <div className="flex items-center gap-2 text-xs">
-                <label className="text-slate-600">{t("teacherProfile.adminScoring")}</label>
-                <select
-                  className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
-                  value={scoringMode}
-                  onChange={(e) => {
-                    const mode = e.target.value;
-                    setScoringMode(mode);
-                    scoringModeMutation.mutate(mode);
-                  }}
-                >
-                  <option value="override">{t("teacherProfile.overrideAi")}</option>
-                  <option value="coexist">{t("teacherProfile.coexistWithAi")}</option>
-                </select>
-              </div>
-            )}
-          </div>
-        </div>
 
         <section className="mb-6 rounded-xl border border-slate-200 bg-gradient-to-br from-white via-slate-50 to-emerald-50/60 p-5">
           <div className="flex flex-wrap items-start justify-between gap-4">
@@ -992,12 +1033,36 @@ export function TeacherProfilePage() {
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           <div className="lg:col-span-8 space-y-6">
             <section className="rounded-xl border border-slate-200 bg-white p-5">
-              <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                {t("teacherProfile.aiInsights")}
-              </h2>
-              <p className="mb-3 text-xs text-slate-500">
-                {t("teacherProfile.aiInsightsDescription")}
-              </p>
+              <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="mb-2 flex flex-wrap gap-2">
+                    <span className="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">
+                      {t("timeScope.fromThisLesson")}
+                    </span>
+                    {latestReviewedAt ? (
+                      <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+                        {t("teacherProfile.latestLessonDate", {
+                          date: formatDateTime(latestReviewedAt),
+                        })}
+                      </span>
+                    ) : null}
+                  </div>
+                  <h2 className="text-sm font-semibold text-slate-900">
+                    {t("teacherProfile.latestClassReview")}
+                  </h2>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {t("teacherProfile.latestClassReviewDescription")}
+                  </p>
+                </div>
+                {latestAssessment?.video_id ? (
+                  <Link
+                    to={`/videos/${latestAssessment.video_id}`}
+                    className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                  >
+                    {t("teacherProfile.openLatestLesson")}
+                  </Link>
+                ) : null}
+              </div>
               <div className="space-y-3 text-xs text-slate-700">
                 <ObservationFocusPanel
                   frameworkType={latestAssessment?.framework_type}
@@ -1010,7 +1075,7 @@ export function TeacherProfilePage() {
                   <>
                     <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
                       <div className="text-[11px] uppercase tracking-wide text-slate-500">
-                        {t("teacherProfile.recentPerformanceSummary")}
+                        {t("teacherProfile.latestLessonSummary")}
                       </div>
                       <div className="mt-1 text-xs text-slate-700">
                         {summaryInsightsRes.summary}
@@ -1025,6 +1090,44 @@ export function TeacherProfilePage() {
                           existingFeedback={feedbackByTarget["summary:teacher-summary"]}
                         />
                       )}
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
+                        <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
+                          {t("teacherProfile.latestStrengths")}
+                        </div>
+                        {latestLessonSignals.strengths.length ? (
+                          <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>
+                            {latestLessonSignals.strengths.map((item) => (
+                              <li key={`latest-strength-${item.element_id}`}>
+                                {item.label} ({formatScore(item.score)}/10)
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <div className="text-xs text-slate-500">
+                            {t("teacherProfile.noRecentHighlights")}
+                          </div>
+                        )}
+                      </div>
+                      <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
+                        <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-amber-700">
+                          {t("teacherProfile.immediateConcerns")}
+                        </div>
+                        {latestLessonSignals.concerns.length ? (
+                          <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>
+                            {latestLessonSignals.concerns.map((item) => (
+                              <li key={`latest-concern-${item.element_id}`}>
+                                {item.label} ({formatScore(item.score)}/10)
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <div className="text-xs text-slate-500">
+                            {t("teacherProfile.noRecentHighlights")}
+                          </div>
+                        )}
+                      </div>
                     </div>
                     {summaryInsightsRes.recommendations?.length ? (
                       <div>
@@ -1145,44 +1248,65 @@ export function TeacherProfilePage() {
                         </ul>
                       </div>
                     ) : null}
-                    <div>
-                      <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                        {t("teacherProfile.observationHighlights")}
-                      </div>
-                      {(dashboardRes?.recent_video_highlights || []).length ? (
-                        <ul className="space-y-2 text-xs text-slate-700">
-                          {dashboardRes.recent_video_highlights.map((h, idx) => (
-                            <li
-                              key={`${h.video_id}-${idx}`}
-                              className="rounded-md border border-slate-200 bg-white px-3 py-2"
-                            >
-                              <div className="text-[11px] text-slate-500">
-                                {formatDateTime(h.created_at)}
-                                {typeof h.timestamp_seconds === "number" && (
-                                  <span className={isRtl ? "mr-2" : "ml-2"}>
-                                    • {formatClock(h.timestamp_seconds)}
-                                  </span>
-                                )}
-                              </div>
-                              <div className="mt-1 text-xs text-slate-700">
-                                {h.summary}
-                              </div>
-                              {h.video_id && (
-                                <Link
-                                  to={`/videos/${h.video_id}`}
-                                  className="mt-1 inline-flex text-[11px] text-primary hover:underline"
-                                >
-                                  {t("teacherProfile.watchClip")}
-                                </Link>
-                              )}
-                            </li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <div className="text-xs text-slate-500">
-                          {t("teacherProfile.noRecentHighlights")}
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <div>
+                        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                          {t("teacherProfile.timestampedEvidence")}
                         </div>
-                      )}
+                        {latestHighlights.length ? (
+                          <ul className="space-y-2 text-xs text-slate-700">
+                            {latestHighlights.map((h, idx) => (
+                              <li
+                                key={`${h.video_id}-${idx}`}
+                                className="rounded-md border border-slate-200 bg-white px-3 py-2"
+                              >
+                                <div className="text-[11px] text-slate-500">
+                                  {formatDateTime(h.created_at)}
+                                  {typeof h.timestamp_seconds === "number" && (
+                                    <span className={isRtl ? "mr-2" : "ml-2"}>
+                                      • {formatClock(h.timestamp_seconds)}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="mt-1 text-xs text-slate-700">
+                                  {h.summary}
+                                </div>
+                                {h.video_id && (
+                                  <Link
+                                    to={`/videos/${h.video_id}`}
+                                    className="mt-1 inline-flex text-[11px] text-primary hover:underline"
+                                  >
+                                    {t("teacherProfile.watchClip")}
+                                  </Link>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <div className="text-xs text-slate-500">
+                            {t("teacherProfile.noRecentHighlights")}
+                          </div>
+                        )}
+                      </div>
+                      <div className="space-y-3">
+                        <div>
+                          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                            {t("teacherProfile.latestAdminComment")}
+                          </div>
+                          <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700">
+                            {latestObservation?.admin_comment || t("teacherProfile.noAdminComment")}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                            {t("teacherProfile.latestTeacherResponse")}
+                          </div>
+                          <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700">
+                            {latestObservation?.teacher_response ||
+                              t("teacherProfile.noLatestTeacherResponse")}
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </>
                 ) : (
@@ -1194,12 +1318,97 @@ export function TeacherProfilePage() {
             </section>
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
-              <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                {t("teacherProfile.professionalInsights")}
-              </h2>
-              <p className="mb-3 text-xs text-slate-500">
-                {t("teacherProfile.professionalInsightsDescription")}
-              </p>
+              <div className="mb-3">
+                <div className="mb-2 flex flex-wrap gap-2">
+                  <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+                    {t("timeScope.ongoingGoal")}
+                  </span>
+                  <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+                    {patternStrengthLabel}
+                  </span>
+                </div>
+                <h2 className="text-sm font-semibold text-slate-900">
+                  {t("teacherProfile.ongoingCoachingRecord")}
+                </h2>
+                <p className="mt-1 text-xs text-slate-500">
+                  {t("teacherProfile.ongoingCoachingRecordDescription")}
+                </p>
+              </div>
+              <div className="mb-4 grid gap-3 md:grid-cols-2">
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("teacherProfile.actionPlanFocus")}
+                  </div>
+                  {activeGoalTitles.length ? (
+                    <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>
+                      {activeGoalTitles.map((item, idx) => (
+                        <li key={`active-goal-${idx}`}>{item}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="text-xs text-slate-500">{t("teacherProfile.noNextStepsYet")}</div>
+                  )}
+                </div>
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("teacherProfile.conferencePrepContinuity")}
+                  </div>
+                  {(conferencePrepRes?.continuity_lines || []).length ? (
+                    <ul className="space-y-2 text-xs text-slate-700">
+                      {conferencePrepRes.continuity_lines.slice(0, 3).map((item, idx) => (
+                        <li
+                          key={`continuity-${idx}`}
+                          className="rounded-md border border-slate-200 bg-white px-3 py-2"
+                        >
+                          {item}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="text-xs text-slate-500">
+                      {t("teacherProfile.conferencePrepNoContinuity")}
+                    </div>
+                  )}
+                </div>
+                <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
+                    {t("teacherProfile.recurringStrengths")}
+                  </div>
+                  {recurringPatternSummary.strengths.length ? (
+                    <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>
+                      {recurringPatternSummary.strengths.map((item) => (
+                        <li key={`pattern-strength-${item.elementId}`}>{item.label}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="text-xs text-slate-500">
+                      {t("teacherProfile.noRecurringStrengths")}
+                    </div>
+                  )}
+                </div>
+                <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-amber-700">
+                    {t("teacherProfile.recurringChallenges")}
+                  </div>
+                  {summaryInsightsRes?.recommendations?.length ? (
+                    <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>
+                      {summaryInsightsRes.recommendations.slice(0, 3).map((item, idx) => (
+                        <li key={`ongoing-challenge-${idx}`}>{item}</li>
+                      ))}
+                    </ul>
+                  ) : recurringPatternSummary.challenges.length ? (
+                    <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>
+                      {recurringPatternSummary.challenges.map((item) => (
+                        <li key={`pattern-challenge-${item.elementId}`}>{item.label}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="text-xs text-slate-500">
+                      {t("teacherProfile.noRecurringChallenges")}
+                    </div>
+                  )}
+                </div>
+              </div>
               <div className="space-y-3 text-xs text-slate-700">
                 <div>
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
@@ -1218,6 +1427,18 @@ export function TeacherProfilePage() {
                   </div>
                 </div>
               </div>
+              {nextStepsItems.length > 0 && (
+                <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("teacherProfile.longTermCoachingNotes")}
+                  </div>
+                  <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>
+                    {nextStepsItems.map((item, idx) => (
+                      <li key={`long-term-note-${idx}`}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <form onSubmit={handleSaveReflection} className="mt-3 space-y-3 text-xs">
                 <div>
                   <label className="mb-1 block text-[11px] font-medium text-slate-600">
@@ -1256,12 +1477,66 @@ export function TeacherProfilePage() {
 
           <div className="lg:col-span-4 space-y-6">
             <section className="rounded-xl border border-slate-200 bg-white p-5">
-              <h2 className="mb-2 text-sm font-semibold text-slate-900">
-                {t("teacherProfile.nextSteps")}
-              </h2>
-              <p className="mb-3 text-xs text-slate-500">
-                {t("teacherProfile.nextStepsDescription")}
-              </p>
+              <div className="mb-3">
+                <div className="mb-2 flex flex-wrap gap-2">
+                  <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+                    {t("teacherProfile.adminActionLane")}
+                  </span>
+                </div>
+                <h2 className="text-sm font-semibold text-slate-900">
+                  {t("teacherProfile.adminActionLane")}
+                </h2>
+                <p className="mt-1 text-xs text-slate-500">
+                  {t("teacherProfile.adminActionLaneDescription")}
+                </p>
+              </div>
+              <div className="mb-3 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={handleScheduleConference}
+                  disabled={scheduleConferenceMutation.isPending}
+                  className="inline-flex items-center justify-center rounded-md bg-primary px-3 py-2 text-xs font-medium text-white hover:bg-primary/90 disabled:opacity-60"
+                >
+                  {t("teacherProfile.scheduleConference")}
+                </button>
+                <Link
+                  to="/master-schedule"
+                  className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                >
+                  {t("teacherProfile.viewMasterSchedule")}
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => handleExportReport("pdf", { teacher_id: teacherId })}
+                  className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                >
+                  {t("teacherProfile.exportPdf")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleExportReport("csv", { teacher_id: teacherId })}
+                  className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                >
+                  {t("teacherProfile.exportCsv")}
+                </button>
+              </div>
+              <div className="mb-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                <label className="mb-1 block text-[11px] font-medium text-slate-600">
+                  {t("teacherProfile.adminScoring")}
+                </label>
+                <select
+                  className="w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                  value={scoringMode}
+                  onChange={(e) => {
+                    const mode = e.target.value;
+                    setScoringMode(mode);
+                    scoringModeMutation.mutate(mode);
+                  }}
+                >
+                  <option value="override">{t("teacherProfile.overrideAi")}</option>
+                  <option value="coexist">{t("teacherProfile.coexistWithAi")}</option>
+                </select>
+              </div>
               <div className="space-y-3">
                 <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
@@ -1388,7 +1663,6 @@ export function TeacherProfilePage() {
                 </button>
               </div>
             </section>
-
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 {t("teacherProfile.nextConferenceTitle")}
@@ -1931,7 +2205,38 @@ export function TeacherProfilePage() {
               </div>
             </section>
 
-            <section>
+            <section className="rounded-xl border border-slate-200 bg-white p-5">
+              <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="mb-2 flex flex-wrap gap-2">
+                    <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+                      {t("timeScope.acrossRecentObservations")}
+                    </span>
+                    <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+                      {patternStrengthLabel}
+                    </span>
+                  </div>
+                  <h2 className="text-sm font-semibold text-slate-900">
+                    {t("teacherProfile.evidenceOverTime")}
+                  </h2>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {t("teacherProfile.evidenceOverTimeDescription")}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <label className="text-slate-600">{t("teacherProfile.period")}</label>
+                  <select
+                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                    value={periodMonths}
+                    onChange={(e) => setPeriodMonths(Number(e.target.value))}
+                  >
+                    <option value={1}>{t("teacherProfile.month1")}</option>
+                    <option value={3}>{t("teacherProfile.month3")}</option>
+                    <option value={6}>{t("teacherProfile.month6")}</option>
+                    <option value={12}>{t("teacherProfile.month12")}</option>
+                  </select>
+                </div>
+              </div>
               <MonthlySummary
                 dashboardRes={dashboardRes}
                 periodMonths={periodMonths}
