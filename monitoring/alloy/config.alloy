@@ -1,0 +1,45 @@
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_CLOUD_PROMETHEUS_REMOTE_WRITE_URL")
+
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_PROMETHEUS_USERNAME")
+      password = sys.env("GRAFANA_CLOUD_API_KEY")
+    }
+
+    queue_config {
+      capacity             = 10000
+      max_samples_per_send = 2000
+      max_shards           = 10
+    }
+  }
+
+  external_labels = {
+    app     = "cognivio",
+    env     = sys.env("COGNIVIO_MONITORING_ENV"),
+    service = "cognivio-backend",
+  }
+}
+
+prometheus.scrape "cognivio_backend" {
+  targets = [{
+    "__address__"      = sys.env("COGNIVIO_METRICS_TARGET"),
+    "__scheme__"       = sys.env("COGNIVIO_METRICS_SCHEME"),
+    "__metrics_path__" = sys.env("COGNIVIO_METRICS_PATH"),
+    "job"              = "cognivio-backend",
+    "env"              = sys.env("COGNIVIO_MONITORING_ENV"),
+    "service"          = "cognivio-backend",
+  }]
+
+  scrape_interval = sys.env("COGNIVIO_METRICS_SCRAPE_INTERVAL")
+  scrape_timeout  = sys.env("COGNIVIO_METRICS_SCRAPE_TIMEOUT")
+  forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+prometheus.exporter.self "alloy" {}
+
+prometheus.scrape "alloy_self" {
+  targets         = prometheus.exporter.self.alloy.targets
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+}

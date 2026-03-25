@@ -21,7 +21,7 @@ stack first.
 
 ## Deployment Shape
 
-### Option A: Grafana Cloud Agent / Collector
+### Option A: Grafana Alloy Collector
 
 Recommended first production path:
 
@@ -35,6 +35,13 @@ Use this when:
 - the team wants durable metrics quickly
 - alerting and dashboards should live outside the app process
 - self-hosting Prometheus is unnecessary overhead
+
+Version-controlled starting point:
+
+- [config.alloy](C:/Projects/Cognivio/monitoring/alloy/config.alloy)
+- [staging.env.example](C:/Projects/Cognivio/monitoring/alloy/staging.env.example)
+- [GRAFANA_CLOUD_SETUP.md](C:/Projects/Cognivio/docs/GRAFANA_CLOUD_SETUP.md)
+- [MONITORING_SECRET_INVENTORY_TEMPLATE.md](C:/Projects/Cognivio/docs/MONITORING_SECRET_INVENTORY_TEMPLATE.md)
 
 ### Option B: Self-hosted Prometheus + Grafana
 

@@ -15,6 +15,29 @@ This rubric is used to compare baseline analysis, smart visual sampling, and mul
 - 3 = acceptable
 - 5 = strong
 
+## Phase 1 Harness
+- Gold set file: `backend/evals/analysis_gold_set.json`
+- Runner: `python scripts/run-analysis-eval.py`
+- JSON output: `python scripts/run-analysis-eval.py --json`
+
+This Phase 1 harness is intentionally small and deterministic. It checks whether summary text, recommendation text, and packet-level confidence/alignment outputs continue to:
+- reflect the configured observation focus
+- stay grounded in visible evidence
+- produce actionable coaching language
+- avoid unsupported modality claims when audio is absent
+
+## How To Use It
+1. Run the harness before changing analysis prompts, ranking logic, or coaching packet generation.
+2. Run it again after the change.
+3. Review any failed dimensions before rollout.
+4. If the product behavior should intentionally change, update the gold set expectations in `backend/evals/analysis_gold_set.json` and note why in the PR.
+
+## Gold Set Notes
+- Cases are stored as stable fixtures, not live recordings.
+- Each case defines checks by rubric dimension.
+- A dimension scores `5` when all checks pass, `3` when at least half pass, and `1` otherwise.
+- Phase 1 uses this as an internal regression harness, not as a substitute for human coaching review.
+
 ## Required Notes
 - Most convincing evidence snippet
 - Least convincing claim

@@ -80,6 +80,20 @@ This document is the source of truth for active Cognivio runtime configuration.
 | `REACT_APP_BACKEND_URL` | Yes | API base URL | Injected via runtime config |
 | `REACT_APP_BUILD_SHA` | Optional | Build metadata | Helpful for smoke/debug |
 
+## Monitoring Collector Runtime
+
+| Variable | Required | Purpose | Notes |
+| --- | --- | --- | --- |
+| `GRAFANA_CLOUD_PROMETHEUS_REMOTE_WRITE_URL` | Optional | Grafana Cloud remote write endpoint | Required for external metrics storage |
+| `GRAFANA_CLOUD_PROMETHEUS_USERNAME` | Optional | Grafana Cloud Prometheus username / instance id | Used for remote write auth |
+| `GRAFANA_CLOUD_API_KEY` | Optional | Grafana Cloud ingestion token | Keep only in secret storage |
+| `COGNIVIO_MONITORING_ENV` | Optional | Environment label attached by the collector | Example: `staging` or `production` |
+| `COGNIVIO_METRICS_TARGET` | Optional | Backend host scraped by the collector | Prefer the backend service host only |
+| `COGNIVIO_METRICS_SCHEME` | Optional | Scrape scheme | Usually `https` |
+| `COGNIVIO_METRICS_PATH` | Optional | Scrape path | Default `/metrics` |
+| `COGNIVIO_METRICS_SCRAPE_INTERVAL` | Optional | Collector scrape interval | Example: `30s` |
+| `COGNIVIO_METRICS_SCRAPE_TIMEOUT` | Optional | Collector scrape timeout | Example: `10s` |
+
 ## Staging Defaults
 
 - Enable smart sampling before enabling audio.

@@ -4,6 +4,8 @@ This directory contains version-controlled monitoring artifacts for Cognivio.
 
 ## Contents
 
+- `alloy/config.alloy`
+- `alloy/staging.env.example`
 - `prometheus/cognivio-recording-rules.yml`
 - `prometheus/cognivio-alerts.yml`
 - `grafana/cognivio-operations-dashboard.json`
@@ -12,6 +14,7 @@ This directory contains version-controlled monitoring artifacts for Cognivio.
 ## Intended Use
 
 - Prometheus-compatible environments can load the recording and alert rules.
+- Grafana Alloy can scrape Cognivio `/metrics` and remote-write to Grafana Cloud.
 - Grafana can import the dashboard JSON files directly and then bind them to the
   Prometheus data source used for Cognivio metrics.
 
