@@ -28,7 +28,7 @@ import {
 import { toast } from "sonner";
 import { subDays } from "date-fns";
 import { useAuth } from "@/hooks/useAuth";
-import { Button, EmptyState, LoadingState, PageHeader, Panel } from "@/components/ui";
+import { Button, EmptyState, LoadingState, PageHeader, Panel, SectionHeader } from "@/components/ui";
 import { Link } from "react-router-dom";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 
@@ -1454,19 +1454,11 @@ export function DashboardPage() {
             {isAdmin && (
               <>
                 <section className="mb-6 rounded-xl border border-slate-200 bg-white p-5">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="max-w-3xl">
-                      <h2 className="text-sm font-semibold text-slate-900">
-                        {t("dashboard.triageTitle")}
-                      </h2>
-                      <p className="mt-1 text-xs text-slate-500">
-                        {t("dashboard.triageDescription")}
-                      </p>
-                    </div>
-                    <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">
-                      {t("timeScope.latestClass")} + {t("timeScope.recurringPattern")}
-                    </span>
-                  </div>
+                  <SectionHeader
+                    title={t("dashboard.triageTitle")}
+                    description={t("dashboard.triageDescription")}
+                    tags={[t("timeScope.latestClass"), t("timeScope.recurringPattern")]}
+                  />
                   <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
                     {triageCards.map((card) => (
                       <div
@@ -1486,30 +1478,19 @@ export function DashboardPage() {
                 </section>
 
                 <section className="mb-6 rounded-xl border border-slate-200 bg-white p-5">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="max-w-3xl">
-                      <div className="mb-2 flex flex-wrap items-center gap-2">
-                        <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-700">
-                          {t("timeScope.fromThisLesson")}
-                        </span>
-                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
-                          {t("timeScope.immediateFollowUp")}
-                        </span>
-                      </div>
-                      <h2 className="text-sm font-semibold text-slate-900">
-                        {t("dashboard.recentLessonSignalsTitle")}
-                      </h2>
-                      <p className="mt-1 text-xs text-slate-500">
-                        {t("dashboard.recentLessonSignalsDescription")}
-                      </p>
-                    </div>
-                    <Link
-                      to="/teachers"
-                      className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
-                    >
-                      {t("dashboard.smartQueueOpenTeachers")}
-                    </Link>
-                  </div>
+                  <SectionHeader
+                    title={t("dashboard.recentLessonSignalsTitle")}
+                    description={t("dashboard.recentLessonSignalsDescription")}
+                    tags={[t("timeScope.fromThisLesson"), t("timeScope.immediateFollowUp")]}
+                    actions={
+                      <Link
+                        to="/teachers"
+                        className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                      >
+                        {t("dashboard.smartQueueOpenTeachers")}
+                      </Link>
+                    }
+                  />
                   {recentLessonSignals.length === 0 ? (
                     <div className="mt-4 text-xs text-slate-500">
                       {t("dashboard.recentLessonSignalsEmpty")}
@@ -1585,30 +1566,19 @@ export function DashboardPage() {
                 </section>
 
                 <section className="mb-6 rounded-xl border border-slate-200 bg-white p-5">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="max-w-3xl">
-                      <div className="mb-2 flex flex-wrap items-center gap-2">
-                        <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
-                          {t("timeScope.ongoingGoal")}
-                        </span>
-                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
-                          {t("timeScope.acrossRecentObservations")}
-                        </span>
-                      </div>
-                      <h2 className="text-sm font-semibold text-slate-900">
-                        {t("dashboard.recurringPatternsTitle")}
-                      </h2>
-                      <p className="mt-1 text-xs text-slate-500">
-                        {t("dashboard.recurringPatternsDescription")}
-                      </p>
-                    </div>
-                    <Link
-                      to="/teachers"
-                      className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
-                    >
-                      {t("dashboard.reviewTeacherRoster")}
-                    </Link>
-                  </div>
+                  <SectionHeader
+                    title={t("dashboard.recurringPatternsTitle")}
+                    description={t("dashboard.recurringPatternsDescription")}
+                    tags={[t("timeScope.ongoingGoal"), t("timeScope.acrossRecentObservations")]}
+                    actions={
+                      <Link
+                        to="/teachers"
+                        className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                      >
+                        {t("dashboard.reviewTeacherRoster")}
+                      </Link>
+                    }
+                  />
                   {recurringPatternCards.length === 0 ? (
                     <div className="mt-4 text-xs text-slate-500">
                       {t("dashboard.recurringPatternsEmpty")}

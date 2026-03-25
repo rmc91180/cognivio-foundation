@@ -655,9 +655,12 @@ const en = {
     noUpcoming: "No upcoming",
     upcoming: "{{count}} upcoming",
     trendSnapshot: "30-day trend snapshot",
+    latestClassSnapshot: "Latest class snapshot",
+    recurringPatternSnapshot: "Recurring pattern snapshot",
     notEnoughTrendData: "Not enough recent observations for a 30-day trend.",
     quickActions: "Quick actions",
     viewProfile: "View profile",
+    openDeepDive: "Open deep dive",
     viewVideos: "View videos",
     save: "Save",
     enterCustomCategory: "Enter a custom category",
@@ -998,6 +1001,18 @@ const en = {
     saveReflection: "Save reflection",
     coachingWorkspace: "Coaching workspace",
     coachingWorkspaceDescription: "See the current coaching state, choose the next move, and carry it into follow-through.",
+    pageGuideTitle: "How to use this page",
+    pageGuideDescription:
+      "Review the latest class first, confirm what is repeating over time second, and only then decide the next admin move.",
+    pageGuideLatestTitle: "Start with the latest class",
+    pageGuideLatestDescription:
+      "Use the lesson-scoped evidence to see what happened most recently and what needs immediate follow-up.",
+    pageGuidePatternsTitle: "Then confirm recurring patterns",
+    pageGuidePatternsDescription:
+      "Use the ongoing record and evidence-over-time views to separate one-off signals from longer-term themes.",
+    pageGuideActionsTitle: "Finish in the admin action lane",
+    pageGuideActionsDescription:
+      "Schedule, override, and adjust action plans only after the evidence and pattern views are clear.",
     coachingStatusLatestLesson: "Latest reviewed lesson",
     coachingStatusGoals: "Goals in motion",
     coachingStatusConference: "Next conference",
@@ -1241,6 +1256,19 @@ const en = {
     viewHistory: "View my history",
     returnHome: "Return to workspace home",
     workspaceTag: "Teacher-owned workspace",
+    activeSectionLabel: "Active section",
+    startHereTitle: "Start here this week",
+    startHereDescription:
+      "If you are not sure where to begin, use these three sections in order so the workspace stays simple.",
+    startHereLatestTitle: "1. Review the latest class",
+    startHereLatestDescription:
+      "See the newest feedback, immediate next step, and any comment that needs your response.",
+    startHereGoalsTitle: "2. Check ongoing goals",
+    startHereGoalsDescription:
+      "Keep longer-term growth goals separate from what only belongs to the latest lesson.",
+    startHereMaterialsTitle: "3. Upload materials and privacy info",
+    startHereMaterialsDescription:
+      "Manage privacy, lesson recordings, and teaching documents from one clear teacher-owned area.",
     noLinkedTeacherTitle: "Teacher record not linked yet",
     noLinkedTeacherDescription:
       "This login does not yet point to a teacher profile. Link the teacher account or matching teacher email before using the workspace.",

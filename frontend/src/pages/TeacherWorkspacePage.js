@@ -4,24 +4,19 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { LayoutShell } from "@/components/LayoutShell";
 import { VideoRecorder } from "@/components/VideoRecorder";
-import { Button, PageHeader, Panel } from "@/components/ui";
+import { Button, PageHeader, Panel, SectionHeader } from "@/components/ui";
 import { useAuth } from "@/hooks/useAuth";
 import { useTeacherWorkspaceData } from "@/pages/teacher-workspace/useTeacherWorkspaceData";
 
-function WorkspaceSection({ title, description, tags, active, children }) {
+function WorkspaceSection({ title, description, tags, active, children, activeLabel }) {
   return (
     <Panel className={[active ? "border-primary/40 bg-primary/5" : "border-slate-200 bg-white", "space-y-4 border transition-colors"].join(" ")}>
-      <div className="space-y-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-base font-semibold text-slate-900">{title}</h2>
-          {tags.map((tag) => (
-            <span key={`${title}-${tag}`} className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-600">
-              {tag}
-            </span>
-          ))}
-        </div>
-        <p className="text-sm text-slate-500">{description}</p>
-      </div>
+      <SectionHeader
+        title={title}
+        description={description}
+        eyebrow={active ? activeLabel : null}
+        tags={tags}
+      />
       {children}
     </Panel>
   );
@@ -156,6 +151,42 @@ export function TeacherWorkspacePage() {
           </div>
         </div>
 
+        <Panel className="mb-6 border border-dashed border-slate-300 bg-slate-50/80">
+          <SectionHeader
+            title={t("teacherWorkspace.startHereTitle")}
+            description={t("teacherWorkspace.startHereDescription")}
+            eyebrow={t("teacherWorkspace.workspaceTag")}
+          />
+          <div className="mt-4 grid gap-3 md:grid-cols-3">
+            {[
+              [
+                "/my-workspace",
+                t("teacherWorkspace.startHereLatestTitle"),
+                t("teacherWorkspace.startHereLatestDescription"),
+              ],
+              [
+                "/my-workspace/goals",
+                t("teacherWorkspace.startHereGoalsTitle"),
+                t("teacherWorkspace.startHereGoalsDescription"),
+              ],
+              [
+                "/my-workspace/materials",
+                t("teacherWorkspace.startHereMaterialsTitle"),
+                t("teacherWorkspace.startHereMaterialsDescription"),
+              ],
+            ].map(([to, title, description]) => (
+              <Link
+                key={to}
+                to={to}
+                className="rounded-xl border border-slate-200 bg-white px-4 py-4 text-sm text-slate-700 transition-colors hover:bg-slate-100"
+              >
+                <div className="font-semibold text-slate-900">{title}</div>
+                <div className="mt-1 text-xs text-slate-500">{description}</div>
+              </Link>
+            ))}
+          </div>
+        </Panel>
+
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[260px_minmax(0,1fr)]">
           <Panel className="space-y-3 self-start lg:sticky lg:top-6">
             <div>
@@ -178,7 +209,7 @@ export function TeacherWorkspacePage() {
           </Panel>
 
           <div className="space-y-6">
-            <WorkspaceSection title={t("teacherWorkspace.currentTitle")} description={t("teacherWorkspace.currentDescription")} tags={[t("timeScope.latestClass"), t("timeScope.immediateFollowUp")]} active={activeSection === "overview"}>
+            <WorkspaceSection title={t("teacherWorkspace.currentTitle")} description={t("teacherWorkspace.currentDescription")} tags={[t("timeScope.latestClass"), t("timeScope.immediateFollowUp")]} active={activeSection === "overview"} activeLabel={t("teacherWorkspace.activeSectionLabel")}>
               <div className="grid gap-4 md:grid-cols-2">
                 <Panel><div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.currentSummaryTitle")}</div><div className="mt-2 text-xs text-slate-700">{summaryInsightsRes?.summary || t("teacherProfile.noSummaryData")}</div></Panel>
                 <Panel><div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.currentNextStep")}</div><div className="mt-2 text-xs text-slate-700">{summaryInsightsRes?.recommendations?.[0] || openGoals[0]?.title || t("teacherProfile.noNextStepsYet")}</div></Panel>
@@ -198,7 +229,7 @@ export function TeacherWorkspacePage() {
               </form>
             </WorkspaceSection>
 
-            <WorkspaceSection title={t("teacherWorkspace.goalsTitle")} description={t("teacherWorkspace.goalsDescription")} tags={[t("timeScope.ongoingGoal"), t("timeScope.recurringPattern")]} active={activeSection === "goals"}>
+            <WorkspaceSection title={t("teacherWorkspace.goalsTitle")} description={t("teacherWorkspace.goalsDescription")} tags={[t("timeScope.ongoingGoal"), t("timeScope.recurringPattern")]} active={activeSection === "goals"} activeLabel={t("teacherWorkspace.activeSectionLabel")}>
               <div className="grid gap-4 lg:grid-cols-2">
                 <Panel><div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-amber-700">{t("teacherProfile.recurringChallenges")}</div>{recurringChallenges.length ? <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>{recurringChallenges.slice(0, 3).map((item, idx) => <li key={idx}>{item}</li>)}</ul> : <div className="text-xs text-slate-500">{t("teacherProfile.noRecurringChallenges")}</div>}</Panel>
                 <Panel><div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.goalsImplementationNotes")}</div><textarea rows={4} value={state.actionPlanNotes} onChange={(e) => state.setActionPlanNotes(e.target.value)} className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800" placeholder={t("teacherProfile.actionPlanNotesPlaceholder")} /></Panel>
@@ -217,7 +248,7 @@ export function TeacherWorkspacePage() {
               </div>
             </WorkspaceSection>
 
-            <WorkspaceSection title={t("teacherWorkspace.materialsTitle")} description={t("teacherWorkspace.materialsDescription")} tags={[t("teacherWorkspace.workspaceTag")]} active={activeSection === "materials"}>
+            <WorkspaceSection title={t("teacherWorkspace.materialsTitle")} description={t("teacherWorkspace.materialsDescription")} tags={[t("teacherWorkspace.workspaceTag")]} active={activeSection === "materials"} activeLabel={t("teacherWorkspace.activeSectionLabel")}>
               <Panel><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="font-medium text-slate-800">{t("teacherProfile.privacyIdentityProfile")}</div><div className="mt-1 text-[11px] text-slate-500">{t("teacherProfile.privacyStatusLabel", { status: privacyReady ? t("teacherProfile.privacyReady", { count: privacyProfileRes?.reference_count || 0 }) : t("teacherProfile.notConfigured") })}</div></div><Button size="sm" variant="secondary" onClick={() => mutations.savePrivacyProfileMutation.mutate(state.privacyReferenceFiles)} disabled={mutations.savePrivacyProfileMutation.isPending || state.privacyReferenceFiles.length === 0}>{mutations.savePrivacyProfileMutation.isPending ? t("teachersPage.saving") : t("teacherProfile.savePrivacyProfile")}</Button></div><input ref={refs.privacyReferenceInputRef} type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={(e) => state.setPrivacyReferenceFiles(Array.from(e.target.files || []))} className="hidden" /><div className="mt-3 flex flex-wrap items-center gap-2"><button type="button" onClick={() => refs.privacyReferenceInputRef.current?.click()} className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100">{t("teacherProfile.chooseFiles")}</button><span className="text-[11px] text-slate-500">{state.privacyReferenceFiles.length > 0 ? t("teacherProfile.referenceFilesSelected", { count: state.privacyReferenceFiles.length }) : t("teacherProfile.noFilesSelected")}</span></div></Panel>
               <Panel><div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-sm font-semibold text-slate-900">{t("teacherProfile.lessonVideoHub")}</h3><p className="text-xs text-slate-500">{t("teacherProfile.lessonVideoHubDescription")}</p></div><Link to={`/videos?teacher_id=${teacherId}`} className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100">{t("teacherProfile.openRecordingsPage")}</Link></div><div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2"><VideoRecorder onRecordingReady={(blob, url) => { state.setRecordedBlob(blob); state.setRecordedUrl(url); }} /><div className="space-y-3 text-xs text-slate-600"><input type="text" value={state.videoSubject} onChange={(e) => state.setVideoSubject(e.target.value)} className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800" /><div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-600">{state.recordedUrl ? t("teacherProfile.recordingReady") : t("teacherProfile.noRecordingYet")}</div><Button size="sm" onClick={() => { if (!privacyReady) { toast.error(t("teacherProfile.completePrivacyProfileFirst")); return; } if (!state.recordedBlob) { toast.error(t("teacherProfile.recordVideoFirst")); return; } const ext = state.recordedBlob.type?.includes("mp4") ? "mp4" : "webm"; const file = new File([state.recordedBlob], `teacher-recording.${ext}`, { type: state.recordedBlob.type || "video/webm" }); mutations.uploadRecordedMutation.mutate({ file, recordedAt: new Date().toISOString() }); }} disabled={mutations.uploadRecordedMutation.isPending}>{mutations.uploadRecordedMutation.isPending ? t("teacherProfile.uploading") : t("teacherProfile.uploadRecording")}</Button></div></div></Panel>
               <div className="grid gap-4 lg:grid-cols-3">
@@ -286,7 +317,7 @@ export function TeacherWorkspacePage() {
               </div>
             </WorkspaceSection>
 
-            <WorkspaceSection title={t("teacherWorkspace.historyTitle")} description={t("teacherWorkspace.historyDescription")} tags={[t("timeScope.acrossRecentObservations")]} active={activeSection === "history"}>
+            <WorkspaceSection title={t("teacherWorkspace.historyTitle")} description={t("teacherWorkspace.historyDescription")} tags={[t("timeScope.acrossRecentObservations")]} active={activeSection === "history"} activeLabel={t("teacherWorkspace.activeSectionLabel")}>
               <div className="grid gap-4 lg:grid-cols-3">
                 <Panel><div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.historyRecentLessons")}</div>{videos.length ? <ul className="space-y-2 text-xs text-slate-700">{videos.slice(0, 5).map((video) => <li key={video.id} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2"><div className="font-medium text-slate-800">{video.filename || t("teacherProfile.lessonRecordingFallback")}</div><div className="mt-1 text-[11px] text-slate-500">{video.recorded_at || video.upload_date ? formatDateTime(video.recorded_at || video.upload_date) : t("teacherProfile.dateNotSet")}</div></li>)}</ul> : <div className="text-xs text-slate-500">{t("teacherProfile.noVideosForTeacher")}</div>}</Panel>
                 <Panel><div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.historyRecentFeedback")}</div>{observations.length ? <ul className="space-y-2 text-xs text-slate-700">{observations.slice(0, 5).map((obs) => <li key={obs.id} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2"><div className="font-medium text-slate-800">{obs.admin_comment || t("teacherProfile.noAdminComment")}</div><div className="mt-1 text-[11px] text-slate-500">{formatDateTime(obs.created_at)}</div></li>)}</ul> : <div className="text-xs text-slate-500">{t("teacherProfile.noObservations")}</div>}</Panel>

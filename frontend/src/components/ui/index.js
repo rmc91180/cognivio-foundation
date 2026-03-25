@@ -3,5 +3,6 @@ export { Panel } from "./Panel";
 export { Field, Input, Select, Textarea } from "./Field";
 export { Badge } from "./Badge";
 export { PageHeader } from "./PageHeader";
+export { SectionHeader } from "./SectionHeader";
 export { LoadingState, EmptyState, ErrorState, SuccessState } from "./StatePanel";
 export { TableShell, DataTable } from "./Table";

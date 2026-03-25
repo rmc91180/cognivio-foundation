@@ -23,6 +23,7 @@ import { AssessmentFeedbackWidget } from "@/components/assessment/AssessmentFeed
 import { ObservationFocusPanel } from "@/components/assessment/ObservationFocusPanel";
 import { MonthlySummary } from "@/components/MonthlySummary";
 import { VideoRecorder } from "@/components/VideoRecorder";
+import { SectionHeader } from "@/components/ui";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
 import { useTranslation } from "react-i18next";
@@ -977,25 +978,55 @@ export function TeacherProfilePage() {
           </div>
         </section>
 
+        {isAdmin && (
+          <section className="mb-6 rounded-xl border border-dashed border-slate-300 bg-slate-50/80 p-5">
+            <SectionHeader
+              title={t("teacherProfile.pageGuideTitle")}
+              description={t("teacherProfile.pageGuideDescription")}
+              eyebrow={t("teacherProfile.adminActionLane")}
+            />
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
+              {[
+                [
+                  t("teacherProfile.pageGuideLatestTitle"),
+                  t("teacherProfile.pageGuideLatestDescription"),
+                ],
+                [
+                  t("teacherProfile.pageGuidePatternsTitle"),
+                  t("teacherProfile.pageGuidePatternsDescription"),
+                ],
+                [
+                  t("teacherProfile.pageGuideActionsTitle"),
+                  t("teacherProfile.pageGuideActionsDescription"),
+                ],
+              ].map(([title, description]) => (
+                <div
+                  key={title}
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-4 text-sm text-slate-700"
+                >
+                  <div className="font-semibold text-slate-900">{title}</div>
+                  <div className="mt-1 text-xs text-slate-500">{description}</div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
         {conferencePrepRes?.agenda?.length ? (
           <section className="mb-6 rounded-xl border border-slate-200 bg-white p-5">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-900">
-                  {t("teacherProfile.conferencePrepTitle")}
-                </h2>
-                <p className="mt-1 text-xs text-slate-500">
-                  {t("teacherProfile.conferencePrepDescription")}
-                </p>
-              </div>
-              {conferencePrepRes?.next_conference ? (
-                <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-[11px] text-slate-600">
-                  {t("teacherProfile.nextConferenceScheduled", {
-                    date: formatDateTime(conferencePrepRes.next_conference),
-                  })}
-                </div>
-              ) : null}
-            </div>
+            <SectionHeader
+              title={t("teacherProfile.conferencePrepTitle")}
+              description={t("teacherProfile.conferencePrepDescription")}
+              actions={
+                conferencePrepRes?.next_conference ? (
+                  <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-[11px] text-slate-600">
+                    {t("teacherProfile.nextConferenceScheduled", {
+                      date: formatDateTime(conferencePrepRes.next_conference),
+                    })}
+                  </div>
+                ) : null
+              }
+            />
             <div className="mt-4 grid gap-4 lg:grid-cols-2">
               <div>
                 <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
@@ -1477,19 +1508,11 @@ export function TeacherProfilePage() {
 
           <div className="lg:col-span-4 space-y-6">
             <section className="rounded-xl border border-slate-200 bg-white p-5">
-              <div className="mb-3">
-                <div className="mb-2 flex flex-wrap gap-2">
-                  <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
-                    {t("teacherProfile.adminActionLane")}
-                  </span>
-                </div>
-                <h2 className="text-sm font-semibold text-slate-900">
-                  {t("teacherProfile.adminActionLane")}
-                </h2>
-                <p className="mt-1 text-xs text-slate-500">
-                  {t("teacherProfile.adminActionLaneDescription")}
-                </p>
-              </div>
+              <SectionHeader
+                title={t("teacherProfile.adminActionLane")}
+                description={t("teacherProfile.adminActionLaneDescription")}
+                eyebrow={t("teacherProfile.adminActionLane")}
+              />
               <div className="mb-3 grid grid-cols-2 gap-2">
                 <button
                   type="button"
@@ -1723,24 +1746,21 @@ export function TeacherProfilePage() {
               ref={actionPlanSectionRef}
               className="rounded-xl border border-slate-200 bg-white p-5"
             >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h2 className="text-sm font-semibold text-slate-900">
-                    {t("teacherProfile.actionPlan")}
-                  </h2>
-                  <p className="text-xs text-slate-500">
-                    {t("teacherProfile.actionPlanDescription")}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleSaveActionPlan}
-                  disabled={saveActionPlanMutation.isPending}
-                  className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90 disabled:opacity-60"
-                >
-                  {t("teacherProfile.saveActionPlan")}
-                </button>
-              </div>
+              <SectionHeader
+                title={t("teacherProfile.actionPlan")}
+                description={t("teacherProfile.actionPlanDescription")}
+                eyebrow={t("timeScope.ongoingGoal")}
+                actions={
+                  <button
+                    type="button"
+                    onClick={handleSaveActionPlan}
+                    disabled={saveActionPlanMutation.isPending}
+                    className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90 disabled:opacity-60"
+                  >
+                    {t("teacherProfile.saveActionPlan")}
+                  </button>
+                }
+              />
 
               <div className="mt-4 space-y-3 text-xs">
                 {actionPlanGoals.map((goal) => (
@@ -2206,37 +2226,26 @@ export function TeacherProfilePage() {
             </section>
 
             <section className="rounded-xl border border-slate-200 bg-white p-5">
-              <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <div className="mb-2 flex flex-wrap gap-2">
-                    <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
-                      {t("timeScope.acrossRecentObservations")}
-                    </span>
-                    <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
-                      {patternStrengthLabel}
-                    </span>
+              <SectionHeader
+                title={t("teacherProfile.evidenceOverTime")}
+                description={t("teacherProfile.evidenceOverTimeDescription")}
+                tags={[t("timeScope.acrossRecentObservations"), patternStrengthLabel]}
+                actions={
+                  <div className="flex items-center gap-2 text-xs">
+                    <label className="text-slate-600">{t("teacherProfile.period")}</label>
+                    <select
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                      value={periodMonths}
+                      onChange={(e) => setPeriodMonths(Number(e.target.value))}
+                    >
+                      <option value={1}>{t("teacherProfile.month1")}</option>
+                      <option value={3}>{t("teacherProfile.month3")}</option>
+                      <option value={6}>{t("teacherProfile.month6")}</option>
+                      <option value={12}>{t("teacherProfile.month12")}</option>
+                    </select>
                   </div>
-                  <h2 className="text-sm font-semibold text-slate-900">
-                    {t("teacherProfile.evidenceOverTime")}
-                  </h2>
-                  <p className="mt-1 text-xs text-slate-500">
-                    {t("teacherProfile.evidenceOverTimeDescription")}
-                  </p>
-                </div>
-                <div className="flex items-center gap-2 text-xs">
-                  <label className="text-slate-600">{t("teacherProfile.period")}</label>
-                  <select
-                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
-                    value={periodMonths}
-                    onChange={(e) => setPeriodMonths(Number(e.target.value))}
-                  >
-                    <option value={1}>{t("teacherProfile.month1")}</option>
-                    <option value={3}>{t("teacherProfile.month3")}</option>
-                    <option value={6}>{t("teacherProfile.month6")}</option>
-                    <option value={12}>{t("teacherProfile.month12")}</option>
-                  </select>
-                </div>
-              </div>
+                }
+              />
               <MonthlySummary
                 dashboardRes={dashboardRes}
                 periodMonths={periodMonths}

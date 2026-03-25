@@ -783,7 +783,7 @@ export function TeachersPage() {
                               to={`/teachers/${teacher.id}`}
                               className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700 hover:bg-slate-100"
                             >
-                              {t("teachersPage.viewProfile")}
+                              {t("teachersPage.openDeepDive")}
                             </Link>
                             <Link
                               to={`/videos?teacher_id=${teacher.id}`}
@@ -1033,9 +1033,45 @@ export function TeachersPage() {
                                 <td colSpan={colSpan} className="px-6 py-4">
                                   <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                                     <div>
-                                      <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                                        {t("teachersPage.trendSnapshot")}
-                                      </h4>
+                                      <div className="mb-3">
+                                        <div className="mb-2 flex flex-wrap gap-2">
+                                          <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-700">
+                                            {t("timeScope.fromThisLesson")}
+                                          </span>
+                                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-600">
+                                            {t("timeScope.immediateFollowUp")}
+                                          </span>
+                                        </div>
+                                        <h4 className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                          {t("teachersPage.latestClassSnapshot")}
+                                        </h4>
+                                      </div>
+                                      {roster?.recent_observations?.length ? (
+                                        <ul className="space-y-1 text-[11px] text-slate-600">
+                                          {roster.recent_observations.slice(0, 3).map((obs, i) => (
+                                            <li key={i} className="rounded bg-white px-2 py-1 border border-slate-200">
+                                              {obs.summary || obs.admin_comment || t("teachersPage.observationRecorded")}
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      ) : (
+                                        <p className="text-[11px] text-slate-500">{t("teachersPage.noRecentObservations")}</p>
+                                      )}
+                                    </div>
+                                    <div>
+                                      <div className="mb-3">
+                                        <div className="mb-2 flex flex-wrap gap-2">
+                                          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+                                            {t("timeScope.ongoingGoal")}
+                                          </span>
+                                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-600">
+                                            {t("timeScope.acrossRecentObservations")}
+                                          </span>
+                                        </div>
+                                        <h4 className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                          {t("teachersPage.recurringPatternSnapshot")}
+                                        </h4>
+                                      </div>
                                       {roster?.trend_30d?.length ? (
                                         <div className="grid gap-2">
                                           {roster.trend_30d.slice(0, 6).map((trend) => {
@@ -1081,22 +1117,20 @@ export function TeachersPage() {
                                         </p>
                                       )}
                                       <h4 className="mb-2 mt-4 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                                        {t("teachersPage.recentObservationsTitle")}
+                                        {t("teachersPage.actionItems")}
                                       </h4>
-                                      {roster?.recent_observations?.length ? (
+                                      {roster?.action_items?.length ? (
                                         <ul className="space-y-1 text-[11px] text-slate-600">
-                                          {roster.recent_observations.slice(0, 3).map((obs, i) => (
-                                            <li key={i} className="rounded bg-white px-2 py-1 border border-slate-200">
-                                              {obs.summary || obs.admin_comment || t("teachersPage.observationRecorded")}
+                                          {roster.action_items.map((item, idx) => (
+                                            <li key={idx} className="rounded bg-white px-2 py-1 border border-slate-200">
+                                              {item.title}
                                             </li>
                                           ))}
                                         </ul>
                                       ) : (
-                                        <p className="text-[11px] text-slate-500">{t("teachersPage.noRecentObservations")}</p>
+                                        <p className="text-[11px] text-slate-500">{t("teachersPage.noActionItems")}</p>
                                       )}
-                                    </div>
-                                    <div>
-                                      <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                      <h4 className="mb-2 mt-4 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                                         {t("teachersPage.quickActionsTitle")}
                                       </h4>
                                       <div className="flex flex-wrap gap-2">
@@ -1104,7 +1138,7 @@ export function TeachersPage() {
                                           to={`/teachers/${teacher.id}`}
                                           className="inline-flex items-center rounded bg-primary/10 px-2 py-1 text-[11px] text-primary hover:bg-primary/20"
                                         >
-                                          {t("teachersPage.viewProfile")}
+                                          {t("teachersPage.openDeepDive")}
                                         </Link>
                                         <Link
                                           to={`/videos?teacher_id=${teacher.id}`}

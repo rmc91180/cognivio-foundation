@@ -655,9 +655,12 @@ const he = {
     noUpcoming: "אין פריטים קרובים",
     upcoming: "{{count}} פריטים קרובים",
     trendSnapshot: "תמונת מצב של 30 יום",
+    latestClassSnapshot: "תמונת מצב של השיעור האחרון",
+    recurringPatternSnapshot: "תמונת מצב של דפוס חוזר",
     notEnoughTrendData: "אין מספיק תצפיות עדכניות כדי להציג מגמת 30 יום.",
     quickActions: "פעולות מהירות",
     viewProfile: "צפייה בפרופיל",
+    openDeepDive: "פתיחת עמוד עומק",
     viewVideos: "צפייה בסרטונים",
     save: "שמירה",
     enterCustomCategory: "יש להזין קטגוריה מותאמת",
@@ -998,6 +1001,18 @@ const he = {
     saveReflection: "שמירת רפלקציה",
     coachingWorkspace: "מרחב ליווי",
     coachingWorkspaceDescription: "ראו את מצב הליווי הנוכחי, בחרו את הצעד הבא, והעבירו אותו להמשך המעקב.",
+    pageGuideTitle: "איך להשתמש בעמוד הזה",
+    pageGuideDescription:
+      "התחילו מהשיעור האחרון, עברו אחר כך לדפוסים שחוזרים לאורך זמן, ורק אז החליטו על הצעד הניהולי הבא.",
+    pageGuideLatestTitle: "מתחילים מהשיעור האחרון",
+    pageGuideLatestDescription:
+      "השתמשו בראיות שמחוברות לשיעור האחרון כדי להבין מה קרה עכשיו ומה דורש המשך טיפול מיידי.",
+    pageGuidePatternsTitle: "אחר כך בודקים דפוסים חוזרים",
+    pageGuidePatternsDescription:
+      "השתמשו ברשומת הליווי ובמבט לאורך זמן כדי להבדיל בין אות חד-פעמי לבין מגמה מתמשכת.",
+    pageGuideActionsTitle: "מסיימים באזור הפעולה הניהולי",
+    pageGuideActionsDescription:
+      "קובעים שיחות, מבצעים עקיפות ומעדכנים תוכנית פעולה רק אחרי שהתמונה הראייתית ברורה.",
     coachingStatusLatestLesson: "השיעור האחרון שנבדק",
     coachingStatusGoals: "יעדים בתנועה",
     coachingStatusConference: "שיחת האימון הבאה",
@@ -1233,6 +1248,19 @@ const he = {
     viewHistory: "צפי בהיסטוריה שלי",
     returnHome: "חזרה לדף הבית של המרחב",
     workspaceTag: "מרחב בבעלות המורה",
+    activeSectionLabel: "החלק הפעיל",
+    startHereTitle: "כאן מתחילים השבוע",
+    startHereDescription:
+      "אם לא ברור מאיפה להתחיל, עברו על שלושת החלקים האלה לפי הסדר כדי לשמור על המרחב פשוט וברור.",
+    startHereLatestTitle: "1. סקירה של השיעור האחרון",
+    startHereLatestDescription:
+      "בדקו את המשוב החדש ביותר, את הצעד המיידי הבא, ואת כל הערה שדורשת תגובה.",
+    startHereGoalsTitle: "2. בדיקת יעדים מתמשכים",
+    startHereGoalsDescription:
+      "שמרו את יעדי הצמיחה ארוכי הטווח נפרדים ממה ששייך רק לשיעור האחרון.",
+    startHereMaterialsTitle: "3. העלאת חומרים ומידע פרטיות",
+    startHereMaterialsDescription:
+      "נהלו פרטיות, הקלטות שיעור ומסמכי הוראה במקום ברור אחד שבבעלות המורה.",
     noLinkedTeacherTitle: "עדיין אין קישור לפרופיל המורה",
     noLinkedTeacherDescription:
       "ההתחברות הזו עדיין לא מקושרת לפרופיל מורה. יש לקשר את חשבון המורה או להתאים כתובת דוא\"ל של מורה לפני השימוש במרחב.",
