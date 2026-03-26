@@ -16,6 +16,7 @@ const en = {
     cognivioLibrary: "Cognivio-wide",
     noSubject: "No subject",
     noDepartment: "No department",
+    close: "Close",
     score: "Score",
     trend: "Trend",
     observationsShort: "Obs",
@@ -687,6 +688,8 @@ const en = {
     reportExportFailed: "Failed to export report",
     addTeacherPanel: "Add teacher",
     trainingAddTeacherPanel: "Add cohort member",
+    creationDialogDescription:
+      "Keep teacher creation short here. Use school setup for school-wide structure and defaults.",
     name: "Name",
     email: "Email",
     subject: "Subject",
@@ -703,6 +706,8 @@ const en = {
     saveTeacher: "Save teacher",
     roster: "Roster",
     trainingRoster: "Cohort roster",
+    rosterDescription:
+      "See the active roster, open the right next page quickly, and keep setup work out of the daily teaching flow.",
     all: "All",
     performance: "Performance",
     trend: "Trend",
@@ -715,6 +720,13 @@ const en = {
     selectTeacherToExport: "Select a teacher to export",
     selectDepartmentToExport: "Select a department to export",
     resetFilters: "Reset filters",
+    manageSetup: "Manage school setup",
+    schoolManagementTitle: "School setup lives separately",
+    schoolManagementDescription:
+      "Create schools, frameworks, and recording defaults from School Setup so this page stays focused on roster work.",
+    openSchoolSetup: "Open school setup",
+    showExportTools: "Show export tools",
+    hideExportTools: "Hide export tools",
     visibleRoster: "Visible roster",
     scored: "Scored",
     needsSupport: "Needs support",
@@ -747,6 +759,9 @@ const en = {
     recurringPatternSnapshot: "Recurring pattern snapshot",
     notEnoughTrendData: "Not enough recent observations for a 30-day trend.",
     quickActions: "Quick actions",
+    openLatestLesson: "Open latest lesson",
+    openCoachingRecord: "Open coaching record",
+    openSchedule: "Open schedule",
     viewProfile: "View profile",
     openDeepDive: "Open deep dive",
     viewVideos: "View videos",
@@ -787,6 +802,13 @@ const en = {
     recentObservationsTitle: "Recent observations",
     quickActionsTitle: "Quick actions",
     categoryTitle: "Category",
+    filtersTitle: "Roster filters",
+    filtersDescription:
+      "Use these filters to narrow the roster without mixing setup, reporting, and coaching work together.",
+    scoredCountLine: "{{count}} teachers currently have scored evidence.",
+    exportToolsTitle: "Export tools",
+    exportToolsDescription:
+      "Keep exports available when needed without making them the main job of the roster page.",
   },
   videosPage: {
     title: "Lesson Recordings & Assessments",

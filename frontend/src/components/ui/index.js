@@ -5,5 +5,6 @@ export { Badge } from "./Badge";
 export { PageHeader } from "./PageHeader";
 export { PageContextHeader } from "./PageContextHeader";
 export { SectionHeader } from "./SectionHeader";
+export { Dialog } from "./Dialog";
 export { LoadingState, EmptyState, ErrorState, SuccessState } from "./StatePanel";
 export { TableShell, DataTable } from "./Table";

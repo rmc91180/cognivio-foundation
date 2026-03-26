@@ -41,6 +41,19 @@ test.describe('Admin Navigation Smoke', () => {
     await expect(page.getByRole('heading', { name: /^teachers$/i })).toBeVisible();
   });
 
+  test('uses the extracted add-teacher dialog and roster quick actions', async ({ page }) => {
+    await page.goto('/teachers');
+    await page.getByRole('button', { name: /add teacher/i }).click();
+    await expect(page.getByRole('dialog', { name: /add teacher/i })).toBeVisible();
+    await expect(page.getByText(/school setup lives separately/i)).toBeVisible();
+    await page.getByRole('button', { name: /^close$/i }).click();
+    await expect(page.getByRole('dialog', { name: /add teacher/i })).not.toBeVisible();
+
+    const quickActionsHeader = page.getByRole('columnheader', { name: /quick actions/i });
+    await expect(quickActionsHeader).toBeVisible();
+    await expect(page.getByRole('link', { name: /open coaching record/i }).first()).toBeVisible();
+  });
+
   test('loads the admin dashboard with current time-horizon lanes', async ({ page }) => {
     await expect(
       page.getByRole('heading', { name: /what needs action now/i })

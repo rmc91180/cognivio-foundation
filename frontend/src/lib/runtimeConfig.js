@@ -39,6 +39,14 @@ export const runtimeConfig = {
     getConfigValue("REACT_APP_GUIDED_ONBOARDING", "true") !== "false",
   improvedEmptyStatesEnabled:
     getConfigValue("REACT_APP_IMPROVED_EMPTY_STATES", "true") !== "false",
+  teacherCreationModalEnabled:
+    getConfigValue("REACT_APP_TEACHER_CREATION_MODAL", "true") !== "false",
+  schoolManagementSubflowEnabled:
+    getConfigValue("REACT_APP_SCHOOL_MANAGEMENT_SUBFLOW", "true") !== "false",
+  teacherRowQuickActionsEnabled:
+    getConfigValue("REACT_APP_TEACHER_ROW_QUICK_ACTIONS", "true") !== "false",
+  rosterHierarchyCleanupEnabled:
+    getConfigValue("REACT_APP_ROSTER_HIERARCHY_CLEANUP", "true") !== "false",
   trainingModeFoundationEnabled:
     getConfigValue("REACT_APP_TRAINING_MODE_FOUNDATION", "false") === "true",
   assessmentFeedbackEnabled:

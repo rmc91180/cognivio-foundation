@@ -16,6 +16,7 @@ const he = {
     cognivioLibrary: "לכל משתמשי קוגניביו",
     noSubject: "ללא מקצוע",
     noDepartment: "ללא מחלקה",
+    close: "סגירה",
     score: "ציון",
     trend: "מגמה",
     observationsShort: "תצפיות",
@@ -687,6 +688,8 @@ const he = {
     reportExportFailed: "ייצוא הדוח נכשל",
     addTeacherPanel: "הוספת מורה",
     trainingAddTeacherPanel: "הוספת חבר/ת קוהורט",
+    creationDialogDescription:
+      "כאן שומרים על יצירת מורה קצרה ופשוטה. ניהול בתי ספר, ברירות מחדל ומבנה כללי נשאר במסך הגדרות בית הספר.",
     name: "שם",
     email: "אימייל",
     subject: "מקצוע",
@@ -703,6 +706,8 @@ const he = {
     saveTeacher: "שמירת מורה",
     roster: "רשימה",
     trainingRoster: "רשימת הקוהורט",
+    rosterDescription:
+      "סקירת הרשימה הפעילה, פתיחה מהירה של העמוד הנכון, והשארת עבודת ההגדרה מחוץ לזרימת העבודה היומיומית.",
     all: "הכול",
     performance: "ביצועים",
     trend: "מגמה",
@@ -715,6 +720,13 @@ const he = {
     selectTeacherToExport: "יש לבחור מורה לייצוא",
     selectDepartmentToExport: "יש לבחור מחלקה לייצוא",
     resetFilters: "איפוס מסננים",
+    manageSetup: "ניהול הגדרות בית הספר",
+    schoolManagementTitle: "הגדרות בית הספר נשארות בנפרד",
+    schoolManagementDescription:
+      "יצירת בתי ספר, מסגרות הערכה וברירות מחדל להקלטה נעשית במסך הגדרות בית הספר כדי שהעמוד הזה יישאר ממוקד ברשימת המורים.",
+    openSchoolSetup: "פתיחת הגדרות בית הספר",
+    showExportTools: "הצגת כלי ייצוא",
+    hideExportTools: "הסתרת כלי ייצוא",
     visibleRoster: "מורים מוצגים",
     scored: "עם ניקוד",
     needsSupport: "זקוקים לתמיכה",
@@ -747,6 +759,9 @@ const he = {
     recurringPatternSnapshot: "תמונת מצב של דפוס חוזר",
     notEnoughTrendData: "אין מספיק תצפיות עדכניות כדי להציג מגמת 30 יום.",
     quickActions: "פעולות מהירות",
+    openLatestLesson: "פתיחת השיעור האחרון",
+    openCoachingRecord: "פתיחת רשומת הליווי",
+    openSchedule: "פתיחת לוח הזמנים",
     viewProfile: "צפייה בפרופיל",
     openDeepDive: "פתיחת עמוד עומק",
     viewVideos: "צפייה בסרטונים",
@@ -787,6 +802,13 @@ const he = {
     recentObservationsTitle: "תצפיות אחרונות",
     quickActionsTitle: "פעולות מהירות",
     categoryTitle: "קטגוריה",
+    filtersTitle: "מסנני רשימה",
+    filtersDescription:
+      "השתמשו במסננים כדי לצמצם את הרשימה בלי לערבב יחד הגדרות, ייצוא ועבודת ליווי.",
+    scoredCountLine: "ל־{{count}} מורים יש כרגע ראיות מדורגות.",
+    exportToolsTitle: "כלי ייצוא",
+    exportToolsDescription:
+      "כלי הייצוא זמינים כשצריך אותם, בלי להפוך אותם לעבודה הראשית של עמוד הרשימה.",
   },
   videosPage: {
     title: "סרטוני שיעור והערכות",
