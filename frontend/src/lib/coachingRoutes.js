@@ -22,7 +22,18 @@ export function getConferenceRoute(user, teacherId) {
 
 export function resolveCoachingLink(user, teacherId, routeHint, payload = {}) {
   if (routeHint === "video") {
-    return payload.videoId ? `/videos/${payload.videoId}` : "/videos";
+    if (!payload.videoId) {
+      return "/videos";
+    }
+    const search = new URLSearchParams();
+    if (
+      typeof payload.timestampSeconds === "number" &&
+      Number.isFinite(payload.timestampSeconds)
+    ) {
+      search.set("t", String(Math.max(0, Math.floor(payload.timestampSeconds))));
+    }
+    const query = search.toString();
+    return query ? `/videos/${payload.videoId}?${query}` : `/videos/${payload.videoId}`;
   }
   if (routeHint === "action_plan") {
     return getActionPlanRoute(user, teacherId);

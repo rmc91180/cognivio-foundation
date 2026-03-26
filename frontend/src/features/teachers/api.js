@@ -7,6 +7,7 @@ export const teacherApi = {
   update: (id, payload) => api.patch(`/api/teachers/${id}`, payload),
   conferencePrep: (id) => api.get(`/api/teachers/${id}/conference-prep`),
   conferenceAgenda: (id) => api.get(`/api/teachers/${id}/conference-agenda`),
+  evidenceCatalog: (id) => api.get(`/api/teachers/${id}/evidence-catalog`),
   publishConferenceAgenda: (id, payload) =>
     api.post(`/api/teachers/${id}/conference-agenda`, payload),
   coachingTimeline: (id) => api.get(`/api/teachers/${id}/coaching-timeline`),

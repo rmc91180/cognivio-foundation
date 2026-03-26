@@ -2665,6 +2665,10 @@ class ActionPlanGoal(BaseModel):
     due_date: Optional[str] = None
     status: Optional[str] = "planned"
     evidence_links: Optional[List[str]] = None
+    evidence_records: List["EvidenceRecord"] = []
+    progress_signal: Optional[str] = None
+    progress_summary: Optional[str] = None
+    latest_evidence_at: Optional[str] = None
 
 
 class ActionPlan(BaseModel):
@@ -2698,6 +2702,12 @@ class SummaryReflection(BaseModel):
     teacher_id: str
     self_reflection: Optional[str] = None
     actions_taken: Optional[str] = None
+    linked_goal_ids: List[str] = []
+    linked_goal_titles: List[str] = []
+    linked_video_id: Optional[str] = None
+    linked_assessment_id: Optional[str] = None
+    linked_observation_id: Optional[str] = None
+    linked_evidence_records: List["EvidenceRecord"] = []
     created_at: str
     updated_at: Optional[str] = None
 
@@ -2705,6 +2715,32 @@ class SummaryReflection(BaseModel):
 class SummaryReflectionUpsert(BaseModel):
     self_reflection: Optional[str] = None
     actions_taken: Optional[str] = None
+    linked_goal_ids: List[str] = []
+    linked_video_id: Optional[str] = None
+    linked_assessment_id: Optional[str] = None
+    linked_observation_id: Optional[str] = None
+
+
+class EvidenceRecord(BaseModel):
+    id: str
+    teacher_id: str
+    evidence_type: str
+    title: str
+    summary: Optional[str] = None
+    created_at: Optional[str] = None
+    route_hint: Optional[str] = "video"
+    video_id: Optional[str] = None
+    assessment_id: Optional[str] = None
+    observation_id: Optional[str] = None
+    timestamp_seconds: Optional[float] = None
+    signal: Optional[str] = None
+    reference_key: Optional[str] = None
+
+
+class TeacherEvidenceCatalogResponse(BaseModel):
+    teacher_id: str
+    teacher_name: Optional[str] = None
+    items: List[EvidenceRecord]
 
 
 class ReflectionHistoryEntry(BaseModel):
@@ -2716,6 +2752,12 @@ class ReflectionHistoryEntry(BaseModel):
     author_role: Optional[str] = None
     self_reflection: Optional[str] = None
     actions_taken: Optional[str] = None
+    linked_goal_ids: List[str] = []
+    linked_goal_titles: List[str] = []
+    linked_video_id: Optional[str] = None
+    linked_assessment_id: Optional[str] = None
+    linked_observation_id: Optional[str] = None
+    linked_evidence_records: List[EvidenceRecord] = []
     saved_at: str
     updated_at: Optional[str] = None
 
@@ -2723,6 +2765,10 @@ class ReflectionHistoryEntry(BaseModel):
 class ReflectionHistoryResponse(BaseModel):
     current_entries: List[ReflectionHistoryEntry]
     history: List[ReflectionHistoryEntry]
+
+
+ActionPlanGoal.model_rebuild()
+SummaryReflection.model_rebuild()
 
 
 class ConferenceAgendaRecord(BaseModel):
@@ -6278,6 +6324,345 @@ async def _get_latest_published_conference_agenda(teacher_id: str) -> Optional[d
     )
 
 
+def _serialize_action_plan_goal(goal: Any) -> dict:
+    if isinstance(goal, ActionPlanGoal):
+        return {
+            "id": goal.id,
+            "title": goal.title,
+            "description": goal.description,
+            "due_date": goal.due_date,
+            "status": goal.status,
+            "evidence_links": list(goal.evidence_links or []),
+        }
+    return {
+        "id": goal.get("id", ""),
+        "title": goal.get("title", ""),
+        "description": goal.get("description"),
+        "due_date": goal.get("due_date"),
+        "status": goal.get("status") or "planned",
+        "evidence_links": list(goal.get("evidence_links") or []),
+    }
+
+
+def _tokenize_goal_terms(*parts: Optional[str]) -> List[str]:
+    tokens: List[str] = []
+    seen = set()
+    for part in parts:
+        for token in re.findall(r"[\w\u0590-\u05FF']+", str(part or "").lower()):
+            clean = token.strip("_'")
+            if len(clean) < 4:
+                continue
+            if clean in seen:
+                continue
+            seen.add(clean)
+            tokens.append(clean)
+    return tokens
+
+
+def _goal_match_score(goal_terms: List[str], *parts: Optional[str]) -> int:
+    haystack = " ".join(str(part or "").lower() for part in parts)
+    return sum(1 for token in goal_terms if token in haystack)
+
+
+def _format_evidence_record_title(
+    label: str,
+    video: Optional[dict],
+    created_at: Optional[str],
+) -> str:
+    video_label = (video or {}).get("filename") or (video or {}).get("subject")
+    if video_label:
+        return f"{label}: {video_label}"
+    if created_at:
+        parsed = _parse_iso_datetime(created_at)
+        if parsed:
+            return f"{label}: {parsed.date().isoformat()}"
+    return label
+
+
+async def _build_teacher_evidence_catalog(
+    teacher: dict,
+    current_user: dict,
+    *,
+    limit: int = 40,
+) -> List[dict]:
+    teacher_id = teacher["id"]
+    owner_id = _resolve_plan_owner_id(teacher, current_user)
+    assessment_docs = await db.assessments.find(
+        {"teacher_id": teacher_id, "user_id": owner_id},
+        {"_id": 0},
+    ).sort("analyzed_at", -1).to_list(20)
+    observation_docs = await db.observations.find(
+        {"teacher_id": teacher_id, "user_id": owner_id},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(30)
+
+    video_ids = {
+        doc.get("video_id")
+        for doc in assessment_docs + observation_docs
+        if doc.get("video_id")
+    }
+    videos = (
+        await db.videos.find({"id": {"$in": list(video_ids or ['__none__'])}}, {"_id": 0}).to_list(50)
+        if video_ids
+        else []
+    )
+    video_map = {video.get("id"): video for video in videos if video.get("id")}
+
+    items: List[dict] = []
+
+    for assessment in assessment_docs:
+        created_at = assessment.get("analyzed_at") or assessment.get("created_at")
+        video = video_map.get(assessment.get("video_id"))
+        if assessment.get("summary"):
+            items.append(
+                {
+                    "id": f"assessment-summary-{assessment.get('id')}",
+                    "teacher_id": teacher_id,
+                    "evidence_type": "assessment_summary",
+                    "title": _format_evidence_record_title("Lesson review", video, created_at),
+                    "summary": str(assessment.get("summary")).strip(),
+                    "created_at": created_at,
+                    "route_hint": "video",
+                    "video_id": assessment.get("video_id"),
+                    "assessment_id": assessment.get("id"),
+                    "signal": "linked_context",
+                    "reference_key": f"assessment:{assessment.get('id')}:summary",
+                }
+            )
+
+        for idx, recommendation in enumerate(assessment.get("recommendations") or []):
+            text = str(recommendation or "").strip()
+            if not text:
+                continue
+            items.append(
+                {
+                    "id": f"assessment-recommendation-{assessment.get('id')}-{idx}",
+                    "teacher_id": teacher_id,
+                    "evidence_type": "assessment_recommendation",
+                    "title": _format_evidence_record_title("AI coaching move", video, created_at),
+                    "summary": text,
+                    "created_at": created_at,
+                    "route_hint": "video",
+                    "video_id": assessment.get("video_id"),
+                    "assessment_id": assessment.get("id"),
+                    "signal": "showing_challenge",
+                    "reference_key": f"assessment:{assessment.get('id')}:recommendation:{idx}",
+                }
+            )
+
+        observation_summary = assessment.get("observation_summary") or {}
+        for idx, text in enumerate(observation_summary.get("top_strengths") or []):
+            text = str(text or "").strip()
+            if not text:
+                continue
+            items.append(
+                {
+                    "id": f"assessment-strength-{assessment.get('id')}-{idx}",
+                    "teacher_id": teacher_id,
+                    "evidence_type": "assessment_strength",
+                    "title": _format_evidence_record_title("Observed strength", video, created_at),
+                    "summary": text,
+                    "created_at": created_at,
+                    "route_hint": "video",
+                    "video_id": assessment.get("video_id"),
+                    "assessment_id": assessment.get("id"),
+                    "signal": "reinforcing_progress",
+                    "reference_key": f"assessment:{assessment.get('id')}:strength:{idx}",
+                }
+            )
+        for idx, text in enumerate(observation_summary.get("growth_areas") or []):
+            text = str(text or "").strip()
+            if not text:
+                continue
+            items.append(
+                {
+                    "id": f"assessment-growth-{assessment.get('id')}-{idx}",
+                    "teacher_id": teacher_id,
+                    "evidence_type": "assessment_growth_area",
+                    "title": _format_evidence_record_title("Growth area", video, created_at),
+                    "summary": text,
+                    "created_at": created_at,
+                    "route_hint": "video",
+                    "video_id": assessment.get("video_id"),
+                    "assessment_id": assessment.get("id"),
+                    "signal": "showing_challenge",
+                    "reference_key": f"assessment:{assessment.get('id')}:growth:{idx}",
+                }
+            )
+
+    for observation in observation_docs:
+        created_at = observation.get("created_at") or observation.get("updated_at")
+        for kind, summary, signal in (
+            ("admin_comment", observation.get("admin_comment"), "showing_challenge"),
+            ("teacher_response", observation.get("teacher_response"), "follow_through"),
+        ):
+            text = str(summary or "").strip()
+            if not text:
+                continue
+            label = "Admin observation" if kind == "admin_comment" else "Teacher follow-through"
+            items.append(
+                {
+                    "id": f"{kind}-{observation.get('id')}",
+                    "teacher_id": teacher_id,
+                    "evidence_type": kind,
+                    "title": _format_evidence_record_title(label, video_map.get(observation.get("video_id")), created_at),
+                    "summary": text,
+                    "created_at": created_at,
+                    "route_hint": "video" if observation.get("video_id") else "reflection",
+                    "video_id": observation.get("video_id"),
+                    "observation_id": observation.get("id"),
+                    "timestamp_seconds": observation.get("timestamp_seconds"),
+                    "signal": signal,
+                    "reference_key": f"observation:{observation.get('id')}:{kind}",
+                }
+            )
+
+    items.sort(key=lambda item: _sort_key_for_iso(item.get("created_at")), reverse=True)
+    return items[:limit]
+
+
+def _progress_signal_from_evidence(records: List[dict]) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    if not records:
+        return (
+            "evidence_gap",
+            "No recent linked evidence is attached to this goal yet.",
+            None,
+        )
+    latest_created_at = records[0].get("created_at")
+    positive = sum(
+        1
+        for record in records
+        if record.get("signal") in {"reinforcing_progress", "follow_through"}
+    )
+    challenge = sum(1 for record in records if record.get("signal") == "showing_challenge")
+    if positive >= 2 and positive > challenge:
+        return (
+            "reinforcing_progress",
+            f"Recent evidence is reinforcing this goal across {positive} linked records.",
+            latest_created_at,
+        )
+    if challenge >= 2 and challenge >= positive:
+        return (
+            "repeated_challenge",
+            f"Recent evidence shows this challenge repeating across {challenge} linked records.",
+            latest_created_at,
+        )
+    if positive or challenge:
+        return (
+            "one_off_evidence",
+            "There is only limited evidence linked to this goal so far. Review the next lesson before changing course.",
+            latest_created_at,
+        )
+    return (
+        "linked_context",
+        "Context is linked to this goal, but it does not yet show a strong evidence pattern.",
+        latest_created_at,
+    )
+
+
+def _enrich_action_plan_goals_with_evidence(
+    goals: List[dict],
+    evidence_catalog: List[dict],
+) -> List[dict]:
+    by_reference = {
+        item.get("reference_key"): item
+        for item in evidence_catalog
+        if item.get("reference_key")
+    }
+    enriched: List[dict] = []
+    for goal in goals:
+        goal_doc = dict(goal)
+        goal_terms = _tokenize_goal_terms(goal_doc.get("title"), goal_doc.get("description"))
+        selected: List[dict] = []
+        seen = set()
+
+        for reference_key in goal_doc.get("evidence_links") or []:
+            record = by_reference.get(reference_key)
+            if not record:
+                continue
+            selected.append(record)
+            seen.add(record.get("id"))
+
+        if goal_terms:
+            for record in evidence_catalog:
+                if record.get("id") in seen:
+                    continue
+                score = _goal_match_score(goal_terms, record.get("title"), record.get("summary"))
+                if score <= 0:
+                    continue
+                selected.append(record)
+                seen.add(record.get("id"))
+                if len(selected) >= 4:
+                    break
+
+        selected.sort(key=lambda item: _sort_key_for_iso(item.get("created_at")), reverse=True)
+        progress_signal, progress_summary, latest_evidence_at = _progress_signal_from_evidence(selected)
+        goal_doc["evidence_records"] = selected[:4]
+        goal_doc["progress_signal"] = progress_signal
+        goal_doc["progress_summary"] = progress_summary
+        goal_doc["latest_evidence_at"] = latest_evidence_at
+        enriched.append(goal_doc)
+    return enriched
+
+
+def _collect_linked_evidence_for_reflection(
+    doc: dict,
+    *,
+    goal_map: Dict[str, dict],
+    evidence_catalog: List[dict],
+) -> tuple[List[str], List[dict]]:
+    linked_goal_ids = list(doc.get("linked_goal_ids") or [])
+    linked_goal_titles = [
+        goal_map[goal_id].get("title")
+        for goal_id in linked_goal_ids
+        if goal_id in goal_map and goal_map[goal_id].get("title")
+    ]
+    linked_records: List[dict] = []
+    seen = set()
+
+    def push(record: Optional[dict]) -> None:
+        if not record or record.get("id") in seen:
+            return
+        linked_records.append(record)
+        seen.add(record.get("id"))
+
+    for record in evidence_catalog:
+        if doc.get("linked_observation_id") and record.get("observation_id") == doc.get("linked_observation_id"):
+            push(record)
+        if doc.get("linked_assessment_id") and record.get("assessment_id") == doc.get("linked_assessment_id"):
+            push(record)
+        if doc.get("linked_video_id") and record.get("video_id") == doc.get("linked_video_id"):
+            push(record)
+
+    for goal_id in linked_goal_ids:
+        for record in (goal_map.get(goal_id) or {}).get("evidence_records") or []:
+            push(record)
+            if len(linked_records) >= 4:
+                break
+        if len(linked_records) >= 4:
+            break
+
+    linked_records.sort(key=lambda item: _sort_key_for_iso(item.get("created_at")), reverse=True)
+    return linked_goal_titles, linked_records[:4]
+
+
+def _enrich_reflection_payload(
+    doc: dict,
+    *,
+    goal_map: Dict[str, dict],
+    evidence_catalog: List[dict],
+) -> dict:
+    enriched = dict(doc)
+    linked_goal_titles, linked_records = _collect_linked_evidence_for_reflection(
+        enriched,
+        goal_map=goal_map,
+        evidence_catalog=evidence_catalog,
+    )
+    enriched["linked_goal_titles"] = linked_goal_titles
+    enriched["linked_evidence_records"] = linked_records
+    return enriched
+
+
 async def _build_teacher_coaching_timeline(
     teacher: dict,
     current_user: dict,
@@ -6652,14 +7037,30 @@ async def get_teacher_summary_reflection(
     teacher_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    await _get_teacher_or_404(teacher_id, current_user)
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
     doc = await db.summary_reflections.find_one(
         {"teacher_id": teacher_id, "user_id": current_user["id"]},
         {"_id": 0, "user_id": 0},
     )
     if not doc:
         return None
-    return SummaryReflection(**doc)
+    evidence_catalog = await _build_teacher_evidence_catalog(teacher, current_user)
+    action_plan_doc = await db.action_plans.find_one(
+        {"teacher_id": teacher_id, "user_id": _resolve_plan_owner_id(teacher, current_user)},
+        {"_id": 0, "user_id": 0},
+    ) or {"goals": []}
+    enriched_goals = _enrich_action_plan_goals_with_evidence(
+        action_plan_doc.get("goals") or [],
+        evidence_catalog,
+    )
+    goal_map = {goal.get("id"): goal for goal in enriched_goals if goal.get("id")}
+    return SummaryReflection(
+        **_enrich_reflection_payload(
+            doc,
+            goal_map=goal_map,
+            evidence_catalog=evidence_catalog,
+        )
+    )
 
 
 @api_router.post(
@@ -6686,6 +7087,10 @@ async def upsert_teacher_summary_reflection(
             update_fields["self_reflection"] = payload.self_reflection
         if payload.actions_taken is not None:
             update_fields["actions_taken"] = payload.actions_taken
+        update_fields["linked_goal_ids"] = list(payload.linked_goal_ids or [])
+        update_fields["linked_video_id"] = payload.linked_video_id
+        update_fields["linked_assessment_id"] = payload.linked_assessment_id
+        update_fields["linked_observation_id"] = payload.linked_observation_id
         await db.summary_reflections.update_one(
             {"teacher_id": teacher_id, "user_id": current_user["id"]},
             {"$set": update_fields},
@@ -6701,6 +7106,10 @@ async def upsert_teacher_summary_reflection(
                 "author_role": _get_user_role(current_user),
                 "self_reflection": existing.get("self_reflection") or "",
                 "actions_taken": existing.get("actions_taken") or "",
+                "linked_goal_ids": list(existing.get("linked_goal_ids") or []),
+                "linked_video_id": existing.get("linked_video_id"),
+                "linked_assessment_id": existing.get("linked_assessment_id"),
+                "linked_observation_id": existing.get("linked_observation_id"),
                 "saved_at": now,
                 "updated_at": existing.get("updated_at"),
             }
@@ -6708,7 +7117,24 @@ async def upsert_teacher_summary_reflection(
         existing.pop("_id", None)
         existing.pop("user_id", None)
         await sync_summary_reflection_memory(current_user, teacher_id, existing)
-        return SummaryReflection(**existing)
+        teacher = await _get_teacher_or_404(teacher_id, current_user)
+        evidence_catalog = await _build_teacher_evidence_catalog(teacher, current_user)
+        action_plan_doc = await db.action_plans.find_one(
+            {"teacher_id": teacher_id, "user_id": _resolve_plan_owner_id(teacher, current_user)},
+            {"_id": 0, "user_id": 0},
+        ) or {"goals": []}
+        enriched_goals = _enrich_action_plan_goals_with_evidence(
+            action_plan_doc.get("goals") or [],
+            evidence_catalog,
+        )
+        goal_map = {goal.get("id"): goal for goal in enriched_goals if goal.get("id")}
+        return SummaryReflection(
+            **_enrich_reflection_payload(
+                existing,
+                goal_map=goal_map,
+                evidence_catalog=evidence_catalog,
+            )
+        )
 
     doc = {
         "id": str(uuid.uuid4()),
@@ -6716,6 +7142,10 @@ async def upsert_teacher_summary_reflection(
         "user_id": current_user["id"],
         "self_reflection": payload.self_reflection or "",
         "actions_taken": payload.actions_taken or "",
+        "linked_goal_ids": list(payload.linked_goal_ids or []),
+        "linked_video_id": payload.linked_video_id,
+        "linked_assessment_id": payload.linked_assessment_id,
+        "linked_observation_id": payload.linked_observation_id,
         "created_at": now,
         "updated_at": None,
     }
@@ -6730,6 +7160,10 @@ async def upsert_teacher_summary_reflection(
             "author_role": _get_user_role(current_user),
             "self_reflection": doc.get("self_reflection") or "",
             "actions_taken": doc.get("actions_taken") or "",
+            "linked_goal_ids": list(doc.get("linked_goal_ids") or []),
+            "linked_video_id": doc.get("linked_video_id"),
+            "linked_assessment_id": doc.get("linked_assessment_id"),
+            "linked_observation_id": doc.get("linked_observation_id"),
             "saved_at": now,
             "updated_at": None,
         }
@@ -6737,7 +7171,24 @@ async def upsert_teacher_summary_reflection(
     await sync_summary_reflection_memory(current_user, teacher_id, doc)
     doc.pop("_id", None)
     doc.pop("user_id", None)
-    return SummaryReflection(**doc)
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    evidence_catalog = await _build_teacher_evidence_catalog(teacher, current_user)
+    action_plan_doc = await db.action_plans.find_one(
+        {"teacher_id": teacher_id, "user_id": _resolve_plan_owner_id(teacher, current_user)},
+        {"_id": 0, "user_id": 0},
+    ) or {"goals": []}
+    enriched_goals = _enrich_action_plan_goals_with_evidence(
+        action_plan_doc.get("goals") or [],
+        evidence_catalog,
+    )
+    goal_map = {goal.get("id"): goal for goal in enriched_goals if goal.get("id")}
+    return SummaryReflection(
+        **_enrich_reflection_payload(
+            doc,
+            goal_map=goal_map,
+            evidence_catalog=evidence_catalog,
+        )
+    )
 
 
 @api_router.get(
@@ -6749,6 +7200,16 @@ async def get_teacher_reflection_history(
     current_user: dict = Depends(get_current_user),
 ):
     teacher = await _get_teacher_or_404(teacher_id, current_user)
+    evidence_catalog = await _build_teacher_evidence_catalog(teacher, current_user)
+    action_plan_doc = await db.action_plans.find_one(
+        {"teacher_id": teacher_id, "user_id": _resolve_plan_owner_id(teacher, current_user)},
+        {"_id": 0, "user_id": 0},
+    ) or {"goals": []}
+    enriched_goals = _enrich_action_plan_goals_with_evidence(
+        action_plan_doc.get("goals") or [],
+        evidence_catalog,
+    )
+    goal_map = {goal.get("id"): goal for goal in enriched_goals if goal.get("id")}
     participants = await _list_coaching_participants(teacher, current_user)
     visible_user_ids = [item["user_id"] for item in participants if item.get("user_id")]
     participant_map = {item["user_id"]: item for item in participants if item.get("user_id")}
@@ -6765,36 +7226,58 @@ async def get_teacher_reflection_history(
     current_entries = []
     for doc in current_docs:
         participant = participant_map.get(doc.get("user_id"), {})
+        enriched_doc = _enrich_reflection_payload(
+            doc,
+            goal_map=goal_map,
+            evidence_catalog=evidence_catalog,
+        )
         current_entries.append(
             ReflectionHistoryEntry(
-                id=doc.get("id") or str(uuid.uuid4()),
+                id=enriched_doc.get("id") or str(uuid.uuid4()),
                 teacher_id=teacher_id,
-                reflection_id=doc.get("id"),
-                author_user_id=doc.get("user_id"),
+                reflection_id=enriched_doc.get("id"),
+                author_user_id=enriched_doc.get("user_id"),
                 author_name=participant.get("name") or current_user.get("name"),
                 author_role=participant.get("role") or "teacher",
-                self_reflection=doc.get("self_reflection"),
-                actions_taken=doc.get("actions_taken"),
-                saved_at=doc.get("updated_at") or doc.get("created_at") or "",
-                updated_at=doc.get("updated_at"),
+                self_reflection=enriched_doc.get("self_reflection"),
+                actions_taken=enriched_doc.get("actions_taken"),
+                linked_goal_ids=list(enriched_doc.get("linked_goal_ids") or []),
+                linked_goal_titles=list(enriched_doc.get("linked_goal_titles") or []),
+                linked_video_id=enriched_doc.get("linked_video_id"),
+                linked_assessment_id=enriched_doc.get("linked_assessment_id"),
+                linked_observation_id=enriched_doc.get("linked_observation_id"),
+                linked_evidence_records=list(enriched_doc.get("linked_evidence_records") or []),
+                saved_at=enriched_doc.get("updated_at") or enriched_doc.get("created_at") or "",
+                updated_at=enriched_doc.get("updated_at"),
             )
         )
 
     history_entries = []
     for doc in history_docs:
         participant = participant_map.get(doc.get("author_user_id"), {})
+        enriched_doc = _enrich_reflection_payload(
+            doc,
+            goal_map=goal_map,
+            evidence_catalog=evidence_catalog,
+        )
         history_entries.append(
             ReflectionHistoryEntry(
-                id=doc.get("id") or str(uuid.uuid4()),
+                id=enriched_doc.get("id") or str(uuid.uuid4()),
                 teacher_id=teacher_id,
-                reflection_id=doc.get("reflection_id"),
-                author_user_id=doc.get("author_user_id"),
-                author_name=doc.get("author_name") or participant.get("name"),
-                author_role=doc.get("author_role") or participant.get("role") or "teacher",
-                self_reflection=doc.get("self_reflection"),
-                actions_taken=doc.get("actions_taken"),
-                saved_at=doc.get("saved_at") or "",
-                updated_at=doc.get("updated_at"),
+                reflection_id=enriched_doc.get("reflection_id"),
+                author_user_id=enriched_doc.get("author_user_id"),
+                author_name=enriched_doc.get("author_name") or participant.get("name"),
+                author_role=enriched_doc.get("author_role") or participant.get("role") or "teacher",
+                self_reflection=enriched_doc.get("self_reflection"),
+                actions_taken=enriched_doc.get("actions_taken"),
+                linked_goal_ids=list(enriched_doc.get("linked_goal_ids") or []),
+                linked_goal_titles=list(enriched_doc.get("linked_goal_titles") or []),
+                linked_video_id=enriched_doc.get("linked_video_id"),
+                linked_assessment_id=enriched_doc.get("linked_assessment_id"),
+                linked_observation_id=enriched_doc.get("linked_observation_id"),
+                linked_evidence_records=list(enriched_doc.get("linked_evidence_records") or []),
+                saved_at=enriched_doc.get("saved_at") or "",
+                updated_at=enriched_doc.get("updated_at"),
             )
         )
 
@@ -8522,6 +9005,7 @@ async def get_action_plan(
 ):
     teacher = await _get_teacher_or_404(teacher_id, current_user)
     plan_owner_id = _resolve_plan_owner_id(teacher, current_user)
+    evidence_catalog = await _build_teacher_evidence_catalog(teacher, current_user)
 
     plan = await db.action_plans.find_one(
         {"teacher_id": teacher_id, "user_id": plan_owner_id},
@@ -8536,6 +9020,10 @@ async def get_action_plan(
             created_at=None,
             updated_at=None,
         )
+    plan["goals"] = _enrich_action_plan_goals_with_evidence(
+        plan.get("goals") or [],
+        evidence_catalog,
+    )
     return ActionPlan(**plan)
 
 
@@ -8551,6 +9039,7 @@ async def get_action_plan_history(
 ):
     teacher = await _get_teacher_or_404(teacher_id, current_user)
     plan_owner_id = _resolve_plan_owner_id(teacher, current_user)
+    evidence_catalog = await _build_teacher_evidence_catalog(teacher, current_user)
     current_plan_doc = await db.action_plans.find_one(
         {"teacher_id": teacher_id, "user_id": plan_owner_id},
         {"_id": 0, "user_id": 0},
@@ -8573,8 +9062,39 @@ async def get_action_plan_history(
             }
         )
     )
-    history = [ActionPlanHistoryEntry(**doc) for doc in history_docs]
+    current_plan.goals = [
+        ActionPlanGoal(**goal)
+        for goal in _enrich_action_plan_goals_with_evidence(
+            [goal.dict() for goal in current_plan.goals],
+            evidence_catalog,
+        )
+    ]
+    history = []
+    for doc in history_docs:
+        entry_doc = dict(doc)
+        entry_doc["goals"] = _enrich_action_plan_goals_with_evidence(
+            entry_doc.get("goals") or [],
+            evidence_catalog,
+        )
+        history.append(ActionPlanHistoryEntry(**entry_doc))
     return ActionPlanHistoryResponse(current_plan=current_plan, history=history)
+
+
+@api_router.get(
+    "/teachers/{teacher_id}/evidence-catalog",
+    response_model=TeacherEvidenceCatalogResponse,
+)
+async def get_teacher_evidence_catalog(
+    teacher_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    items = await _build_teacher_evidence_catalog(teacher, current_user)
+    return TeacherEvidenceCatalogResponse(
+        teacher_id=teacher_id,
+        teacher_name=teacher.get("name"),
+        items=[EvidenceRecord(**item) for item in items],
+    )
 
 
 @api_router.get("/teachers/{teacher_id}/coaching-timeline", response_model=CoachingTimelineResponse)
@@ -8624,7 +9144,7 @@ async def save_action_plan(
     now = datetime.now(timezone.utc).isoformat()
     if existing:
         update_doc = {
-            "goals": [goal.dict() for goal in payload.goals],
+            "goals": [_serialize_action_plan_goal(goal) for goal in payload.goals],
             "notes": payload.notes,
             "updated_at": now,
         }
@@ -8639,7 +9159,7 @@ async def save_action_plan(
         doc = {
             "id": plan_id,
             "teacher_id": teacher_id,
-            "goals": [goal.dict() for goal in payload.goals],
+            "goals": [_serialize_action_plan_goal(goal) for goal in payload.goals],
             "notes": payload.notes,
             "user_id": plan_owner_id,
             "created_at": created_at,

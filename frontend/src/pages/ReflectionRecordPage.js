@@ -6,8 +6,9 @@ import { toast } from "sonner";
 import { LayoutShell } from "@/components/LayoutShell";
 import { Button, PageHeader, Panel, SectionHeader } from "@/components/ui";
 import { CoachingTimelinePanel } from "@/components/coaching/CoachingTimelinePanel";
+import { EvidenceRecordList } from "@/components/coaching/EvidenceRecordList";
 import { useAuth } from "@/hooks/useAuth";
-import { assessmentApi, teacherApi } from "@/lib/api";
+import { actionPlanApi, assessmentApi, teacherApi } from "@/lib/api";
 import { isAdminUser } from "@/lib/userRoutes";
 
 export function ReflectionRecordPage() {
@@ -34,6 +35,16 @@ export function ReflectionRecordPage() {
     enabled: Boolean(teacherId),
     queryFn: () => assessmentApi.teacherReflectionHistory(teacherId).then((r) => r.data),
   });
+  const { data: actionPlanRes } = useQuery({
+    queryKey: ["action-plan", teacherId],
+    enabled: Boolean(teacherId),
+    queryFn: () => actionPlanApi.get(teacherId).then((r) => r.data),
+  });
+  const { data: evidenceCatalogRes } = useQuery({
+    queryKey: ["teacher-evidence-catalog", teacherId],
+    enabled: Boolean(teacherId),
+    queryFn: () => teacherApi.evidenceCatalog(teacherId).then((r) => r.data),
+  });
   const { data: coachingTimelineRes } = useQuery({
     queryKey: ["teacher-coaching-timeline", teacherId],
     enabled: Boolean(teacherId),
@@ -42,10 +53,18 @@ export function ReflectionRecordPage() {
 
   const [selfReflection, setSelfReflection] = useState("");
   const [actionsTaken, setActionsTaken] = useState("");
+  const [linkedGoalIds, setLinkedGoalIds] = useState([]);
+  const [linkedVideoId, setLinkedVideoId] = useState("");
+  const [linkedAssessmentId, setLinkedAssessmentId] = useState("");
+  const [linkedObservationId, setLinkedObservationId] = useState("");
 
   useEffect(() => {
     setSelfReflection(currentReflectionRes?.self_reflection || "");
     setActionsTaken(currentReflectionRes?.actions_taken || "");
+    setLinkedGoalIds(currentReflectionRes?.linked_goal_ids || []);
+    setLinkedVideoId(currentReflectionRes?.linked_video_id || "");
+    setLinkedAssessmentId(currentReflectionRes?.linked_assessment_id || "");
+    setLinkedObservationId(currentReflectionRes?.linked_observation_id || "");
   }, [currentReflectionRes]);
 
   const saveReflectionMutation = useMutation({
@@ -80,6 +99,31 @@ export function ReflectionRecordPage() {
       null,
     [currentEntries, reflectionHistory]
   );
+  const lessonEvidenceOptions = useMemo(() => {
+    const seen = new Set();
+    return (evidenceCatalogRes?.items || []).filter((item) => {
+      const key = item.assessment_id || item.video_id;
+      if (!key || seen.has(key) || item.evidence_type !== "assessment_summary") {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+  }, [evidenceCatalogRes]);
+  const adminCommentOptions = useMemo(
+    () =>
+      (evidenceCatalogRes?.items || []).filter(
+        (item) => item.evidence_type === "admin_comment"
+      ),
+    [evidenceCatalogRes]
+  );
+  const toggleGoalLink = (goalId) => {
+    setLinkedGoalIds((prev) =>
+      prev.includes(goalId)
+        ? prev.filter((item) => item !== goalId)
+        : [...prev, goalId]
+    );
+  };
 
   const editorTitle = isAdmin
     ? t("teacherProfile.adminReflectionTitle")
@@ -145,6 +189,10 @@ export function ReflectionRecordPage() {
                   saveReflectionMutation.mutate({
                     self_reflection: selfReflection,
                     actions_taken: actionsTaken,
+                    linked_goal_ids: linkedGoalIds,
+                    linked_video_id: linkedVideoId || null,
+                    linked_assessment_id: linkedAssessmentId || null,
+                    linked_observation_id: linkedObservationId || null,
                   })
                 }
                 disabled={saveReflectionMutation.isPending}
@@ -220,6 +268,99 @@ export function ReflectionRecordPage() {
               />
             </div>
           </div>
+          <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 px-4 py-4">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              {t("teacherProfile.anchorReflectionTitle")}
+            </div>
+            <div className="mt-1 text-xs text-slate-600">
+              {t("teacherProfile.anchorReflectionDescription")}
+            </div>
+            <div className="mt-4 grid gap-4 lg:grid-cols-3">
+              <div>
+                <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  {t("teacherProfile.linkedGoalsTitle")}
+                </div>
+                <div className="space-y-2">
+                  {(actionPlanRes?.goals || []).length ? (
+                    actionPlanRes.goals
+                      .filter((goal) => goal?.title)
+                      .map((goal) => (
+                        <label
+                          key={goal.id}
+                          className="flex items-start gap-2 text-xs text-slate-700"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={linkedGoalIds.includes(goal.id)}
+                            onChange={() => toggleGoalLink(goal.id)}
+                            className="mt-0.5"
+                          />
+                          <span>{goal.title}</span>
+                        </label>
+                      ))
+                  ) : (
+                    <div className="text-xs text-slate-500">
+                      {t("teacherProfile.noSharedGoalsYet")}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div>
+                <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  {t("teacherProfile.linkedLessonTitle")}
+                </label>
+                <select
+                  value={linkedAssessmentId || linkedVideoId || ""}
+                  onChange={(e) => {
+                    const selected = lessonEvidenceOptions.find(
+                      (item) =>
+                        item.assessment_id === e.target.value || item.video_id === e.target.value
+                    );
+                    setLinkedAssessmentId(selected?.assessment_id || "");
+                    setLinkedVideoId(selected?.video_id || "");
+                  }}
+                  className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700"
+                >
+                  <option value="">{t("teacherProfile.selectLessonPlaceholder")}</option>
+                  {lessonEvidenceOptions.map((item) => (
+                    <option
+                      key={item.id}
+                      value={item.assessment_id || item.video_id || ""}
+                    >
+                      {item.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  {t("teacherProfile.linkedAdminCommentTitle")}
+                </label>
+                <select
+                  value={linkedObservationId || ""}
+                  onChange={(e) => setLinkedObservationId(e.target.value)}
+                  className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700"
+                >
+                  <option value="">{t("teacherProfile.selectAdminCommentPlaceholder")}</option>
+                  {adminCommentOptions.map((item) => (
+                    <option key={item.id} value={item.observation_id || ""}>
+                      {item.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="mt-4">
+              <EvidenceRecordList
+                records={currentReflectionRes?.linked_evidence_records || []}
+                user={user}
+                teacherId={teacherId}
+                t={t}
+                dateFormatter={dateFormatter}
+                emptyLabel={t("teacherProfile.noReflectionEvidenceLinked")}
+              />
+            </div>
+          </div>
         </section>
 
         <section className="mt-6 rounded-xl border border-slate-200 bg-white p-5">
@@ -266,6 +407,30 @@ export function ReflectionRecordPage() {
                       </div>
                     </div>
                   </div>
+                  {entry.linked_goal_titles?.length ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {entry.linked_goal_titles.map((goalTitle) => (
+                        <span
+                          key={`${entry.id}-${goalTitle}`}
+                          className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-slate-600"
+                        >
+                          {goalTitle}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                  {entry.linked_evidence_records?.length ? (
+                    <div className="mt-3">
+                      <EvidenceRecordList
+                        records={entry.linked_evidence_records}
+                        user={user}
+                        teacherId={teacherId}
+                        t={t}
+                        dateFormatter={dateFormatter}
+                        emptyLabel={t("teacherProfile.noReflectionEvidenceLinked")}
+                      />
+                    </div>
+                  ) : null}
                 </div>
               ))
             ) : (

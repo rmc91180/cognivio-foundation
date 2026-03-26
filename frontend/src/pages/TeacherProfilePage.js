@@ -23,6 +23,7 @@ import { AssessmentFeedbackWidget } from "@/components/assessment/AssessmentFeed
 import { ObservationFocusPanel } from "@/components/assessment/ObservationFocusPanel";
 import { CoachingTaskList } from "@/components/coaching/CoachingTaskList";
 import { CoachingTimelinePanel } from "@/components/coaching/CoachingTimelinePanel";
+import { EvidenceRecordList } from "@/components/coaching/EvidenceRecordList";
 import { MonthlySummary } from "@/components/MonthlySummary";
 import { VideoRecorder } from "@/components/VideoRecorder";
 import { SectionHeader } from "@/components/ui";
@@ -1843,9 +1844,31 @@ export function TeacherProfilePage() {
                       <div className="mt-2 text-xs text-slate-700">
                         {goal.description || t("teacherWorkspace.goalNoDescription")}
                       </div>
+                      {goal.progress_signal ? (
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-600">
+                            {t(`goalProgressSignals.${goal.progress_signal}`)}
+                          </span>
+                          <span className="text-[11px] text-slate-500">
+                            {goal.progress_summary}
+                          </span>
+                        </div>
+                      ) : null}
                       {goal.due_date ? (
                         <div className="mt-2 text-[11px] text-slate-500">
                           {t("teacherProfile.dueDate")}: {goal.due_date}
+                        </div>
+                      ) : null}
+                      {goal.evidence_records?.length ? (
+                        <div className="mt-3">
+                          <EvidenceRecordList
+                            records={goal.evidence_records.slice(0, 2)}
+                            user={user}
+                            teacherId={teacherId}
+                            t={t}
+                            dateFormatter={dateFormatter}
+                            emptyLabel={t("teacherProfile.goalEvidenceEmpty")}
+                          />
                         </div>
                       ) : null}
                     </div>

@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { LayoutShell } from "@/components/LayoutShell";
 import { Button, PageHeader, Panel, SectionHeader } from "@/components/ui";
 import { CoachingTimelinePanel } from "@/components/coaching/CoachingTimelinePanel";
+import { EvidenceRecordList } from "@/components/coaching/EvidenceRecordList";
 import { useAuth } from "@/hooks/useAuth";
 import { actionPlanApi, teacherApi } from "@/lib/api";
 import { isAdminUser } from "@/lib/userRoutes";
@@ -46,9 +47,15 @@ export function ActionPlanRecordPage() {
     enabled: Boolean(teacherId),
     queryFn: () => teacherApi.coachingTimeline(teacherId).then((r) => r.data),
   });
+  const { data: evidenceCatalogRes } = useQuery({
+    queryKey: ["teacher-evidence-catalog", teacherId],
+    enabled: Boolean(teacherId),
+    queryFn: () => teacherApi.evidenceCatalog(teacherId).then((r) => r.data),
+  });
 
   const [actionPlanGoals, setActionPlanGoals] = useState([]);
   const [actionPlanNotes, setActionPlanNotes] = useState("");
+  const [pendingEvidenceByGoal, setPendingEvidenceByGoal] = useState({});
 
   useEffect(() => {
     const plan = actionPlanHistoryRes?.current_plan || actionPlanRes;
@@ -104,6 +111,42 @@ export function ActionPlanRecordPage() {
     setActionPlanGoals((prev) =>
       prev.map((goal) => (goal.id === goalId ? { ...goal, ...patch } : goal))
     );
+  const attachEvidenceToGoal = (goalId) => {
+    const referenceKey = pendingEvidenceByGoal[goalId];
+    if (!referenceKey) return;
+    const record = (evidenceCatalogRes?.items || []).find(
+      (item) => item.reference_key === referenceKey
+    );
+    setActionPlanGoals((prev) =>
+      prev.map((goal) => {
+        if (goal.id !== goalId) return goal;
+        const existingLinks = Array.isArray(goal.evidence_links) ? goal.evidence_links : [];
+        if (existingLinks.includes(referenceKey)) return goal;
+        return {
+          ...goal,
+          evidence_links: [...existingLinks, referenceKey],
+          evidence_records: record
+            ? [record, ...(goal.evidence_records || []).filter((item) => item.id !== record.id)]
+            : goal.evidence_records,
+        };
+      })
+    );
+    setPendingEvidenceByGoal((prev) => ({ ...prev, [goalId]: "" }));
+  };
+  const detachEvidenceFromGoal = (goalId, referenceKey) => {
+    setActionPlanGoals((prev) =>
+      prev.map((goal) => {
+        if (goal.id !== goalId) return goal;
+        return {
+          ...goal,
+          evidence_links: (goal.evidence_links || []).filter((item) => item !== referenceKey),
+          evidence_records: (goal.evidence_records || []).filter(
+            (item) => item.reference_key !== referenceKey
+          ),
+        };
+      })
+    );
+  };
   const removeGoal = (goalId) =>
     setActionPlanGoals((prev) => prev.filter((goal) => goal.id !== goalId));
 
@@ -298,6 +341,89 @@ export function ActionPlanRecordPage() {
                         {goal.due_date || t("teacherProfile.dateNotSet")}
                       </span>
                     )}
+                  </div>
+                  <div className="mt-3 rounded-md border border-slate-200 bg-white px-3 py-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                          {t("teacherProfile.goalEvidenceTitle")}
+                        </div>
+                        <div className="mt-1 text-xs text-slate-600">
+                          {goal.progress_summary || t("teacherProfile.goalEvidenceEmpty")}
+                        </div>
+                      </div>
+                      {goal.progress_signal ? (
+                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-600">
+                          {t(`goalProgressSignals.${goal.progress_signal}`)}
+                        </span>
+                      ) : null}
+                    </div>
+                    {goal.latest_evidence_at ? (
+                      <div className="mt-2 text-[11px] text-slate-500">
+                        {t("teacherProfile.latestEvidenceLabel")}:{" "}
+                        {dateFormatter.format(new Date(goal.latest_evidence_at))}
+                      </div>
+                    ) : null}
+                    <div className="mt-3">
+                      <EvidenceRecordList
+                        records={goal.evidence_records || []}
+                        user={user}
+                        teacherId={teacherId}
+                        t={t}
+                        dateFormatter={dateFormatter}
+                        emptyLabel={t("teacherProfile.goalEvidenceEmpty")}
+                      />
+                    </div>
+                    {isAdmin ? (
+                      <div className="mt-3 rounded-md border border-dashed border-slate-200 bg-slate-50 px-3 py-3">
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                          {t("teacherProfile.attachEvidence")}
+                        </div>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          <select
+                            value={pendingEvidenceByGoal[goal.id] || ""}
+                            onChange={(e) =>
+                              setPendingEvidenceByGoal((prev) => ({
+                                ...prev,
+                                [goal.id]: e.target.value,
+                              }))
+                            }
+                            className="min-w-[220px] rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+                          >
+                            <option value="">{t("teacherProfile.selectEvidencePlaceholder")}</option>
+                            {(evidenceCatalogRes?.items || []).map((item) => (
+                              <option
+                                key={item.reference_key || item.id}
+                                value={item.reference_key || ""}
+                              >
+                                {item.title}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => attachEvidenceToGoal(goal.id)}
+                            className="inline-flex items-center rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
+                          >
+                            {t("teacherProfile.attachEvidenceButton")}
+                          </button>
+                        </div>
+                        {(goal.evidence_links || []).length ? (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {(goal.evidence_links || []).map((referenceKey) => (
+                              <button
+                                key={`${goal.id}-${referenceKey}`}
+                                type="button"
+                                onClick={() => detachEvidenceFromGoal(goal.id, referenceKey)}
+                                className="rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] font-medium text-slate-600 hover:bg-slate-100"
+                              >
+                                {t("teacherProfile.removeLinkedEvidence")}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ))
