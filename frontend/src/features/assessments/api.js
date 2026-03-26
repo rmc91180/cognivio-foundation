@@ -19,6 +19,8 @@ export const assessmentApi = {
     api.get(`/api/teachers/${teacherId}/summary-insights`),
   teacherSummaryReflection: (teacherId) =>
     api.get(`/api/teachers/${teacherId}/summary-reflection`),
+  teacherReflectionHistory: (teacherId) =>
+    api.get(`/api/teachers/${teacherId}/reflection-history`),
   saveTeacherSummaryReflection: (teacherId, payload) =>
     api.post(`/api/teachers/${teacherId}/summary-reflection`, payload),
   createAdminOverride: (assessmentId, payload) =>

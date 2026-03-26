@@ -86,10 +86,10 @@ export function TeacherProfilePage() {
     queryFn: () => teacherApi.conferencePrep(teacherId).then((r) => r.data),
   });
 
-  const { data: summaryReflectionRes } = useQuery({
-    queryKey: ["teacher-summary-reflection", teacherId],
+  const { data: reflectionHistoryRes } = useQuery({
+    queryKey: ["teacher-reflection-history", teacherId],
     queryFn: () =>
-      assessmentApi.teacherSummaryReflection(teacherId).then((r) => r.data),
+      assessmentApi.teacherReflectionHistory(teacherId).then((r) => r.data),
   });
 
   const { data: observationsRes } = useQuery({
@@ -121,20 +121,6 @@ export function TeacherProfilePage() {
   const { data: schedulesRes } = useQuery({
     queryKey: ["schedules", teacherId],
     queryFn: () => scheduleApi.list({ teacher_id: teacherId }).then((r) => r.data),
-  });
-
-  const saveReflectionMutation = useMutation({
-    mutationFn: (payload) =>
-      assessmentApi.saveTeacherSummaryReflection(teacherId, payload),
-    onSuccess: () => {
-      toast.success(t("teacherProfile.reflectionSaved"));
-      queryClient.invalidateQueries({
-        queryKey: ["teacher-summary-reflection", teacherId],
-      });
-    },
-    onError: () => {
-      toast.error(t("teacherProfile.reflectionSaveFailed"));
-    },
   });
 
   const saveNextCoachingConferenceMutation = useMutation({
@@ -237,20 +223,6 @@ export function TeacherProfilePage() {
     },
   });
 
-  const saveActionPlanMutation = useMutation({
-    mutationFn: (payload) => actionPlanApi.save(teacherId, payload),
-    onSuccess: () => {
-      toast.success(t("teacherProfile.actionPlanSaved"));
-      queryClient.invalidateQueries({ queryKey: ["action-plan", teacherId] });
-      queryClient.invalidateQueries({ queryKey: ["schedules", teacherId] });
-    },
-    onError: () => {
-      toast.error(t("teacherProfile.actionPlanSaveFailed"));
-    },
-  });
-
-  const [selfReflection, setSelfReflection] = useState("");
-  const [actionsTaken, setActionsTaken] = useState("");
   const [nextStepsNote, setNextStepsNote] = useState("");
   const [observationReview, setObservationReview] = useState({});
   const [curriculumFile, setCurriculumFile] = useState(null);
@@ -274,15 +246,6 @@ export function TeacherProfilePage() {
   const curriculumInputRef = useRef(null);
   const lessonPlanInputRef = useRef(null);
   const syllabusInputRef = useRef(null);
-  const actionPlanSectionRef = useRef(null);
-
-  const makeGoalId = () => {
-    if (typeof crypto !== "undefined" && crypto.randomUUID) {
-      return crypto.randomUUID();
-    }
-    return `goal_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
-  };
-
   const nextLessonPlan = useMemo(() => {
     const plans = lessonPlansRes?.lesson_plans || [];
     const today = new Date().toISOString().slice(0, 10);
@@ -297,13 +260,6 @@ export function TeacherProfilePage() {
       setVideoSubject(teacherRes.subject);
     }
   }, [teacherRes]);
-
-  useEffect(() => {
-    if (summaryReflectionRes) {
-      setSelfReflection(summaryReflectionRes.self_reflection || "");
-      setActionsTaken(summaryReflectionRes.actions_taken || "");
-    }
-  }, [summaryReflectionRes]);
 
   useEffect(() => {
     if (dashboardRes?.scoring_mode) {
@@ -526,6 +482,13 @@ export function TeacherProfilePage() {
   (assessmentFeedbackRes?.feedback || []).forEach((item) => {
     feedbackByTarget[`${item.target_type}:${item.target_id || ""}`] = item;
   });
+  const currentReflectionEntries = reflectionHistoryRes?.current_entries || [];
+  const latestTeacherReflection = currentReflectionEntries.find(
+    (entry) => entry.author_role === "teacher"
+  ) || (reflectionHistoryRes?.history || []).find((entry) => entry.author_role === "teacher");
+  const latestAdminReflection = currentReflectionEntries.find(
+    (entry) => entry.author_role !== "teacher"
+  ) || (reflectionHistoryRes?.history || []).find((entry) => entry.author_role !== "teacher");
 
   const formatDate = (value) => {
     if (!value) return t("teacherProfile.notConfigured");
@@ -666,14 +629,6 @@ export function TeacherProfilePage() {
       .slice(0, 3);
   }, [actionPlanGoals, recurringPatternSummary]);
 
-  const handleSaveReflection = (e) => {
-    e.preventDefault();
-    saveReflectionMutation.mutate({
-      self_reflection: selfReflection,
-      actions_taken: actionsTaken,
-    });
-  };
-
   const handleScheduleConference = () => {
     if (!teacherRes) return;
     const start = new Date();
@@ -793,12 +748,6 @@ export function TeacherProfilePage() {
     savePrivacyProfileMutation.mutate(privacyReferenceFiles);
   };
 
-  const handleSaveActionPlan = () => {
-    saveActionPlanMutation.mutate({
-      goals: actionPlanGoals,
-      notes: actionPlanNotes,
-    });
-  };
   const handleMoveDraftToActionPlanNotes = () => {
     const draft = nextStepsNote.trim();
     if (!draft) return;
@@ -941,18 +890,12 @@ export function TeacherProfilePage() {
                   {t("teacherProfile.openLatestLesson")}
                 </Link>
               )}
-              <button
-                type="button"
-                onClick={() =>
-                  actionPlanSectionRef.current?.scrollIntoView({
-                    behavior: "smooth",
-                    block: "start",
-                  })
-                }
+              <Link
+                to={`/teachers/${teacherId}/action-plan`}
                 className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
               >
                 {t("teacherProfile.jumpToActionPlan")}
-              </button>
+              </Link>
             </div>
           </div>
           <div className="mt-4 grid gap-3 md:grid-cols-3">
@@ -1538,18 +1481,18 @@ export function TeacherProfilePage() {
               <div className="space-y-3 text-xs text-slate-700">
                 <div>
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                    {t("teacherProfile.teacher")}
+                    {t("teacherProfile.latestTeacherReflectionTitle")}
                   </div>
                   <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-                    {selfReflection || t("teacherProfile.noTeacherReflection")}
+                    {latestTeacherReflection?.self_reflection || t("teacherProfile.noTeacherReflection")}
                   </div>
                 </div>
                 <div>
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                    {t("teacherProfile.principal")}
+                    {t("teacherProfile.latestAdminReflectionTitle")}
                   </div>
                   <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-                    {actionsTaken || t("teacherProfile.noPrincipalReflection")}
+                    {latestAdminReflection?.self_reflection || t("teacherProfile.noPrincipalReflection")}
                   </div>
                 </div>
               </div>
@@ -1565,39 +1508,14 @@ export function TeacherProfilePage() {
                   </ul>
                 </div>
               )}
-              <form onSubmit={handleSaveReflection} className="mt-3 space-y-3 text-xs">
-                <div>
-                  <label className="mb-1 block text-[11px] font-medium text-slate-600">
-                    {t("teacherProfile.teacherReflection")}
-                  </label>
-                  <textarea
-                    rows={3}
-                    value={selfReflection}
-                    onChange={(e) => setSelfReflection(e.target.value)}
-                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
-                    placeholder={t("teacherProfile.teacherReflectionPlaceholder")}
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-[11px] font-medium text-slate-600">
-                    {t("teacherProfile.principalReflection")}
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={actionsTaken}
-                    onChange={(e) => setActionsTaken(e.target.value)}
-                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
-                    placeholder={t("teacherProfile.principalReflectionPlaceholder")}
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={saveReflectionMutation.isPending}
-                  className="mt-1 inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90 disabled:opacity-60"
+              <div className="mt-3">
+                <Link
+                  to={`/teachers/${teacherId}/reflections`}
+                  className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
                 >
-                  {saveReflectionMutation.isPending ? t("teachersPage.saving") : t("teacherProfile.saveReflection")}
-                </button>
-              </form>
+                  {t("teacherWorkspace.reflectionsOpenRecord")}
+                </Link>
+              </div>
             </section>
           </div>
 
@@ -1764,109 +1682,89 @@ export function TeacherProfilePage() {
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           <div className="lg:col-span-8 space-y-6">
-            <section
-              ref={actionPlanSectionRef}
-              className="rounded-xl border border-slate-200 bg-white p-5"
-            >
+            <section className="rounded-xl border border-slate-200 bg-white p-5">
               <SectionHeader
-                title={t("teacherProfile.actionPlan")}
-                description={t("teacherProfile.actionPlanDescription")}
+                title={t("teacherProfile.currentSharedPlanTitle")}
+                description={t("teacherProfile.currentSharedPlanAdminDescription")}
                 eyebrow={t("timeScope.ongoingGoal")}
                 actions={
-                  <button
-                    type="button"
-                    onClick={handleSaveActionPlan}
-                    disabled={saveActionPlanMutation.isPending}
-                    className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90 disabled:opacity-60"
+                  <Link
+                    to={`/teachers/${teacherId}/action-plan`}
+                    className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
                   >
-                    {t("teacherProfile.saveActionPlan")}
-                  </button>
+                    {t("teacherWorkspace.goalsOpenRecord")}
+                  </Link>
                 }
               />
               <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
                 {t("teacherProfile.actionPlanSyncNotice")}
               </div>
 
-              <div className="mt-4 space-y-3 text-xs">
-                {actionPlanGoals.map((goal) => (
-                  <div
-                    key={goal.id}
-                    className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <input
-                        type="text"
-                        value={goal.title}
-                        onChange={(e) => updateGoal(goal.id, { title: e.target.value })}
-                        placeholder={t("teacherProfile.goalTitlePlaceholder")}
-                        className="flex-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800"
-                      />
-                      <select
-                        value={goal.status || "planned"}
-                        onChange={(e) => updateGoal(goal.id, { status: e.target.value })}
-                        className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
-                      >
-                        <option value="planned">{t("teacherProfile.goalStatusPlanned")}</option>
-                        <option value="in_progress">{t("teacherProfile.goalStatusInProgress")}</option>
-                        <option value="complete">{t("teacherProfile.goalStatusComplete")}</option>
-                      </select>
-                      <button
-                        type="button"
-                        onClick={() => removeGoal(goal.id)}
-                        className="text-[11px] text-slate-500 hover:text-slate-700"
-                      >
-                        {t("teacherProfile.removeGoal")}
-                      </button>
-                    </div>
-                    <textarea
-                      rows={2}
-                      value={goal.description || ""}
-                      onChange={(e) =>
-                        updateGoal(goal.id, { description: e.target.value })
-                      }
-                      placeholder={t("teacherProfile.goalDescriptionPlaceholder")}
-                      className="mt-2 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800"
-                    />
-                    <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                      <label className="text-slate-500">{t("teacherProfile.dueDate")}</label>
-                      <input
-                        type="date"
-                        value={goal.due_date || ""}
-                        onChange={(e) => updateGoal(goal.id, { due_date: e.target.value })}
-                        className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
-                      />
-                    </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("teacherProfile.coachingStatusGoals")}
                   </div>
-                ))}
-                <button
-                  type="button"
-                  onClick={() =>
-                    setActionPlanGoals((prev) => [
-                      ...prev,
-                      {
-                        id: makeGoalId(),
-                        title: "",
-                        description: "",
-                        due_date: "",
-                        status: "planned",
-                      },
-                    ])
-                  }
-                  className="inline-flex items-center rounded-md border border-dashed border-slate-200 px-3 py-2 text-[11px] text-slate-600 hover:bg-slate-50"
-                >
-                  {t("teacherProfile.addGoal")}
-                </button>
-                <div>
-                  <label className="mb-1 block text-[11px] font-medium text-slate-600">
+                  <div className="text-sm font-semibold text-slate-900">
+                    {t("teacherProfile.goalsInMotionCount", {
+                      open: openGoalsCount,
+                      completed: completedGoalsCount,
+                    })}
+                  </div>
+                </div>
+                <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("teacherProfile.nextCheckpoint")}
+                  </div>
+                  <div className="text-sm font-semibold text-slate-900">
+                    {actionPlanGoals.find((goal) => goal?.due_date)?.due_date || t("teacherProfile.nextConferenceNotScheduled")}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 space-y-3 text-xs">
+                {actionPlanGoals.length ? (
+                  actionPlanGoals.slice(0, 4).map((goal) => (
+                    <div
+                      key={goal.id}
+                      className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-sm font-semibold text-slate-900">
+                          {goal.title || t("teacherWorkspace.goalUntitled")}
+                        </div>
+                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-600">
+                          {goal.status === "complete"
+                            ? t("teacherProfile.goalStatusComplete")
+                            : goal.status === "implemented"
+                              ? t("teacherProfile.goalStatusImplemented")
+                              : goal.status === "in_progress"
+                                ? t("teacherProfile.goalStatusInProgress")
+                                : t("teacherProfile.goalStatusPlanned")}
+                        </span>
+                      </div>
+                      <div className="mt-2 text-xs text-slate-700">
+                        {goal.description || t("teacherWorkspace.goalNoDescription")}
+                      </div>
+                      {goal.due_date ? (
+                        <div className="mt-2 text-[11px] text-slate-500">
+                          {t("teacherProfile.dueDate")}: {goal.due_date}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))
+                ) : (
+                  <div className="rounded-md border border-dashed border-slate-200 px-3 py-4 text-xs text-slate-500">
+                    {t("teacherProfile.noSharedGoalsYet")}
+                  </div>
+                )}
+                <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
+                  <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                     {t("teacherProfile.actionPlanNotes")}
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={actionPlanNotes}
-                    onChange={(e) => setActionPlanNotes(e.target.value)}
-                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800"
-                    placeholder={t("teacherProfile.actionPlanNotesPlaceholder")}
-                  />
+                  </div>
+                  <div className="text-xs text-slate-700">
+                    {actionPlanNotes || t("teacherProfile.actionPlanNotesPlaceholder")}
+                  </div>
                 </div>
               </div>
 

@@ -7,6 +7,7 @@ import {
   History,
   Layers,
   LayoutDashboard,
+  MessageSquareText,
   PlayCircle,
   ShieldCheck,
   Trophy,
@@ -63,6 +64,7 @@ export function LayoutShell({ children }) {
               <NavItem to="/videos" icon={PlayCircle} label={t("nav.myVideos")} />
               <NavItem to="/my-workspace/materials" icon={BookOpen} label={t("nav.myMaterials")} />
               <NavItem to="/my-workspace/goals" icon={ClipboardList} label={t("nav.myGoals")} />
+              <NavItem to="/my-workspace/reflections" icon={MessageSquareText} label={t("nav.myReflections")} />
               <NavItem to="/my-workspace/history" icon={History} label={t("nav.myHistory")} />
             </>
           )}

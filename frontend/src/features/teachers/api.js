@@ -31,6 +31,7 @@ export const observationApi = {
 
 export const actionPlanApi = {
   get: (teacherId) => api.get(`/api/teachers/${teacherId}/action-plan`),
+  history: (teacherId) => api.get(`/api/teachers/${teacherId}/action-plan/history`),
   save: (teacherId, payload) =>
     api.post(`/api/teachers/${teacherId}/action-plan`, payload),
 };

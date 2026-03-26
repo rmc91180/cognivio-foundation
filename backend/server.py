@@ -2676,6 +2676,23 @@ class ActionPlan(BaseModel):
     updated_at: Optional[str] = None
 
 
+class ActionPlanHistoryEntry(BaseModel):
+    id: str
+    teacher_id: str
+    plan_id: str
+    goals: List[ActionPlanGoal]
+    notes: Optional[str] = None
+    saved_at: str
+    saved_by_user_id: Optional[str] = None
+    saved_by_name: Optional[str] = None
+    saved_by_role: Optional[str] = None
+
+
+class ActionPlanHistoryResponse(BaseModel):
+    current_plan: ActionPlan
+    history: List[ActionPlanHistoryEntry]
+
+
 class SummaryReflection(BaseModel):
     id: str
     teacher_id: str
@@ -2688,6 +2705,24 @@ class SummaryReflection(BaseModel):
 class SummaryReflectionUpsert(BaseModel):
     self_reflection: Optional[str] = None
     actions_taken: Optional[str] = None
+
+
+class ReflectionHistoryEntry(BaseModel):
+    id: str
+    teacher_id: str
+    reflection_id: Optional[str] = None
+    author_user_id: Optional[str] = None
+    author_name: Optional[str] = None
+    author_role: Optional[str] = None
+    self_reflection: Optional[str] = None
+    actions_taken: Optional[str] = None
+    saved_at: str
+    updated_at: Optional[str] = None
+
+
+class ReflectionHistoryResponse(BaseModel):
+    current_entries: List[ReflectionHistoryEntry]
+    history: List[ReflectionHistoryEntry]
 
 
 class NotificationRecord(BaseModel):
@@ -6103,6 +6138,66 @@ async def get_teacher_summary_insights(
     }
 
 
+def _resolve_plan_owner_id(teacher: dict, current_user: dict) -> str:
+    role = _get_user_role(current_user)
+    if role == "teacher" and teacher.get("created_by"):
+        return teacher["created_by"]
+    return teacher.get("created_by") or current_user["id"]
+
+
+async def _list_coaching_participants(teacher: dict, current_user: dict) -> List[dict]:
+    owner_id = _resolve_plan_owner_id(teacher, current_user)
+    visible_user_ids = {owner_id}
+    teacher_email = str(teacher.get("email") or "").strip().lower()
+    if teacher_email:
+        teacher_users = await db.users.find(
+            {"email": {"$regex": f"^{re.escape(teacher_email)}$", "$options": "i"}},
+            {"_id": 0, "id": 1, "name": 1, "role": 1, "email": 1},
+        ).to_list(10)
+        for user in teacher_users:
+            if user.get("id"):
+                visible_user_ids.add(user["id"])
+    if _get_user_role(current_user) == "teacher":
+        visible_user_ids.add(current_user["id"])
+
+    users = await db.users.find(
+        {"id": {"$in": list(visible_user_ids)}},
+        {"_id": 0, "id": 1, "name": 1, "role": 1, "email": 1},
+    ).to_list(20)
+    by_id = {user["id"]: user for user in users if user.get("id")}
+
+    participants: List[dict] = []
+    if owner_id in by_id:
+        owner_user = by_id[owner_id]
+        participants.append(
+            {
+                "user_id": owner_id,
+                "name": owner_user.get("name"),
+                "role": _get_user_role(owner_user),
+            }
+        )
+    else:
+        participants.append(
+            {
+                "user_id": owner_id,
+                "name": current_user.get("name") if owner_id == current_user["id"] else None,
+                "role": "admin",
+            }
+        )
+
+    for user_id, user in by_id.items():
+        if user_id == owner_id:
+            continue
+        participants.append(
+            {
+                "user_id": user_id,
+                "name": user.get("name"),
+                "role": _get_user_role(user),
+            }
+        )
+    return participants
+
+
 @api_router.get(
     "/teachers/{teacher_id}/summary-reflection",
     response_model=Optional[SummaryReflection],
@@ -6111,6 +6206,7 @@ async def get_teacher_summary_reflection(
     teacher_id: str,
     current_user: dict = Depends(get_current_user),
 ):
+    await _get_teacher_or_404(teacher_id, current_user)
     doc = await db.summary_reflections.find_one(
         {"teacher_id": teacher_id, "user_id": current_user["id"]},
         {"_id": 0, "user_id": 0},
@@ -6131,6 +6227,7 @@ async def upsert_teacher_summary_reflection(
 ):
     from app.services.workspace_service import sync_summary_reflection_memory
 
+    await _get_teacher_or_404(teacher_id, current_user)
     now = datetime.now(timezone.utc).isoformat()
     existing = await db.summary_reflections.find_one(
         {"teacher_id": teacher_id, "user_id": current_user["id"]}
@@ -6148,6 +6245,20 @@ async def upsert_teacher_summary_reflection(
             {"$set": update_fields},
         )
         existing.update(update_fields)
+        await db.summary_reflection_history.insert_one(
+            {
+                "id": str(uuid.uuid4()),
+                "teacher_id": teacher_id,
+                "reflection_id": existing.get("id"),
+                "author_user_id": current_user["id"],
+                "author_name": current_user.get("name"),
+                "author_role": _get_user_role(current_user),
+                "self_reflection": existing.get("self_reflection") or "",
+                "actions_taken": existing.get("actions_taken") or "",
+                "saved_at": now,
+                "updated_at": existing.get("updated_at"),
+            }
+        )
         existing.pop("_id", None)
         existing.pop("user_id", None)
         await sync_summary_reflection_memory(current_user, teacher_id, existing)
@@ -6163,10 +6274,88 @@ async def upsert_teacher_summary_reflection(
         "updated_at": None,
     }
     await db.summary_reflections.insert_one(doc)
+    await db.summary_reflection_history.insert_one(
+        {
+            "id": str(uuid.uuid4()),
+            "teacher_id": teacher_id,
+            "reflection_id": doc["id"],
+            "author_user_id": current_user["id"],
+            "author_name": current_user.get("name"),
+            "author_role": _get_user_role(current_user),
+            "self_reflection": doc.get("self_reflection") or "",
+            "actions_taken": doc.get("actions_taken") or "",
+            "saved_at": now,
+            "updated_at": None,
+        }
+    )
     await sync_summary_reflection_memory(current_user, teacher_id, doc)
     doc.pop("_id", None)
     doc.pop("user_id", None)
     return SummaryReflection(**doc)
+
+
+@api_router.get(
+    "/teachers/{teacher_id}/reflection-history",
+    response_model=ReflectionHistoryResponse,
+)
+async def get_teacher_reflection_history(
+    teacher_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    participants = await _list_coaching_participants(teacher, current_user)
+    visible_user_ids = [item["user_id"] for item in participants if item.get("user_id")]
+    participant_map = {item["user_id"]: item for item in participants if item.get("user_id")}
+
+    current_docs = await db.summary_reflections.find(
+        {"teacher_id": teacher_id, "user_id": {"$in": visible_user_ids or ["__none__"]}},
+        {"_id": 0},
+    ).sort("updated_at", -1).to_list(20)
+    history_docs = await db.summary_reflection_history.find(
+        {"teacher_id": teacher_id, "author_user_id": {"$in": visible_user_ids or ["__none__"]}},
+        {"_id": 0},
+    ).sort("saved_at", -1).to_list(100)
+
+    current_entries = []
+    for doc in current_docs:
+        participant = participant_map.get(doc.get("user_id"), {})
+        current_entries.append(
+            ReflectionHistoryEntry(
+                id=doc.get("id") or str(uuid.uuid4()),
+                teacher_id=teacher_id,
+                reflection_id=doc.get("id"),
+                author_user_id=doc.get("user_id"),
+                author_name=participant.get("name") or current_user.get("name"),
+                author_role=participant.get("role") or "teacher",
+                self_reflection=doc.get("self_reflection"),
+                actions_taken=doc.get("actions_taken"),
+                saved_at=doc.get("updated_at") or doc.get("created_at") or "",
+                updated_at=doc.get("updated_at"),
+            )
+        )
+
+    history_entries = []
+    for doc in history_docs:
+        participant = participant_map.get(doc.get("author_user_id"), {})
+        history_entries.append(
+            ReflectionHistoryEntry(
+                id=doc.get("id") or str(uuid.uuid4()),
+                teacher_id=teacher_id,
+                reflection_id=doc.get("reflection_id"),
+                author_user_id=doc.get("author_user_id"),
+                author_name=doc.get("author_name") or participant.get("name"),
+                author_role=doc.get("author_role") or participant.get("role") or "teacher",
+                self_reflection=doc.get("self_reflection"),
+                actions_taken=doc.get("actions_taken"),
+                saved_at=doc.get("saved_at") or "",
+                updated_at=doc.get("updated_at"),
+            )
+        )
+
+    return ReflectionHistoryResponse(
+        current_entries=current_entries,
+        history=history_entries,
+    )
 
 
 def _normalize_subject_filter(value: str) -> str:
@@ -7886,8 +8075,7 @@ async def get_action_plan(
     current_user: dict = Depends(get_current_user),
 ):
     teacher = await _get_teacher_or_404(teacher_id, current_user)
-    role = _get_user_role(current_user)
-    plan_owner_id = teacher.get("created_by") if role == "teacher" and teacher.get("created_by") else current_user["id"]
+    plan_owner_id = _resolve_plan_owner_id(teacher, current_user)
 
     plan = await db.action_plans.find_one(
         {"teacher_id": teacher_id, "user_id": plan_owner_id},
@@ -7910,6 +8098,39 @@ class ActionPlanUpsert(BaseModel):
     notes: Optional[str] = None
 
 
+@api_router.get("/teachers/{teacher_id}/action-plan/history", response_model=ActionPlanHistoryResponse)
+async def get_action_plan_history(
+    teacher_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    plan_owner_id = _resolve_plan_owner_id(teacher, current_user)
+    current_plan_doc = await db.action_plans.find_one(
+        {"teacher_id": teacher_id, "user_id": plan_owner_id},
+        {"_id": 0, "user_id": 0},
+    )
+    history_docs = await db.action_plan_history.find(
+        {"teacher_id": teacher_id, "plan_owner_id": plan_owner_id},
+        {"_id": 0},
+    ).sort("saved_at", -1).to_list(100)
+
+    current_plan = ActionPlan(
+        **(
+            current_plan_doc
+            or {
+                "id": "",
+                "teacher_id": teacher_id,
+                "goals": [],
+                "notes": None,
+                "created_at": None,
+                "updated_at": None,
+            }
+        )
+    )
+    history = [ActionPlanHistoryEntry(**doc) for doc in history_docs]
+    return ActionPlanHistoryResponse(current_plan=current_plan, history=history)
+
+
 @api_router.post("/teachers/{teacher_id}/action-plan", response_model=ActionPlan)
 async def save_action_plan(
     teacher_id: str,
@@ -7919,8 +8140,7 @@ async def save_action_plan(
     from app.services.workspace_service import sync_action_plan_memory
 
     teacher = await _get_teacher_or_404(teacher_id, current_user)
-    role = _get_user_role(current_user)
-    plan_owner_id = teacher.get("created_by") if role == "teacher" and teacher.get("created_by") else current_user["id"]
+    plan_owner_id = _resolve_plan_owner_id(teacher, current_user)
 
     existing = await db.action_plans.find_one(
         {"teacher_id": teacher_id, "user_id": plan_owner_id},
@@ -8004,6 +8224,20 @@ async def save_action_plan(
     )
     if not result:
         raise HTTPException(status_code=500, detail="Action plan save failed")
+    await db.action_plan_history.insert_one(
+        {
+            "id": str(uuid.uuid4()),
+            "teacher_id": teacher_id,
+            "plan_id": plan_id,
+            "plan_owner_id": plan_owner_id,
+            "goals": result.get("goals", []),
+            "notes": result.get("notes"),
+            "saved_at": now,
+            "saved_by_user_id": current_user["id"],
+            "saved_by_name": current_user.get("name"),
+            "saved_by_role": _get_user_role(current_user),
+        }
+    )
     await sync_action_plan_memory(current_user, teacher, result)
     return ActionPlan(**result)
 
@@ -11485,6 +11719,10 @@ async def _ensure_database_indexes() -> None:
         unique=True,
     )
     await _safe_create_index(db.assessment_report_feedback, [("assessment_id", 1), ("updated_at", -1)])
+    await _safe_create_index(db.action_plans, [("teacher_id", 1), ("user_id", 1)], unique=True)
+    await _safe_create_index(db.action_plan_history, [("teacher_id", 1), ("plan_owner_id", 1), ("saved_at", -1)])
+    await _safe_create_index(db.summary_reflections, [("teacher_id", 1), ("user_id", 1)], unique=True)
+    await _safe_create_index(db.summary_reflection_history, [("teacher_id", 1), ("author_user_id", 1), ("saved_at", -1)])
     await _safe_create_index(db.observations, [("video_id", 1), ("created_at", -1)])
     await _safe_create_index(db.video_processing_jobs, [("video_id", 1)], unique=True)
     await _safe_create_index(db.video_processing_jobs, [("status", 1), ("updated_at", -1)])

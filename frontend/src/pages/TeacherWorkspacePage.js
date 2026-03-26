@@ -112,14 +112,6 @@ export function TeacherWorkspacePage() {
     );
   }
 
-  const saveReflection = (event) => {
-    event.preventDefault();
-    mutations.saveReflectionMutation.mutate({
-      self_reflection: state.selfReflection,
-      actions_taken: state.actionsTaken,
-    });
-  };
-
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
@@ -198,6 +190,7 @@ export function TeacherWorkspacePage() {
               {[
                 ["overview", t("teacherWorkspace.currentTitle"), t("teacherWorkspace.currentDescription")],
                 ["goals", t("teacherWorkspace.goalsTitle"), t("teacherWorkspace.goalsDescription")],
+                ["reflections", t("teacherWorkspace.reflectionsTitle"), t("teacherWorkspace.reflectionsDescription")],
                 ["materials", t("teacherWorkspace.materialsTitle"), t("teacherWorkspace.materialsDescription")],
                 ["history", t("teacherWorkspace.historyTitle"), t("teacherWorkspace.historyDescription")],
               ].map(([id, title, description]) => (
@@ -223,22 +216,36 @@ export function TeacherWorkspacePage() {
                 <Panel><div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.currentUrgentTitle")}</div>{urgentItems.length ? <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>{urgentItems.map((item) => <li key={item}>{item}</li>)}</ul> : <div className="text-xs text-slate-500">{t("teacherWorkspace.currentUrgentClear")}</div>}</Panel>
                 <Panel><div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherProfile.latestAdminComment")}</div><div className="text-xs text-slate-700">{latestObservation?.admin_comment || t("teacherProfile.noAdminComment")}</div></Panel>
               </div>
-              <form onSubmit={saveReflection} className="grid gap-4 lg:grid-cols-2">
-                <div><label className="mb-1 block text-[11px] font-medium text-slate-600">{t("teacherProfile.teacherReflection")}</label><textarea rows={4} value={state.selfReflection} onChange={(e) => state.setSelfReflection(e.target.value)} className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring" placeholder={t("teacherProfile.teacherReflectionPlaceholder")} /></div>
-                <div><label className="mb-1 block text-[11px] font-medium text-slate-600">{t("teacherWorkspace.currentTeacherResponseTitle")}</label><textarea rows={4} value={state.actionsTaken} onChange={(e) => state.setActionsTaken(e.target.value)} className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring" placeholder={t("teacherWorkspace.currentTeacherResponsePlaceholder")} /></div>
-                <div className="lg:col-span-2"><Button type="submit" size="sm" disabled={mutations.saveReflectionMutation.isPending}>{mutations.saveReflectionMutation.isPending ? t("teachersPage.saving") : t("teacherProfile.saveReflection")}</Button></div>
-              </form>
-            </WorkspaceSection>
-
-            <WorkspaceSection title={t("teacherWorkspace.goalsTitle")} description={t("teacherWorkspace.goalsDescription")} tags={[t("timeScope.ongoingGoal"), t("timeScope.recurringPattern")]} active={activeSection === "goals"} activeLabel={t("teacherWorkspace.activeSectionLabel")}>
               <div className="grid gap-4 lg:grid-cols-2">
-                <Panel><div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-amber-700">{t("teacherProfile.recurringChallenges")}</div>{recurringChallenges.length ? <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>{recurringChallenges.slice(0, 3).map((item, idx) => <li key={idx}>{item}</li>)}</ul> : <div className="text-xs text-slate-500">{t("teacherProfile.noRecurringChallenges")}</div>}</Panel>
-                <Panel><div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.goalsImplementationNotes")}</div><textarea rows={4} value={state.actionPlanNotes} onChange={(e) => state.setActionPlanNotes(e.target.value)} className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800" placeholder={t("teacherWorkspace.goalsImplementationPlaceholder")} /></Panel>
+                <Panel>
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-amber-700">{t("teacherProfile.recurringChallenges")}</div>
+                  {recurringChallenges.length ? <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>{recurringChallenges.slice(0, 3).map((item, idx) => <li key={idx}>{item}</li>)}</ul> : <div className="text-xs text-slate-500">{t("teacherProfile.noRecurringChallenges")}</div>}
+                  <div className="mt-3">
+                    <Link to="/my-workspace/goals" className="text-xs font-medium text-primary hover:underline">{t("teacherWorkspace.goalsOpenRecord")}</Link>
+                  </div>
+                </Panel>
+                <Panel>
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherProfile.latestTeacherReflectionTitle")}</div>
+                  <div className="text-xs text-slate-700">{state.selfReflection || t("teacherProfile.noTeacherReflection")}</div>
+                  <div className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherProfile.followThroughTextLabel")}</div>
+                  <div className="mt-2 text-xs text-slate-700">{state.actionsTaken || t("teacherProfile.noFollowThroughEntry")}</div>
+                  <div className="mt-3">
+                    <Link to="/my-workspace/reflections" className="text-xs font-medium text-primary hover:underline">{t("teacherWorkspace.reflectionsOpenRecord")}</Link>
+                  </div>
+                </Panel>
               </div>
               <Panel>
                 <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.sharedPlanTitle")}</div>
                 <div className="text-xs text-slate-600">{t("teacherWorkspace.sharedPlanDescription")}</div>
                 <div className="mt-2 text-[11px] text-slate-500">{t("teacherWorkspace.sharedPlanOwnership")}</div>
+                <div className="mt-3 text-xs text-slate-700">
+                  {openGoals.length
+                    ? t("teacherProfile.goalsInMotionCount", {
+                        open: openGoals.length,
+                        completed: completedGoals.length,
+                      })
+                    : t("teacherWorkspace.noSharedGoals")}
+                </div>
               </Panel>
               <Panel>
                 <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.upcomingConferenceTitle")}</div>
@@ -249,31 +256,6 @@ export function TeacherWorkspacePage() {
                 </div>
                 <div className="mt-2 text-[11px] text-slate-500">{t("teacherWorkspace.upcomingConferenceSyncNote")}</div>
               </Panel>
-              <div className="space-y-3 text-xs">
-                {state.actionPlanGoals.length ? state.actionPlanGoals.map((goal) => (
-                  <Panel key={goal.id}>
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex-1 text-sm font-medium text-slate-900">{goal.title || t("teacherWorkspace.goalUntitled")}</div>
-                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-600">
-                        {goal.status === "complete"
-                          ? t("teacherProfile.goalStatusComplete")
-                          : goal.status === "in_progress"
-                            ? t("teacherProfile.goalStatusInProgress")
-                            : t("teacherProfile.goalStatusPlanned")}
-                      </span>
-                    </div>
-                    <div className="mt-2 text-xs text-slate-700">{goal.description || t("teacherWorkspace.goalNoDescription")}</div>
-                    {goal.due_date ? (
-                      <div className="mt-2 text-[11px] text-slate-500">
-                        {t("teacherProfile.dueDate")}: {goal.due_date}
-                      </div>
-                    ) : null}
-                  </Panel>
-                )) : (
-                  <div className="text-xs text-slate-500">{t("teacherWorkspace.noSharedGoals")}</div>
-                )}
-                <div className="flex flex-wrap gap-2"><Button size="sm" onClick={() => mutations.saveActionPlanMutation.mutate({ goals: state.actionPlanGoals, notes: state.actionPlanNotes })} disabled={mutations.saveActionPlanMutation.isPending}>{mutations.saveActionPlanMutation.isPending ? t("teachersPage.saving") : t("teacherWorkspace.saveImplementationNotes")}</Button></div>
-              </div>
             </WorkspaceSection>
 
             <WorkspaceSection title={t("teacherWorkspace.materialsTitle")} description={t("teacherWorkspace.materialsDescription")} tags={[t("teacherWorkspace.workspaceTag")]} active={activeSection === "materials"} activeLabel={t("teacherWorkspace.activeSectionLabel")}>

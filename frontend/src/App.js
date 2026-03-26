@@ -16,6 +16,8 @@ import { RecognitionReviewPage } from "@/pages/RecognitionReviewPage";
 import { ExemplarLibraryPage } from "@/pages/ExemplarLibraryPage";
 import { OpsMetricsPage } from "@/pages/OpsMetricsPage";
 import { TeacherWorkspacePage } from "@/pages/TeacherWorkspacePage";
+import { ActionPlanRecordPage } from "@/pages/ActionPlanRecordPage";
+import { ReflectionRecordPage } from "@/pages/ReflectionRecordPage";
 import { getDefaultHomeRoute } from "@/lib/userRoutes";
 
 function HomeRedirect() {
@@ -62,10 +64,42 @@ function App() {
           }
         />
         <Route
+          path="/teachers/:teacherId/action-plan"
+          element={
+            <ProtectedRoute adminOnly>
+              <ActionPlanRecordPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/teachers/:teacherId/reflections"
+          element={
+            <ProtectedRoute adminOnly>
+              <ReflectionRecordPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
           path="/my-workspace"
           element={
             <ProtectedRoute>
               <TeacherWorkspacePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/my-workspace/goals"
+          element={
+            <ProtectedRoute>
+              <ActionPlanRecordPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/my-workspace/reflections"
+          element={
+            <ProtectedRoute>
+              <ReflectionRecordPage />
             </ProtectedRoute>
           }
         />
