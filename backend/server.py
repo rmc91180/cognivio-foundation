@@ -9421,6 +9421,7 @@ async def get_teacher_conference_prep(
     current_user: dict = Depends(get_current_user),
 ):
     from app.services.workspace_service import build_teacher_memory_support
+    from app.analysis.specialist_orchestrator import orchestrate_conference_prep
 
     teacher = await _get_teacher_or_404(teacher_id, current_user)
     language = _resolve_request_language(request, default="en")
@@ -9499,18 +9500,28 @@ async def get_teacher_conference_prep(
     if adaptive_support.get("admin_prompt_body"):
         agenda.append(adaptive_support["admin_prompt_body"])
     published_agenda = await _get_latest_published_conference_agenda(teacher_id)
+    prep_payload = orchestrate_conference_prep(
+        {
+            "agenda": agenda[:6],
+            "continuity_lines": comparison_lines,
+        },
+        language=language,
+        adaptive_support=adaptive_support,
+    )
     return _to_json_safe({
         "teacher_id": teacher_id,
         "teacher_name": teacher.get("name"),
         "latest_assessment_id": latest.get("id") if latest else None,
         "latest_assessment_date": latest.get("analyzed_at") if latest else None,
         "summary": latest_summary,
-        "continuity_lines": comparison_lines,
-        "agenda": agenda[:6],
+        "continuity_lines": prep_payload.get("continuity_lines", []),
+        "agenda": prep_payload.get("agenda", []),
         "open_goals": open_goals[:4],
         "recent_observations": observations[:4],
         "next_conference": teacher.get("next_coaching_conference"),
         "published_agenda": published_agenda,
+        "conference_specialist_trace": prep_payload.get("conference_specialist_trace", []),
+        "conference_specialist_orchestrator": prep_payload.get("conference_specialist_orchestrator"),
     })
 
 @api_router.get("/teachers/{teacher_id}/peer-recommendations")

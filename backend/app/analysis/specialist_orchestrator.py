@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from app.analysis.specialist_contracts import (
     SpecialistContext,
     SpecialistResult,
+    get_conference_prep_specialist_contracts,
     get_default_specialist_contracts,
 )
 
@@ -34,6 +35,26 @@ def _first_active_goal(context: SpecialistContext) -> Optional[str]:
         if text:
             return text
     return None
+
+
+def _primary_goal_progress(context: SpecialistContext) -> Optional[Dict[str, Any]]:
+    items = list(context.goal_progress_signals or [])
+    if not items:
+        return None
+    priority = {
+        "repeated_challenge": 3,
+        "evidence_gap": 2,
+        "one_off_evidence": 1,
+        "reinforcing_progress": 0,
+    }
+    ranked = sorted(
+        items,
+        key=lambda item: (
+            -priority.get(str(item.get("progress_signal") or ""), 0),
+            str(item.get("latest_evidence_at") or ""),
+        ),
+    )
+    return ranked[0] if ranked else None
 
 
 def _apply_evidence_grounding(payload: Dict[str, Any], context: SpecialistContext) -> SpecialistResult:
@@ -174,6 +195,152 @@ def _apply_recommendation_sequence(payload: Dict[str, Any], context: SpecialistC
     )
 
 
+def _apply_longitudinal_pattern(payload: Dict[str, Any], context: SpecialistContext) -> SpecialistResult:
+    notes: List[str] = []
+    primary_goal = _primary_goal_progress(context)
+    if not primary_goal:
+        return SpecialistResult(
+            specialist_id="longitudinal_pattern",
+            notes=notes,
+            payload_delta={"summary_updated": False, "recommendation_linked": False},
+        )
+
+    goal_title = str(primary_goal.get("title") or "").strip()
+    signal = str(primary_goal.get("progress_signal") or "").strip()
+    if not goal_title or not signal:
+        return SpecialistResult(
+            specialist_id="longitudinal_pattern",
+            notes=notes,
+            payload_delta={"summary_updated": False, "recommendation_linked": False},
+        )
+
+    summary_updated = False
+    recommendation_linked = False
+    summary = str(payload.get("summary") or "").strip()
+    summary_prefix = ""
+    recommendation_suffix = ""
+    if signal == "repeated_challenge":
+        if _is_hebrew(context.language):
+            summary_prefix = f"לאורך שיעורים אחרונים, {goal_title} מופיע כאתגר חוזר. "
+            recommendation_suffix = f" שמרו את ההמשך ממוקד ביעד החוזר: {goal_title}."
+        else:
+            summary_prefix = f"Across recent lessons, {goal_title} is showing up as a recurring challenge. "
+            recommendation_suffix = f" Keep the next move tightly focused on the recurring goal: {goal_title}."
+    elif signal == "reinforcing_progress":
+        if _is_hebrew(context.language):
+            summary_prefix = f"לאורך שיעורים אחרונים, יש סימני התקדמות עקביים סביב {goal_title}. "
+            recommendation_suffix = f" שמרו את ההמשך צמוד למה שכבר מתחיל לעבוד סביב {goal_title}."
+        else:
+            summary_prefix = f"Across recent lessons, there are consistent signs of improvement around {goal_title}. "
+            recommendation_suffix = f" Keep the next move anchored to what is starting to work around {goal_title}."
+    elif signal == "evidence_gap":
+        if _is_hebrew(context.language):
+            summary_prefix = f"לאורך שיעורים אחרונים, {goal_title} עדיין פעיל אבל בסיס הראיות עדיין דל. "
+            recommendation_suffix = f" בקשו ראיה חדשה שתאשר או תעדכן את הכיוון סביב {goal_title}."
+        else:
+            summary_prefix = f"Across recent lessons, {goal_title} is still active but the recent evidence base is still thin. "
+            recommendation_suffix = f" Ask for fresh evidence before changing direction on {goal_title}."
+    elif signal == "one_off_evidence":
+        if _is_hebrew(context.language):
+            summary_prefix = f"לאורך שיעורים אחרונים, יש רק ראיה ראשונית סביב {goal_title}. "
+            recommendation_suffix = f" השתמשו בשיעור הבא כדי לבדוק אם {goal_title} אכן מתבסס כדפוס."
+        else:
+            summary_prefix = f"Across recent lessons, there is only early evidence around {goal_title}. "
+            recommendation_suffix = f" Use the next lesson to confirm whether {goal_title} is becoming a real pattern."
+
+    if summary_prefix and _normalize_text(goal_title) not in _normalize_text(summary):
+        payload["summary"] = f"{summary_prefix}{summary}".strip()
+        summary_updated = True
+
+    recommendations = list(payload.get("recommendations") or [])
+    if recommendations and recommendation_suffix:
+        first = recommendations[0]
+        text = str(first.get("text") or "").strip()
+        if _normalize_text(goal_title) not in _normalize_text(text):
+            first["text"] = f"{text}{recommendation_suffix}".strip()
+            recommendation_linked = True
+    if summary_updated:
+        notes.append("Added one bounded longitudinal framing move from evidence-backed goal progress.")
+    if recommendation_linked:
+        notes.append("Linked the leading recommendation to the current longitudinal coaching pattern.")
+    return SpecialistResult(
+        specialist_id="longitudinal_pattern",
+        notes=notes,
+        payload_delta={
+            "summary_updated": summary_updated,
+            "recommendation_linked": recommendation_linked,
+            "goal_signal": signal,
+        },
+    )
+
+
+def _apply_conference_prep_synthesis(
+    payload: Dict[str, Any],
+    *,
+    language: str = "en",
+    adaptive_support: Optional[Dict[str, Any]] = None,
+) -> SpecialistResult:
+    notes: List[str] = []
+    agenda = [str(item or "").strip() for item in (payload.get("agenda") or []) if str(item or "").strip()]
+    continuity_lines = [
+        str(item or "").strip()
+        for item in (payload.get("continuity_lines") or [])
+        if str(item or "").strip()
+    ]
+    adaptive = adaptive_support or {}
+    primary_goal = adaptive.get("primary_goal") or {}
+    goal_title = str(primary_goal.get("title") or "").strip()
+    goal_signal = str(primary_goal.get("progress_signal") or "").strip()
+    admin_prompt = str(adaptive.get("admin_prompt_body") or "").strip()
+
+    def _dedupe(values: List[str]) -> List[str]:
+        out: List[str] = []
+        seen = set()
+        for value in values:
+            key = _normalize_text(value)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(value)
+        return out
+
+    if goal_title and goal_signal == "repeated_challenge":
+        lead = (
+            f"Keep the conference centered on the recurring challenge: {goal_title}."
+            if not _is_hebrew(language)
+            else f"שמרו את השיחה ממוקדת באתגר החוזר: {goal_title}."
+        )
+        agenda = [lead, *agenda]
+    elif goal_title and goal_signal == "reinforcing_progress":
+        lead = (
+            f"Reinforce the progress now showing up around: {goal_title}."
+            if not _is_hebrew(language)
+            else f"חזקו את ההתקדמות שמתחילה להופיע סביב: {goal_title}."
+        )
+        agenda = [lead, *agenda]
+
+    if admin_prompt:
+        agenda.append(admin_prompt)
+    continuity_lines = [*(adaptive.get("conference_continuity_lines") or []), *continuity_lines]
+    agenda = _dedupe(agenda)[:6]
+    continuity_lines = _dedupe(continuity_lines)[:5]
+    payload["agenda"] = agenda
+    payload["continuity_lines"] = continuity_lines
+    if goal_title:
+        notes.append("Re-centered conference prep on the clearest ongoing coaching thread.")
+    if admin_prompt:
+        notes.append("Folded adaptive admin guidance into the conference prep agenda.")
+    return SpecialistResult(
+        specialist_id="conference_prep_synthesis",
+        notes=notes,
+        payload_delta={
+            "agenda_count": len(agenda),
+            "continuity_count": len(continuity_lines),
+            "goal_signal": goal_signal or None,
+        },
+    )
+
+
 def orchestrate_specialists(
     payload: Dict[str, Any],
     *,
@@ -195,6 +362,18 @@ def orchestrate_specialists(
         priority_element_ids=priority_element_ids or [],
         focus_note=focus_note,
         active_goals=list((analysis_context or {}).get("active_goals") or []),
+        goal_progress_signals=list((analysis_context or {}).get("goal_progress_signals") or []),
+        reflection_takeaways=[
+            str(item).strip()
+            for item in [
+                ((analysis_context or {}).get("reflection_summary") or {}).get("self_reflection"),
+                ((analysis_context or {}).get("reflection_summary") or {}).get("actions_taken"),
+            ]
+            if str(item or "").strip()
+        ],
+        conference_continuity_lines=list(
+            ((analysis_context or {}).get("conference_continuity_lines") or [])
+        ),
         signal_guidance=list(
             ((analysis_context or {}).get("signal_summary") or {}).get("guidance") or []
         ),
@@ -205,6 +384,7 @@ def orchestrate_specialists(
     specialist_functions = {
         "evidence_grounding": _apply_evidence_grounding,
         "priority_coach": _apply_priority_coach,
+        "longitudinal_pattern": _apply_longitudinal_pattern,
         "recommendation_sequence": _apply_recommendation_sequence,
     }
     for contract in sorted(get_default_specialist_contracts(), key=lambda item: item.execution_order):
@@ -226,6 +406,42 @@ def orchestrate_specialists(
     result["specialist_orchestrator"] = {
         "enabled": True,
         "version": SPECIALIST_ORCHESTRATOR_VERSION,
+        "specialist_ids": [item["specialist_id"] for item in specialist_trace],
+    }
+    return result
+
+
+def orchestrate_conference_prep(
+    payload: Dict[str, Any],
+    *,
+    language: str = "en",
+    adaptive_support: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    result = {
+        **payload,
+        "agenda": [str(item) for item in (payload.get("agenda") or [])],
+        "continuity_lines": [str(item) for item in (payload.get("continuity_lines") or [])],
+    }
+    specialist_trace: List[dict] = []
+    for contract in get_conference_prep_specialist_contracts():
+        specialist_result = _apply_conference_prep_synthesis(
+            result,
+            language=language,
+            adaptive_support=adaptive_support,
+        )
+        specialist_trace.append(
+            {
+                "specialist_id": contract.specialist_id,
+                "name": contract.name,
+                "owned_fields": list(contract.owned_fields),
+                "notes": specialist_result.notes,
+                "payload_delta": specialist_result.payload_delta,
+            }
+        )
+    result["conference_specialist_trace"] = specialist_trace
+    result["conference_specialist_orchestrator"] = {
+        "enabled": True,
+        "version": "conference_prep_specialists_v1",
         "specialist_ids": [item["specialist_id"] for item in specialist_trace],
     }
     return result

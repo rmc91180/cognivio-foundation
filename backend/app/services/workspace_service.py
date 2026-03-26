@@ -503,23 +503,52 @@ async def build_analysis_context(current_user: dict, teacher_id: str) -> Dict[st
         scope_type="teacher",
         scope_id=teacher_id,
     )
+    enriched_goals = legacy._enrich_action_plan_goals_with_evidence(
+        (action_plan or {}).get("goals", []),
+        await legacy._build_teacher_evidence_catalog(teacher or {"id": teacher_id}, current_user),
+    ) if teacher else []
     signal_summary = await build_feedback_signal_summary(current_user, teacher_id=teacher_id)
+    memory_support = await build_teacher_memory_support(
+        current_user,
+        teacher_id,
+        language="en",
+    )
+    linked_goal_ids = list((reflection or {}).get("linked_goal_ids") or [])
+    linked_goal_titles = [
+        goal.get("title")
+        for goal in enriched_goals
+        if goal.get("id") in linked_goal_ids and goal.get("title")
+    ]
     return {
         "teacher_name": (teacher or {}).get("name"),
         "priority_elements": (framework_selection or {}).get("priority_elements", []),
         "focus_note": (framework_selection or {}).get("focus_note"),
         "active_goals": [
             goal.get("title")
-            for goal in (action_plan or {}).get("goals", [])
+            for goal in enriched_goals
             if goal.get("title") and goal.get("status") not in {"complete", "implemented"}
         ][:3],
+        "goal_progress_signals": [
+            {
+                "id": goal.get("id"),
+                "title": goal.get("title"),
+                "progress_signal": goal.get("progress_signal"),
+                "progress_summary": goal.get("progress_summary"),
+                "latest_evidence_at": goal.get("latest_evidence_at"),
+            }
+            for goal in enriched_goals
+            if goal.get("title")
+        ][:4],
         "action_plan_notes": (action_plan or {}).get("notes"),
         "reflection_summary": {
             "self_reflection": (reflection or {}).get("self_reflection"),
             "actions_taken": (reflection or {}).get("actions_taken"),
+            "linked_goal_ids": linked_goal_ids,
+            "linked_goal_titles": linked_goal_titles,
         },
         "memory_entries": memory_entries[:4],
         "signal_summary": signal_summary,
+        "conference_continuity_lines": list(memory_support.get("conference_continuity_lines") or []),
     }
 
 
