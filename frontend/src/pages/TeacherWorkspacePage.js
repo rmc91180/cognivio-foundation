@@ -68,6 +68,11 @@ export function TeacherWorkspacePage() {
     enabled: Boolean(teacherId),
     queryFn: () => teacherApi.conferenceAgenda(teacherId).then((r) => r.data),
   });
+  const { data: adaptiveSupportRes } = useQuery({
+    queryKey: ["teacher-adaptive-support", teacherId],
+    enabled: Boolean(teacherId),
+    queryFn: () => teacherApi.adaptiveSupport(teacherId).then((r) => r.data),
+  });
   const latestReviewedAt = latestAssessment?.analyzed_at || latestAssessment?.recorded_at || latestAssessment?.created_at || null;
   const nextConferenceAt = teacherRes?.next_coaching_conference || null;
   const privacyReady = privacyProfileRes?.status === "active";
@@ -214,8 +219,23 @@ export function TeacherWorkspacePage() {
             <WorkspaceSection title={t("teacherWorkspace.currentTitle")} description={t("teacherWorkspace.currentDescription")} tags={[t("timeScope.latestClass"), t("timeScope.immediateFollowUp")]} active={activeSection === "overview"} activeLabel={t("teacherWorkspace.activeSectionLabel")}>
               <div className="grid gap-4 md:grid-cols-2">
                 <Panel><div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.currentSummaryTitle")}</div><div className="mt-2 text-xs text-slate-700">{summaryInsightsRes?.summary || t("teacherProfile.noSummaryData")}</div></Panel>
-                <Panel><div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.currentNextStep")}</div><div className="mt-2 text-xs text-slate-700">{summaryInsightsRes?.recommendations?.[0] || openGoals[0]?.title || t("teacherProfile.noNextStepsYet")}</div></Panel>
+                <Panel><div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.currentNextStep")}</div><div className="mt-2 text-xs text-slate-700">{adaptiveSupportRes?.teacher_prompt_body || summaryInsightsRes?.recommendations?.[0] || openGoals[0]?.title || t("teacherProfile.noNextStepsYet")}</div></Panel>
               </div>
+              {adaptiveSupportRes?.teacher_prompt_title || adaptiveSupportRes?.teacher_prompt_body ? (
+                <Panel>
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {adaptiveSupportRes?.teacher_prompt_title || t("teacherWorkspace.currentNextStep")}
+                  </div>
+                  <div className="mt-2 text-xs text-slate-700">
+                    {adaptiveSupportRes?.teacher_prompt_body}
+                  </div>
+                  {adaptiveSupportRes?.primary_goal_title ? (
+                    <div className="mt-3 text-[11px] text-slate-500">
+                      {adaptiveSupportRes.primary_goal_title}
+                    </div>
+                  ) : null}
+                </Panel>
+              ) : null}
               <div className="grid gap-4 lg:grid-cols-2">
                 <Panel><div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">{t("teacherProfile.latestStrengths")}</div>{latestSignals.strengths.length ? <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>{latestSignals.strengths.map((item) => <li key={item.element_id}>{item.label} ({formatScore(item.score)}/10)</li>)}</ul> : <div className="text-xs text-slate-500">{t("teacherProfile.noRecentHighlights")}</div>}</Panel>
                 <Panel><div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-amber-700">{t("teacherProfile.immediateConcerns")}</div>{latestSignals.concerns.length ? <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>{latestSignals.concerns.map((item) => <li key={item.element_id}>{item.label} ({formatScore(item.score)}/10)</li>)}</ul> : <div className="text-xs text-slate-500">{t("teacherProfile.noRecentHighlights")}</div>}</Panel>
@@ -239,6 +259,9 @@ export function TeacherWorkspacePage() {
                               {t("coachingTasks.openTask")}
                             </Link>
                           </div>
+                          {task.support_prompt && task.support_prompt !== task.summary ? (
+                            <div className="mt-2 text-[11px] text-slate-500">{task.support_prompt}</div>
+                          ) : null}
                         </div>
                       ))}
                     </div>
@@ -285,6 +308,13 @@ export function TeacherWorkspacePage() {
                     : t("teacherWorkspace.upcomingConferenceNoDate")}
                 </div>
                 <div className="mt-2 text-[11px] text-slate-500">{t("teacherWorkspace.upcomingConferenceSyncNote")}</div>
+                {(adaptiveSupportRes?.conference_continuity_lines || []).length ? (
+                  <ul className={`mt-3 space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>
+                    {adaptiveSupportRes.conference_continuity_lines.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                ) : null}
                 {conferenceAgendaRes?.agenda_items?.length ? (
                   <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
                     <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">

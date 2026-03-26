@@ -2832,10 +2832,25 @@ class CoachingTask(BaseModel):
     observation_id: Optional[str] = None
     goal_id: Optional[str] = None
     schedule_id: Optional[str] = None
+    context_label: Optional[str] = None
+    support_prompt: Optional[str] = None
+    rank_reason: Optional[str] = None
 
 
 class CoachingTaskListResponse(BaseModel):
     tasks: List[CoachingTask]
+
+
+class TeacherAdaptiveSupportResponse(BaseModel):
+    teacher_id: str
+    teacher_name: Optional[str] = None
+    teacher_prompt_title: Optional[str] = None
+    teacher_prompt_body: Optional[str] = None
+    admin_prompt_title: Optional[str] = None
+    admin_prompt_body: Optional[str] = None
+    primary_goal_title: Optional[str] = None
+    primary_goal_signal: Optional[str] = None
+    conference_continuity_lines: List[str] = []
 
 
 class NotificationRecord(BaseModel):
@@ -6829,11 +6844,21 @@ async def _build_teacher_coaching_timeline(
 
 
 async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -> List[dict]:
+    from app.services.workspace_service import build_teacher_memory_support
+
     owner_id = _resolve_plan_owner_id(teacher, current_user)
     teacher_id = teacher["id"]
     role = _get_user_role(current_user)
     now = datetime.now(timezone.utc)
     tasks: List[dict] = []
+    adaptive_support = await build_teacher_memory_support(current_user, teacher_id)
+    primary_goal = adaptive_support.get("primary_goal") or {}
+    primary_goal_title = primary_goal.get("title")
+    primary_goal_signal = primary_goal.get("progress_signal")
+    teacher_prompt = adaptive_support.get("teacher_prompt_body")
+    admin_prompt = adaptive_support.get("admin_prompt_body")
+    next_conference_dt = _parse_iso_datetime(teacher.get("next_coaching_conference"))
+    conference_soon = bool(next_conference_dt and next_conference_dt <= now + timedelta(days=10))
 
     latest_assessment = await db.assessments.find_one(
         {"teacher_id": teacher_id, "user_id": owner_id},
@@ -6850,6 +6875,11 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
         {"teacher_id": teacher_id, "user_id": owner_id},
         {"_id": 0},
     ) or {"goals": [], "notes": None}
+    evidence_catalog = await _build_teacher_evidence_catalog(teacher, current_user)
+    current_action_plan["goals"] = _enrich_action_plan_goals_with_evidence(
+        current_action_plan.get("goals") or [],
+        evidence_catalog,
+    )
     reflection_participants = await _list_coaching_participants(teacher, current_user)
     teacher_user_ids = [
         item["user_id"]
@@ -6885,19 +6915,32 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
         assessment_at = _parse_iso_datetime(latest_assessment.get("analyzed_at") or latest_assessment.get("created_at"))
         observation_at = _parse_iso_datetime(latest_observation.get("created_at") if latest_observation else None)
         if assessment_at and (observation_at is None or assessment_at > observation_at):
+            priority = 95
+            if primary_goal_signal == "repeated_challenge":
+                priority += 3
+            if conference_soon:
+                priority += 2
             tasks.append(
                 {
                     "id": f"admin-review-{teacher_id}-{latest_assessment.get('id')}",
                     "teacher_id": teacher_id,
                     "teacher_name": teacher.get("name"),
                     "state": "awaiting_admin_review",
-                    "priority": 95,
+                    "priority": priority,
                     "title": "Review new lesson evidence",
-                    "summary": "A newly analyzed lesson is ready for admin review and follow-up.",
+                    "summary": admin_prompt
+                    or (
+                        f"Recent lesson evidence is ready for review with focus on {primary_goal_title}."
+                        if primary_goal_title
+                        else "A newly analyzed lesson is ready for admin review and follow-up."
+                    ),
                     "due_at": latest_assessment.get("analyzed_at"),
                     "route_hint": "video",
                     "assessment_id": latest_assessment.get("id"),
                     "video_id": latest_assessment.get("video_id"),
+                    "context_label": primary_goal_title,
+                    "support_prompt": admin_prompt,
+                    "rank_reason": "conference_soon" if conference_soon else primary_goal_signal,
                 }
             )
 
@@ -6905,19 +6948,32 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
         assessment_at = _parse_iso_datetime(latest_assessment.get("analyzed_at") or latest_assessment.get("created_at"))
         teacher_reflection_at = _parse_iso_datetime((latest_teacher_reflection or {}).get("saved_at"))
         if assessment_at and (teacher_reflection_at is None or assessment_at > teacher_reflection_at):
+            priority = 92
+            if primary_goal_signal == "repeated_challenge":
+                priority += 4
+            elif primary_goal_signal == "evidence_gap":
+                priority += 2
             tasks.append(
                 {
                     "id": f"teacher-evidence-{teacher_id}-{latest_assessment.get('id')}",
                     "teacher_id": teacher_id,
                     "teacher_name": teacher.get("name"),
                     "state": "new_evidence_ready",
-                    "priority": 92,
+                    "priority": priority,
                     "title": "Respond to the latest class evidence",
-                    "summary": "A recent lesson review is ready. Add your reflection and implementation response.",
+                    "summary": teacher_prompt
+                    or (
+                        f"A recent lesson review is ready. Connect your next move to {primary_goal_title}."
+                        if primary_goal_title
+                        else "A recent lesson review is ready. Add your reflection and implementation response."
+                    ),
                     "due_at": latest_assessment.get("analyzed_at"),
                     "route_hint": "reflection",
                     "assessment_id": latest_assessment.get("id"),
                     "video_id": latest_assessment.get("video_id"),
+                    "context_label": primary_goal_title,
+                    "support_prompt": teacher_prompt,
+                    "rank_reason": primary_goal_signal,
                 }
             )
 
@@ -6926,19 +6982,26 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
         teacher_reflection_at = _parse_iso_datetime((latest_teacher_reflection or {}).get("saved_at"))
         teacher_actions = str((latest_teacher_reflection or {}).get("actions_taken") or "").strip()
         if observation_at and (teacher_reflection_at is None or observation_at > teacher_reflection_at or not teacher_actions):
+            priority = 90 + (6 if conference_soon else 0)
             tasks.append(
                 {
                     "id": f"teacher-response-{teacher_id}-{latest_observation.get('id')}",
                     "teacher_id": teacher_id,
                     "teacher_name": teacher.get("name"),
                     "state": "awaiting_teacher_response",
-                    "priority": 90,
+                    "priority": priority,
                     "title": "Respond to admin follow-up",
-                    "summary": latest_observation.get("admin_comment"),
+                    "summary": (
+                        f"{latest_observation.get('admin_comment')} "
+                        f"{teacher_prompt or ''}"
+                    ).strip(),
                     "due_at": latest_observation.get("created_at"),
                     "route_hint": "reflection",
                     "observation_id": latest_observation.get("id"),
                     "video_id": latest_observation.get("video_id"),
+                    "context_label": primary_goal_title,
+                    "support_prompt": teacher_prompt,
+                    "rank_reason": "conference_soon" if conference_soon else "awaiting_teacher_response",
                 }
             )
 
@@ -6946,19 +7009,24 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
         observation_at = _parse_iso_datetime(latest_observation.get("created_at"))
         teacher_reflection_at = _parse_iso_datetime((latest_teacher_reflection or {}).get("saved_at"))
         if observation_at and (teacher_reflection_at is None or observation_at > teacher_reflection_at):
+            priority = 85 + (7 if conference_soon else 0)
             tasks.append(
                 {
                     "id": f"await-teacher-{teacher_id}-{latest_observation.get('id')}",
                     "teacher_id": teacher_id,
                     "teacher_name": teacher.get("name"),
                     "state": "awaiting_teacher_response",
-                    "priority": 85,
+                    "priority": priority,
                     "title": "Check for teacher follow-through",
-                    "summary": "A recent admin comment has not yet received a teacher follow-through response.",
+                    "summary": admin_prompt
+                    or "A recent admin comment has not yet received a teacher follow-through response.",
                     "due_at": latest_observation.get("created_at"),
                     "route_hint": "reflection",
                     "observation_id": latest_observation.get("id"),
                     "video_id": latest_observation.get("video_id"),
+                    "context_label": primary_goal_title,
+                    "support_prompt": admin_prompt,
+                    "rank_reason": "conference_soon" if conference_soon else primary_goal_signal,
                 }
             )
 
@@ -6967,22 +7035,33 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
             continue
         due_dt = _parse_iso_datetime(goal.get("due_date"))
         if due_dt and due_dt <= now + timedelta(days=14):
+            goal_priority = 80 if due_dt <= now else 72
+            if goal.get("title") == primary_goal_title and primary_goal_signal == "repeated_challenge":
+                goal_priority += 6
+            elif goal.get("title") == primary_goal_title and primary_goal_signal == "evidence_gap":
+                goal_priority += 3
+            if conference_soon:
+                goal_priority += 2
             tasks.append(
                 {
                     "id": f"goal-due-{teacher_id}-{goal.get('id')}",
                     "teacher_id": teacher_id,
                     "teacher_name": teacher.get("name"),
                     "state": "goal_checkpoint_due",
-                    "priority": 80 if due_dt <= now else 72,
+                    "priority": goal_priority,
                     "title": f"Checkpoint due: {goal.get('title')}",
-                    "summary": goal.get("description") or "Review progress against this shared goal.",
+                    "summary": goal.get("progress_summary")
+                    or goal.get("description")
+                    or "Review progress against this shared goal.",
                     "due_at": goal.get("due_date"),
                     "route_hint": "action_plan",
                     "goal_id": goal.get("id"),
+                    "context_label": goal.get("title"),
+                    "support_prompt": teacher_prompt if role == "teacher" else admin_prompt,
+                    "rank_reason": primary_goal_signal if goal.get("title") == primary_goal_title else "goal_checkpoint_due",
                 }
             )
 
-    next_conference_dt = _parse_iso_datetime(teacher.get("next_coaching_conference"))
     if next_conference_dt and next_conference_dt <= now + timedelta(days=10):
         tasks.append(
             {
@@ -6992,9 +7071,14 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
                 "state": "conference_upcoming",
                 "priority": 70,
                 "title": "Upcoming coaching conference",
-                "summary": "Prepare for the next coaching conversation and confirm the agenda.",
+                "summary": (
+                    teacher_prompt if role == "teacher" else admin_prompt
+                ) or "Prepare for the next coaching conversation and confirm the agenda.",
                 "due_at": teacher.get("next_coaching_conference"),
                 "route_hint": "conference",
+                "context_label": primary_goal_title,
+                "support_prompt": teacher_prompt if role == "teacher" else admin_prompt,
+                "rank_reason": "conference_upcoming",
             }
         )
 
@@ -9249,6 +9333,38 @@ async def get_published_conference_agenda(
     return ConferenceAgendaRecord(**agenda)
 
 
+@api_router.get(
+    "/teachers/{teacher_id}/adaptive-support",
+    response_model=TeacherAdaptiveSupportResponse,
+)
+async def get_teacher_adaptive_support(
+    teacher_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    from app.services.workspace_service import build_teacher_memory_support
+
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    language = _resolve_request_language(request, default="en")
+    snapshot = await build_teacher_memory_support(
+        current_user,
+        teacher_id,
+        language=language,
+    )
+    primary_goal = snapshot.get("primary_goal") or {}
+    return TeacherAdaptiveSupportResponse(
+        teacher_id=teacher_id,
+        teacher_name=teacher.get("name"),
+        teacher_prompt_title=snapshot.get("teacher_prompt_title"),
+        teacher_prompt_body=snapshot.get("teacher_prompt_body"),
+        admin_prompt_title=snapshot.get("admin_prompt_title"),
+        admin_prompt_body=snapshot.get("admin_prompt_body"),
+        primary_goal_title=primary_goal.get("title"),
+        primary_goal_signal=primary_goal.get("progress_signal"),
+        conference_continuity_lines=list(snapshot.get("conference_continuity_lines") or []),
+    )
+
+
 @api_router.post("/teachers/{teacher_id}/conference-agenda", response_model=ConferenceAgendaRecord)
 async def publish_conference_agenda(
     teacher_id: str,
@@ -9304,6 +9420,8 @@ async def get_teacher_conference_prep(
     request: Request,
     current_user: dict = Depends(get_current_user),
 ):
+    from app.services.workspace_service import build_teacher_memory_support
+
     teacher = await _get_teacher_or_404(teacher_id, current_user)
     language = _resolve_request_language(request, default="en")
     action_plan = await db.action_plans.find_one(
@@ -9357,6 +9475,14 @@ async def get_teacher_conference_prep(
             comparison_lines.append(f"הערות תוכנית הפעולה: {action_plan.get('notes')}")
         else:
             comparison_lines.append(f"Action-plan notes: {action_plan.get('notes')}")
+    adaptive_support = await build_teacher_memory_support(
+        current_user,
+        teacher_id,
+        language=language,
+    )
+    for line in adaptive_support.get("conference_continuity_lines") or []:
+        if line not in comparison_lines:
+            comparison_lines.append(line)
     agenda = []
     if latest_summary:
         agenda.append(latest_summary)
@@ -9370,6 +9496,8 @@ async def get_teacher_conference_prep(
                 agenda.append(f"בדקו התקדמות מול היעד: {goal.get('title')}.")
             else:
                 agenda.append(f"Check progress against the goal: {goal.get('title')}.")
+    if adaptive_support.get("admin_prompt_body"):
+        agenda.append(adaptive_support["admin_prompt_body"])
     published_agenda = await _get_latest_published_conference_agenda(teacher_id)
     return _to_json_safe({
         "teacher_id": teacher_id,

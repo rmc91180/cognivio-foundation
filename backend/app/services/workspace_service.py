@@ -162,6 +162,11 @@ async def sync_action_plan_memory(current_user: dict, teacher: dict, plan_doc: d
                 "active_goals": goals,
                 "notes": plan_doc.get("notes"),
                 "next_coaching_conference": teacher.get("next_coaching_conference"),
+                "goal_evidence_links": {
+                    goal.get("id"): list(goal.get("evidence_links") or [])
+                    for goal in plan_doc.get("goals", [])
+                    if goal.get("id")
+                },
             },
             "updated_by": current_user["id"],
             "updated_at": now,
@@ -187,10 +192,225 @@ async def sync_summary_reflection_memory(current_user: dict, teacher_id: str, re
             "payload": {
                 "self_reflection": reflection_doc.get("self_reflection") or "",
                 "actions_taken": reflection_doc.get("actions_taken") or "",
+                "linked_goal_ids": list(reflection_doc.get("linked_goal_ids") or []),
+                "linked_video_id": reflection_doc.get("linked_video_id"),
+                "linked_assessment_id": reflection_doc.get("linked_assessment_id"),
+                "linked_observation_id": reflection_doc.get("linked_observation_id"),
             },
             "updated_by": current_user["id"],
             "updated_at": now,
         },
+    )
+
+
+def _goal_signal_priority(signal: Optional[str]) -> int:
+    order = {
+        "repeated_challenge": 4,
+        "evidence_gap": 3,
+        "one_off_evidence": 2,
+        "linked_context": 1,
+        "reinforcing_progress": 0,
+    }
+    return order.get(signal or "", 0)
+
+
+def _build_memory_support_snapshot_from_inputs(
+    *,
+    teacher_name: Optional[str],
+    enriched_goals: List[dict],
+    reflection_summary: Dict[str, Any],
+    signal_summary: Dict[str, Any],
+    next_conference: Optional[str],
+    language: str = "en",
+) -> Dict[str, Any]:
+    def is_hebrew() -> bool:
+        return str(language or "").lower().startswith("he")
+
+    open_goals = [
+        goal for goal in enriched_goals
+        if goal.get("title") and goal.get("status") not in {"complete", "implemented"}
+    ]
+    open_goals.sort(
+        key=lambda goal: (
+            -_goal_signal_priority(goal.get("progress_signal")),
+            legacy._sort_key_for_iso(goal.get("latest_evidence_at")),
+        )
+    )
+    primary_goal = open_goals[0] if open_goals else None
+    reflection_text = str(reflection_summary.get("self_reflection") or "").strip()
+    actions_taken = str(reflection_summary.get("actions_taken") or "").strip()
+    guidance = [str(item).strip() for item in (signal_summary.get("guidance") or []) if str(item).strip()]
+    continuity_lines: List[str] = []
+    teacher_prompt_title = None
+    teacher_prompt_body = None
+    admin_prompt_title = None
+    admin_prompt_body = None
+
+    if primary_goal:
+        goal_title = primary_goal.get("title")
+        signal = primary_goal.get("progress_signal")
+        progress_summary = primary_goal.get("progress_summary")
+        if signal == "repeated_challenge":
+            if is_hebrew():
+                teacher_prompt_title = f"פוקוס לשיעור הבא: {goal_title}"
+                teacher_prompt_body = (
+                    f"ראיות אחרונות מראות שהאתגר סביב \"{goal_title}\" עדיין חוזר. "
+                    "תעדו מה תנסו לעשות אחרת בשיעור הבא וקשרו זאת לראיה האחרונה."
+                )
+                admin_prompt_title = f"אתגר חוזר: {goal_title}"
+                admin_prompt_body = (
+                    f"היעד \"{goal_title}\" עדיין מופיע כאתגר חוזר. "
+                    "עדיף למקד את שיחת הליווי הקרובה ביעד הזה ולבדוק תגובת מורה."
+                )
+            else:
+                teacher_prompt_title = f"Next class focus: {goal_title}"
+                teacher_prompt_body = (
+                    f"Recent evidence shows that \"{goal_title}\" is still repeating as a challenge. "
+                    "Log what you will try next and connect it to the latest evidence."
+                )
+                admin_prompt_title = f"Recurring challenge: {goal_title}"
+                admin_prompt_body = (
+                    f"\"{goal_title}\" is still showing up as a repeated challenge. "
+                    "Center the next coaching move on this goal and confirm teacher follow-through."
+                )
+        elif signal == "reinforcing_progress":
+            if is_hebrew():
+                teacher_prompt_title = f"שמרו על התנופה: {goal_title}"
+                teacher_prompt_body = (
+                    f"נראה שהעבודה על \"{goal_title}\" מתחילה להתחזק. "
+                    "תעדו מה עבד כדי שהמנהל יוכל לחזק את זה בשיחה הבאה."
+                )
+                admin_prompt_title = f"מומנטום חיובי: {goal_title}"
+                admin_prompt_body = (
+                    f"היעד \"{goal_title}\" מקבל חיזוק מראיות אחרונות. "
+                    "שווה לחזק את המהלך שעבד ולשמר אותו."
+                )
+            else:
+                teacher_prompt_title = f"Keep building: {goal_title}"
+                teacher_prompt_body = (
+                    f"Recent evidence suggests progress on \"{goal_title}\". "
+                    "Capture what worked so your admin can reinforce it in the next conference."
+                )
+                admin_prompt_title = f"Positive momentum: {goal_title}"
+                admin_prompt_body = (
+                    f"Recent evidence is reinforcing progress on \"{goal_title}\". "
+                    "Use the next conference to reinforce what is starting to work."
+                )
+        else:
+            if is_hebrew():
+                teacher_prompt_title = f"צרו ראיה חדשה עבור: {goal_title}"
+                teacher_prompt_body = (
+                    f"היעד \"{goal_title}\" עדיין פעיל, אבל אין מספיק ראיות חדשות. "
+                    "אחרי השיעור הבא, הוסיפו רפלקציה קצרה או העלו שיעור חדש."
+                )
+                admin_prompt_title = f"נדרשת ראיה חדשה: {goal_title}"
+                admin_prompt_body = (
+                    f"היעד \"{goal_title}\" עדיין פעיל, אבל חסרות ראיות חדשות. "
+                    "כדאי לוודא שיש שיעור או תגובת מורה חדשים לפני שינוי הכיוון."
+                )
+            else:
+                teacher_prompt_title = f"Create fresh evidence for: {goal_title}"
+                teacher_prompt_body = (
+                    f"\"{goal_title}\" is still active, but there is not enough fresh evidence yet. "
+                    "After the next class, add a short reflection or link new lesson evidence."
+                )
+                admin_prompt_title = f"Fresh evidence needed: {goal_title}"
+                admin_prompt_body = (
+                    f"\"{goal_title}\" is still active, but the recent evidence base is thin. "
+                    "Look for a new lesson or teacher response before changing the coaching plan."
+                )
+        if progress_summary:
+            continuity_lines.append(progress_summary)
+        if primary_goal.get("latest_evidence_at"):
+            if is_hebrew():
+                continuity_lines.append(
+                    f"הראיה האחרונה ליעד \"{goal_title}\" נוספה ב-{primary_goal.get('latest_evidence_at')}."
+                )
+            else:
+                continuity_lines.append(
+                    f"Latest linked evidence for \"{goal_title}\" was updated on {primary_goal.get('latest_evidence_at')}."
+                )
+
+    if actions_taken:
+        continuity_lines.append(actions_taken)
+    elif reflection_text:
+        continuity_lines.append(reflection_text)
+
+    if guidance:
+        continuity_lines.extend(guidance[:2])
+
+    if next_conference:
+        if is_hebrew():
+            continuity_lines.append("שיחת הליווי הבאה מתקרבת, ולכן כדאי להגיע עם ראיה ותגובה מעודכנות.")
+        else:
+            continuity_lines.append("The next coaching conference is coming up, so it is worth bringing fresh evidence and a current follow-through response.")
+
+    unique_lines: List[str] = []
+    seen = set()
+    for line in continuity_lines:
+        line = str(line).strip()
+        if not line or line in seen:
+            continue
+        seen.add(line)
+        unique_lines.append(line)
+
+    return {
+        "teacher_name": teacher_name,
+        "primary_goal": primary_goal,
+        "teacher_prompt_title": teacher_prompt_title,
+        "teacher_prompt_body": teacher_prompt_body,
+        "admin_prompt_title": admin_prompt_title,
+        "admin_prompt_body": admin_prompt_body,
+        "conference_continuity_lines": unique_lines[:4],
+    }
+
+
+async def build_teacher_memory_support(
+    current_user: dict,
+    teacher_id: str,
+    *,
+    language: str = "en",
+) -> Dict[str, Any]:
+    owner_id = _owner_id(current_user)
+    teacher = await legacy.db.teachers.find_one(
+        {"id": teacher_id, "created_by": owner_id},
+        {"_id": 0},
+    )
+    if not teacher:
+        return {
+            "teacher_name": None,
+            "primary_goal": None,
+            "teacher_prompt_title": None,
+            "teacher_prompt_body": None,
+            "admin_prompt_title": None,
+            "admin_prompt_body": None,
+            "conference_continuity_lines": [],
+        }
+
+    action_plan = await legacy.db.action_plans.find_one(
+        {"teacher_id": teacher_id, "user_id": owner_id},
+        {"_id": 0},
+    ) or {"goals": [], "notes": None}
+    reflection = await legacy.db.summary_reflections.find_one(
+        {"teacher_id": teacher_id, "user_id": owner_id},
+        {"_id": 0},
+    ) or {}
+    evidence_catalog = await legacy._build_teacher_evidence_catalog(teacher, current_user)
+    enriched_goals = legacy._enrich_action_plan_goals_with_evidence(
+        action_plan.get("goals") or [],
+        evidence_catalog,
+    )
+    signal_summary = await build_feedback_signal_summary(current_user, teacher_id=teacher_id)
+    return _build_memory_support_snapshot_from_inputs(
+        teacher_name=teacher.get("name"),
+        enriched_goals=enriched_goals,
+        reflection_summary={
+            "self_reflection": reflection.get("self_reflection"),
+            "actions_taken": reflection.get("actions_taken"),
+        },
+        signal_summary=signal_summary,
+        next_conference=teacher.get("next_coaching_conference"),
+        language=language,
     )
 
 

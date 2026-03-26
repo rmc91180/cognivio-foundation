@@ -900,7 +900,8 @@ export function DashboardPage() {
       const sharedTasks = (coachingTasksRes?.tasks || []).slice(0, 4).map((task) => ({
         id: task.id,
         title: task.title,
-        description: task.summary,
+        description: task.support_prompt || task.summary,
+        contextLabel: task.context_label,
         actionLabel: t("coachingTasks.openTask"),
         to: resolveCoachingLink(user, task.teacher_id, task.route_hint, {
           videoId: task.video_id,
@@ -1311,6 +1312,9 @@ export function DashboardPage() {
                   >
                     <h3 className="text-sm font-semibold text-slate-900">{item.title}</h3>
                     <p className="mt-1 text-xs text-slate-600">{item.description}</p>
+                    {item.contextLabel ? (
+                      <div className="mt-2 text-[11px] text-slate-500">{item.contextLabel}</div>
+                    ) : null}
                     <div className="mt-4">
                       <Link
                         to={item.to}

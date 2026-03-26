@@ -45,6 +45,16 @@ export function CoachingTaskList({
                 ) : null}
               </div>
               <div className="mt-3 text-xs text-slate-700">{task.summary}</div>
+              {task.support_prompt && task.support_prompt !== task.summary ? (
+                <div className="mt-2 rounded-md border border-slate-200 bg-white/80 px-3 py-2 text-[11px] text-slate-600">
+                  {task.support_prompt}
+                </div>
+              ) : null}
+              {task.context_label ? (
+                <div className="mt-2 text-[11px] text-slate-500">
+                  {task.context_label}
+                </div>
+              ) : null}
               <div className="mt-4">
                 <Link
                   to={resolveCoachingLink(user, task.teacher_id, task.route_hint, {
