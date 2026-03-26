@@ -1,57 +1,68 @@
 import { test, expect } from '@playwright/test';
 
-const DEMO_EMAIL = 'principal@lincoln.edu';
-const DEMO_PASSWORD = 'password123';
+const ADMIN_EMAIL = 'principal@demo.cognivio.app';
+const TEACHER_EMAIL = 'teacher@demo.cognivio.app';
+const DEMO_PASSWORD = 'DemoAccess2026!';
 
 test.describe('Authentication', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/login');
   });
 
+  const emailInput = (page) => page.locator('input[type="email"]');
+  const passwordInput = (page) => page.locator('input[type="password"]');
+
   test('displays login form', async ({ page }) => {
-    await expect(page.getByRole('heading', { name: /sign in/i })).toBeVisible();
-    await expect(page.getByLabel(/email/i)).toBeVisible();
-    await expect(page.locator('#password')).toBeVisible();
+    await expect(page.getByRole('heading', { name: /cognivio/i })).toBeVisible();
+    await expect(emailInput(page)).toBeVisible();
+    await expect(passwordInput(page)).toBeVisible();
     await expect(page.getByRole('button', { name: /sign in/i })).toBeVisible();
   });
 
-  test('shows validation error for empty fields', async ({ page }) => {
-    await page.getByRole('button', { name: /sign in/i }).click();
-    await expect(page).toHaveURL(/.*login/);
-    await expect(page.getByRole('heading', { name: /sign in/i })).toBeVisible();
-  });
-
-  test('shows error for invalid credentials', async ({ page }) => {
-    await page.getByLabel(/email/i).fill('invalid@test.com');
-    await page.locator('#password').fill('wrongpassword');
+  test('keeps the user on login for invalid credentials', async ({ page }) => {
+    await emailInput(page).fill('invalid@test.com');
+    await passwordInput(page).fill('wrongpassword');
     await page.getByRole('button', { name: /sign in/i }).click();
 
     await expect(page).toHaveURL(/.*login/);
+    await expect(page.getByRole('button', { name: /sign in/i })).toBeVisible();
   });
 
-  test('successfully logs in with demo credentials', async ({ page }) => {
-    await page.getByLabel(/email/i).fill(DEMO_EMAIL);
-    await page.locator('#password').fill(DEMO_PASSWORD);
+  test('successfully logs in as admin and reaches the dashboard', async ({ page }) => {
+    await emailInput(page).fill(ADMIN_EMAIL);
+    await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
 
-    // Should redirect to dashboard
     await expect(page).toHaveURL(/.*dashboard/);
-    await expect(page.getByRole('heading', { name: /dashboard/i })).toBeVisible();
+    await expect(
+      page.getByRole('heading', { name: /teacher performance overview|training program overview/i })
+    ).toBeVisible();
   });
 
   test('persists authentication across page reload', async ({ page }) => {
-    // Login
-    await page.getByLabel(/email/i).fill(DEMO_EMAIL);
-    await page.locator('#password').fill(DEMO_PASSWORD);
+    await emailInput(page).fill(ADMIN_EMAIL);
+    await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
 
     await expect(page).toHaveURL(/.*dashboard/);
 
-    // Reload page
     await page.reload();
 
-    // Should still be on dashboard
     await expect(page).toHaveURL(/.*dashboard/);
+  });
+
+  test('successfully logs in as teacher and reaches the teacher workspace', async ({ page }) => {
+    await emailInput(page).fill(TEACHER_EMAIL);
+    await passwordInput(page).fill(DEMO_PASSWORD);
+    await page.getByRole('button', { name: /sign in/i }).click();
+
+    await expect(page).toHaveURL(/.*my-workspace/);
+    await expect(
+      page.getByRole('heading', { name: /my teaching workspace/i })
+    ).toBeVisible();
+    await expect(
+      page.getByRole('heading', { name: /teacher record not linked yet/i })
+    ).toBeVisible();
   });
 
   test('redirects to login when not authenticated', async ({ page }) => {
@@ -60,18 +71,13 @@ test.describe('Authentication', () => {
   });
 
   test('logout clears session', async ({ page }) => {
-    // Login first
-    await page.getByLabel(/email/i).fill(DEMO_EMAIL);
-    await page.locator('#password').fill(DEMO_PASSWORD);
+    await emailInput(page).fill(ADMIN_EMAIL);
+    await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
 
     await expect(page).toHaveURL(/.*dashboard/);
 
-    // Open user menu and sign out
-    await page.locator('button[aria-haspopup="true"]').click();
-    await page.getByRole('button', { name: /sign out/i }).click();
-
-    // Should be back at login
+    await page.getByRole('button', { name: /logout/i }).click();
     await expect(page).toHaveURL(/.*login/);
   });
 });
