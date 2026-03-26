@@ -8,7 +8,7 @@ import { ObservationFocusPanel } from "@/components/assessment/ObservationFocusP
 import { VideoTimeline } from "@/components/VideoTimeline";
 import { useAuth } from "@/hooks/useAuth";
 import { toast } from "sonner";
-import { Badge, Button, EmptyState, Field, PageHeader, Panel, Textarea } from "@/components/ui";
+import { Badge, Button, EmptyState, Field, PageContextHeader, Panel, Textarea } from "@/components/ui";
 import { useTranslation } from "react-i18next";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 import { resolveCoachingLink } from "@/lib/coachingRoutes";
@@ -521,7 +521,31 @@ export function VideoPlayerPage() {
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
-        <PageHeader title={t("videoPlayer.lessonRecording")} compact className="mb-4" />
+        <PageContextHeader
+          breadcrumbs={[
+            { label: t("nav.videos"), to: "/videos" },
+            { label: videoRes?.filename || t("videoPlayer.lessonRecording") },
+          ]}
+          title={videoRes?.filename || t("videoPlayer.lessonRecording")}
+          description={t("videoPlayer.lessonRecording")}
+          quickLinks={[
+            videoRes?.teacher_id && isAdmin
+              ? {
+                  label: t("nav.teachers"),
+                  to: `/teachers/${videoRes.teacher_id}`,
+                }
+              : null,
+            assessmentRes?.video_id && videoRes?.teacher_id
+              ? {
+                  label: t("teacherWorkspace.goalsTitle"),
+                  to: isAdmin
+                    ? `/teachers/${videoRes.teacher_id}/action-plan`
+                    : "/my-workspace/goals",
+                }
+              : null,
+          ]}
+          className="mb-4"
+        />
         <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-slate-600">
           <Badge variant={statusVariant}>
             {t("videoPlayer.status", { status: formatAnalysisStatus(videoStatus) })}

@@ -25,7 +25,7 @@ import { CoachingTimelinePanel } from "@/components/coaching/CoachingTimelinePan
 import { EvidenceRecordList } from "@/components/coaching/EvidenceRecordList";
 import { MonthlySummary } from "@/components/MonthlySummary";
 import { VideoRecorder } from "@/components/VideoRecorder";
-import { SectionHeader } from "@/components/ui";
+import { PageContextHeader, SectionHeader } from "@/components/ui";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
 import { useTranslation } from "react-i18next";
@@ -830,50 +830,56 @@ export function TeacherProfilePage() {
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
-        <header className="mb-6 rounded-2xl border border-slate-200 bg-gradient-to-br from-white via-slate-50 to-emerald-50/60 p-5">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div className="max-w-3xl">
-              <div className="mb-2 flex flex-wrap gap-2">
-                <span className="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">
-                  {t("timeScope.latestClass")}
-                </span>
-                <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
-                  {t("timeScope.longTermFocus")}
-                </span>
-              </div>
-              <h1 className="font-heading text-2xl font-semibold text-slate-900">
-                {t("teacherProfile.title", {
-                  name: teacherRes?.name || t("teacherProfile.fallbackTeacher"),
-                })}
-              </h1>
-              <p className="mt-1 text-sm text-slate-600">{t("teacherProfile.subtitle")}</p>
-            </div>
-            <div className="grid min-w-[250px] gap-2 text-right text-xs text-slate-600">
-              <div className="rounded-xl border border-slate-200 bg-white/90 px-4 py-3">
-                <div className="uppercase tracking-wide text-slate-500">
-                  {t("teacherProfile.coachingStatusLatestLesson")}
-                </div>
-                <div className="mt-1 font-semibold text-slate-900">
-                  {latestReviewedAt
-                    ? formatDateTime(latestReviewedAt)
-                    : t("teacherProfile.noLessonReviewedYet")}
-                </div>
-              </div>
-              <div className="rounded-xl border border-slate-200 bg-white/90 px-4 py-3">
-                <div className="uppercase tracking-wide text-slate-500">
-                  {t("teacherProfile.coachingStatusConference")}
-                </div>
-                <div className="mt-1 font-semibold text-slate-900">
-                  {nextCoachingConference
-                    ? t("teacherProfile.nextConferenceScheduled", {
-                        date: formatDateTime(nextCoachingConference),
-                      })
-                    : t("teacherProfile.nextConferenceNotScheduled")}
-                </div>
-              </div>
-            </div>
-          </div>
-        </header>
+        <PageContextHeader
+          breadcrumbs={[
+            { label: t("nav.teachers"), to: "/teachers" },
+            { label: teacherRes?.name || t("teacherProfile.fallbackTeacher") },
+          ]}
+          title={t("teacherProfile.title", {
+            name: teacherRes?.name || t("teacherProfile.fallbackTeacher"),
+          })}
+          description={t("teacherProfile.subtitle")}
+          badge={t("teacherProfile.adminActionLane")}
+          stats={[
+            {
+              label: t("teacherProfile.coachingStatusLatestLesson"),
+              value: latestReviewedAt
+                ? formatDateTime(latestReviewedAt)
+                : t("teacherProfile.noLessonReviewedYet"),
+            },
+            {
+              label: t("teacherProfile.coachingStatusConference"),
+              value: nextCoachingConference
+                ? t("teacherProfile.nextConferenceScheduled", {
+                    date: formatDateTime(nextCoachingConference),
+                  })
+                : t("teacherProfile.nextConferenceNotScheduled"),
+            },
+            {
+              label: t("teacherProfile.coachingStatusGoals"),
+              value: t("teacherProfile.goalsInMotionCount", {
+                open: openGoalsCount,
+                completed: completedGoalsCount,
+              }),
+            },
+          ]}
+          quickLinks={[
+            latestAssessment?.video_id
+              ? {
+                  label: t("teacherProfile.openLatestLesson"),
+                  to: `/videos/${latestAssessment.video_id}`,
+                }
+              : null,
+            {
+              label: t("teacherProfile.jumpToActionPlan"),
+              to: `/teachers/${teacherId}/action-plan`,
+            },
+            {
+              label: t("teacherWorkspace.reflectionsTitle"),
+              to: `/teachers/${teacherId}/reflections`,
+            },
+          ]}
+        />
 
         {scheduleReminders.length > 0 && (
           <details className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
@@ -915,22 +921,6 @@ export function TeacherProfilePage() {
               <p className="mt-1 text-xs text-slate-500">
                 {t("teacherProfile.coachingWorkspaceDescription")}
               </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {latestAssessment?.video_id && (
-                <Link
-                  to={`/videos/${latestAssessment.video_id}`}
-                  className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
-                >
-                  {t("teacherProfile.openLatestLesson")}
-                </Link>
-              )}
-              <Link
-                to={`/teachers/${teacherId}/action-plan`}
-                className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
-              >
-                {t("teacherProfile.jumpToActionPlan")}
-              </Link>
             </div>
           </div>
           <div className="mt-4 grid gap-3 md:grid-cols-3">

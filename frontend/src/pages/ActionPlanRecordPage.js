@@ -4,7 +4,7 @@ import { Link, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { LayoutShell } from "@/components/LayoutShell";
-import { Button, PageHeader, Panel, SectionHeader } from "@/components/ui";
+import { Button, PageContextHeader, PageHeader, Panel, SectionHeader } from "@/components/ui";
 import { CoachingTimelinePanel } from "@/components/coaching/CoachingTimelinePanel";
 import { EvidenceRecordList } from "@/components/coaching/EvidenceRecordList";
 import { useAuth } from "@/hooks/useAuth";
@@ -164,9 +164,21 @@ export function ActionPlanRecordPage() {
   }
 
   return (
-    <LayoutShell>
-      <div className="mx-auto max-w-5xl px-6 py-6">
-        <PageHeader
+      <LayoutShell>
+        <div className="mx-auto max-w-5xl px-6 py-6">
+        <PageContextHeader
+          breadcrumbs={
+            isAdmin
+              ? [
+                  { label: t("nav.teachers"), to: "/teachers" },
+                  { label: teacherRes?.name || t("teacherWorkspace.fallbackName"), to: `/teachers/${teacherId}` },
+                  { label: t("teacherProfile.actionPlanRecordTitle") },
+                ]
+              : [
+                  { label: t("nav.myWorkspace"), to: "/my-workspace" },
+                  { label: t("teacherWorkspace.goalsTitle") },
+                ]
+          }
           title={t("teacherProfile.actionPlanRecordTitle")}
           description={t("teacherProfile.actionPlanRecordDescription")}
           meta={
@@ -176,33 +188,50 @@ export function ActionPlanRecordPage() {
                 })
               : t("teacherWorkspace.sharedPlanTitle")
           }
+          stats={[
+            {
+              label: t("teacherProfile.coachingStatusGoals"),
+              value: t("teacherProfile.goalsInMotionCount", {
+                open: openGoalsCount,
+                completed: completedGoalsCount,
+              }),
+            },
+            {
+              label: t("teacherProfile.nextCheckpoint"),
+              value: nextDueGoal?.title || t("teacherProfile.noSharedGoalsYet"),
+            },
+            {
+              label: t("teacherProfile.recordHistory"),
+              value: `${(actionPlanHistoryRes?.history || []).length}`,
+            },
+          ]}
+          quickLinks={[
+            {
+              label: isAdmin ? t("teacherProfile.returnToTeacher") : t("teacherWorkspace.returnHome"),
+              to: isAdmin ? `/teachers/${teacherId}` : "/my-workspace",
+            },
+            {
+              label: t("teacherWorkspace.reflectionsTitle"),
+              to: isAdmin ? `/teachers/${teacherId}/reflections` : "/my-workspace/reflections",
+            },
+          ]}
           actions={
-            <div className="flex flex-wrap gap-2">
-              <Link
-                to={isAdmin ? `/teachers/${teacherId}` : "/my-workspace"}
-                className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
-              >
-                {isAdmin
-                  ? t("teacherProfile.returnToTeacher")
-                  : t("teacherWorkspace.returnHome")}
-              </Link>
-              <Button
-                size="sm"
-                onClick={() =>
-                  saveActionPlanMutation.mutate({
-                    goals: actionPlanGoals,
-                    notes: actionPlanNotes,
-                  })
-                }
-                disabled={saveActionPlanMutation.isPending}
-              >
-                {saveActionPlanMutation.isPending
-                  ? t("teachersPage.saving")
-                  : isAdmin
-                    ? t("teacherProfile.saveActionPlan")
-                    : t("teacherWorkspace.saveImplementationNotes")}
-              </Button>
-            </div>
+            <Button
+              size="sm"
+              onClick={() =>
+                saveActionPlanMutation.mutate({
+                  goals: actionPlanGoals,
+                  notes: actionPlanNotes,
+                })
+              }
+              disabled={saveActionPlanMutation.isPending}
+            >
+              {saveActionPlanMutation.isPending
+                ? t("teachersPage.saving")
+                : isAdmin
+                  ? t("teacherProfile.saveActionPlan")
+                  : t("teacherWorkspace.saveImplementationNotes")}
+            </Button>
           }
         />
 
