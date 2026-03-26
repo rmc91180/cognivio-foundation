@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { LayoutShell } from "@/components/LayoutShell";
 import { Button, PageHeader, Panel, SectionHeader } from "@/components/ui";
+import { CoachingTimelinePanel } from "@/components/coaching/CoachingTimelinePanel";
 import { useAuth } from "@/hooks/useAuth";
 import { assessmentApi, teacherApi } from "@/lib/api";
 import { isAdminUser } from "@/lib/userRoutes";
@@ -33,6 +34,11 @@ export function ReflectionRecordPage() {
     enabled: Boolean(teacherId),
     queryFn: () => assessmentApi.teacherReflectionHistory(teacherId).then((r) => r.data),
   });
+  const { data: coachingTimelineRes } = useQuery({
+    queryKey: ["teacher-coaching-timeline", teacherId],
+    enabled: Boolean(teacherId),
+    queryFn: () => teacherApi.coachingTimeline(teacherId).then((r) => r.data),
+  });
 
   const [selfReflection, setSelfReflection] = useState("");
   const [actionsTaken, setActionsTaken] = useState("");
@@ -49,6 +55,8 @@ export function ReflectionRecordPage() {
       queryClient.invalidateQueries({ queryKey: ["teacher-summary-reflection", teacherId] });
       queryClient.invalidateQueries({ queryKey: ["teacher-reflection-history", teacherId] });
       queryClient.invalidateQueries({ queryKey: ["teacher-dashboard", teacherId] });
+      queryClient.invalidateQueries({ queryKey: ["coaching-tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["teacher-coaching-timeline", teacherId] });
     },
     onError: () => {
       toast.error(t("teacherProfile.reflectionSaveFailed"));
@@ -267,6 +275,20 @@ export function ReflectionRecordPage() {
             )}
           </div>
         </section>
+
+        <div className="mt-6">
+          <CoachingTimelinePanel
+            title={t("coachingTimeline.title")}
+            description={t("coachingTimeline.description")}
+            eyebrow={t("teacherProfile.recordHistory")}
+            entries={coachingTimelineRes?.entries || []}
+            user={user}
+            teacherId={teacherId}
+            t={t}
+            emptyLabel={t("coachingTimeline.empty")}
+            dateFormatter={dateFormatter}
+          />
+        </div>
       </div>
     </LayoutShell>
   );

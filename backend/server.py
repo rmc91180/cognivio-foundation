@@ -2725,6 +2725,73 @@ class ReflectionHistoryResponse(BaseModel):
     history: List[ReflectionHistoryEntry]
 
 
+class ConferenceAgendaRecord(BaseModel):
+    id: str
+    teacher_id: str
+    agenda_items: List[str]
+    linked_goal_ids: List[str] = []
+    linked_assessment_id: Optional[str] = None
+    linked_video_id: Optional[str] = None
+    published_by_user_id: Optional[str] = None
+    published_by_name: Optional[str] = None
+    published_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class ConferenceAgendaUpsert(BaseModel):
+    agenda_items: List[str]
+    linked_goal_ids: List[str] = []
+    linked_assessment_id: Optional[str] = None
+    linked_video_id: Optional[str] = None
+
+
+class CoachingTimelineEntry(BaseModel):
+    id: str
+    teacher_id: str
+    teacher_name: Optional[str] = None
+    entry_type: str
+    title: str
+    summary: Optional[str] = None
+    created_at: str
+    author_name: Optional[str] = None
+    author_role: Optional[str] = None
+    route_hint: Optional[str] = None
+    assessment_id: Optional[str] = None
+    video_id: Optional[str] = None
+    observation_id: Optional[str] = None
+    goal_id: Optional[str] = None
+    reflection_id: Optional[str] = None
+    schedule_id: Optional[str] = None
+    timestamp_seconds: Optional[float] = None
+
+
+class CoachingTimelineResponse(BaseModel):
+    teacher_id: str
+    teacher_name: Optional[str] = None
+    entries: List[CoachingTimelineEntry]
+
+
+class CoachingTask(BaseModel):
+    id: str
+    teacher_id: str
+    teacher_name: Optional[str] = None
+    state: str
+    priority: int
+    title: str
+    summary: str
+    due_at: Optional[str] = None
+    route_hint: Optional[str] = None
+    assessment_id: Optional[str] = None
+    video_id: Optional[str] = None
+    observation_id: Optional[str] = None
+    goal_id: Optional[str] = None
+    schedule_id: Optional[str] = None
+
+
+class CoachingTaskListResponse(BaseModel):
+    tasks: List[CoachingTask]
+
+
 class NotificationRecord(BaseModel):
     id: str
     teacher_id: Optional[str] = None
@@ -6198,6 +6265,385 @@ async def _list_coaching_participants(teacher: dict, current_user: dict) -> List
     return participants
 
 
+def _sort_key_for_iso(value: Optional[str]) -> datetime:
+    parsed = _parse_iso_datetime(value)
+    return parsed or datetime.min.replace(tzinfo=timezone.utc)
+
+
+async def _get_latest_published_conference_agenda(teacher_id: str) -> Optional[dict]:
+    return await db.published_conference_agendas.find_one(
+        {"teacher_id": teacher_id},
+        {"_id": 0},
+        sort=[("published_at", -1), ("updated_at", -1)],
+    )
+
+
+async def _build_teacher_coaching_timeline(
+    teacher: dict,
+    current_user: dict,
+    *,
+    max_entries: int = 20,
+) -> List[dict]:
+    teacher_id = teacher["id"]
+    owner_id = _resolve_plan_owner_id(teacher, current_user)
+    participants = await _list_coaching_participants(teacher, current_user)
+    participant_map = {item["user_id"]: item for item in participants if item.get("user_id")}
+    visible_user_ids = [item["user_id"] for item in participants if item.get("user_id")]
+
+    action_plan_history = await db.action_plan_history.find(
+        {"teacher_id": teacher_id, "plan_owner_id": owner_id},
+        {"_id": 0},
+    ).sort("saved_at", -1).to_list(25)
+    reflection_history = await db.summary_reflection_history.find(
+        {"teacher_id": teacher_id, "author_user_id": {"$in": visible_user_ids or ["__none__"]}},
+        {"_id": 0},
+    ).sort("saved_at", -1).to_list(25)
+    observation_docs = await db.observations.find(
+        {"teacher_id": teacher_id, "user_id": owner_id},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(25)
+    assessment_docs = await db.assessments.find(
+        {"teacher_id": teacher_id, "user_id": owner_id},
+        {"_id": 0},
+    ).sort("analyzed_at", -1).to_list(15)
+    published_agenda = await _get_latest_published_conference_agenda(teacher_id)
+
+    entries: List[dict] = []
+
+    for entry in action_plan_history:
+        goal_titles = [
+            goal.get("title")
+            for goal in entry.get("goals", [])
+            if goal.get("title")
+        ]
+        summary_parts = []
+        if goal_titles:
+            summary_parts.append(", ".join(goal_titles[:3]))
+        if entry.get("notes"):
+            summary_parts.append(str(entry.get("notes")).strip())
+        entries.append(
+            {
+                "id": f"action-plan-{entry.get('id')}",
+                "teacher_id": teacher_id,
+                "teacher_name": teacher.get("name"),
+                "entry_type": "action_plan_update",
+                "title": "Action plan updated",
+                "summary": " • ".join([part for part in summary_parts if part]) or None,
+                "created_at": entry.get("saved_at") or teacher.get("created_at"),
+                "author_name": entry.get("saved_by_name"),
+                "author_role": entry.get("saved_by_role"),
+                "route_hint": "action_plan",
+            }
+        )
+
+    for entry in reflection_history:
+        participant = participant_map.get(entry.get("author_user_id"), {})
+        author_role = entry.get("author_role") or participant.get("role") or "teacher"
+        title = "Teacher reflection saved" if author_role == "teacher" else "Admin reflection saved"
+        summary = entry.get("self_reflection") or entry.get("actions_taken") or ""
+        entries.append(
+            {
+                "id": f"reflection-{entry.get('id')}",
+                "teacher_id": teacher_id,
+                "teacher_name": teacher.get("name"),
+                "entry_type": "reflection_saved",
+                "title": title,
+                "summary": str(summary).strip() or None,
+                "created_at": entry.get("saved_at") or teacher.get("created_at"),
+                "author_name": entry.get("author_name") or participant.get("name"),
+                "author_role": author_role,
+                "route_hint": "reflection",
+                "reflection_id": entry.get("reflection_id"),
+            }
+        )
+
+    for observation in observation_docs:
+        summary = (
+            observation.get("admin_comment")
+            or observation.get("teacher_response")
+            or observation.get("summary")
+        )
+        if not summary:
+            continue
+        entries.append(
+            {
+                "id": f"observation-{observation.get('id')}",
+                "teacher_id": teacher_id,
+                "teacher_name": teacher.get("name"),
+                "entry_type": "observation_comment",
+                "title": "Observation follow-up noted",
+                "summary": str(summary).strip(),
+                "created_at": observation.get("created_at") or teacher.get("created_at"),
+                "author_name": current_user.get("name") if owner_id == current_user["id"] else None,
+                "author_role": "admin",
+                "route_hint": "video",
+                "observation_id": observation.get("id"),
+                "video_id": observation.get("video_id"),
+                "timestamp_seconds": observation.get("timestamp_seconds"),
+            }
+        )
+
+    for assessment in assessment_docs:
+        summary = assessment.get("summary")
+        entries.append(
+            {
+                "id": f"assessment-{assessment.get('id')}",
+                "teacher_id": teacher_id,
+                "teacher_name": teacher.get("name"),
+                "entry_type": "lesson_evidence_ready",
+                "title": "Lesson evidence reviewed",
+                "summary": str(summary).strip() if summary else None,
+                "created_at": assessment.get("analyzed_at")
+                or assessment.get("created_at")
+                or teacher.get("created_at"),
+                "author_role": "system",
+                "route_hint": "video",
+                "assessment_id": assessment.get("id"),
+                "video_id": assessment.get("video_id"),
+            }
+        )
+
+    if teacher.get("next_coaching_conference"):
+        entries.append(
+            {
+                "id": f"conference-{teacher_id}",
+                "teacher_id": teacher_id,
+                "teacher_name": teacher.get("name"),
+                "entry_type": "conference_scheduled",
+                "title": "Coaching conference scheduled",
+                "summary": teacher.get("next_coaching_conference"),
+                "created_at": teacher.get("next_coaching_conference"),
+                "author_role": "admin",
+                "route_hint": "conference",
+            }
+        )
+
+    if published_agenda:
+        agenda_preview = ", ".join((published_agenda.get("agenda_items") or [])[:3])
+        entries.append(
+            {
+                "id": f"conference-agenda-{published_agenda.get('id')}",
+                "teacher_id": teacher_id,
+                "teacher_name": teacher.get("name"),
+                "entry_type": "conference_agenda_published",
+                "title": "Conference agenda published",
+                "summary": agenda_preview or None,
+                "created_at": published_agenda.get("published_at")
+                or published_agenda.get("updated_at")
+                or teacher.get("created_at"),
+                "author_name": published_agenda.get("published_by_name"),
+                "author_role": "admin",
+                "route_hint": "conference",
+                "assessment_id": published_agenda.get("linked_assessment_id"),
+                "video_id": published_agenda.get("linked_video_id"),
+            }
+        )
+
+    entries.sort(key=lambda item: _sort_key_for_iso(item.get("created_at")), reverse=True)
+    return entries[:max_entries]
+
+
+async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -> List[dict]:
+    owner_id = _resolve_plan_owner_id(teacher, current_user)
+    teacher_id = teacher["id"]
+    role = _get_user_role(current_user)
+    now = datetime.now(timezone.utc)
+    tasks: List[dict] = []
+
+    latest_assessment = await db.assessments.find_one(
+        {"teacher_id": teacher_id, "user_id": owner_id},
+        {"_id": 0},
+        sort=[("analyzed_at", -1)],
+    )
+    latest_observation = await db.observations.find_one(
+        {"teacher_id": teacher_id, "user_id": owner_id},
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    privacy_profile = await _get_active_privacy_profile(teacher_id)
+    current_action_plan = await db.action_plans.find_one(
+        {"teacher_id": teacher_id, "user_id": owner_id},
+        {"_id": 0},
+    ) or {"goals": [], "notes": None}
+    reflection_participants = await _list_coaching_participants(teacher, current_user)
+    teacher_user_ids = [
+        item["user_id"]
+        for item in reflection_participants
+        if item.get("role") == "teacher" and item.get("user_id")
+    ]
+    latest_teacher_reflection = await db.summary_reflection_history.find_one(
+        {"teacher_id": teacher_id, "author_user_id": {"$in": teacher_user_ids or ["__none__"]}},
+        {"_id": 0},
+        sort=[("saved_at", -1)],
+    )
+    latest_admin_reflection = await db.summary_reflection_history.find_one(
+        {"teacher_id": teacher_id, "author_role": {"$ne": "teacher"}},
+        {"_id": 0},
+        sort=[("saved_at", -1)],
+    )
+
+    if not privacy_profile:
+        tasks.append(
+            {
+                "id": f"privacy-{teacher_id}",
+                "teacher_id": teacher_id,
+                "teacher_name": teacher.get("name"),
+                "state": "privacy_blocker",
+                "priority": 100,
+                "title": "Complete privacy profile",
+                "summary": "Recording uploads are blocked until the teacher privacy profile is complete.",
+                "route_hint": "privacy_profile",
+            }
+        )
+
+    if role != "teacher" and latest_assessment:
+        assessment_at = _parse_iso_datetime(latest_assessment.get("analyzed_at") or latest_assessment.get("created_at"))
+        observation_at = _parse_iso_datetime(latest_observation.get("created_at") if latest_observation else None)
+        if assessment_at and (observation_at is None or assessment_at > observation_at):
+            tasks.append(
+                {
+                    "id": f"admin-review-{teacher_id}-{latest_assessment.get('id')}",
+                    "teacher_id": teacher_id,
+                    "teacher_name": teacher.get("name"),
+                    "state": "awaiting_admin_review",
+                    "priority": 95,
+                    "title": "Review new lesson evidence",
+                    "summary": "A newly analyzed lesson is ready for admin review and follow-up.",
+                    "due_at": latest_assessment.get("analyzed_at"),
+                    "route_hint": "video",
+                    "assessment_id": latest_assessment.get("id"),
+                    "video_id": latest_assessment.get("video_id"),
+                }
+            )
+
+    if role == "teacher" and latest_assessment:
+        assessment_at = _parse_iso_datetime(latest_assessment.get("analyzed_at") or latest_assessment.get("created_at"))
+        teacher_reflection_at = _parse_iso_datetime((latest_teacher_reflection or {}).get("saved_at"))
+        if assessment_at and (teacher_reflection_at is None or assessment_at > teacher_reflection_at):
+            tasks.append(
+                {
+                    "id": f"teacher-evidence-{teacher_id}-{latest_assessment.get('id')}",
+                    "teacher_id": teacher_id,
+                    "teacher_name": teacher.get("name"),
+                    "state": "new_evidence_ready",
+                    "priority": 92,
+                    "title": "Respond to the latest class evidence",
+                    "summary": "A recent lesson review is ready. Add your reflection and implementation response.",
+                    "due_at": latest_assessment.get("analyzed_at"),
+                    "route_hint": "reflection",
+                    "assessment_id": latest_assessment.get("id"),
+                    "video_id": latest_assessment.get("video_id"),
+                }
+            )
+
+    if latest_observation and latest_observation.get("admin_comment"):
+        observation_at = _parse_iso_datetime(latest_observation.get("created_at"))
+        teacher_reflection_at = _parse_iso_datetime((latest_teacher_reflection or {}).get("saved_at"))
+        teacher_actions = str((latest_teacher_reflection or {}).get("actions_taken") or "").strip()
+        if observation_at and (teacher_reflection_at is None or observation_at > teacher_reflection_at or not teacher_actions):
+            tasks.append(
+                {
+                    "id": f"teacher-response-{teacher_id}-{latest_observation.get('id')}",
+                    "teacher_id": teacher_id,
+                    "teacher_name": teacher.get("name"),
+                    "state": "awaiting_teacher_response",
+                    "priority": 90,
+                    "title": "Respond to admin follow-up",
+                    "summary": latest_observation.get("admin_comment"),
+                    "due_at": latest_observation.get("created_at"),
+                    "route_hint": "reflection",
+                    "observation_id": latest_observation.get("id"),
+                    "video_id": latest_observation.get("video_id"),
+                }
+            )
+
+    if role != "teacher" and latest_observation and latest_observation.get("admin_comment"):
+        observation_at = _parse_iso_datetime(latest_observation.get("created_at"))
+        teacher_reflection_at = _parse_iso_datetime((latest_teacher_reflection or {}).get("saved_at"))
+        if observation_at and (teacher_reflection_at is None or observation_at > teacher_reflection_at):
+            tasks.append(
+                {
+                    "id": f"await-teacher-{teacher_id}-{latest_observation.get('id')}",
+                    "teacher_id": teacher_id,
+                    "teacher_name": teacher.get("name"),
+                    "state": "awaiting_teacher_response",
+                    "priority": 85,
+                    "title": "Check for teacher follow-through",
+                    "summary": "A recent admin comment has not yet received a teacher follow-through response.",
+                    "due_at": latest_observation.get("created_at"),
+                    "route_hint": "reflection",
+                    "observation_id": latest_observation.get("id"),
+                    "video_id": latest_observation.get("video_id"),
+                }
+            )
+
+    for goal in current_action_plan.get("goals", []):
+        if goal.get("status") in {"complete", "implemented"} or not goal.get("title"):
+            continue
+        due_dt = _parse_iso_datetime(goal.get("due_date"))
+        if due_dt and due_dt <= now + timedelta(days=14):
+            tasks.append(
+                {
+                    "id": f"goal-due-{teacher_id}-{goal.get('id')}",
+                    "teacher_id": teacher_id,
+                    "teacher_name": teacher.get("name"),
+                    "state": "goal_checkpoint_due",
+                    "priority": 80 if due_dt <= now else 72,
+                    "title": f"Checkpoint due: {goal.get('title')}",
+                    "summary": goal.get("description") or "Review progress against this shared goal.",
+                    "due_at": goal.get("due_date"),
+                    "route_hint": "action_plan",
+                    "goal_id": goal.get("id"),
+                }
+            )
+
+    next_conference_dt = _parse_iso_datetime(teacher.get("next_coaching_conference"))
+    if next_conference_dt and next_conference_dt <= now + timedelta(days=10):
+        tasks.append(
+            {
+                "id": f"conference-{teacher_id}",
+                "teacher_id": teacher_id,
+                "teacher_name": teacher.get("name"),
+                "state": "conference_upcoming",
+                "priority": 70,
+                "title": "Upcoming coaching conference",
+                "summary": "Prepare for the next coaching conversation and confirm the agenda.",
+                "due_at": teacher.get("next_coaching_conference"),
+                "route_hint": "conference",
+            }
+        )
+
+    tasks.sort(
+        key=lambda item: (
+            -(item.get("priority") or 0),
+            _sort_key_for_iso(item.get("due_at")),
+        )
+    )
+    return tasks
+
+
+async def _list_visible_teachers_for_user(
+    current_user: dict,
+    teacher_id: Optional[str] = None,
+) -> List[dict]:
+    role = _get_user_role(current_user)
+    if teacher_id:
+        teacher = await _get_teacher_or_404(teacher_id, current_user)
+        return [teacher]
+    if role == "teacher":
+        teacher_ids = await _list_teacher_ids_for_user(current_user)
+        if not teacher_ids:
+            return []
+        return await db.teachers.find(
+            {"id": {"$in": teacher_ids}},
+            {"_id": 0},
+        ).to_list(20)
+    return await db.teachers.find(
+        {"created_by": current_user["id"]},
+        {"_id": 0},
+    ).to_list(200)
+
+
 @api_router.get(
     "/teachers/{teacher_id}/summary-reflection",
     response_model=Optional[SummaryReflection],
@@ -8131,6 +8577,35 @@ async def get_action_plan_history(
     return ActionPlanHistoryResponse(current_plan=current_plan, history=history)
 
 
+@api_router.get("/teachers/{teacher_id}/coaching-timeline", response_model=CoachingTimelineResponse)
+async def get_teacher_coaching_timeline(
+    teacher_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    entries = await _build_teacher_coaching_timeline(teacher, current_user)
+    return CoachingTimelineResponse(
+        teacher_id=teacher_id,
+        teacher_name=teacher.get("name"),
+        entries=[CoachingTimelineEntry(**entry) for entry in entries],
+    )
+
+
+@api_router.get("/coaching/tasks", response_model=CoachingTaskListResponse)
+async def list_coaching_tasks(
+    teacher_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    teachers = await _list_visible_teachers_for_user(current_user, teacher_id=teacher_id)
+    all_tasks: List[dict] = []
+    for teacher in teachers:
+        all_tasks.extend(await _build_coaching_tasks_for_teacher(teacher, current_user))
+    all_tasks.sort(
+        key=lambda item: (-(item.get("priority") or 0), _sort_key_for_iso(item.get("due_at"))),
+    )
+    return CoachingTaskListResponse(tasks=[CoachingTask(**task) for task in all_tasks[:50]])
+
+
 @api_router.post("/teachers/{teacher_id}/action-plan", response_model=ActionPlan)
 async def save_action_plan(
     teacher_id: str,
@@ -8242,6 +8717,67 @@ async def save_action_plan(
     return ActionPlan(**result)
 
 
+@api_router.get("/teachers/{teacher_id}/conference-agenda", response_model=Optional[ConferenceAgendaRecord])
+async def get_published_conference_agenda(
+    teacher_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_teacher_or_404(teacher_id, current_user)
+    agenda = await _get_latest_published_conference_agenda(teacher_id)
+    if not agenda:
+        return None
+    return ConferenceAgendaRecord(**agenda)
+
+
+@api_router.post("/teachers/{teacher_id}/conference-agenda", response_model=ConferenceAgendaRecord)
+async def publish_conference_agenda(
+    teacher_id: str,
+    payload: ConferenceAgendaUpsert,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    if _get_user_role(current_user) == "teacher":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    now = datetime.now(timezone.utc).isoformat()
+    existing = await _get_latest_published_conference_agenda(teacher_id)
+    clean_items = [str(item).strip() for item in payload.agenda_items if str(item).strip()]
+    if existing:
+        update_doc = {
+            "agenda_items": clean_items,
+            "linked_goal_ids": payload.linked_goal_ids or [],
+            "linked_assessment_id": payload.linked_assessment_id,
+            "linked_video_id": payload.linked_video_id,
+            "published_by_user_id": current_user["id"],
+            "published_by_name": current_user.get("name"),
+            "published_at": existing.get("published_at") or now,
+            "updated_at": now,
+        }
+        await db.published_conference_agendas.update_one(
+            {"id": existing["id"]},
+            {"$set": update_doc},
+        )
+        result = {
+            **existing,
+            **update_doc,
+        }
+    else:
+        result = {
+            "id": str(uuid.uuid4()),
+            "teacher_id": teacher_id,
+            "agenda_items": clean_items,
+            "linked_goal_ids": payload.linked_goal_ids or [],
+            "linked_assessment_id": payload.linked_assessment_id,
+            "linked_video_id": payload.linked_video_id,
+            "published_by_user_id": current_user["id"],
+            "published_by_name": current_user.get("name"),
+            "published_at": now,
+            "updated_at": None,
+        }
+        await db.published_conference_agendas.insert_one(result)
+
+    return ConferenceAgendaRecord(**result)
+
+
 @api_router.get("/teachers/{teacher_id}/conference-prep")
 async def get_teacher_conference_prep(
     teacher_id: str,
@@ -8314,6 +8850,7 @@ async def get_teacher_conference_prep(
                 agenda.append(f"בדקו התקדמות מול היעד: {goal.get('title')}.")
             else:
                 agenda.append(f"Check progress against the goal: {goal.get('title')}.")
+    published_agenda = await _get_latest_published_conference_agenda(teacher_id)
     return _to_json_safe({
         "teacher_id": teacher_id,
         "teacher_name": teacher.get("name"),
@@ -8325,6 +8862,7 @@ async def get_teacher_conference_prep(
         "open_goals": open_goals[:4],
         "recent_observations": observations[:4],
         "next_conference": teacher.get("next_coaching_conference"),
+        "published_agenda": published_agenda,
     })
 
 @api_router.get("/teachers/{teacher_id}/peer-recommendations")
@@ -11723,6 +12261,7 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.action_plan_history, [("teacher_id", 1), ("plan_owner_id", 1), ("saved_at", -1)])
     await _safe_create_index(db.summary_reflections, [("teacher_id", 1), ("user_id", 1)], unique=True)
     await _safe_create_index(db.summary_reflection_history, [("teacher_id", 1), ("author_user_id", 1), ("saved_at", -1)])
+    await _safe_create_index(db.published_conference_agendas, [("teacher_id", 1), ("published_at", -1)])
     await _safe_create_index(db.observations, [("video_id", 1), ("created_at", -1)])
     await _safe_create_index(db.video_processing_jobs, [("video_id", 1)], unique=True)
     await _safe_create_index(db.video_processing_jobs, [("status", 1), ("updated_at", -1)])

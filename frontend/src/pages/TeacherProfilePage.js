@@ -21,6 +21,8 @@ import {
 import { LayoutShell } from "@/components/LayoutShell";
 import { AssessmentFeedbackWidget } from "@/components/assessment/AssessmentFeedbackWidget";
 import { ObservationFocusPanel } from "@/components/assessment/ObservationFocusPanel";
+import { CoachingTaskList } from "@/components/coaching/CoachingTaskList";
+import { CoachingTimelinePanel } from "@/components/coaching/CoachingTimelinePanel";
 import { MonthlySummary } from "@/components/MonthlySummary";
 import { VideoRecorder } from "@/components/VideoRecorder";
 import { SectionHeader } from "@/components/ui";
@@ -51,6 +53,7 @@ export function TeacherProfilePage() {
   const [nextCoachingConference, setNextCoachingConference] = useState("");
   const [showEvidenceOverTime, setShowEvidenceOverTime] = useState(false);
   const [showHumanObservations, setShowHumanObservations] = useState(false);
+  const [publishedAgendaDraft, setPublishedAgendaDraft] = useState("");
 
   const { data: teacherRes } = useQuery({
     queryKey: ["teacher", teacherId],
@@ -85,6 +88,21 @@ export function TeacherProfilePage() {
     queryKey: ["teacher-conference-prep", teacherId],
     queryFn: () => teacherApi.conferencePrep(teacherId).then((r) => r.data),
   });
+  const { data: coachingTimelineRes } = useQuery({
+    queryKey: ["teacher-coaching-timeline", teacherId],
+    queryFn: () => teacherApi.coachingTimeline(teacherId).then((r) => r.data),
+  });
+  const { data: coachingTasksRes } = useQuery({
+    queryKey: ["coaching-tasks", teacherId],
+    queryFn: () => teacherApi.coachingTasks({ teacher_id: teacherId }).then((r) => r.data),
+  });
+  useEffect(() => {
+    const publishedItems = conferencePrepRes?.published_agenda?.agenda_items || [];
+    const sourceItems = publishedItems.length
+      ? publishedItems
+      : (conferencePrepRes?.agenda || []);
+    setPublishedAgendaDraft(sourceItems.join("\n"));
+  }, [conferencePrepRes]);
 
   const { data: reflectionHistoryRes } = useQuery({
     queryKey: ["teacher-reflection-history", teacherId],
@@ -131,6 +149,19 @@ export function TeacherProfilePage() {
     },
     onError: () => {
       toast.error(t("teacherProfile.nextConferenceFailed"));
+    },
+  });
+  const publishConferenceAgendaMutation = useMutation({
+    mutationFn: (payload) => teacherApi.publishConferenceAgenda(teacherId, payload),
+    onSuccess: () => {
+      toast.success(t("teacherProfile.conferenceAgendaPublished"));
+      queryClient.invalidateQueries({ queryKey: ["teacher-conference-prep", teacherId] });
+      queryClient.invalidateQueries({ queryKey: ["conference-agenda", teacherId] });
+      queryClient.invalidateQueries({ queryKey: ["coaching-tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["teacher-coaching-timeline", teacherId] });
+    },
+    onError: () => {
+      toast.error(t("teacherProfile.conferenceAgendaPublishFailed"));
     },
   });
 
@@ -482,6 +513,8 @@ export function TeacherProfilePage() {
   (assessmentFeedbackRes?.feedback || []).forEach((item) => {
     feedbackByTarget[`${item.target_type}:${item.target_id || ""}`] = item;
   });
+  const coachingTasks = coachingTasksRes?.tasks || [];
+  const coachingTimelineEntries = coachingTimelineRes?.entries || [];
   const currentReflectionEntries = reflectionHistoryRes?.current_entries || [];
   const latestTeacherReflection = currentReflectionEntries.find(
     (entry) => entry.author_role === "teacher"
@@ -996,6 +1029,50 @@ export function TeacherProfilePage() {
                       {item}
                     </div>
                   ))}
+                </div>
+                <div className="mt-4 rounded-lg border border-slate-200 bg-white px-3 py-3">
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("teacherProfile.publishAgendaTitle")}
+                  </div>
+                  <textarea
+                    rows={5}
+                    value={publishedAgendaDraft}
+                    onChange={(e) => setPublishedAgendaDraft(e.target.value)}
+                    className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
+                    placeholder={t("teacherProfile.publishAgendaPlaceholder")}
+                  />
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        publishConferenceAgendaMutation.mutate({
+                          agenda_items: publishedAgendaDraft
+                            .split("\n")
+                            .map((item) => item.trim())
+                            .filter(Boolean),
+                          linked_goal_ids: actionPlanGoals
+                            .filter((goal) => goal?.status !== "complete" && goal?.status !== "implemented")
+                            .map((goal) => goal.id)
+                            .slice(0, 4),
+                          linked_assessment_id: latestAssessment?.id || null,
+                          linked_video_id: latestAssessment?.video_id || null,
+                        })
+                      }
+                      disabled={publishConferenceAgendaMutation.isPending || !publishedAgendaDraft.trim()}
+                      className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90 disabled:opacity-60"
+                    >
+                      {publishConferenceAgendaMutation.isPending
+                        ? t("teachersPage.saving")
+                        : t("teacherProfile.publishAgenda")}
+                    </button>
+                    {conferencePrepRes?.published_agenda?.published_at ? (
+                      <span className="text-[11px] text-slate-500">
+                        {t("teacherProfile.publishAgendaStatus", {
+                          date: formatDateTime(conferencePrepRes.published_agenda.published_at),
+                        })}
+                      </span>
+                    ) : null}
+                  </div>
                 </div>
               </div>
               <div>
@@ -1520,6 +1597,15 @@ export function TeacherProfilePage() {
           </div>
 
           <div className="lg:col-span-4 space-y-6">
+            <CoachingTaskList
+              title={t("coachingTasks.title")}
+              description={t("coachingTasks.description")}
+              eyebrow={t("teacherProfile.adminActionLane")}
+              tasks={coachingTasks.slice(0, 4)}
+              user={user}
+              t={t}
+              emptyLabel={t("coachingTasks.empty")}
+            />
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <SectionHeader
                 title={t("teacherProfile.adminActionLane")}
@@ -1668,6 +1754,17 @@ export function TeacherProfilePage() {
                 )}
               </div>
             </section>
+            <CoachingTimelinePanel
+              title={t("coachingTimeline.title")}
+              description={t("coachingTimeline.description")}
+              eyebrow={t("teacherProfile.recordHistory")}
+              entries={coachingTimelineEntries.slice(0, 6)}
+              user={user}
+              teacherId={teacherId}
+              t={t}
+              emptyLabel={t("coachingTimeline.empty")}
+              dateFormatter={dateTimeFormatter}
+            />
           </div>
         </div>
 

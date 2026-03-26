@@ -81,6 +81,26 @@ const he = {
     acrossRecentObservations: "לאורך תצפיות אחרונות",
     longTermFocus: "מוקד התפתחות ארוך טווח",
   },
+  coachingTimeline: {
+    title: "ציר ליווי משותף",
+    description: "מעקב אחר אותו חוט ליווי בין ראיות שיעור, רפלקציות, תוכניות פעולה ואבני דרך של שיחות.",
+    empty: "עדיין אין רשומות בציר הליווי.",
+    openLinkedRecord: "פתיחת הרשומה המקושרת",
+  },
+  coachingTasks: {
+    title: "משימות ליווי משותפות",
+    description: "המשימות נוצרות מאותו מצב ליווי משותף, כך שאותה סוגיה נשארת גלויה גם למנהל וגם למורה.",
+    empty: "כרגע אין משימות ליווי משותפות שממתינות.",
+    openTask: "פתיחת משימה",
+    states: {
+      privacy_blocker: "חסם פרטיות",
+      awaiting_admin_review: "ממתין לסקירת מנהל",
+      awaiting_teacher_response: "ממתין לתגובת מורה",
+      goal_checkpoint_due: "נקודת בדיקת יעד קרובה",
+      conference_upcoming: "שיחת ליווי מתקרבת",
+      new_evidence_ready: "ראיות חדשות מוכנות",
+    },
+  },
   opsMetrics: {
     title: "מדדי תפעול",
     description: "מסך פנימי לסיכום מצב המערכת על בסיס מדדי backend ותצפית תפעולית.",
@@ -962,6 +982,10 @@ const he = {
     reportSummary: "סיכום",
     reportObservations: "הערות תצפית מרכזיות",
     reportActionItems: "צעדים מומלצים להמשך",
+    continueCoachingThreadTitle: "המשך חוט הליווי",
+    openTeacherThread: "פתיחת חוט המורה",
+    openActionPlan: "פתיחת תוכנית הפעולה",
+    openReflectionRecord: "פתיחת הרפלקציות",
     cognivioBrand: "קוגניביו",
   },
   teacherProfile: {
@@ -1093,6 +1117,12 @@ const he = {
     conferencePrepAgenda: "סדר יום מוצע",
     conferencePrepContinuity: "רצף מהעבודה הקודמת",
     conferencePrepNoContinuity: "עדיין אין הערות רצף. שמרו יעדי תוכנית פעולה או רפלקציות כדי לבנות רצף לשיחת הליווי.",
+    publishAgendaTitle: "סדר יום גלוי למורה",
+    publishAgendaPlaceholder: "ערכו את סדר היום שהמורה יראה לפני השיחה. שורה אחת לכל נקודת דיון.",
+    publishAgenda: "פרסום סדר יום למורה",
+    publishAgendaStatus: "פורסם {{date}}",
+    conferenceAgendaPublished: "סדר היום לשיחה פורסם",
+    conferenceAgendaPublishFailed: "פרסום סדר היום נכשל",
     noLessonReviewedYet: "עדיין אין שיעור שנבדק",
     goalsInMotionCount: "{{open}} פתוחים • {{completed}} הושלמו",
     nextConferenceScheduled: "נקבעה ל־{{date}}",
@@ -1338,6 +1368,7 @@ const he = {
     upcomingConferenceNoDate: "עדיין לא נקבעה שיחת ליווי.",
     upcomingConferenceSyncNote:
       "המלווה או המנהל מכינים את משטח ההכנה המלא בנפרד. המרחב הזה מציג את מועד השיחה ואת היעדים המשותפים שינחו אותה.",
+    publishedAgendaTitle: "סדר יום שפורסם",
     materialsTitle: "המרחב והחומרים שלי",
     materialsDescription:
       "ניהול פרטיות, סרטונים ומסמכי הוראה מתוך אזור אחד שבבעלות המורה.",

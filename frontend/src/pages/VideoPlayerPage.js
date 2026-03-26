@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { Badge, Button, EmptyState, Field, PageHeader, Panel, Textarea } from "@/components/ui";
 import { useTranslation } from "react-i18next";
 import { runtimeConfig } from "@/lib/runtimeConfig";
+import { resolveCoachingLink } from "@/lib/coachingRoutes";
 
 export function VideoPlayerPage() {
   const { t, i18n } = useTranslation();
@@ -1123,6 +1124,33 @@ export function VideoPlayerPage() {
             </Panel>
 
             <Panel className="p-4 text-xs">
+              {videoRes?.teacher_id ? (
+                <div className="mb-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("videoPlayer.continueCoachingThreadTitle")}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Link
+                      to={resolveCoachingLink(user, videoRes.teacher_id, null)}
+                      className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
+                    >
+                      {t("videoPlayer.openTeacherThread")}
+                    </Link>
+                    <Link
+                      to={resolveCoachingLink(user, videoRes.teacher_id, "action_plan")}
+                      className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
+                    >
+                      {t("videoPlayer.openActionPlan")}
+                    </Link>
+                    <Link
+                      to={resolveCoachingLink(user, videoRes.teacher_id, "reflection")}
+                      className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
+                    >
+                      {t("videoPlayer.openReflectionRecord")}
+                    </Link>
+                  </div>
+                </div>
+              ) : null}
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 {t("videoPlayer.summaryActionItems")}
               </h2>

@@ -1,5 +1,6 @@
 import React, { useMemo } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { LayoutShell } from "@/components/LayoutShell";
@@ -7,6 +8,8 @@ import { VideoRecorder } from "@/components/VideoRecorder";
 import { Button, PageHeader, Panel, SectionHeader } from "@/components/ui";
 import { useAuth } from "@/hooks/useAuth";
 import { useTeacherWorkspaceData } from "@/pages/teacher-workspace/useTeacherWorkspaceData";
+import { resolveCoachingLink } from "@/lib/coachingRoutes";
+import { teacherApi } from "@/lib/api";
 
 function WorkspaceSection({ title, description, tags, active, children, activeLabel }) {
   return (
@@ -55,6 +58,16 @@ export function TeacherWorkspacePage() {
     const assessments = dashboardRes?.assessments || [];
     return assessments.length ? assessments[assessments.length - 1] : null;
   }, [dashboardRes]);
+  const { data: coachingTasksRes } = useQuery({
+    queryKey: ["coaching-tasks", teacherId],
+    enabled: Boolean(teacherId),
+    queryFn: () => teacherApi.coachingTasks({ teacher_id: teacherId }).then((r) => r.data),
+  });
+  const { data: conferenceAgendaRes } = useQuery({
+    queryKey: ["conference-agenda", teacherId],
+    enabled: Boolean(teacherId),
+    queryFn: () => teacherApi.conferenceAgenda(teacherId).then((r) => r.data),
+  });
   const latestReviewedAt = latestAssessment?.analyzed_at || latestAssessment?.recorded_at || latestAssessment?.created_at || null;
   const nextConferenceAt = teacherRes?.next_coaching_conference || null;
   const privacyReady = privacyProfileRes?.status === "active";
@@ -74,12 +87,7 @@ export function TeacherWorkspacePage() {
     };
   }, [latestAssessment, elementNameById]);
   const recurringChallenges = summaryInsightsRes?.recommendations || [];
-  const urgentItems = [
-    !privacyReady ? t("teacherWorkspace.urgentPrivacy") : null,
-    !latestAssessment ? t("teacherWorkspace.urgentNoLesson") : null,
-    latestObservation?.admin_comment ? t("teacherWorkspace.urgentComment") : null,
-    openGoals.length ? t("teacherWorkspace.urgentGoals", { count: openGoals.length }) : null,
-  ].filter(Boolean);
+  const urgentTasks = coachingTasksRes?.tasks || [];
   const formatDateTime = (value) => {
     if (!value) return t("teacherProfile.notConfigured");
     const parsed = Date.parse(value);
@@ -213,7 +221,29 @@ export function TeacherWorkspacePage() {
                 <Panel><div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-amber-700">{t("teacherProfile.immediateConcerns")}</div>{latestSignals.concerns.length ? <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>{latestSignals.concerns.map((item) => <li key={item.element_id}>{item.label} ({formatScore(item.score)}/10)</li>)}</ul> : <div className="text-xs text-slate-500">{t("teacherProfile.noRecentHighlights")}</div>}</Panel>
               </div>
               <div className="grid gap-4 lg:grid-cols-2">
-                <Panel><div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.currentUrgentTitle")}</div>{urgentItems.length ? <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>{urgentItems.map((item) => <li key={item}>{item}</li>)}</ul> : <div className="text-xs text-slate-500">{t("teacherWorkspace.currentUrgentClear")}</div>}</Panel>
+                <Panel>
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherWorkspace.currentUrgentTitle")}</div>
+                  {urgentTasks.length ? (
+                    <div className="space-y-2">
+                      {urgentTasks.slice(0, 3).map((task) => (
+                        <div key={task.id} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                          <div className="text-xs font-semibold text-slate-900">{task.title}</div>
+                          <div className="mt-1 text-xs text-slate-600">{task.summary}</div>
+                          <div className="mt-2">
+                            <Link
+                              to={resolveCoachingLink(user, teacherId, task.route_hint, {
+                                videoId: task.video_id,
+                              })}
+                              className="text-[11px] font-medium text-primary hover:underline"
+                            >
+                              {t("coachingTasks.openTask")}
+                            </Link>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : <div className="text-xs text-slate-500">{t("teacherWorkspace.currentUrgentClear")}</div>}
+                </Panel>
                 <Panel><div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{t("teacherProfile.latestAdminComment")}</div><div className="text-xs text-slate-700">{latestObservation?.admin_comment || t("teacherProfile.noAdminComment")}</div></Panel>
               </div>
               <div className="grid gap-4 lg:grid-cols-2">
@@ -255,6 +285,18 @@ export function TeacherWorkspacePage() {
                     : t("teacherWorkspace.upcomingConferenceNoDate")}
                 </div>
                 <div className="mt-2 text-[11px] text-slate-500">{t("teacherWorkspace.upcomingConferenceSyncNote")}</div>
+                {conferenceAgendaRes?.agenda_items?.length ? (
+                  <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                    <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      {t("teacherWorkspace.publishedAgendaTitle")}
+                    </div>
+                    <ul className={`space-y-1 text-xs text-slate-700 ${isRtl ? "pr-4" : "pl-4"} list-disc`}>
+                      {conferenceAgendaRes.agenda_items.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
               </Panel>
             </WorkspaceSection>
 

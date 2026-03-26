@@ -6,6 +6,11 @@ export const teacherApi = {
   get: (id) => api.get(`/api/teachers/${id}`),
   update: (id, payload) => api.patch(`/api/teachers/${id}`, payload),
   conferencePrep: (id) => api.get(`/api/teachers/${id}/conference-prep`),
+  conferenceAgenda: (id) => api.get(`/api/teachers/${id}/conference-agenda`),
+  publishConferenceAgenda: (id, payload) =>
+    api.post(`/api/teachers/${id}/conference-agenda`, payload),
+  coachingTimeline: (id) => api.get(`/api/teachers/${id}/coaching-timeline`),
+  coachingTasks: (params) => api.get("/api/coaching/tasks", { params }),
   getPeerRecommendations: (id) =>
     api.get(`/api/teachers/${id}/peer-recommendations`),
 };

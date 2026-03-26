@@ -81,6 +81,26 @@ const en = {
     acrossRecentObservations: "Across recent observations",
     longTermFocus: "Long-term development focus",
   },
+  coachingTimeline: {
+    title: "Shared coaching timeline",
+    description: "Follow the same coaching thread across lesson evidence, reflections, action plans, and conference milestones.",
+    empty: "No coaching timeline entries yet.",
+    openLinkedRecord: "Open linked record",
+  },
+  coachingTasks: {
+    title: "Shared coaching tasks",
+    description: "These tasks come from the shared coaching state so the same issue stays visible across admin and teacher surfaces.",
+    empty: "No shared coaching tasks are waiting right now.",
+    openTask: "Open task",
+    states: {
+      privacy_blocker: "Privacy blocker",
+      awaiting_admin_review: "Awaiting admin review",
+      awaiting_teacher_response: "Awaiting teacher response",
+      goal_checkpoint_due: "Goal checkpoint due",
+      conference_upcoming: "Conference upcoming",
+      new_evidence_ready: "New evidence ready",
+    },
+  },
   opsMetrics: {
     title: "Ops metrics",
     description: "Internal monitoring summary pulled from backend observability and persistent metrics.",
@@ -962,6 +982,10 @@ const en = {
     reportSummary: "Summary",
     reportObservations: "Key observations",
     reportActionItems: "Action items for next lesson",
+    continueCoachingThreadTitle: "Continue the coaching thread",
+    openTeacherThread: "Open teacher thread",
+    openActionPlan: "Open action plan",
+    openReflectionRecord: "Open reflections",
     cognivioBrand: "Cognivio",
   },
   teacherProfile: {
@@ -1093,6 +1117,12 @@ const en = {
     conferencePrepAgenda: "Suggested agenda",
     conferencePrepContinuity: "Continuity from previous work",
     conferencePrepNoContinuity: "No continuity notes yet. Save action-plan goals or reflections to build conference continuity.",
+    publishAgendaTitle: "Teacher-facing agenda",
+    publishAgendaPlaceholder: "Edit the agenda the teacher should see before the conference. One line per discussion point.",
+    publishAgenda: "Publish agenda to teacher",
+    publishAgendaStatus: "Published {{date}}",
+    conferenceAgendaPublished: "Conference agenda published",
+    conferenceAgendaPublishFailed: "Failed to publish conference agenda",
     noLessonReviewedYet: "No reviewed lesson yet",
     goalsInMotionCount: "{{open}} open • {{completed}} complete",
     nextConferenceScheduled: "Scheduled {{date}}",
@@ -1343,6 +1373,7 @@ const en = {
     upcomingConferenceNoDate: "No conference is scheduled yet.",
     upcomingConferenceSyncNote:
       "Your coach or admin prepares the full conference prep separately. This workspace shows the timing and the shared goals that will inform the conversation.",
+    publishedAgendaTitle: "Published conference agenda",
     materialsTitle: "My workspace and materials",
     materialsDescription:
       "Manage privacy, videos, and teaching documents from one teacher-owned area.",

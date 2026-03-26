@@ -31,6 +31,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { Button, EmptyState, LoadingState, PageHeader, Panel, SectionHeader } from "@/components/ui";
 import { Link } from "react-router-dom";
 import { runtimeConfig } from "@/lib/runtimeConfig";
+import { resolveCoachingLink } from "@/lib/coachingRoutes";
 
 const DASHBOARD_SIGNAL_WINDOW_DAYS = 14;
 
@@ -199,6 +200,11 @@ export function DashboardPage() {
     queryKey: ["admin-feedback-digest"],
     enabled: isAdmin,
     queryFn: () => adminApi.feedbackDigest().then((res) => res.data),
+  });
+  const { data: coachingTasksRes } = useQuery({
+    queryKey: ["coaching-tasks", "admin"],
+    enabled: isAdmin,
+    queryFn: () => teacherApi.coachingTasks().then((res) => res.data),
   });
 
   const roster = useMemo(() => currentData?.roster ?? [], [currentData]);
@@ -891,49 +897,27 @@ export function DashboardPage() {
   );
   const smartQueueItems = useMemo(() => {
     if (isAdmin) {
+      const sharedTasks = (coachingTasksRes?.tasks || []).slice(0, 4).map((task) => ({
+        id: task.id,
+        title: task.title,
+        description: task.summary,
+        actionLabel: t("coachingTasks.openTask"),
+        to: resolveCoachingLink(user, task.teacher_id, task.route_hint, {
+          videoId: task.video_id,
+        }),
+        tone:
+          task.state === "privacy_blocker"
+            ? "amber"
+            : task.state === "conference_upcoming"
+              ? "emerald"
+              : task.state === "goal_checkpoint_due"
+                ? "sky"
+                : "rose",
+      }));
+      if (sharedTasks.length) {
+        return sharedTasks;
+      }
       const items = [];
-      const followUpTeacher = recentLessonSignals.find(
-        (signal) => signal.immediateState === "follow_up"
-      );
-      if (followUpTeacher) {
-        items.push({
-          id: `follow-up-${followUpTeacher.teacherId}`,
-          title: t("dashboard.taskQueueFollowUpTitle", {
-            name: followUpTeacher.teacherName,
-          }),
-          description:
-            followUpTeacher.nextAction ||
-            followUpTeacher.latestAdminComment ||
-            followUpTeacher.latestSummary,
-          actionLabel: t("dashboard.taskQueueOpenTeacher"),
-          to: `/teachers/${followUpTeacher.teacherId}`,
-          tone: "rose",
-        });
-      }
-      if (teachersMissingPrivacyProfiles > 0) {
-        items.push({
-          id: "privacy-profiles",
-          title: t("dashboard.taskQueuePrivacyTitle"),
-          description: t("dashboard.taskQueuePrivacyDescription", {
-            count: teachersMissingPrivacyProfiles,
-          }),
-          actionLabel: t("dashboard.taskQueueResolveNow"),
-          to: "/teachers",
-          tone: "amber",
-        });
-      }
-      if (privacyReviewsPending > 0) {
-        items.push({
-          id: "privacy-review",
-          title: t("dashboard.taskQueuePrivacyReviewTitle"),
-          description: t("dashboard.taskQueuePrivacyReviewDescription", {
-            count: privacyReviewsPending,
-          }),
-          actionLabel: t("dashboard.openPrivacyReview"),
-          to: "/privacy-review",
-          tone: "amber",
-        });
-      }
       if (!hasAnyObservations) {
         items.push({
           id: "capture-evidence",
@@ -952,23 +936,6 @@ export function DashboardPage() {
           actionLabel: t("dashboard.smartQueueOpenSetup"),
           to: "/school-setup",
           tone: "sky",
-        });
-      }
-      if (!items.length && prioritySupportCount > 0 && supportKpiRows[0]?.id) {
-        items.push({
-          id: `support-${supportKpiRows[0].id}`,
-          title: t("dashboard.taskQueueSupportTitle", {
-            name: supportKpiRows[0].name,
-          }),
-          description: t("dashboard.taskQueueSupportDescription", {
-            score:
-              typeof supportKpiRows[0].overallScore === "number"
-                ? supportKpiRows[0].overallScore.toFixed(1)
-                : "—",
-          }),
-          actionLabel: t("dashboard.taskQueueOpenTeacher"),
-          to: `/teachers/${supportKpiRows[0].id}`,
-          tone: "rose",
         });
       }
       return items.slice(0, 4);
@@ -998,12 +965,9 @@ export function DashboardPage() {
     focusAreasConfigured,
     hasAnyObservations,
     isAdmin,
-    prioritySupportCount,
-    privacyReviewsPending,
-    recentLessonSignals,
-    supportKpiRows,
+    coachingTasksRes,
     t,
-    teachersMissingPrivacyProfiles,
+    user,
   ]);
   const queueToneClasses = {
     rose: "border-rose-200 bg-rose-50/70",
