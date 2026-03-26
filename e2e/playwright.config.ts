@@ -28,7 +28,7 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: 'npm run dev:backend:mvp',
+      command: 'powershell -ExecutionPolicy Bypass -File .\\scripts\\start-e2e-backend.ps1',
       url: 'http://127.0.0.1:8000/health',
       reuseExistingServer: false,
       cwd: '..',
