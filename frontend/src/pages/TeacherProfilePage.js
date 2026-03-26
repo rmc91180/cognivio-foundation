@@ -21,7 +21,6 @@ import {
 import { LayoutShell } from "@/components/LayoutShell";
 import { AssessmentFeedbackWidget } from "@/components/assessment/AssessmentFeedbackWidget";
 import { ObservationFocusPanel } from "@/components/assessment/ObservationFocusPanel";
-import { CoachingTaskList } from "@/components/coaching/CoachingTaskList";
 import { CoachingTimelinePanel } from "@/components/coaching/CoachingTimelinePanel";
 import { EvidenceRecordList } from "@/components/coaching/EvidenceRecordList";
 import { MonthlySummary } from "@/components/MonthlySummary";
@@ -31,6 +30,7 @@ import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
 import { useTranslation } from "react-i18next";
 import { runtimeConfig } from "@/lib/runtimeConfig";
+import { resolveCoachingLink } from "@/lib/coachingRoutes";
 
 export function TeacherProfilePage() {
   const { t, i18n } = useTranslation();
@@ -515,6 +515,7 @@ export function TeacherProfilePage() {
     feedbackByTarget[`${item.target_type}:${item.target_id || ""}`] = item;
   });
   const coachingTasks = coachingTasksRes?.tasks || [];
+  const adminActionTasks = useMemo(() => coachingTasks.slice(0, 3), [coachingTasks]);
   const coachingTimelineEntries = coachingTimelineRes?.entries || [];
   const currentReflectionEntries = reflectionHistoryRes?.current_entries || [];
   const latestTeacherReflection = currentReflectionEntries.find(
@@ -1598,21 +1599,54 @@ export function TeacherProfilePage() {
           </div>
 
           <div className="lg:col-span-4 space-y-6">
-            <CoachingTaskList
-              title={t("coachingTasks.title")}
-              description={t("coachingTasks.description")}
-              eyebrow={t("teacherProfile.adminActionLane")}
-              tasks={coachingTasks.slice(0, 4)}
-              user={user}
-              t={t}
-              emptyLabel={t("coachingTasks.empty")}
-            />
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <SectionHeader
                 title={t("teacherProfile.adminActionLane")}
                 description={t("teacherProfile.adminActionLaneDescription")}
                 eyebrow={t("teacherProfile.adminActionLane")}
               />
+              {adminActionTasks.length > 0 ? (
+                <div className="mb-4 space-y-2">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("teacherProfile.adminActionQueueTitle")}
+                  </div>
+                  <div className="space-y-2">
+                    {adminActionTasks.map((task) => (
+                      <div
+                        key={task.id}
+                        className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="text-xs font-semibold text-slate-900">{task.title}</div>
+                            {task.state ? (
+                              <div className="mt-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                                {t(`coachingTasks.states.${task.state}`, { defaultValue: task.state })}
+                              </div>
+                            ) : null}
+                          </div>
+                          {task.context_label ? (
+                            <div className="text-[10px] text-slate-500">{task.context_label}</div>
+                          ) : null}
+                        </div>
+                        <div className="mt-2 text-xs text-slate-600">
+                          {task.support_prompt || task.summary}
+                        </div>
+                        <div className="mt-3">
+                          <Link
+                            to={resolveCoachingLink(user, task.teacher_id, task.route_hint, {
+                              videoId: task.video_id,
+                            })}
+                            className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
+                          >
+                            {t("coachingTasks.openTask")}
+                          </Link>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               <div className="mb-3 grid grid-cols-2 gap-2">
                 <button
                   type="button"

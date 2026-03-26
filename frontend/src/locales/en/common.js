@@ -359,10 +359,13 @@ const en = {
     taskQueueClear: "No acute blockers are waiting right now. Use the rest of the dashboard for pattern review and coaching planning.",
     taskQueueOpenTeacher: "Open teacher page",
     taskQueueResolveNow: "Resolve now",
+    taskQueueOpenRoster: "Open roster",
     taskQueueFollowUpTitle: "Follow up on {{name}}'s latest lesson",
     taskQueuePrivacyTitle: "Complete teacher privacy setup",
     taskQueuePrivacyDescription:
       "{{count}} teachers still need privacy setup before lesson uploads can move cleanly through review.",
+    taskQueueGroupedTeachersContext: "{{count}} teachers: {{teachers}}{{overflow}}",
+    taskQueueTeacherOverflow: " +{{count}} more",
     taskQueuePrivacyReviewTitle: "Review the privacy queue",
     taskQueuePrivacyReviewDescription:
       "{{count}} recordings are waiting on privacy review before they can be used confidently.",
@@ -1049,6 +1052,7 @@ const en = {
     adminActionLane: "Admin action lane",
     adminActionLaneDescription:
       "Keep supervisory actions separate from the evidence so the page reads evidence first, action second.",
+    adminActionQueueTitle: "What needs action now",
     scheduleConference: "Schedule Coaching Conference",
     viewMasterSchedule: "View master schedule",
     exportPdf: "Export PDF",

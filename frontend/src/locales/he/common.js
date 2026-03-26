@@ -359,10 +359,13 @@ const he = {
     taskQueueClear: "כרגע אין חסמים דחופים שממתינים. השתמשו בשאר לוח הבקרה כדי לסקור דפוסים ולתכנן את הליווי הבא.",
     taskQueueOpenTeacher: "פתיחת עמוד המורה",
     taskQueueResolveNow: "לטפל עכשיו",
+    taskQueueOpenRoster: "פתיחת רשימת המורים",
     taskQueueFollowUpTitle: "מעקב על השיעור האחרון של {{name}}",
     taskQueuePrivacyTitle: "השלמת הגדרות פרטיות למורים",
     taskQueuePrivacyDescription:
       "ל־{{count}} מורים עדיין חסרות הגדרות פרטיות לפני שהעלאות השיעורים יזרמו בצורה תקינה לסקירה.",
+    taskQueueGroupedTeachersContext: "{{count}} מורים: {{teachers}}{{overflow}}",
+    taskQueueTeacherOverflow: " ועוד {{count}}",
     taskQueuePrivacyReviewTitle: "בדיקת תור הפרטיות",
     taskQueuePrivacyReviewDescription:
       "{{count}} הקלטות ממתינות לבדיקת פרטיות לפני שאפשר להסתמך עליהן בביטחון.",
@@ -1049,6 +1052,7 @@ const he = {
     adminActionLane: "מסלול פעולות מנהל",
     adminActionLaneDescription:
       "שמרו את פעולות הפיקוח בנפרד מהראיות כדי שהעמוד ייקרא קודם כל כעמוד ראיות ורק אחר כך כעמוד פעולה.",
+    adminActionQueueTitle: "מה דורש פעולה עכשיו",
     scheduleConference: "תיאום שיחת אימון",
     viewMasterSchedule: "צפייה בלוח הראשי",
     exportPdf: "ייצוא PDF",

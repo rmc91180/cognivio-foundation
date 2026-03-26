@@ -54,6 +54,23 @@ function formatScoreShort(value) {
   return typeof value === "number" ? value.toFixed(1) : "—";
 }
 
+function buildGroupedTeacherLabel(tasks, t) {
+  const teacherNames = Array.from(
+    new Set(tasks.map((task) => task.teacher_name).filter(Boolean))
+  );
+  if (!teacherNames.length) return null;
+  const visibleNames = teacherNames.slice(0, 3).join(", ");
+  const remainingCount = teacherNames.length - Math.min(teacherNames.length, 3);
+  return t("dashboard.taskQueueGroupedTeachersContext", {
+    count: teacherNames.length,
+    teachers: visibleNames,
+    overflow:
+      remainingCount > 0
+        ? t("dashboard.taskQueueTeacherOverflow", { count: remainingCount })
+        : "",
+  });
+}
+
 export function DashboardPage() {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
@@ -897,24 +914,43 @@ export function DashboardPage() {
   );
   const smartQueueItems = useMemo(() => {
     if (isAdmin) {
-      const sharedTasks = (coachingTasksRes?.tasks || []).slice(0, 4).map((task) => ({
-        id: task.id,
-        title: task.title,
-        description: task.support_prompt || task.summary,
-        contextLabel: task.context_label,
-        actionLabel: t("coachingTasks.openTask"),
-        to: resolveCoachingLink(user, task.teacher_id, task.route_hint, {
-          videoId: task.video_id,
-        }),
-        tone:
-          task.state === "privacy_blocker"
-            ? "amber"
-            : task.state === "conference_upcoming"
+      const groupedSharedTasks = [];
+      const privacyTasks = (coachingTasksRes?.tasks || []).filter(
+        (task) => task.state === "privacy_blocker"
+      );
+      if (privacyTasks.length) {
+        groupedSharedTasks.push({
+          id: "grouped-privacy-blockers",
+          title: t("dashboard.taskQueuePrivacyTitle"),
+          description: t("dashboard.taskQueuePrivacyDescription", {
+            count: privacyTasks.length,
+          }),
+          contextLabel: buildGroupedTeacherLabel(privacyTasks, t),
+          actionLabel: t("dashboard.taskQueueOpenRoster"),
+          to: "/teachers",
+          tone: "amber",
+        });
+      }
+      const specificSharedTasks = (coachingTasksRes?.tasks || [])
+        .filter((task) => task.state !== "privacy_blocker")
+        .slice(0, 4)
+        .map((task) => ({
+          id: task.id,
+          title: task.title,
+          description: task.support_prompt || task.summary,
+          contextLabel: task.context_label || task.teacher_name,
+          actionLabel: t("coachingTasks.openTask"),
+          to: resolveCoachingLink(user, task.teacher_id, task.route_hint, {
+            videoId: task.video_id,
+          }),
+          tone:
+            task.state === "conference_upcoming"
               ? "emerald"
               : task.state === "goal_checkpoint_due"
                 ? "sky"
                 : "rose",
-      }));
+        }));
+      const sharedTasks = [...groupedSharedTasks, ...specificSharedTasks].slice(0, 4);
       if (sharedTasks.length) {
         return sharedTasks;
       }
