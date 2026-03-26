@@ -273,6 +273,15 @@ const en = {
     workspaceStatusSetup: "Needs setup",
     workspaceStatusAttention: "Needs attention",
     workspaceStatusReady: "Ready to coach",
+    modeSwitchTitle: "Choose your dashboard view",
+    modeSwitchDescription:
+      "Use operations for immediate follow-up and insights for evidence, patterns, and trends.",
+    modeOperationsLabel: "Operations",
+    modeOperationsDescription:
+      "See today’s work first: urgent follow-up, setup blockers, and coaching actions that need movement now.",
+    modeInsightsLabel: "Insights",
+    modeInsightsDescription:
+      "Review the evidence story: recent lesson signals, recurring patterns, and performance trends over time.",
     workspaceTitleAdmin: "Start from the clearest next action, not from a blank dashboard",
     workspaceTitleTeacher: "Keep classroom evidence, reflection, and next steps in one place",
     workspaceDescriptionAdmin:
@@ -311,6 +320,11 @@ const en = {
     feedbackDigestDescription:
       "A visible summary of what human feedback is reinforcing, challenging, and teaching the system to be better at.",
     feedbackDigestCounts: "{{feedback}} feedback • {{overrides}} overrides",
+    secondaryOperationsTitle: "Secondary operations",
+    secondaryOperationsDescription:
+      "Keep privacy and recognition consoles nearby without letting them compete with the main workflow.",
+    showSecondaryOperations: "Show secondary operations",
+    hideSecondaryOperations: "Hide secondary operations",
     smartQueueTitle: "What to do next",
     smartQueueDescription:
       "A short operational queue so low-tech teams can keep moving without hunting through the product.",

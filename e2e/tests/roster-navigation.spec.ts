@@ -46,6 +46,10 @@ test.describe('Admin Navigation Smoke', () => {
       page.getByRole('heading', { name: /what needs action now/i })
     ).toBeVisible();
     await expect(
+      page.getByRole('button', { name: /^operations$/i })
+    ).toBeVisible();
+    await page.getByRole('button', { name: /^insights$/i }).click();
+    await expect(
       page.getByRole('heading', { name: /recent lesson signals/i })
     ).toBeVisible();
     await expect(

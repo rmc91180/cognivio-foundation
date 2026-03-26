@@ -273,6 +273,15 @@ const he = {
     workspaceStatusSetup: "דורש הגדרה",
     workspaceStatusAttention: "דורש טיפול",
     workspaceStatusReady: "מוכן לליווי",
+    modeSwitchTitle: "בחירת תצוגת לוח הבקרה",
+    modeSwitchDescription:
+      "השתמשו בתצוגת פעולות למעקב מיידי ובתצוגת תובנות לראיות, דפוסים ומגמות.",
+    modeOperationsLabel: "פעולות",
+    modeOperationsDescription:
+      "ראו קודם את העבודה של היום: המשכי טיפול דחופים, חסמי הגדרה וצעדי ליווי שצריכים תנועה עכשיו.",
+    modeInsightsLabel: "תובנות",
+    modeInsightsDescription:
+      "סקירת סיפור הראיות: אותות מהשיעורים האחרונים, דפוסים חוזרים ומגמות ביצוע לאורך זמן.",
     workspaceTitleAdmin: "להתחיל מהצעד הבא הכי ברור, לא מלוח בקרה ריק",
     workspaceTitleTeacher: "לשמור ראיות כיתתיות, רפלקציה והצעדים הבאים במקום אחד",
     workspaceDescriptionAdmin:
@@ -311,6 +320,11 @@ const he = {
     feedbackDigestDescription:
       "סיכום גלוי של מה שהמשוב האנושי מחזק, מאתגר, ומלמד את המערכת לעשות טוב יותר.",
     feedbackDigestCounts: "{{feedback}} משובים • {{overrides}} עקיפות",
+    secondaryOperationsTitle: "פעולות משניות",
+    secondaryOperationsDescription:
+      "להשאיר את קונסולות הפרטיות וההוקרה זמינות בלי שיתחרו בזרימת העבודה הראשית.",
+    showSecondaryOperations: "הצגת פעולות משניות",
+    hideSecondaryOperations: "הסתרת פעולות משניות",
     smartQueueTitle: "מה הצעד הבא",
     smartQueueDescription:
       "תור פעולה קצר שעוזר לצוותים בעלי אוריינות טכנולוגית נמוכה להמשיך להתקדם בלי לחפש בתוך המוצר.",

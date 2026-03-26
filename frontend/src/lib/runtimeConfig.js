@@ -25,6 +25,14 @@ export const runtimeConfig = {
   dashboardV2Enabled: getConfigValue("REACT_APP_DASHBOARD_V2", "true") !== "false",
   dashboardRoleShellEnabled:
     getConfigValue("REACT_APP_DASHBOARD_ROLE_SHELL", "true") !== "false",
+  dashboardDualModeEnabled:
+    getConfigValue("REACT_APP_DASHBOARD_DUAL_MODE", "true") !== "false",
+  dashboardOperationsLaneEnabled:
+    getConfigValue("REACT_APP_DASHBOARD_OPERATIONS_LANE", "true") !== "false",
+  dashboardInsightsLaneEnabled:
+    getConfigValue("REACT_APP_DASHBOARD_INSIGHTS_LANE", "true") !== "false",
+  dashboardSecondaryOpsDemoteEnabled:
+    getConfigValue("REACT_APP_DASHBOARD_SECONDARY_OPS_DEMOTE", "true") !== "false",
   dashboardSmartQueueEnabled:
     getConfigValue("REACT_APP_DASHBOARD_SMART_QUEUE", "true") !== "false",
   guidedOnboardingEnabled:

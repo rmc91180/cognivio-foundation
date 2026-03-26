@@ -106,6 +106,8 @@ export function DashboardPage() {
   const [trendWindowMonths, setTrendWindowMonths] = useState(3);
   const [trendTeacherId, setTrendTeacherId] = useState("");
   const [trendSubjects, setTrendSubjects] = useState([]);
+  const [dashboardMode, setDashboardMode] = useState(() => (isAdmin ? "operations" : "insights"));
+  const [showSecondaryOperations, setShowSecondaryOperations] = useState(false);
   const [domainTrendViewMode, setDomainTrendViewMode] = useState("chart");
   const [departmentProgressViewMode, setDepartmentProgressViewMode] = useState("chart");
   const trendSubjectsParam = useMemo(
@@ -647,6 +649,10 @@ export function DashboardPage() {
   };
 
   const dashboardRoleShellEnabled = runtimeConfig.dashboardRoleShellEnabled;
+  const dashboardDualModeEnabled = runtimeConfig.dashboardDualModeEnabled;
+  const dashboardOperationsLaneEnabled = runtimeConfig.dashboardOperationsLaneEnabled;
+  const dashboardInsightsLaneEnabled = runtimeConfig.dashboardInsightsLaneEnabled;
+  const dashboardSecondaryOpsDemoteEnabled = runtimeConfig.dashboardSecondaryOpsDemoteEnabled;
   const dashboardSmartQueueEnabled = runtimeConfig.dashboardSmartQueueEnabled;
   const guidedOnboardingEnabled = runtimeConfig.guidedOnboardingEnabled;
   const improvedEmptyStatesEnabled = runtimeConfig.improvedEmptyStatesEnabled;
@@ -680,6 +686,11 @@ export function DashboardPage() {
   const workspaceRoleLabel = isAdmin
     ? t("dashboard.workspaceRoleAdmin")
     : t("dashboard.workspaceRoleTeacher");
+  const useDashboardModes = isAdmin && dashboardDualModeEnabled;
+  const showOperationsMode =
+    !useDashboardModes || dashboardMode === "operations" || !dashboardOperationsLaneEnabled;
+  const showInsightsMode =
+    !useDashboardModes || dashboardMode === "insights" || !dashboardInsightsLaneEnabled;
   const onboardingItems = useMemo(() => {
     if (!isAdmin) return [];
     return [
@@ -1063,7 +1074,181 @@ export function DashboardPage() {
           </Panel>
         )}
 
-        {isAdmin && trainingModeFoundationEnabled && (
+        {useDashboardModes && (
+          <Panel className="mb-6 border border-slate-200 bg-white">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">
+                  {t("dashboard.modeSwitchTitle")}
+                </h2>
+                <p className="text-xs text-slate-500">
+                  {t("dashboard.modeSwitchDescription")}
+                </p>
+              </div>
+              <div className="inline-flex items-center rounded-xl border border-slate-200 bg-slate-50 p-1">
+                <button
+                  type="button"
+                  onClick={() => setDashboardMode("operations")}
+                  className={`rounded-lg px-3 py-2 text-xs font-medium transition ${
+                    dashboardMode === "operations"
+                      ? "bg-white text-slate-900 shadow-sm"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  {t("dashboard.modeOperationsLabel")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDashboardMode("insights")}
+                  className={`rounded-lg px-3 py-2 text-xs font-medium transition ${
+                    dashboardMode === "insights"
+                      ? "bg-white text-slate-900 shadow-sm"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  {t("dashboard.modeInsightsLabel")}
+                </button>
+              </div>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <div
+                className={`rounded-xl border px-4 py-4 ${
+                  dashboardMode === "operations"
+                    ? "border-sky-200 bg-sky-50/70"
+                    : "border-slate-200 bg-slate-50"
+                }`}
+              >
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  {t("dashboard.modeOperationsLabel")}
+                </div>
+                <p className="mt-2 text-sm text-slate-700">
+                  {t("dashboard.modeOperationsDescription")}
+                </p>
+              </div>
+              <div
+                className={`rounded-xl border px-4 py-4 ${
+                  dashboardMode === "insights"
+                    ? "border-emerald-200 bg-emerald-50/70"
+                    : "border-slate-200 bg-slate-50"
+                }`}
+              >
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  {t("dashboard.modeInsightsLabel")}
+                </div>
+                <p className="mt-2 text-sm text-slate-700">
+                  {t("dashboard.modeInsightsDescription")}
+                </p>
+              </div>
+            </div>
+          </Panel>
+        )}
+
+        {showOperationsMode && !isLoading && dashboardSmartQueueEnabled && (
+          <Panel className="mb-6 border border-slate-200 bg-white">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">
+                  {t("dashboard.taskQueueTitle")}
+                </h2>
+                <p className="text-xs text-slate-500">
+                  {t("dashboard.taskQueueDescription")}
+                </p>
+              </div>
+              {smartQueueItems.length > 0 ? (
+                <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">
+                  {t("dashboard.smartQueueCount", { count: smartQueueItems.length })}
+                </span>
+              ) : null}
+            </div>
+            {smartQueueItems.length > 0 ? (
+              <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                {smartQueueItems.map((item) => (
+                  <div
+                    key={item.id}
+                    className={`rounded-xl border px-4 py-4 ${queueToneClasses[item.tone] || "border-slate-200 bg-slate-50"}`}
+                  >
+                    <h3 className="text-sm font-semibold text-slate-900">{item.title}</h3>
+                    <p className="mt-1 text-xs text-slate-600">{item.description}</p>
+                    {item.contextLabel ? (
+                      <div className="mt-2 text-[11px] text-slate-500">{item.contextLabel}</div>
+                    ) : null}
+                    <div className="mt-4">
+                      <Link
+                        to={item.to}
+                        className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                      >
+                        {item.actionLabel}
+                      </Link>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm text-emerald-800">
+                {t("dashboard.taskQueueClear")}
+              </div>
+            )}
+          </Panel>
+        )}
+
+        {showOperationsMode && !isLoading && guidedOnboardingEnabled && isAdmin && onboardingItems.length > 0 && (
+          <Panel className="mb-6 border border-slate-200 bg-white">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">
+                  {t("dashboard.onboardingTitle")}
+                </h2>
+                <p className="text-xs text-slate-500">
+                  {t("dashboard.onboardingDescription")}
+                </p>
+              </div>
+              <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700">
+                {t("dashboard.onboardingProgress", {
+                  completed: onboardingItems.filter((item) => item.complete).length,
+                  total: onboardingItems.length,
+                })}
+              </span>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              {onboardingItems.map((item) => (
+                <div
+                  key={item.id}
+                  className={`rounded-xl border px-4 py-4 ${
+                    item.complete
+                      ? "border-emerald-200 bg-emerald-50/70"
+                      : "border-slate-200 bg-slate-50"
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-sm font-semibold text-slate-900">{item.title}</h3>
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                        item.complete
+                          ? "bg-emerald-100 text-emerald-700"
+                          : "bg-amber-100 text-amber-700"
+                      }`}
+                    >
+                      {item.complete
+                        ? t("dashboard.onboardingDone")
+                        : t("dashboard.onboardingNext")}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">{item.description}</p>
+                  <div className="mt-4">
+                    <Link
+                      to={item.to}
+                      className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                    >
+                      {item.actionLabel}
+                    </Link>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Panel>
+        )}
+
+        {showInsightsMode && isAdmin && trainingModeFoundationEnabled && (
           <div className="mb-6 grid gap-4 xl:grid-cols-2">
             <Panel>
               <div>
@@ -1205,7 +1390,7 @@ export function DashboardPage() {
           </div>
         )}
 
-        {isAdmin && feedbackDigestRes?.items?.length ? (
+        {showInsightsMode && isAdmin && feedbackDigestRes?.items?.length ? (
           <Panel className="mb-6">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
@@ -1234,197 +1419,203 @@ export function DashboardPage() {
           </Panel>
         ) : null}
 
-        {isAdmin && (
-          <div className="mb-6 grid gap-4 xl:grid-cols-2">
-            <Panel>
+        {showOperationsMode && isAdmin && (
+          dashboardSecondaryOpsDemoteEnabled ? (
+            <Panel className="mb-6 border border-slate-200 bg-white">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-900">
-                    {t("dashboard.privacyOperationsTitle")}
+                    {t("dashboard.secondaryOperationsTitle")}
                   </h2>
                   <p className="text-xs text-slate-500">
-                    {t("dashboard.privacyOperationsDescription")}
+                    {t("dashboard.secondaryOperationsDescription")}
                   </p>
                 </div>
-                <Link
-                  to="/privacy-review"
+                <button
+                  type="button"
+                  onClick={() => setShowSecondaryOperations((prev) => !prev)}
                   className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
                 >
-                  {t("dashboard.openPrivacyReview")}
-                </Link>
+                  {showSecondaryOperations
+                    ? t("dashboard.hideSecondaryOperations")
+                    : t("dashboard.showSecondaryOperations")}
+                </button>
               </div>
-              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.pendingReviews")}</div>
-                  <div className="mt-1 text-xl font-semibold text-slate-900">
-                    {opsHealthRes?.metrics?.privacy_reviews_pending ?? 0}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.privacyQueue")}</div>
-                  <div className="mt-1 text-xl font-semibold text-slate-900">
-                    {opsHealthRes?.metrics?.privacy_queue_depth ?? 0}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.privacyFailures24h")}</div>
-                  <div className="mt-1 text-xl font-semibold text-slate-900">
-                    {opsHealthRes?.metrics?.failed_privacy_jobs_24h ?? 0}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.missingProfiles")}</div>
-                  <div className="mt-1 text-xl font-semibold text-slate-900">
-                    {opsReadinessRes?.metrics?.teachers_missing_privacy_profiles ?? 0}
-                  </div>
-                </div>
-              </div>
-            </Panel>
-
-            <Panel>
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h2 className="text-sm font-semibold text-slate-900">
-                    {t("dashboard.recognitionOperationsTitle")}
-                  </h2>
-                  <p className="text-xs text-slate-500">
-                    {t("dashboard.recognitionOperationsDescription")}
-                  </p>
-                </div>
-                <Link
-                  to="/recognition-review"
-                  className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
-                >
-                  {t("dashboard.openRecognitionReview")}
-                </Link>
-              </div>
-              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.pendingReviews")}</div>
-                  <div className="mt-1 text-xl font-semibold text-slate-900">
-                    {recognitionQueueItems.length}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.libraryScope")}</div>
-                  <div className="mt-1 text-xl font-semibold text-slate-900">
-                    {recognitionQueueItems.filter((item) => item.sharing_scope === "cognivio_library").length}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.schoolScope")}</div>
-                  <div className="mt-1 text-xl font-semibold text-slate-900">
-                    {recognitionQueueItems.filter((item) => item.sharing_scope === "school_only").length}
-                  </div>
-                </div>
-              </div>
-            </Panel>
-          </div>
-        )}
-
-        {!isLoading && dashboardSmartQueueEnabled && (
-          <Panel className="mb-6 border border-slate-200 bg-white">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-900">
-                  {t("dashboard.taskQueueTitle")}
-                </h2>
-                <p className="text-xs text-slate-500">
-                  {t("dashboard.taskQueueDescription")}
-                </p>
-              </div>
-              {smartQueueItems.length > 0 ? (
-                <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">
-                  {t("dashboard.smartQueueCount", { count: smartQueueItems.length })}
-                </span>
-              ) : null}
-            </div>
-            {smartQueueItems.length > 0 ? (
-              <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                {smartQueueItems.map((item) => (
-                  <div
-                    key={item.id}
-                    className={`rounded-xl border px-4 py-4 ${queueToneClasses[item.tone] || "border-slate-200 bg-slate-50"}`}
-                  >
-                    <h3 className="text-sm font-semibold text-slate-900">{item.title}</h3>
-                    <p className="mt-1 text-xs text-slate-600">{item.description}</p>
-                    {item.contextLabel ? (
-                      <div className="mt-2 text-[11px] text-slate-500">{item.contextLabel}</div>
-                    ) : null}
-                    <div className="mt-4">
+              {showSecondaryOperations ? (
+                <div className="mt-4 grid gap-4 xl:grid-cols-2">
+                  <Panel>
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <h2 className="text-sm font-semibold text-slate-900">
+                          {t("dashboard.privacyOperationsTitle")}
+                        </h2>
+                        <p className="text-xs text-slate-500">
+                          {t("dashboard.privacyOperationsDescription")}
+                        </p>
+                      </div>
                       <Link
-                        to={item.to}
+                        to="/privacy-review"
                         className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
                       >
-                        {item.actionLabel}
+                        {t("dashboard.openPrivacyReview")}
                       </Link>
                     </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm text-emerald-800">
-                {t("dashboard.taskQueueClear")}
-              </div>
-            )}
-          </Panel>
-        )}
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                        <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.pendingReviews")}</div>
+                        <div className="mt-1 text-xl font-semibold text-slate-900">
+                          {opsHealthRes?.metrics?.privacy_reviews_pending ?? 0}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                        <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.privacyQueue")}</div>
+                        <div className="mt-1 text-xl font-semibold text-slate-900">
+                          {opsHealthRes?.metrics?.privacy_queue_depth ?? 0}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                        <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.privacyFailures24h")}</div>
+                        <div className="mt-1 text-xl font-semibold text-slate-900">
+                          {opsHealthRes?.metrics?.failed_privacy_jobs_24h ?? 0}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                        <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.missingProfiles")}</div>
+                        <div className="mt-1 text-xl font-semibold text-slate-900">
+                          {opsReadinessRes?.metrics?.teachers_missing_privacy_profiles ?? 0}
+                        </div>
+                      </div>
+                    </div>
+                  </Panel>
 
-        {!isLoading && guidedOnboardingEnabled && isAdmin && onboardingItems.length > 0 && (
-          <Panel className="mb-6 border border-slate-200 bg-white">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-900">
-                  {t("dashboard.onboardingTitle")}
-                </h2>
-                <p className="text-xs text-slate-500">
-                  {t("dashboard.onboardingDescription")}
-                </p>
-              </div>
-              <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700">
-                {t("dashboard.onboardingProgress", {
-                  completed: onboardingItems.filter((item) => item.complete).length,
-                  total: onboardingItems.length,
-                })}
-              </span>
-            </div>
-            <div className="mt-4 grid gap-3 md:grid-cols-2">
-              {onboardingItems.map((item) => (
-                <div
-                  key={item.id}
-                  className={`rounded-xl border px-4 py-4 ${
-                    item.complete
-                      ? "border-emerald-200 bg-emerald-50/70"
-                      : "border-slate-200 bg-slate-50"
-                  }`}
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <h3 className="text-sm font-semibold text-slate-900">{item.title}</h3>
-                    <span
-                      className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
-                        item.complete
-                          ? "bg-emerald-100 text-emerald-700"
-                          : "bg-amber-100 text-amber-700"
-                      }`}
-                    >
-                      {item.complete
-                        ? t("dashboard.onboardingDone")
-                        : t("dashboard.onboardingNext")}
-                    </span>
+                  <Panel>
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <h2 className="text-sm font-semibold text-slate-900">
+                          {t("dashboard.recognitionOperationsTitle")}
+                        </h2>
+                        <p className="text-xs text-slate-500">
+                          {t("dashboard.recognitionOperationsDescription")}
+                        </p>
+                      </div>
+                      <Link
+                        to="/recognition-review"
+                        className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                      >
+                        {t("dashboard.openRecognitionReview")}
+                      </Link>
+                    </div>
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                        <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.pendingReviews")}</div>
+                        <div className="mt-1 text-xl font-semibold text-slate-900">
+                          {recognitionQueueItems.length}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                        <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.libraryScope")}</div>
+                        <div className="mt-1 text-xl font-semibold text-slate-900">
+                          {recognitionQueueItems.filter((item) => item.sharing_scope === "cognivio_library").length}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                        <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.schoolScope")}</div>
+                        <div className="mt-1 text-xl font-semibold text-slate-900">
+                          {recognitionQueueItems.filter((item) => item.sharing_scope === "school_only").length}
+                        </div>
+                      </div>
+                    </div>
+                  </Panel>
+                </div>
+              ) : null}
+            </Panel>
+          ) : (
+            <div className="mb-6 grid gap-4 xl:grid-cols-2">
+              <Panel>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold text-slate-900">
+                      {t("dashboard.privacyOperationsTitle")}
+                    </h2>
+                    <p className="text-xs text-slate-500">
+                      {t("dashboard.privacyOperationsDescription")}
+                    </p>
                   </div>
-                  <p className="mt-1 text-xs text-slate-500">{item.description}</p>
-                  <div className="mt-4">
-                    <Link
-                      to={item.to}
-                      className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
-                    >
-                      {item.actionLabel}
-                    </Link>
+                  <Link
+                    to="/privacy-review"
+                    className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                  >
+                    {t("dashboard.openPrivacyReview")}
+                  </Link>
+                </div>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                    <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.pendingReviews")}</div>
+                    <div className="mt-1 text-xl font-semibold text-slate-900">
+                      {opsHealthRes?.metrics?.privacy_reviews_pending ?? 0}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                    <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.privacyQueue")}</div>
+                    <div className="mt-1 text-xl font-semibold text-slate-900">
+                      {opsHealthRes?.metrics?.privacy_queue_depth ?? 0}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                    <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.privacyFailures24h")}</div>
+                    <div className="mt-1 text-xl font-semibold text-slate-900">
+                      {opsHealthRes?.metrics?.failed_privacy_jobs_24h ?? 0}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                    <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.missingProfiles")}</div>
+                    <div className="mt-1 text-xl font-semibold text-slate-900">
+                      {opsReadinessRes?.metrics?.teachers_missing_privacy_profiles ?? 0}
+                    </div>
                   </div>
                 </div>
-              ))}
+              </Panel>
+
+              <Panel>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold text-slate-900">
+                      {t("dashboard.recognitionOperationsTitle")}
+                    </h2>
+                    <p className="text-xs text-slate-500">
+                      {t("dashboard.recognitionOperationsDescription")}
+                    </p>
+                  </div>
+                  <Link
+                    to="/recognition-review"
+                    className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                  >
+                    {t("dashboard.openRecognitionReview")}
+                  </Link>
+                </div>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                    <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.pendingReviews")}</div>
+                    <div className="mt-1 text-xl font-semibold text-slate-900">
+                      {recognitionQueueItems.length}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                    <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.libraryScope")}</div>
+                    <div className="mt-1 text-xl font-semibold text-slate-900">
+                      {recognitionQueueItems.filter((item) => item.sharing_scope === "cognivio_library").length}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+                    <div className="text-[11px] uppercase tracking-wide text-slate-500">{t("dashboard.schoolScope")}</div>
+                    <div className="mt-1 text-xl font-semibold text-slate-900">
+                      {recognitionQueueItems.filter((item) => item.sharing_scope === "school_only").length}
+                    </div>
+                  </div>
+                </div>
+              </Panel>
             </div>
-          </Panel>
+          )
         )}
 
         {isLoading ? (
@@ -1521,7 +1712,7 @@ export function DashboardPage() {
           )
         ) : (
           <>
-            {isAdmin && (
+            {showInsightsMode && isAdmin && (
               <>
                 <section className="mb-6 rounded-xl border border-slate-200 bg-white p-5">
                   <SectionHeader
@@ -1738,6 +1929,7 @@ export function DashboardPage() {
               </>
             )}
 
+            {showOperationsMode && (
             <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs font-semibold text-slate-800">
@@ -1763,7 +1955,9 @@ export function DashboardPage() {
                 </Link>
               </div>
             </section>
+            )}
 
+            {showInsightsMode && (
             <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
               {isDashboardV2Enabled ? (
                 <>
@@ -2373,6 +2567,7 @@ export function DashboardPage() {
                 </section>
               )}
             </div>
+            )}
           </>
         )}
       </div>
