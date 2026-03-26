@@ -8,6 +8,9 @@ import { DashboardPage } from "@/pages/DashboardPage";
 import { TeachersPage } from "@/pages/TeachersPage";
 import { VideosPage } from "@/pages/VideosPage";
 import { TeacherProfilePage } from "@/pages/TeacherProfilePage";
+import { TeacherLatestLessonPage } from "@/pages/TeacherLatestLessonPage";
+import { TeacherOngoingCoachingPage } from "@/pages/TeacherOngoingCoachingPage";
+import { TeacherHistoryPage } from "@/pages/TeacherHistoryPage";
 import { MasterSchedulePage } from "@/pages/MasterSchedulePage";
 import { VideoPlayerPage } from "@/pages/VideoPlayerPage";
 import { FrameworksPage } from "@/pages/FrameworksPage";
@@ -60,6 +63,30 @@ function App() {
           element={
             <ProtectedRoute adminOnly>
               <TeacherProfilePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/teachers/:teacherId/latest-lesson"
+          element={
+            <ProtectedRoute adminOnly>
+              <TeacherLatestLessonPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/teachers/:teacherId/coaching"
+          element={
+            <ProtectedRoute adminOnly>
+              <TeacherOngoingCoachingPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/teachers/:teacherId/history"
+          element={
+            <ProtectedRoute adminOnly>
+              <TeacherHistoryPage />
             </ProtectedRoute>
           }
         />

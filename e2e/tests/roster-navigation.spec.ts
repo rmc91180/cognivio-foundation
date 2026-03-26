@@ -81,16 +81,28 @@ test.describe('Admin Navigation Smoke', () => {
       page.getByRole('heading', { name: /how to use this page/i })
     ).toBeVisible();
     await expect(
-      page.getByRole('heading', { name: /admin conference prep/i })
+      page.getByRole('link', { name: /open latest lesson page/i })
     ).toBeVisible();
   });
 
-  test('opens shared action-plan and reflection records from the deep dive', async ({ page }) => {
+  test('opens deep-dive sub-pages and shared records from the teacher hub', async ({ page }) => {
     await page.goto('/teachers');
     await page.locator('table a[href^="/teachers/"]').first().click();
     await expect(page).toHaveURL(/.*teachers\/[^/]+$/);
 
-    await page.getByRole('link', { name: /jump to action plan/i }).click();
+    await page.getByRole('link', { name: /open latest lesson page/i }).click();
+    await expect(page).toHaveURL(/.*\/latest-lesson$/);
+    await expect(
+      page.getByRole('heading', { name: /latest lesson review/i })
+    ).toBeVisible();
+
+    await page.getByRole('link', { name: /open ongoing coaching page/i }).click();
+    await expect(page).toHaveURL(/.*\/coaching$/);
+    await expect(
+      page.getByRole('heading', { name: /ongoing coaching/i })
+    ).toBeVisible();
+
+    await page.getByRole('link', { name: /open action plan record/i }).click();
     await expect(page).toHaveURL(/.*\/action-plan$/);
     await expect(
       page.getByRole('heading', { name: /shared action plan record/i })
