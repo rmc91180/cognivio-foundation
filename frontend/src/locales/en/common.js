@@ -87,6 +87,14 @@ const en = {
     description: "Follow the same coaching thread across lesson evidence, reflections, action plans, and conference milestones.",
     empty: "No coaching timeline entries yet.",
     openLinkedRecord: "Open linked record",
+    entryTypes: {
+      video: "Lesson evidence",
+      action_plan: "Goals record",
+      reflection: "Reflection record",
+      conference: "Conference continuity",
+      privacy_profile: "Setup task",
+      timeline: "Timeline entry",
+    },
   },
   coachingTasks: {
     title: "Shared coaching tasks",
@@ -1227,7 +1235,42 @@ const en = {
     coachingActions: "Coaching actions",
     openLatestLesson: "Open latest lesson",
     openLatestLessonPage: "Open latest lesson page",
-    openOngoingCoachingPage: "Open ongoing coaching page",
+    coachingHubTitle: "Shared coaching hub",
+    coachingHubDescription:
+      "Move between goals, reflections, timeline, and conference continuity without losing the shared coaching thread.",
+    coachingHubMeta: "Shared coaching hub for {{name}}",
+    coachingHubGoalsAdminDescription:
+      "Use this tab to manage the shared goals record, review evidence-backed progress, and keep ownership clear.",
+    coachingHubGoalsTeacherDescription:
+      "Use this tab to review the shared goals record, understand the evidence behind it, and keep implementation tied to the same coaching thread.",
+    coachingOwnershipTitle: "Ownership",
+    coachingOwnershipAdmin: "Admin maintains goal structure",
+    coachingOwnershipTeacher: "Teacher responds and implements",
+    coachingHubGoalsNote:
+      "These goals stay synchronized with the teacher workspace, conference continuity, and reflection history.",
+    coachingHubReflectionsDescription:
+      "Use reflections as one coaching dialogue: admin framing, teacher response, follow-through, and evidence anchors in one place.",
+    coachingHubReflectionNote:
+      "Reflections are strongest when they stay anchored to the same goals, lesson evidence, and follow-up thread over time.",
+    coachingHubTimelineDescription:
+      "Use the timeline as the chronological spine of the coaching record before drilling into focused goal or reflection pages.",
+    coachingHubOpenGoalsTab: "Goals tab",
+    coachingHubOpenReflectionsTab: "Reflections tab",
+    coachingHubOpenTimelineTab: "Timeline tab",
+    coachingHubOpenConferenceTab: "Conference tab",
+    actionPlanHubAdminNote:
+      "This is the focused goals view inside the shared coaching hub. Update goals here, then return to the hub to see how they connect to reflections and conference continuity.",
+    actionPlanHubTeacherNote:
+      "This is the focused goals view inside your shared coaching hub. Review goals here, then return to the hub to see the matching reflections and conference continuity.",
+    actionPlanTimelineDescription:
+      "Follow how goals have evolved over time, then return to the coaching hub for the full cross-record view.",
+    reflectionHubAdminNote:
+      "This is the focused reflection view inside the shared coaching hub. Keep the coaching dialogue tied to goals, lesson evidence, and next conference continuity.",
+    reflectionHubTeacherNote:
+      "This is the focused reflection view inside your shared coaching hub. Use it to respond to the coaching thread and keep your reflection tied to evidence and goals.",
+    reflectionTimelineDescription:
+      "Use the timeline below to place each reflection save inside the larger coaching conversation.",
+    openOngoingCoachingPage: "Open coaching hub",
     openHistoryPage: "Open history page",
     openActionPlanRecord: "Open action plan record",
     openReflectionRecord: "Open reflection record",
@@ -1470,6 +1513,10 @@ const en = {
     reflectionsDescription:
       "Keep your reflections and your admin's follow-through notes in one shared record with clear history.",
     reflectionsOpenRecord: "Open reflections record",
+    coachingHubTitle: "Shared coaching hub",
+    coachingHubDescription:
+      "Use one shared coaching space for goals, reflections, timeline, and conference continuity.",
+    coachingHubMeta: "Teacher view of the shared coaching hub",
     goalsItemPattern:
       "See which challenges are repeating enough to become ongoing goals.",
     goalsItemProgress: "Track progress against current goals over time.",

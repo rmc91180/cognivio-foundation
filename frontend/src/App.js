@@ -9,8 +9,8 @@ import { TeachersPage } from "@/pages/TeachersPage";
 import { VideosPage } from "@/pages/VideosPage";
 import { TeacherProfilePage } from "@/pages/TeacherProfilePage";
 import { TeacherLatestLessonPage } from "@/pages/TeacherLatestLessonPage";
-import { TeacherOngoingCoachingPage } from "@/pages/TeacherOngoingCoachingPage";
 import { TeacherHistoryPage } from "@/pages/TeacherHistoryPage";
+import { CoachingHubPage } from "@/pages/CoachingHubPage";
 import { MasterSchedulePage } from "@/pages/MasterSchedulePage";
 import { VideoPlayerPage } from "@/pages/VideoPlayerPage";
 import { FrameworksPage } from "@/pages/FrameworksPage";
@@ -78,7 +78,7 @@ function App() {
           path="/teachers/:teacherId/coaching"
           element={
             <ProtectedRoute adminOnly>
-              <TeacherOngoingCoachingPage />
+              <CoachingHubPage />
             </ProtectedRoute>
           }
         />
@@ -119,6 +119,14 @@ function App() {
           element={
             <ProtectedRoute>
               <ActionPlanRecordPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/my-workspace/coaching"
+          element={
+            <ProtectedRoute>
+              <CoachingHubPage />
             </ProtectedRoute>
           }
         />

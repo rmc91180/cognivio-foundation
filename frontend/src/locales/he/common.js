@@ -87,6 +87,14 @@ const he = {
     description: "מעקב אחר אותו חוט ליווי בין ראיות שיעור, רפלקציות, תוכניות פעולה ואבני דרך של שיחות.",
     empty: "עדיין אין רשומות בציר הליווי.",
     openLinkedRecord: "פתיחת הרשומה המקושרת",
+    entryTypes: {
+      video: "ראיות שיעור",
+      action_plan: "רשומת יעדים",
+      reflection: "רשומת רפלקציה",
+      conference: "רצף לשיחה",
+      privacy_profile: "משימת הגדרה",
+      timeline: "רשומת ציר",
+    },
   },
   coachingTasks: {
     title: "משימות ליווי משותפות",
@@ -1227,7 +1235,42 @@ const he = {
     coachingActions: "פעולות ליווי",
     openLatestLesson: "פתיחת השיעור האחרון",
     openLatestLessonPage: "פתיחת עמוד השיעור האחרון",
-    openOngoingCoachingPage: "פתיחת עמוד הליווי המתמשך",
+    coachingHubTitle: "מרכז הליווי המשותף",
+    coachingHubDescription:
+      "מעבר בין יעדים, רפלקציות, ציר זמן ורצף לקראת שיחה בלי לאבד את חוט הליווי המשותף.",
+    coachingHubMeta: "מרכז הליווי המשותף עבור {{name}}",
+    coachingHubGoalsAdminDescription:
+      "השתמשו בלשונית הזו כדי לנהל את רשומת היעדים המשותפת, לעקוב אחר התקדמות מבוססת ראיות ולשמור על חלוקת בעלות ברורה.",
+    coachingHubGoalsTeacherDescription:
+      "השתמשו בלשונית הזו כדי לסקור את רשומת היעדים המשותפת, להבין את הראיות שעומדות מאחוריה ולשמור את היישום מחובר לאותו חוט ליווי.",
+    coachingOwnershipTitle: "בעלות",
+    coachingOwnershipAdmin: "המנהל מנהל את מבנה היעדים",
+    coachingOwnershipTeacher: "המורה מגיב ומיישם",
+    coachingHubGoalsNote:
+      "היעדים האלה נשארים מסונכרנים עם מרחב העבודה של המורה, רצף השיחות והיסטוריית הרפלקציות.",
+    coachingHubReflectionsDescription:
+      "השתמשו ברפלקציות כדיאלוג ליווי אחד: מסגור ניהולי, תגובת מורה, המשך ביצוע ועיגון בראיות במקום אחד.",
+    coachingHubReflectionNote:
+      "רפלקציות חזקות יותר כאשר הן נשארות מעוגנות לאותם יעדים, לאותן ראיות שיעור ולאותו חוט המשך לאורך זמן.",
+    coachingHubTimelineDescription:
+      "השתמשו בציר הזמן כעמוד השדרה הכרונולוגי של רשומת הליווי לפני שנכנסים לעמודי היעדים או הרפלקציות הממוקדים.",
+    coachingHubOpenGoalsTab: "לשונית יעדים",
+    coachingHubOpenReflectionsTab: "לשונית רפלקציות",
+    coachingHubOpenTimelineTab: "לשונית ציר הזמן",
+    coachingHubOpenConferenceTab: "לשונית שיחה",
+    actionPlanHubAdminNote:
+      "זהו מבט היעדים הממוקד בתוך מרכז הליווי המשותף. עדכנו כאן יעדים ואז חזרו למרכז כדי לראות איך הם מתחברים לרפלקציות ולרצף השיחה.",
+    actionPlanHubTeacherNote:
+      "זהו מבט היעדים הממוקד בתוך מרכז הליווי המשותף שלכם. סקרו כאן יעדים ואז חזרו למרכז כדי לראות את הרפלקציות ורצף השיחה התואמים.",
+    actionPlanTimelineDescription:
+      "עקבו אחרי האופן שבו היעדים השתנו לאורך זמן, ואז חזרו למרכז הליווי כדי לראות את התמונה המלאה בין הרשומות.",
+    reflectionHubAdminNote:
+      "זהו מבט הרפלקציות הממוקד בתוך מרכז הליווי המשותף. שמרו את דיאלוג הליווי מחובר ליעדים, לראיות השיעור ולרצף לקראת השיחה הבאה.",
+    reflectionHubTeacherNote:
+      "זהו מבט הרפלקציות הממוקד בתוך מרכז הליווי המשותף שלכם. השתמשו בו כדי להגיב לחוט הליווי ולשמור את הרפלקציה מחוברת לראיות וליעדים.",
+    reflectionTimelineDescription:
+      "השתמשו בציר הזמן שלמטה כדי למקם כל שמירת רפלקציה בתוך שיחת הליווי הרחבה יותר.",
+    openOngoingCoachingPage: "פתיחת מרכז הליווי",
     openHistoryPage: "פתיחת עמוד ההיסטוריה",
     openActionPlanRecord: "פתיחת רשומת תוכנית הפעולה",
     openReflectionRecord: "פתיחת רשומת הרפלקציה",
@@ -1467,6 +1510,10 @@ const he = {
     reflectionsDescription:
       "שמרו את הרפלקציות שלכם ואת הערות ההמשך של המנהל ברשומה משותפת אחת עם היסטוריה ברורה.",
     reflectionsOpenRecord: "פתיחת רשומת הרפלקציות",
+    coachingHubTitle: "מרכז הליווי המשותף",
+    coachingHubDescription:
+      "השתמשו במרחב ליווי משותף אחד עבור יעדים, רפלקציות, ציר זמן ורצף לקראת שיחה.",
+    coachingHubMeta: "תצוגת המורה של מרכז הליווי המשותף",
     goalsItemPattern: "ראי אילו אתגרים חוזרים מספיק כדי להפוך ליעדים מתמשכים.",
     goalsItemProgress: "עקבי אחר ההתקדמות מול היעדים הנוכחיים לאורך זמן.",
     goalsItemImplementation: "שמרי הערות יישום צמוד לכל יעד ארוך טווח.",

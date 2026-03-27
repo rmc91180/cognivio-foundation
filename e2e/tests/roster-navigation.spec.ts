@@ -96,10 +96,10 @@ test.describe('Admin Navigation Smoke', () => {
       page.getByRole('heading', { name: /latest lesson review/i })
     ).toBeVisible();
 
-    await page.getByRole('link', { name: /open ongoing coaching page/i }).click();
+    await page.getByRole('link', { name: /open coaching hub/i }).click();
     await expect(page).toHaveURL(/.*\/coaching$/);
     await expect(
-      page.getByRole('heading', { name: /ongoing coaching/i })
+      page.getByRole('heading', { name: /shared coaching hub/i })
     ).toBeVisible();
 
     await page.getByRole('link', { name: /open action plan record/i }).click();

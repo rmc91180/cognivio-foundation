@@ -103,8 +103,8 @@ export function TeacherWorkspacePage() {
 
   const workspaceLinks = [
     { label: t("teacherWorkspace.currentTitle"), to: "/my-workspace", active: section === "overview" },
-    { label: t("teacherWorkspace.goalsTitle"), to: "/my-workspace/goals" },
-    { label: t("teacherWorkspace.reflectionsTitle"), to: "/my-workspace/reflections" },
+    { label: t("teacherWorkspace.goalsTitle"), to: "/my-workspace/coaching?tab=goals" },
+    { label: t("teacherWorkspace.reflectionsTitle"), to: "/my-workspace/coaching?tab=reflections" },
     { label: t("teacherWorkspace.materialsTitle"), to: "/my-workspace/materials", active: section === "materials" },
     { label: t("teacherWorkspace.historyTitle"), to: "/my-workspace/history", active: section === "history" },
   ];

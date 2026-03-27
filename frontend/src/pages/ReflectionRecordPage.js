@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { LayoutShell } from "@/components/LayoutShell";
@@ -9,6 +9,7 @@ import { CoachingTimelinePanel } from "@/components/coaching/CoachingTimelinePan
 import { EvidenceRecordList } from "@/components/coaching/EvidenceRecordList";
 import { useAuth } from "@/hooks/useAuth";
 import { actionPlanApi, assessmentApi, teacherApi } from "@/lib/api";
+import { getCoachingHubRoute } from "@/lib/coachingRoutes";
 import { isAdminUser } from "@/lib/userRoutes";
 
 export function ReflectionRecordPage() {
@@ -19,6 +20,7 @@ export function ReflectionRecordPage() {
   const isAdmin = isAdminUser(user);
   const teacherId = isAdmin ? routeTeacherId : user?.teacher_id || null;
   const isRtl = i18n.dir() === "rtl";
+  const coachingHubBaseRoute = getCoachingHubRoute(user, teacherId);
 
   const { data: teacherRes } = useQuery({
     queryKey: ["teacher", teacherId],
@@ -169,10 +171,12 @@ export function ReflectionRecordPage() {
               ? [
                   { label: t("nav.teachers"), to: "/teachers" },
                   { label: teacherRes?.name || t("teacherWorkspace.fallbackName"), to: `/teachers/${teacherId}` },
+                  { label: t("teacherProfile.coachingHubTitle"), to: coachingHubBaseRoute },
                   { label: t("teacherProfile.reflectionRecordTitle") },
                 ]
               : [
                   { label: t("nav.myWorkspace"), to: "/my-workspace" },
+                  { label: t("teacherWorkspace.coachingHubTitle"), to: coachingHubBaseRoute },
                   { label: t("teacherWorkspace.reflectionsTitle") },
                 ]
           }
@@ -205,12 +209,21 @@ export function ReflectionRecordPage() {
           ]}
           quickLinks={[
             {
-              label: isAdmin ? t("teacherProfile.returnToTeacher") : t("teacherWorkspace.returnHome"),
-              to: isAdmin ? `/teachers/${teacherId}` : "/my-workspace",
+              label: t("teacherProfile.coachingHubOpenGoalsTab"),
+              to: `${coachingHubBaseRoute}?tab=goals`,
             },
             {
-              label: t("teacherWorkspace.goalsTitle"),
-              to: isAdmin ? `/teachers/${teacherId}/action-plan` : "/my-workspace/goals",
+              label: t("teacherProfile.coachingHubOpenReflectionsTab"),
+              to: `${coachingHubBaseRoute}?tab=reflections`,
+              active: true,
+            },
+            {
+              label: t("teacherProfile.coachingHubOpenTimelineTab"),
+              to: `${coachingHubBaseRoute}?tab=timeline`,
+            },
+            {
+              label: t("teacherProfile.coachingHubOpenConferenceTab"),
+              to: `${coachingHubBaseRoute}?tab=conference`,
             },
           ]}
           actions={
@@ -264,6 +277,12 @@ export function ReflectionRecordPage() {
               </div>
             ) : null}
           </Panel>
+        </div>
+
+        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-600">
+          {isAdmin
+            ? t("teacherProfile.reflectionHubAdminNote")
+            : t("teacherProfile.reflectionHubTeacherNote")}
         </div>
 
         <section className="mt-6 rounded-xl border border-slate-200 bg-white p-5">
@@ -474,7 +493,7 @@ export function ReflectionRecordPage() {
         <div className="mt-6">
           <CoachingTimelinePanel
             title={t("coachingTimeline.title")}
-            description={t("coachingTimeline.description")}
+            description={t("teacherProfile.reflectionTimelineDescription")}
             eyebrow={t("teacherProfile.recordHistory")}
             entries={coachingTimelineRes?.entries || []}
             user={user}

@@ -3,6 +3,18 @@ import { Link } from "react-router-dom";
 import { Panel, SectionHeader } from "@/components/ui";
 import { resolveCoachingLink } from "@/lib/coachingRoutes";
 
+function getTimelineEntryTypeLabel(entry, t) {
+  const routeHint = entry.route_hint || entry.entry_type || "timeline";
+  const map = {
+    video: t("coachingTimeline.entryTypes.video"),
+    action_plan: t("coachingTimeline.entryTypes.action_plan"),
+    reflection: t("coachingTimeline.entryTypes.reflection"),
+    conference: t("coachingTimeline.entryTypes.conference"),
+    privacy_profile: t("coachingTimeline.entryTypes.privacy_profile"),
+  };
+  return map[routeHint] || t("coachingTimeline.entryTypes.timeline");
+}
+
 export function CoachingTimelinePanel({
   title,
   description,
@@ -34,6 +46,9 @@ export function CoachingTimelinePanel({
               </div>
               <div className="mt-1 text-[11px] uppercase tracking-wide text-slate-500">
                 {[entry.author_role, entry.author_name].filter(Boolean).join(" • ")}
+              </div>
+              <div className="mt-2 inline-flex rounded-full bg-white px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-600">
+                {getTimelineEntryTypeLabel(entry, t)}
               </div>
               {entry.summary ? (
                 <div className="mt-3 text-xs text-slate-700">{entry.summary}</div>

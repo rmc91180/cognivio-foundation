@@ -1,5 +1,15 @@
 import { isAdminUser } from "@/lib/userRoutes";
 
+export function getCoachingHubRoute(user, teacherId, tab = "") {
+  const base = isAdminUser(user)
+    ? `/teachers/${teacherId}/coaching`
+    : "/my-workspace/coaching";
+  if (!tab) {
+    return base;
+  }
+  return `${base}?tab=${encodeURIComponent(tab)}`;
+}
+
 export function getActionPlanRoute(user, teacherId) {
   return isAdminUser(user) ? `/teachers/${teacherId}/action-plan` : "/my-workspace/goals";
 }
@@ -17,7 +27,7 @@ export function getMaterialsRoute(user, teacherId) {
 }
 
 export function getConferenceRoute(user, teacherId) {
-  return isAdminUser(user) ? `/teachers/${teacherId}` : "/my-workspace/goals";
+  return getCoachingHubRoute(user, teacherId, "conference");
 }
 
 export function resolveCoachingLink(user, teacherId, routeHint, payload = {}) {
@@ -36,10 +46,10 @@ export function resolveCoachingLink(user, teacherId, routeHint, payload = {}) {
     return query ? `/videos/${payload.videoId}?${query}` : `/videos/${payload.videoId}`;
   }
   if (routeHint === "action_plan") {
-    return getActionPlanRoute(user, teacherId);
+    return getCoachingHubRoute(user, teacherId, "goals");
   }
   if (routeHint === "reflection") {
-    return getReflectionRoute(user, teacherId);
+    return getCoachingHubRoute(user, teacherId, "reflections");
   }
   if (routeHint === "privacy_profile") {
     return getMaterialsRoute(user, teacherId);
