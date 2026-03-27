@@ -282,6 +282,8 @@ const en = {
     workspaceStatusSetup: "Needs setup",
     workspaceStatusAttention: "Needs attention",
     workspaceStatusReady: "Ready to coach",
+    workspaceModeMetaLabel: "Current mode",
+    workspaceStatusMetaLabel: "Status",
     modeSwitchTitle: "Choose your dashboard view",
     modeSwitchDescription:
       "Use operations for immediate follow-up and insights for evidence, patterns, and trends.",

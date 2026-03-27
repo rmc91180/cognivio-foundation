@@ -282,6 +282,8 @@ const he = {
     workspaceStatusSetup: "דורש הגדרה",
     workspaceStatusAttention: "דורש טיפול",
     workspaceStatusReady: "מוכן לליווי",
+    workspaceModeMetaLabel: "מצב נוכחי",
+    workspaceStatusMetaLabel: "סטטוס",
     modeSwitchTitle: "בחירת תצוגת לוח הבקרה",
     modeSwitchDescription:
       "השתמשו בתצוגת פעולות למעקב מיידי ובתצוגת תובנות לראיות, דפוסים ומגמות.",

@@ -1045,12 +1045,34 @@ export function DashboardPage() {
 
         {dashboardRoleShellEnabled && (
           <Panel className="mb-6 border border-slate-200 bg-white">
-            <div className="mb-4 flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-              <span>{workspaceRoleLabel}</span>
-              <span className="text-slate-300">/</span>
-              <span className="text-emerald-700">{workspaceModeLabel}</span>
-              <span className="text-slate-300">/</span>
-              <span>{workspaceStatusLabel}</span>
+            <div className="mb-5 border-b border-slate-100 pb-4">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                {workspaceRoleLabel}
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                    {t("dashboard.workspaceModeMetaLabel")}
+                  </span>
+                  <span className="font-semibold text-slate-900">{workspaceModeLabel}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                    {t("dashboard.workspaceStatusMetaLabel")}
+                  </span>
+                  <span
+                    className={
+                      workspaceStatusLabel === t("dashboard.workspaceStatusReady")
+                        ? "font-medium text-emerald-700"
+                        : workspaceStatusLabel === t("dashboard.workspaceStatusAttention")
+                          ? "font-medium text-amber-700"
+                          : "font-medium text-slate-700"
+                    }
+                  >
+                    {workspaceStatusLabel}
+                  </span>
+                </div>
+              </div>
             </div>
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
               {dashboardOverviewCards.map((card) => (
