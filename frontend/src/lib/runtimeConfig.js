@@ -20,6 +20,8 @@ function getConfigValue(key, fallback = "") {
 export const runtimeConfig = {
   backendUrl: getConfigValue("REACT_APP_BACKEND_URL"),
   demoMode: getConfigValue("REACT_APP_DEMO_MODE", "false") === "true",
+  registrationApprovalRequired:
+    getConfigValue("REACT_APP_REGISTRATION_APPROVAL_REQUIRED", "true") !== "false",
   buildSha: getConfigValue("REACT_APP_BUILD_SHA"),
   buildTime: getConfigValue("REACT_APP_BUILD_TIME"),
   dashboardV2Enabled: getConfigValue("REACT_APP_DASHBOARD_V2", "true") !== "false",

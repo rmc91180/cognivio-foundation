@@ -11,8 +11,17 @@ import { getDefaultHomeRoute } from "@/lib/userRoutes";
 export function AuthPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { user, login, register, loggingIn, registering } = useAuth();
+  const {
+    user,
+    login,
+    register,
+    requestAccessAsync,
+    loggingIn,
+    registering,
+    requestingAccess,
+  } = useAuth();
   const isDemo = runtimeConfig.demoMode;
+  const approvalRequired = runtimeConfig.registrationApprovalRequired;
   const [mode, setMode] = useState("login");
   const [form, setForm] = useState({ email: "", password: "", name: "" });
 
@@ -22,7 +31,7 @@ export function AuthPage() {
     }
   }, [navigate, user]);
 
-  const onSubmit = (e) => {
+  const onSubmit = async (e) => {
     e.preventDefault();
     const payload =
       mode === "register"
@@ -36,12 +45,24 @@ export function AuthPage() {
             password: form.password,
           };
 
-    const fn = mode === "register" ? register : login;
+    if (mode === "request_access") {
+      try {
+        const res = await requestAccessAsync(payload);
+        setForm((current) => ({ ...current, password: "" }));
+        if (res?.data?.status === "approved") {
+          setMode("login");
+        }
+      } catch (error) {
+        return;
+      }
+      return;
+    }
 
+    const fn = mode === "register" ? register : login;
     fn(payload);
   };
 
-  const busy = loggingIn || registering;
+  const busy = loggingIn || registering || requestingAccess;
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-8">
@@ -73,7 +94,7 @@ export function AuthPage() {
           >
             {t("auth.loginTab")}
           </button>
-          {!isDemo && (
+          {!isDemo && !approvalRequired && (
             <button
               type="button"
               onClick={() => setMode("register")}
@@ -84,6 +105,19 @@ export function AuthPage() {
               }`}
             >
               {t("auth.registerTab")}
+            </button>
+          )}
+          {!isDemo && approvalRequired && (
+            <button
+              type="button"
+              onClick={() => setMode("request_access")}
+              className={`flex-1 rounded px-3 py-2 ${
+                mode === "request_access"
+                  ? "bg-white text-slate-900 shadow-sm font-semibold"
+                  : "text-slate-500 hover:text-slate-700"
+              }`}
+            >
+              {t("auth.requestAccessTab")}
             </button>
           )}
         </div>
@@ -98,8 +132,15 @@ export function AuthPage() {
           </div>
         )}
 
+        {!isDemo && approvalRequired && mode === "request_access" && (
+          <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+            <div className="font-semibold">{t("auth.approvalRequiredTitle")}</div>
+            <div className="mt-1">{t("auth.approvalRequiredDescription")}</div>
+          </div>
+        )}
+
         <form onSubmit={onSubmit} className="space-y-4">
-          {mode === "register" && !isDemo && (
+          {(mode === "register" || mode === "request_access") && !isDemo && (
             <Field label={t("auth.name")}>
               <Input
                 type="text"
@@ -132,12 +173,22 @@ export function AuthPage() {
           </Field>
           <Button type="submit" disabled={busy} fullWidth className="mt-2 shadow-brand">
             {busy
-              ? t("auth.signingIn")
+              ? mode === "request_access"
+                ? t("auth.requestingAccess")
+                : t("auth.signingIn")
               : mode === "login"
               ? t("auth.signIn")
+              : mode === "request_access"
+              ? t("auth.requestAccessCta")
               : t("auth.createAccount")}
           </Button>
         </form>
+
+        {!isDemo && approvalRequired && mode === "login" ? (
+          <p className="mt-4 text-center text-xs text-slate-500">
+            {t("auth.needApprovalHint")}
+          </p>
+        ) : null}
       </Panel>
     </div>
   );

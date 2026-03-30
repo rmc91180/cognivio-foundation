@@ -26,6 +26,7 @@ import { evidenceApi, videoApi } from "@/features/videos/api";
 export const authApi = {
   login: (payload) => api.post("/api/auth/login", payload),
   register: (payload) => api.post("/api/auth/register", payload),
+  requestAccess: (payload) => api.post("/api/auth/request-access", payload),
   me: () => api.get("/api/auth/me"),
   getWorkspaceMode: () => api.get("/api/user/workspace-mode"),
   setWorkspaceMode: (payload) => api.post("/api/user/workspace-mode", payload),
@@ -83,6 +84,9 @@ export const adminApi = {
     api.post("/api/admin/preferences/scoring-mode", { scoring_mode }),
   feedbackDigest: () => api.get("/api/admin/feedback-digest"),
   organizationMemory: (params) => api.get("/api/admin/organization-memory", { params }),
+  accessUsers: () => api.get("/api/admin/access-users"),
+  approveAccessUser: (userId, payload = {}) => api.post(`/api/admin/access-users/${userId}/approve`, payload),
+  revokeAccessUser: (userId, payload = {}) => api.post(`/api/admin/access-users/${userId}/revoke`, payload),
 };
 
 export const opsApi = {

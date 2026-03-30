@@ -23,8 +23,11 @@ import re
 import shutil
 import sys
 import time
+import smtplib
+import ssl
 import boto3
 from contextlib import asynccontextmanager
+from email.message import EmailMessage
 from botocore.exceptions import BotoCoreError, ClientError
 from PIL import Image, ImageDraw
 try:
@@ -106,6 +109,85 @@ def _get_user_role(user: dict) -> str:
     if email == "teacher@demo.cognivio.app":
         return "teacher"
     return "teacher"
+
+
+def _get_user_approval_status(user: Optional[dict]) -> str:
+    status = str((user or {}).get("approval_status") or "").strip().lower()
+    if status in {"pending", "approved", "revoked"}:
+        return status
+    return "approved"
+
+
+def _is_user_access_active(user: Optional[dict]) -> bool:
+    if not user:
+        return False
+    if _get_user_approval_status(user) != "approved":
+        return False
+    return (user or {}).get("is_active", True) is not False
+
+
+def _is_access_auto_approved_email(email: str) -> bool:
+    return email.strip().lower() in ADMIN_EMAILS
+
+
+def _build_user_response_payload(user_doc: dict) -> dict:
+    cleaned = {k: v for k, v in (user_doc or {}).items() if k not in {"_id", "password"}}
+    cleaned["role"] = _get_user_role(user_doc)
+    cleaned["approval_status"] = _get_user_approval_status(user_doc)
+    return cleaned
+
+
+def _build_access_request_notification_message(user_doc: dict) -> EmailMessage:
+    message = EmailMessage()
+    message["Subject"] = f"Cognivio access request: {user_doc.get('email')}"
+    message["From"] = SMTP_FROM_EMAIL
+    message["To"] = ACCESS_APPROVAL_NOTIFY_EMAIL
+    message.set_content(
+        "\n".join(
+            [
+                "A new Cognivio pilot access request was submitted.",
+                "",
+                f"Name: {user_doc.get('name')}",
+                f"Email: {user_doc.get('email')}",
+                f"Requested role: {_get_user_role(user_doc)}",
+                f"Requested at: {user_doc.get('approval_requested_at') or user_doc.get('created_at')}",
+                "",
+                "Review this request from the admin access management page after logging in.",
+            ]
+        )
+    )
+    return message
+
+
+def _send_access_request_notification(user_doc: dict) -> bool:
+    if not ACCESS_APPROVAL_NOTIFY_EMAIL:
+        logger.warning("ACCESS_APPROVAL_NOTIFY_EMAIL not set; access request notification skipped.")
+        return False
+    if not SMTP_HOST or not SMTP_FROM_EMAIL:
+        logger.warning(
+            "SMTP is not configured; access request notification for %s was not sent.",
+            user_doc.get("email"),
+        )
+        return False
+
+    message = _build_access_request_notification_message(user_doc)
+    try:
+        if SMTP_USE_TLS:
+            context = ssl.create_default_context()
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as smtp:
+                smtp.starttls(context=context)
+                if SMTP_USERNAME:
+                    smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+                smtp.send_message(message)
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as smtp:
+                if SMTP_USERNAME:
+                    smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+                smtp.send_message(message)
+        return True
+    except Exception as exc:
+        logger.warning("Failed to send access request notification for %s: %s", user_doc.get("email"), exc)
+        return False
 
 
 def _is_paid_analysis_allowed_for_user(user: Optional[dict]) -> bool:
@@ -1185,6 +1267,16 @@ JWT_EXPIRATION_HOURS = 24
 # Demo mode (fixed demo users, registration disabled)
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 ADMIN_EMAILS = set(email.lower() for email in _get_optional_env_list("ADMIN_EMAILS"))
+ACCESS_APPROVAL_REQUIRED = os.getenv("ACCESS_APPROVAL_REQUIRED", "true").lower() == "true"
+ACCESS_APPROVAL_NOTIFY_EMAIL = (
+    os.getenv("ACCESS_APPROVAL_NOTIFY_EMAIL", "rmc91180@gmail.com").strip()
+)
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587") or "587")
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
+SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", "").strip() or SMTP_USERNAME or ACCESS_APPROVAL_NOTIFY_EMAIL
+SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() != "false"
 DEMO_USERS = [
     {
         "email": "principal@demo.cognivio.app",
@@ -2011,10 +2103,45 @@ class UserResponse(BaseModel):
     role: Optional[str] = None
     workspace_mode: Optional[str] = None
     teacher_id: Optional[str] = None
+    approval_status: Optional[str] = None
 
 class TokenResponse(BaseModel):
     token: str
     user: UserResponse
+
+
+class AccessRequestResponse(BaseModel):
+    status: str
+    email: str
+    message: str
+    approval_status: str
+
+
+class AccessUserRecord(BaseModel):
+    id: str
+    email: str
+    name: str
+    created_at: str
+    role: Optional[str] = None
+    approval_status: str
+    approval_requested_at: Optional[str] = None
+    approved_at: Optional[str] = None
+    approved_by: Optional[str] = None
+    revoked_at: Optional[str] = None
+    revoked_by: Optional[str] = None
+    is_active: bool = True
+    teacher_id: Optional[str] = None
+    workspace_mode: Optional[str] = None
+
+
+class AccessUserListResponse(BaseModel):
+    pending: List[AccessUserRecord]
+    approved: List[AccessUserRecord]
+    revoked: List[AccessUserRecord]
+
+
+class AccessDecisionPayload(BaseModel):
+    reason: Optional[str] = None
 
 class TeacherCreate(BaseModel):
     name: str
@@ -2905,7 +3032,12 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         user = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
+        if _get_user_approval_status(user) == "pending":
+            raise HTTPException(status_code=403, detail="Account pending approval")
+        if _get_user_approval_status(user) == "revoked" or not _is_user_access_active(user):
+            raise HTTPException(status_code=403, detail="Account access removed")
         user["role"] = _get_user_role(user)
+        user["approval_status"] = _get_user_approval_status(user)
         return user
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
@@ -2919,6 +3051,8 @@ async def register(user: UserCreate):
 
     if DEMO_MODE:
         raise HTTPException(status_code=403, detail="Registration is disabled for demo mode")
+    if ACCESS_APPROVAL_REQUIRED and not _is_access_auto_approved_email(user.email.lower()):
+        raise HTTPException(status_code=403, detail="Self-registration is disabled. Request access approval.")
     existing = await db.users.find_one({"email": user.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -2931,6 +3065,9 @@ async def register(user: UserCreate):
         "password": hash_password(user.password),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "role": "admin" if user.email.lower() in ADMIN_EMAILS else "teacher",
+        "approval_status": "approved",
+        "approved_at": datetime.now(timezone.utc).isoformat(),
+        "is_active": True,
     }
     await db.users.insert_one(user_doc)
     enriched_user = await enrich_user_with_workspace_mode(user_doc)
@@ -2943,6 +3080,106 @@ async def register(user: UserCreate):
         )
     )
 
+
+@api_router.post("/auth/request-access", response_model=AccessRequestResponse)
+async def request_access(user: UserCreate):
+    from app.services.workspace_service import enrich_user_with_workspace_mode
+
+    if DEMO_MODE:
+        raise HTTPException(status_code=403, detail="Access requests are disabled for demo mode")
+
+    email = user.email.lower()
+    existing = await db.users.find_one({"email": email})
+    now = datetime.now(timezone.utc).isoformat()
+    auto_approved = _is_access_auto_approved_email(email)
+
+    if existing:
+        existing_status = _get_user_approval_status(existing)
+        if existing_status == "approved" and _is_user_access_active(existing):
+            raise HTTPException(status_code=400, detail="Email already registered")
+        if existing_status == "revoked":
+            raise HTTPException(status_code=403, detail="Access has been removed for this account")
+        update_fields = {
+            "name": user.name,
+            "password": hash_password(user.password),
+            "updated_at": now,
+        }
+        if auto_approved:
+            update_fields.update(
+                {
+                    "approval_status": "approved",
+                    "approved_at": now,
+                    "approved_by": "system:auto_admin_allowlist",
+                    "revoked_at": None,
+                    "revoked_by": None,
+                    "is_active": True,
+                    "role": "admin",
+                }
+            )
+        else:
+            update_fields.update(
+                {
+                    "approval_status": "pending",
+                    "approval_requested_at": now,
+                    "approved_at": None,
+                    "approved_by": None,
+                    "revoked_at": None,
+                    "revoked_by": None,
+                    "is_active": False,
+                    "role": existing.get("role") or "teacher",
+                }
+            )
+        await db.users.update_one({"id": existing["id"]}, {"$set": update_fields})
+        refreshed = await db.users.find_one({"id": existing["id"]}, {"_id": 0})
+        if auto_approved:
+            enriched_user = await enrich_user_with_workspace_mode(refreshed)
+            logger.info("Auto-approved access request for allowlisted admin email %s", email)
+            return AccessRequestResponse(
+                status="approved",
+                email=email,
+                message="Access is approved. You can now log in.",
+                approval_status=_get_user_approval_status(enriched_user),
+            )
+        _send_access_request_notification(refreshed)
+        return AccessRequestResponse(
+            status="pending",
+            email=email,
+            message="Access request submitted. Approval is required before login.",
+            approval_status="pending",
+        )
+
+    user_id = str(uuid.uuid4())
+    user_doc = {
+        "id": user_id,
+        "email": email,
+        "name": user.name,
+        "password": hash_password(user.password),
+        "created_at": now,
+        "role": "admin" if auto_approved else "teacher",
+        "approval_status": "approved" if auto_approved else "pending",
+        "approval_requested_at": now,
+        "approved_at": now if auto_approved else None,
+        "approved_by": "system:auto_admin_allowlist" if auto_approved else None,
+        "is_active": True if auto_approved else False,
+    }
+    await db.users.insert_one(user_doc)
+    if auto_approved:
+        enriched_user = await enrich_user_with_workspace_mode(user_doc)
+        logger.info("Auto-approved access request for allowlisted admin email %s", email)
+        return AccessRequestResponse(
+            status="approved",
+            email=email,
+            message="Access is approved. You can now log in.",
+            approval_status=_get_user_approval_status(enriched_user),
+        )
+    _send_access_request_notification(user_doc)
+    return AccessRequestResponse(
+        status="pending",
+        email=email,
+        message="Access request submitted. Approval is required before login.",
+        approval_status="pending",
+    )
+
 @api_router.post("/auth/login", response_model=TokenResponse)
 async def login(user: UserLogin):
     from app.services.workspace_service import enrich_user_with_workspace_mode
@@ -2950,9 +3187,15 @@ async def login(user: UserLogin):
     db_user = await db.users.find_one({"email": user.email})
     if not db_user or not verify_password(user.password, db_user["password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    approval_status = _get_user_approval_status(db_user)
+    if approval_status == "pending":
+        raise HTTPException(status_code=403, detail="Account pending approval")
+    if approval_status == "revoked" or not _is_user_access_active(db_user):
+        raise HTTPException(status_code=403, detail="Account access removed")
     db_user.pop("_id", None)
     db_user.pop("password", None)
     db_user["role"] = _get_user_role(db_user)
+    db_user["approval_status"] = approval_status
     enriched_user = await enrich_user_with_workspace_mode(db_user)
 
     token = create_token(db_user["id"])
@@ -5741,6 +5984,122 @@ async def get_admin_feedback_digest(current_user: dict = Depends(get_current_use
     from app.services.workspace_service import build_feedback_digest
 
     return await build_feedback_digest(current_user)
+
+
+@api_router.get("/admin/access-users", response_model=AccessUserListResponse)
+async def list_access_users(current_user: dict = Depends(get_current_user)):
+    _require_admin_ops_user(current_user)
+    docs = await db.users.find({}, {"_id": 0, "password": 0}).sort("created_at", -1).to_list(1000)
+    serialized = []
+    for doc in docs:
+        payload = _build_user_response_payload(doc)
+        serialized.append(
+            AccessUserRecord(
+                id=payload["id"],
+                email=payload["email"],
+                name=payload["name"],
+                created_at=payload["created_at"],
+                role=payload.get("role"),
+                approval_status=payload.get("approval_status") or "approved",
+                approval_requested_at=doc.get("approval_requested_at"),
+                approved_at=doc.get("approved_at"),
+                approved_by=doc.get("approved_by"),
+                revoked_at=doc.get("revoked_at"),
+                revoked_by=doc.get("revoked_by"),
+                is_active=doc.get("is_active", True) is not False,
+                teacher_id=doc.get("teacher_id"),
+                workspace_mode=doc.get("workspace_mode"),
+            )
+        )
+    return AccessUserListResponse(
+        pending=[item for item in serialized if item.approval_status == "pending"],
+        approved=[item for item in serialized if item.approval_status == "approved" and item.is_active],
+        revoked=[item for item in serialized if item.approval_status == "revoked" or not item.is_active],
+    )
+
+
+@api_router.post("/admin/access-users/{user_id}/approve", response_model=AccessUserRecord)
+async def approve_access_user(
+    user_id: str,
+    payload: AccessDecisionPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_admin_ops_user(current_user)
+    target = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    now = datetime.now(timezone.utc).isoformat()
+    updates = {
+        "approval_status": "approved",
+        "approved_at": now,
+        "approved_by": current_user.get("email") or current_user["id"],
+        "revoked_at": None,
+        "revoked_by": None,
+        "is_active": True,
+    }
+    if payload.reason:
+        updates["approval_note"] = payload.reason
+    await db.users.update_one({"id": user_id}, {"$set": updates})
+    updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    serialized = _build_user_response_payload(updated)
+    return AccessUserRecord(
+        id=serialized["id"],
+        email=serialized["email"],
+        name=serialized["name"],
+        created_at=serialized["created_at"],
+        role=serialized.get("role"),
+        approval_status=serialized.get("approval_status") or "approved",
+        approval_requested_at=updated.get("approval_requested_at"),
+        approved_at=updated.get("approved_at"),
+        approved_by=updated.get("approved_by"),
+        revoked_at=updated.get("revoked_at"),
+        revoked_by=updated.get("revoked_by"),
+        is_active=updated.get("is_active", True) is not False,
+        teacher_id=updated.get("teacher_id"),
+        workspace_mode=updated.get("workspace_mode"),
+    )
+
+
+@api_router.post("/admin/access-users/{user_id}/revoke", response_model=AccessUserRecord)
+async def revoke_access_user(
+    user_id: str,
+    payload: AccessDecisionPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_admin_ops_user(current_user)
+    if user_id == current_user.get("id"):
+        raise HTTPException(status_code=400, detail="You cannot remove your own access")
+    target = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    now = datetime.now(timezone.utc).isoformat()
+    updates = {
+        "approval_status": "revoked",
+        "revoked_at": now,
+        "revoked_by": current_user.get("email") or current_user["id"],
+        "is_active": False,
+    }
+    if payload.reason:
+        updates["approval_note"] = payload.reason
+    await db.users.update_one({"id": user_id}, {"$set": updates})
+    updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    serialized = _build_user_response_payload(updated)
+    return AccessUserRecord(
+        id=serialized["id"],
+        email=serialized["email"],
+        name=serialized["name"],
+        created_at=serialized["created_at"],
+        role=serialized.get("role"),
+        approval_status=serialized.get("approval_status") or "approved",
+        approval_requested_at=updated.get("approval_requested_at"),
+        approved_at=updated.get("approved_at"),
+        approved_by=updated.get("approved_by"),
+        revoked_at=updated.get("revoked_at"),
+        revoked_by=updated.get("revoked_by"),
+        is_active=updated.get("is_active", True) is not False,
+        teacher_id=updated.get("teacher_id"),
+        workspace_mode=updated.get("workspace_mode"),
+    )
 
 
 def _apply_admin_overrides(

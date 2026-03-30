@@ -62,6 +62,16 @@ export function AuthProvider({ children }) {
     },
   });
 
+  const requestAccessMutation = useMutation({
+    mutationFn: authApi.requestAccess,
+    onSuccess: (res) => {
+      toast.success(res?.data?.message || t("auth.requestAccessSubmitted"));
+    },
+    onError: (error) => {
+      toast.error(error?.response?.data?.detail || t("auth.requestAccessFailed"));
+    },
+  });
+
   const logout = () => {
     localStorage.removeItem("cognivio_token");
     setUser(null);
@@ -73,8 +83,11 @@ export function AuthProvider({ children }) {
     initializing,
     login: (payload) => loginMutation.mutate(payload),
     register: (payload) => registerMutation.mutate(payload),
+    requestAccess: (payload) => requestAccessMutation.mutate(payload),
+    requestAccessAsync: (payload) => requestAccessMutation.mutateAsync(payload),
     loggingIn: loginMutation.isPending,
     registering: registerMutation.isPending,
+    requestingAccess: requestAccessMutation.isPending,
     logout,
     refreshUser,
     setUserProfile: (nextUser) => setUser(nextUser),

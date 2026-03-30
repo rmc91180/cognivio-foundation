@@ -7,6 +7,7 @@ import { AuthPage } from "@/pages/AuthPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { TeachersPage } from "@/pages/TeachersPage";
 import { VideosPage } from "@/pages/VideosPage";
+import { AccessManagementPage } from "@/pages/AccessManagementPage";
 import { TeacherProfilePage } from "@/pages/TeacherProfilePage";
 import { TeacherLatestLessonPage } from "@/pages/TeacherLatestLessonPage";
 import { TeacherHistoryPage } from "@/pages/TeacherHistoryPage";
@@ -151,6 +152,14 @@ function App() {
           element={
             <ProtectedRoute>
               <VideosPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/access-management"
+          element={
+            <ProtectedRoute adminOnly>
+              <AccessManagementPage />
             </ProtectedRoute>
           }
         />

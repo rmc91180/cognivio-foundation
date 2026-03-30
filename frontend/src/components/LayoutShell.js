@@ -53,6 +53,7 @@ export function LayoutShell({ children }) {
               <NavItem to="/dashboard" icon={LayoutDashboard} label={t("nav.dashboard")} />
               <NavItem to="/teachers" icon={Users} label={t("nav.teachers")} />
               <NavItem to="/videos" icon={PlayCircle} label={t("nav.videos")} />
+              <NavItem to="/access-management" icon={ClipboardList} label={t("nav.accessManagement")} />
               <NavItem to="/all-star-library" icon={BookOpen} label={t("nav.allStarLibrary")} />
               <NavItem to="/privacy-review" icon={ShieldCheck} label={t("nav.privacyReview")} />
               <NavItem to="/recognition-review" icon={Trophy} label={t("nav.recognitionReview")} />
