@@ -65,7 +65,21 @@ ADMIN_EMAILS=rmc91180@gmail.com
 
 ### Approval email delivery
 
-Configure an SMTP account that the backend can use for approval notifications.
+Recommended production setup: use `Resend` so approval notifications go out over HTTPS instead of raw SMTP.
+
+- [ ] Set `RESEND_API_KEY`
+- [ ] Set `RESEND_FROM_EMAIL`
+
+Recommended Resend setup:
+
+```env
+ACCESS_APPROVAL_REQUIRED=true
+ACCESS_APPROVAL_NOTIFY_EMAIL=rmc91180@gmail.com
+RESEND_API_KEY=<resend-api-key>
+RESEND_FROM_EMAIL=Cognivio <pilot@cognivio.live>
+```
+
+Optional SMTP fallback:
 
 - [ ] Set `SMTP_HOST`
 - [ ] Set `SMTP_PORT`
@@ -74,7 +88,7 @@ Configure an SMTP account that the backend can use for approval notifications.
 - [ ] Set `SMTP_FROM_EMAIL`
 - [ ] Set `SMTP_USE_TLS=true`
 
-Recommended Gmail-style pilot setup:
+Example Gmail fallback:
 
 ```env
 ACCESS_APPROVAL_REQUIRED=true
@@ -89,8 +103,9 @@ SMTP_USE_TLS=true
 
 Notes:
 
-- Use an app password, not a personal Gmail password.
-- If SMTP is not configured, access requests will still be saved in Cognivio, but the email notification will not send.
+- Prefer `Resend` in production because some hosting environments block or degrade outbound SMTP.
+- If `Resend` is configured, Cognivio will use it first and only fall back to SMTP if needed.
+- If no email provider is configured, access requests will still be saved in Cognivio, but the email notification will not send.
 
 ### Approval flow validation
 

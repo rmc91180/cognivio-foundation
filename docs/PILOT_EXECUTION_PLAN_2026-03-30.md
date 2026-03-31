@@ -217,7 +217,7 @@ ACCESS_APPROVAL_REQUIRED=true
 ACCESS_APPROVAL_NOTIFY_EMAIL=rmc91180@gmail.com
 ```
 
-Also configure SMTP so approval requests actually email the approval inbox.
+Also configure an email delivery provider so approval requests actually email the approval inbox.
 
 #### 5. Provision teacher records before teacher login
 
@@ -327,7 +327,7 @@ Run this exact sequence:
 - `ADMIN_EMAILS` set
 - `ACCESS_APPROVAL_REQUIRED=true`
 - `ACCESS_APPROVAL_NOTIFY_EMAIL=rmc91180@gmail.com`
-- SMTP env set
+- `RESEND_API_KEY` and `RESEND_FROM_EMAIL` set, or SMTP fallback configured
 - `OPENAI_API_KEY` set
 - `PAID_ANALYSIS_ENABLED=true`
 - S3 env set
@@ -359,7 +359,7 @@ Run this exact sequence:
 1. Set `DEMO_MODE=false`.
 2. Set `JWT_SECRET`.
 3. Set `ADMIN_EMAILS`.
-4. Set approval and SMTP env.
+4. Set approval env and configure Resend or SMTP fallback.
 5. Create teacher records with real pilot emails.
 6. Validate admin and teacher approval/login.
 
@@ -424,7 +424,7 @@ Mitigation:
 1. Confirm hosting targets for frontend and backend.
 2. Confirm whether we will use `api.cognivio.live` for backend.
 3. List first pilot admin emails for `ADMIN_EMAILS`.
-4. Confirm the approval inbox and SMTP credentials.
+4. Confirm the approval inbox and the active email-delivery provider credentials.
 5. List first pilot teacher emails and ensure matching teacher records exist.
 6. Prepare production environment variable set.
 7. Run the first domain cutover and auth smoke sequence.

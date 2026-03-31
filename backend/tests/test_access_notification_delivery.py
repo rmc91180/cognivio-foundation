@@ -1,0 +1,144 @@
+import os
+import sys
+import types
+from pathlib import Path
+
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+
+def _stub_optional_dependencies():
+    os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
+    os.environ.setdefault("DB_NAME", "cognivio_test")
+    os.environ.setdefault("JWT_SECRET", "test-jwt-secret")
+    os.environ.setdefault("BACKEND_PUBLIC_BASE_URL", "https://api.example.com")
+    if "boto3" not in sys.modules:
+        boto3_stub = types.ModuleType("boto3")
+
+        class _Session:
+            def client(self, *args, **kwargs):
+                return object()
+
+        boto3_stub.session = types.SimpleNamespace(Session=_Session)
+        sys.modules["boto3"] = boto3_stub
+    if "botocore.exceptions" not in sys.modules:
+        botocore_stub = types.ModuleType("botocore")
+        botocore_exceptions_stub = types.ModuleType("botocore.exceptions")
+
+        class _BotoCoreError(Exception):
+            pass
+
+        class _ClientError(Exception):
+            pass
+
+        botocore_exceptions_stub.BotoCoreError = _BotoCoreError
+        botocore_exceptions_stub.ClientError = _ClientError
+        sys.modules["botocore"] = botocore_stub
+        sys.modules["botocore.exceptions"] = botocore_exceptions_stub
+
+
+_stub_optional_dependencies()
+
+import server  # noqa: E402
+
+
+def _sample_user_doc():
+    return {
+        "name": "Pilot Teacher",
+        "email": "pilot.teacher@example.com",
+        "role": "teacher",
+        "created_at": "2026-03-31T10:00:00+00:00",
+        "approval_requested_at": "2026-03-31T10:00:00+00:00",
+    }
+
+
+def test_send_access_request_notification_prefers_resend(monkeypatch):
+    captured = {}
+
+    class _Response:
+        ok = True
+        status_code = 200
+        text = '{"id":"email_123"}'
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        captured["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setattr(server, "RESEND_API_KEY", "re_test_123")
+    monkeypatch.setattr(server, "RESEND_FROM_EMAIL", "Cognivio <pilot@cognivio.live>")
+    monkeypatch.setattr(server, "RESEND_API_BASE_URL", "https://api.resend.com")
+    monkeypatch.setattr(server, "ACCESS_APPROVAL_NOTIFY_EMAIL", "rmc91180@gmail.com")
+    monkeypatch.setattr(server.requests, "post", _fake_post)
+
+    result = server._send_access_request_notification(_sample_user_doc())
+
+    assert result is True
+    assert captured["url"] == "https://api.resend.com/emails"
+    assert captured["headers"]["Authorization"] == "Bearer re_test_123"
+    assert captured["json"]["from"] == "Cognivio <pilot@cognivio.live>"
+    assert captured["json"]["to"] == ["rmc91180@gmail.com"]
+    assert captured["json"]["subject"] == "Cognivio access request: pilot.teacher@example.com"
+    assert "Pilot Teacher" in captured["json"]["text"]
+
+
+def test_send_access_request_notification_returns_false_without_provider(monkeypatch):
+    monkeypatch.setattr(server, "RESEND_API_KEY", "")
+    monkeypatch.setattr(server, "RESEND_FROM_EMAIL", "")
+    monkeypatch.setattr(server, "SMTP_HOST", "")
+    monkeypatch.setattr(server, "SMTP_FROM_EMAIL", "")
+    monkeypatch.setattr(server, "ACCESS_APPROVAL_NOTIFY_EMAIL", "rmc91180@gmail.com")
+
+    assert server._send_access_request_notification(_sample_user_doc()) is False
+
+
+def test_send_access_request_notification_falls_back_to_smtp(monkeypatch):
+    smtp_calls = {}
+
+    class _FakeSMTP:
+        def __init__(self, host, port, timeout=None):
+            smtp_calls["host"] = host
+            smtp_calls["port"] = port
+            smtp_calls["timeout"] = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def starttls(self, context=None):
+            smtp_calls["starttls"] = True
+
+        def login(self, username, password):
+            smtp_calls["username"] = username
+            smtp_calls["password"] = password
+
+        def send_message(self, message):
+            smtp_calls["subject"] = message["Subject"]
+            smtp_calls["to"] = message["To"]
+
+    monkeypatch.setattr(server, "RESEND_API_KEY", "")
+    monkeypatch.setattr(server, "RESEND_FROM_EMAIL", "")
+    monkeypatch.setattr(server, "ACCESS_APPROVAL_NOTIFY_EMAIL", "rmc91180@gmail.com")
+    monkeypatch.setattr(server, "SMTP_HOST", "smtp.gmail.com")
+    monkeypatch.setattr(server, "SMTP_PORT", 587)
+    monkeypatch.setattr(server, "SMTP_USERNAME", "rmc91180@gmail.com")
+    monkeypatch.setattr(server, "SMTP_PASSWORD", "app-password")
+    monkeypatch.setattr(server, "SMTP_FROM_EMAIL", "rmc91180@gmail.com")
+    monkeypatch.setattr(server, "SMTP_USE_TLS", True)
+    monkeypatch.setattr(server.smtplib, "SMTP", _FakeSMTP)
+
+    result = server._send_access_request_notification(_sample_user_doc())
+
+    assert result is True
+    assert smtp_calls["host"] == "smtp.gmail.com"
+    assert smtp_calls["port"] == 587
+    assert smtp_calls["username"] == "rmc91180@gmail.com"
+    assert smtp_calls["password"] == "app-password"
+    assert smtp_calls["to"] == "rmc91180@gmail.com"
+    assert smtp_calls["subject"] == "Cognivio access request: pilot.teacher@example.com"

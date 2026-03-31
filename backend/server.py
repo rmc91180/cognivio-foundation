@@ -23,6 +23,7 @@ import re
 import shutil
 import sys
 import time
+import requests
 import smtplib
 import ssl
 import boto3
@@ -159,13 +160,74 @@ def _build_access_request_notification_message(user_doc: dict) -> EmailMessage:
     return message
 
 
+def _build_access_request_notification_text(user_doc: dict) -> str:
+    return "\n".join(
+        [
+            "A new Cognivio pilot access request was submitted.",
+            "",
+            f"Name: {user_doc.get('name')}",
+            f"Email: {user_doc.get('email')}",
+            f"Requested role: {_get_user_role(user_doc)}",
+            f"Requested at: {user_doc.get('approval_requested_at') or user_doc.get('created_at')}",
+            "",
+            "Review this request from the admin access management page after logging in.",
+        ]
+    )
+
+
+def _send_access_request_notification_via_resend(user_doc: dict) -> bool:
+    if not RESEND_API_KEY or not RESEND_FROM_EMAIL:
+        return False
+    payload = {
+        "from": RESEND_FROM_EMAIL,
+        "to": [ACCESS_APPROVAL_NOTIFY_EMAIL],
+        "subject": f"Cognivio access request: {user_doc.get('email')}",
+        "text": _build_access_request_notification_text(user_doc),
+    }
+    if SMTP_FROM_EMAIL and SMTP_FROM_EMAIL != RESEND_FROM_EMAIL:
+        payload["reply_to"] = SMTP_FROM_EMAIL
+    try:
+        response = requests.post(
+            f"{RESEND_API_BASE_URL}/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        if response.ok:
+            return True
+        logger.warning(
+            "Failed to send access request notification via Resend for %s: %s %s",
+            user_doc.get("email"),
+            response.status_code,
+            response.text[:500],
+        )
+        return False
+    except Exception as exc:
+        logger.warning(
+            "Failed to send access request notification via Resend for %s: %s",
+            user_doc.get("email"),
+            exc,
+        )
+        return False
+
+
 def _send_access_request_notification(user_doc: dict) -> bool:
     if not ACCESS_APPROVAL_NOTIFY_EMAIL:
         logger.warning("ACCESS_APPROVAL_NOTIFY_EMAIL not set; access request notification skipped.")
         return False
+    if RESEND_API_KEY and RESEND_FROM_EMAIL:
+        if _send_access_request_notification_via_resend(user_doc):
+            return True
+        logger.warning(
+            "Resend notification failed for %s; falling back to SMTP if configured.",
+            user_doc.get("email"),
+        )
     if not SMTP_HOST or not SMTP_FROM_EMAIL:
         logger.warning(
-            "SMTP is not configured; access request notification for %s was not sent.",
+            "No email delivery provider is configured for access request notification for %s.",
             user_doc.get("email"),
         )
         return False
@@ -1271,6 +1333,9 @@ ACCESS_APPROVAL_REQUIRED = os.getenv("ACCESS_APPROVAL_REQUIRED", "true").lower()
 ACCESS_APPROVAL_NOTIFY_EMAIL = (
     os.getenv("ACCESS_APPROVAL_NOTIFY_EMAIL", "rmc91180@gmail.com").strip()
 )
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
+RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "").strip()
+RESEND_API_BASE_URL = os.getenv("RESEND_API_BASE_URL", "https://api.resend.com").rstrip("/")
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587") or "587")
 SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
