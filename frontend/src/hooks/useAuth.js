@@ -6,6 +6,23 @@ import { authApi } from "@/lib/api";
 
 const AuthContext = createContext(null);
 
+function getErrorMessage(error, fallback) {
+  const detail = error?.response?.data?.detail;
+  if (typeof detail === "string" && detail.trim()) {
+    return detail;
+  }
+  if (Array.isArray(detail) && detail.length > 0) {
+    const first = detail[0];
+    if (typeof first === "string" && first.trim()) {
+      return first;
+    }
+    if (first && typeof first.msg === "string" && first.msg.trim()) {
+      return first.msg;
+    }
+  }
+  return fallback;
+}
+
 export function AuthProvider({ children }) {
   const { t } = useTranslation();
   const [user, setUser] = useState(null);
@@ -45,7 +62,7 @@ export function AuthProvider({ children }) {
       queryClient.clear();
     },
     onError: (error) => {
-      toast.error(error?.response?.data?.detail || t("auth.loginFailed"));
+      toast.error(getErrorMessage(error, t("auth.loginFailed")));
     },
   });
 
@@ -58,7 +75,7 @@ export function AuthProvider({ children }) {
       queryClient.clear();
     },
     onError: (error) => {
-      toast.error(error?.response?.data?.detail || t("auth.registrationFailed"));
+      toast.error(getErrorMessage(error, t("auth.registrationFailed")));
     },
   });
 
@@ -68,7 +85,7 @@ export function AuthProvider({ children }) {
       toast.success(res?.data?.message || t("auth.requestAccessSubmitted"));
     },
     onError: (error) => {
-      toast.error(error?.response?.data?.detail || t("auth.requestAccessFailed"));
+      toast.error(getErrorMessage(error, t("auth.requestAccessFailed")));
     },
   });
 

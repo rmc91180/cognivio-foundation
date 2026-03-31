@@ -24,6 +24,9 @@ export function AuthPage() {
   const approvalRequired = runtimeConfig.registrationApprovalRequired;
   const [mode, setMode] = useState("login");
   const [form, setForm] = useState({ email: "", password: "", name: "" });
+  const nameInputId = "auth-name";
+  const emailInputId = "auth-email";
+  const passwordInputId = "auth-password";
 
   useEffect(() => {
     if (user) {
@@ -33,21 +36,15 @@ export function AuthPage() {
 
   const onSubmit = async (e) => {
     e.preventDefault();
-    const payload =
-      mode === "register"
-        ? {
-            email: form.email,
-            password: form.password,
-            name: form.name || form.email,
-          }
-        : {
-            email: form.email,
-            password: form.password,
-          };
+    const signupPayload = {
+      email: form.email,
+      password: form.password,
+      name: form.name || form.email,
+    };
 
-    if (mode === "request_access") {
+    if (mode === "signup" && approvalRequired) {
       try {
-        const res = await requestAccessAsync(payload);
+        const res = await requestAccessAsync(signupPayload);
         setForm((current) => ({ ...current, password: "" }));
         if (res?.data?.status === "approved") {
           setMode("login");
@@ -58,7 +55,15 @@ export function AuthPage() {
       return;
     }
 
-    const fn = mode === "register" ? register : login;
+    const payload =
+      mode === "signup"
+        ? signupPayload
+        : {
+            email: form.email,
+            password: form.password,
+          };
+
+    const fn = mode === "signup" ? register : login;
     fn(payload);
   };
 
@@ -94,30 +99,17 @@ export function AuthPage() {
           >
             {t("auth.loginTab")}
           </button>
-          {!isDemo && !approvalRequired && (
+          {!isDemo && (
             <button
               type="button"
-              onClick={() => setMode("register")}
+              onClick={() => setMode("signup")}
               className={`flex-1 rounded px-3 py-2 ${
-                mode === "register"
+                mode === "signup"
                   ? "bg-white text-slate-900 shadow-sm font-semibold"
                   : "text-slate-500 hover:text-slate-700"
               }`}
             >
-              {t("auth.registerTab")}
-            </button>
-          )}
-          {!isDemo && approvalRequired && (
-            <button
-              type="button"
-              onClick={() => setMode("request_access")}
-              className={`flex-1 rounded px-3 py-2 ${
-                mode === "request_access"
-                  ? "bg-white text-slate-900 shadow-sm font-semibold"
-                  : "text-slate-500 hover:text-slate-700"
-              }`}
-            >
-              {t("auth.requestAccessTab")}
+              {t("auth.signUpTab")}
             </button>
           )}
         </div>
@@ -132,7 +124,7 @@ export function AuthPage() {
           </div>
         )}
 
-        {!isDemo && approvalRequired && mode === "request_access" && (
+        {!isDemo && approvalRequired && mode === "signup" && (
           <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
             <div className="font-semibold">{t("auth.approvalRequiredTitle")}</div>
             <div className="mt-1">{t("auth.approvalRequiredDescription")}</div>
@@ -140,9 +132,10 @@ export function AuthPage() {
         )}
 
         <form onSubmit={onSubmit} className="space-y-4">
-          {(mode === "register" || mode === "request_access") && !isDemo && (
-            <Field label={t("auth.name")}>
+          {mode === "signup" && !isDemo && (
+            <Field label={t("auth.name")} htmlFor={nameInputId}>
               <Input
+                id={nameInputId}
                 type="text"
                 value={form.name}
                 onChange={(e) =>
@@ -151,8 +144,9 @@ export function AuthPage() {
               />
             </Field>
           )}
-          <Field label={t("auth.email")}>
+          <Field label={t("auth.email")} htmlFor={emailInputId}>
             <Input
+              id={emailInputId}
               type="email"
               required
               value={form.email}
@@ -161,8 +155,9 @@ export function AuthPage() {
               }
             />
           </Field>
-          <Field label={t("auth.password")}>
+          <Field label={t("auth.password")} htmlFor={passwordInputId}>
             <Input
+              id={passwordInputId}
               type="password"
               required
               value={form.password}
@@ -173,14 +168,14 @@ export function AuthPage() {
           </Field>
           <Button type="submit" disabled={busy} fullWidth className="mt-2 shadow-brand">
             {busy
-              ? mode === "request_access"
-                ? t("auth.requestingAccess")
+              ? mode === "signup"
+                ? approvalRequired
+                  ? t("auth.signingUp")
+                  : t("auth.creatingAccount")
                 : t("auth.signingIn")
               : mode === "login"
               ? t("auth.signIn")
-              : mode === "request_access"
-              ? t("auth.requestAccessCta")
-              : t("auth.createAccount")}
+              : t("auth.signUpCta")}
           </Button>
         </form>
 
