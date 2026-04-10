@@ -140,49 +140,73 @@ def _build_user_response_payload(user_doc: dict) -> dict:
 
 def _build_access_request_notification_message(user_doc: dict) -> EmailMessage:
     message = EmailMessage()
-    message["Subject"] = f"Cognivio access request: {user_doc.get('email')}"
+    message["Subject"] = f"Cognivio approval needed: {user_doc.get('email')}"
     message["From"] = SMTP_FROM_EMAIL
     message["To"] = ACCESS_APPROVAL_NOTIFY_EMAIL
-    message.set_content(
-        "\n".join(
-            [
-                "A new Cognivio pilot access request was submitted.",
-                "",
-                f"Name: {user_doc.get('name')}",
-                f"Email: {user_doc.get('email')}",
-                f"Requested role: {_get_user_role(user_doc)}",
-                f"Requested at: {user_doc.get('approval_requested_at') or user_doc.get('created_at')}",
-                "",
-                "Review this request from the admin access management page after logging in.",
-            ]
-        )
-    )
+    message.set_content(_build_access_request_notification_text(user_doc))
     return message
 
 
 def _build_access_request_notification_text(user_doc: dict) -> str:
     return "\n".join(
         [
-            "A new Cognivio pilot access request was submitted.",
+            "A new Cognivio pilot sign-up is waiting for approval.",
             "",
             f"Name: {user_doc.get('name')}",
             f"Email: {user_doc.get('email')}",
             f"Requested role: {_get_user_role(user_doc)}",
             f"Requested at: {user_doc.get('approval_requested_at') or user_doc.get('created_at')}",
             "",
-            "Review this request from the admin access management page after logging in.",
+            "Approve or remove this request from the Cognivio access-management page after logging in.",
         ]
     )
 
 
-def _send_access_request_notification_via_resend(user_doc: dict) -> bool:
+def _build_access_request_received_text(user_doc: dict) -> str:
+    return "\n".join(
+        [
+            "Your Cognivio sign-up request has been received.",
+            "",
+            f"Email: {user_doc.get('email')}",
+            f"Submitted at: {user_doc.get('approval_requested_at') or user_doc.get('created_at')}",
+            "",
+            "Your account is pending approval.",
+            "Once approved, you can sign in with the same email and password you created during sign-up.",
+        ]
+    )
+
+
+def _build_access_approved_text(user_doc: dict) -> str:
+    return "\n".join(
+        [
+            "Your Cognivio access has been approved.",
+            "",
+            f"Email: {user_doc.get('email')}",
+            f"Approved at: {user_doc.get('approved_at') or datetime.now(timezone.utc).isoformat()}",
+            "",
+            "You can now sign in with the same email and password you created during sign-up.",
+            f"Sign in here: {FRONTEND_URL or BACKEND_PUBLIC_BASE_URL or 'https://www.cognivio.live'}",
+        ]
+    )
+
+
+def _build_email_message(subject: str, to_email: str, text: str) -> EmailMessage:
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = SMTP_FROM_EMAIL
+    message["To"] = to_email
+    message.set_content(text)
+    return message
+
+
+def _send_email_via_resend(subject: str, to_email: str, text: str) -> bool:
     if not RESEND_API_KEY or not RESEND_FROM_EMAIL:
         return False
     payload = {
         "from": RESEND_FROM_EMAIL,
-        "to": [ACCESS_APPROVAL_NOTIFY_EMAIL],
-        "subject": f"Cognivio access request: {user_doc.get('email')}",
-        "text": _build_access_request_notification_text(user_doc),
+        "to": [to_email],
+        "subject": subject,
+        "text": text,
     }
     if SMTP_FROM_EMAIL and SMTP_FROM_EMAIL != RESEND_FROM_EMAIL:
         payload["reply_to"] = SMTP_FROM_EMAIL
@@ -199,40 +223,40 @@ def _send_access_request_notification_via_resend(user_doc: dict) -> bool:
         if response.ok:
             return True
         logger.warning(
-            "Failed to send access request notification via Resend for %s: %s %s",
-            user_doc.get("email"),
+            "Failed to send email via Resend to %s: %s %s",
+            to_email,
             response.status_code,
             response.text[:500],
         )
         return False
     except Exception as exc:
         logger.warning(
-            "Failed to send access request notification via Resend for %s: %s",
-            user_doc.get("email"),
+            "Failed to send email via Resend to %s: %s",
+            to_email,
             exc,
         )
         return False
 
 
-def _send_access_request_notification(user_doc: dict) -> bool:
-    if not ACCESS_APPROVAL_NOTIFY_EMAIL:
-        logger.warning("ACCESS_APPROVAL_NOTIFY_EMAIL not set; access request notification skipped.")
+def _send_platform_email(subject: str, to_email: str, text: str) -> bool:
+    if not to_email:
+        logger.warning("Email delivery skipped because no recipient was provided for subject %s.", subject)
         return False
     if RESEND_API_KEY and RESEND_FROM_EMAIL:
-        if _send_access_request_notification_via_resend(user_doc):
+        if _send_email_via_resend(subject, to_email, text):
             return True
         logger.warning(
-            "Resend notification failed for %s; falling back to SMTP if configured.",
-            user_doc.get("email"),
+            "Resend delivery failed for %s; falling back to SMTP if configured.",
+            to_email,
         )
     if not SMTP_HOST or not SMTP_FROM_EMAIL:
         logger.warning(
-            "No email delivery provider is configured for access request notification for %s.",
-            user_doc.get("email"),
+            "No email delivery provider is configured for email to %s.",
+            to_email,
         )
         return False
 
-    message = _build_access_request_notification_message(user_doc)
+    message = _build_email_message(subject, to_email, text)
     try:
         if SMTP_USE_TLS:
             context = ssl.create_default_context()
@@ -248,8 +272,41 @@ def _send_access_request_notification(user_doc: dict) -> bool:
                 smtp.send_message(message)
         return True
     except Exception as exc:
-        logger.warning("Failed to send access request notification for %s: %s", user_doc.get("email"), exc)
+        logger.warning("Failed to send email to %s: %s", to_email, exc)
         return False
+
+
+def _send_access_request_notification(user_doc: dict) -> bool:
+    if not ACCESS_APPROVAL_NOTIFY_EMAIL:
+        logger.warning("ACCESS_APPROVAL_NOTIFY_EMAIL not set; access request notification skipped.")
+        return False
+    return _send_platform_email(
+        f"Cognivio approval needed: {user_doc.get('email')}",
+        ACCESS_APPROVAL_NOTIFY_EMAIL,
+        _build_access_request_notification_text(user_doc),
+    )
+
+
+def _send_access_request_received_confirmation(user_doc: dict) -> bool:
+    email = str(user_doc.get("email") or "").strip()
+    if not email:
+        return False
+    return _send_platform_email(
+        "Cognivio sign-up received",
+        email,
+        _build_access_request_received_text(user_doc),
+    )
+
+
+def _send_access_approved_confirmation(user_doc: dict) -> bool:
+    email = str(user_doc.get("email") or "").strip()
+    if not email:
+        return False
+    return _send_platform_email(
+        "Your Cognivio access is approved",
+        email,
+        _build_access_approved_text(user_doc),
+    )
 
 
 def _is_paid_analysis_allowed_for_user(user: Optional[dict]) -> bool:
@@ -1329,6 +1386,11 @@ JWT_EXPIRATION_HOURS = 24
 # Demo mode (fixed demo users, registration disabled)
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 ADMIN_EMAILS = set(email.lower() for email in _get_optional_env_list("ADMIN_EMAILS"))
+MASTER_ADMIN_EMAIL = os.getenv("MASTER_ADMIN_EMAIL", "").strip().lower()
+MASTER_ADMIN_PASSWORD = os.getenv("MASTER_ADMIN_PASSWORD", "").strip()
+MASTER_ADMIN_NAME = os.getenv("MASTER_ADMIN_NAME", "Cognivio Master Admin").strip() or "Cognivio Master Admin"
+if MASTER_ADMIN_EMAIL:
+    ADMIN_EMAILS.add(MASTER_ADMIN_EMAIL)
 ACCESS_APPROVAL_REQUIRED = os.getenv("ACCESS_APPROVAL_REQUIRED", "true").lower() == "true"
 ACCESS_APPROVAL_NOTIFY_EMAIL = (
     os.getenv("ACCESS_APPROVAL_NOTIFY_EMAIL", "rmc91180@gmail.com").strip()
@@ -1452,6 +1514,7 @@ PRIVACY_MAINTENANCE_TASKS: List[asyncio.Task] = []
 async def _app_startup() -> None:
     _validate_s3_config()
     await _ensure_database_indexes()
+    await _ensure_master_admin_user()
     await _start_privacy_maintenance_tasks()
     await _start_privacy_workers()
     await _start_video_workers()
@@ -1481,6 +1544,46 @@ async def _app_startup() -> None:
             "role": demo.get("role", "teacher"),
         }
         await db.users.insert_one(user_doc)
+
+
+async def _ensure_master_admin_user() -> None:
+    if not MASTER_ADMIN_EMAIL or not MASTER_ADMIN_PASSWORD:
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+    existing = await db.users.find_one({"email": MASTER_ADMIN_EMAIL})
+    password_hash = hash_password(MASTER_ADMIN_PASSWORD)
+    if existing:
+        updates = {
+            "name": existing.get("name") or MASTER_ADMIN_NAME,
+            "password": password_hash,
+            "role": "admin",
+            "approval_status": "approved",
+            "approved_at": existing.get("approved_at") or now,
+            "approved_by": "system:master_admin_bootstrap",
+            "approval_requested_at": existing.get("approval_requested_at") or now,
+            "revoked_at": None,
+            "revoked_by": None,
+            "is_active": True,
+            "updated_at": now,
+        }
+        await db.users.update_one({"email": MASTER_ADMIN_EMAIL}, {"$set": updates})
+        return
+
+    user_doc = {
+        "id": str(uuid.uuid4()),
+        "email": MASTER_ADMIN_EMAIL,
+        "name": MASTER_ADMIN_NAME,
+        "password": password_hash,
+        "created_at": now,
+        "role": "admin",
+        "approval_status": "approved",
+        "approval_requested_at": now,
+        "approved_at": now,
+        "approved_by": "system:master_admin_bootstrap",
+        "is_active": True,
+    }
+    await db.users.insert_one(user_doc)
 
 
 async def _app_shutdown() -> None:
@@ -3206,6 +3309,7 @@ async def request_access(user: UserCreate):
                 approval_status=_get_user_approval_status(enriched_user),
             )
         _send_access_request_notification(refreshed)
+        _send_access_request_received_confirmation(refreshed)
         return AccessRequestResponse(
             status="pending",
             email=email,
@@ -3238,6 +3342,7 @@ async def request_access(user: UserCreate):
             approval_status=_get_user_approval_status(enriched_user),
         )
     _send_access_request_notification(user_doc)
+    _send_access_request_received_confirmation(user_doc)
     return AccessRequestResponse(
         status="pending",
         email=email,
@@ -6106,6 +6211,7 @@ async def approve_access_user(
         updates["approval_note"] = payload.reason
     await db.users.update_one({"id": user_id}, {"$set": updates})
     updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    _send_access_approved_confirmation(updated)
     serialized = _build_user_response_payload(updated)
     return AccessUserRecord(
         id=serialized["id"],
