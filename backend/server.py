@@ -23,6 +23,7 @@ import re
 import shutil
 import sys
 import time
+import html
 import requests
 import smtplib
 import ssl
@@ -148,6 +149,8 @@ def _build_access_request_notification_message(user_doc: dict) -> EmailMessage:
 
 
 def _build_access_request_notification_text(user_doc: dict) -> str:
+    approve_url = _build_access_request_action_url(user_doc, "approve")
+    deny_url = _build_access_request_action_url(user_doc, "deny")
     return "\n".join(
         [
             "A new Cognivio pilot sign-up is waiting for approval.",
@@ -157,9 +160,35 @@ def _build_access_request_notification_text(user_doc: dict) -> str:
             f"Requested role: {_get_user_role(user_doc)}",
             f"Requested at: {user_doc.get('approval_requested_at') or user_doc.get('created_at')}",
             "",
-            "Approve or remove this request from the Cognivio access-management page after logging in.",
+            f"Approve now: {approve_url}",
+            f"Deny now: {deny_url}",
+            "",
+            "You can also review this request from the Cognivio access-management page after logging in.",
         ]
     )
+
+
+def _build_access_request_notification_html(user_doc: dict) -> str:
+    name = html.escape(str(user_doc.get("name") or ""))
+    email_value = html.escape(str(user_doc.get("email") or ""))
+    role = html.escape(_get_user_role(user_doc))
+    requested_at = html.escape(str(user_doc.get("approval_requested_at") or user_doc.get("created_at") or ""))
+    approve_url = html.escape(_build_access_request_action_url(user_doc, "approve"))
+    deny_url = html.escape(_build_access_request_action_url(user_doc, "deny"))
+    return f"""
+<div style="font-family: Arial, sans-serif; color: #0f172a; line-height: 1.5;">
+  <h2 style="margin: 0 0 16px;">New Cognivio pilot sign-up waiting for approval</h2>
+  <p style="margin: 0 0 8px;"><strong>Name:</strong> {name}</p>
+  <p style="margin: 0 0 8px;"><strong>Email:</strong> {email_value}</p>
+  <p style="margin: 0 0 8px;"><strong>Requested role:</strong> {role}</p>
+  <p style="margin: 0 0 20px;"><strong>Requested at:</strong> {requested_at}</p>
+  <p style="margin: 0 0 18px;">
+    <a href="{approve_url}" style="display:inline-block;padding:12px 20px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:600;margin-right:12px;">Approve</a>
+    <a href="{deny_url}" style="display:inline-block;padding:12px 20px;background:#dc2626;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:600;">Deny</a>
+  </p>
+  <p style="margin: 0; color: #475569;">You can also review this request from the Cognivio access-management page after logging in.</p>
+</div>
+""".strip()
 
 
 def _build_access_request_received_text(user_doc: dict) -> str:
@@ -176,6 +205,20 @@ def _build_access_request_received_text(user_doc: dict) -> str:
     )
 
 
+def _build_access_request_received_html(user_doc: dict) -> str:
+    email_value = html.escape(str(user_doc.get("email") or ""))
+    submitted_at = html.escape(str(user_doc.get("approval_requested_at") or user_doc.get("created_at") or ""))
+    return f"""
+<div style="font-family: Arial, sans-serif; color: #0f172a; line-height: 1.5;">
+  <h2 style="margin: 0 0 16px;">Your Cognivio sign-up request has been received</h2>
+  <p style="margin: 0 0 8px;"><strong>Email:</strong> {email_value}</p>
+  <p style="margin: 0 0 16px;"><strong>Submitted at:</strong> {submitted_at}</p>
+  <p style="margin: 0 0 8px;">Your account is pending approval.</p>
+  <p style="margin: 0;">Once approved, you can sign in with the same email and password you created during sign-up.</p>
+</div>
+""".strip()
+
+
 def _build_access_approved_text(user_doc: dict) -> str:
     return "\n".join(
         [
@@ -190,16 +233,58 @@ def _build_access_approved_text(user_doc: dict) -> str:
     )
 
 
-def _build_email_message(subject: str, to_email: str, text: str) -> EmailMessage:
+def _build_access_approved_html(user_doc: dict) -> str:
+    email_value = html.escape(str(user_doc.get("email") or ""))
+    approved_at = html.escape(str(user_doc.get("approved_at") or datetime.now(timezone.utc).isoformat()))
+    sign_in_url = html.escape(FRONTEND_URL or BACKEND_PUBLIC_BASE_URL or "https://www.cognivio.live")
+    return f"""
+<div style="font-family: Arial, sans-serif; color: #0f172a; line-height: 1.5;">
+  <h2 style="margin: 0 0 16px;">Your Cognivio access is approved</h2>
+  <p style="margin: 0 0 8px;"><strong>Email:</strong> {email_value}</p>
+  <p style="margin: 0 0 16px;"><strong>Approved at:</strong> {approved_at}</p>
+  <p style="margin: 0 0 18px;">You can now sign in with the same email and password you created during sign-up.</p>
+  <p style="margin: 0;"><a href="{sign_in_url}" style="display:inline-block;padding:12px 20px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:600;">Open Cognivio</a></p>
+</div>
+""".strip()
+
+
+def _build_access_denied_text(user_doc: dict) -> str:
+    return "\n".join(
+        [
+            "Your Cognivio access request was not approved.",
+            "",
+            f"Email: {user_doc.get('email')}",
+            "",
+            "You cannot sign in with this account at this time.",
+            "If you believe this is a mistake, reply to this message or contact Cognivio support.",
+        ]
+    )
+
+
+def _build_access_denied_html(user_doc: dict) -> str:
+    email_value = html.escape(str(user_doc.get("email") or ""))
+    return f"""
+<div style="font-family: Arial, sans-serif; color: #0f172a; line-height: 1.5;">
+  <h2 style="margin: 0 0 16px;">Your Cognivio access request was not approved</h2>
+  <p style="margin: 0 0 12px;"><strong>Email:</strong> {email_value}</p>
+  <p style="margin: 0 0 8px;">You cannot sign in with this account at this time.</p>
+  <p style="margin: 0;">If you believe this is a mistake, reply to this message or contact Cognivio support.</p>
+</div>
+""".strip()
+
+
+def _build_email_message(subject: str, to_email: str, text: str, html_body: Optional[str] = None) -> EmailMessage:
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = SMTP_FROM_EMAIL
     message["To"] = to_email
     message.set_content(text)
+    if html_body:
+        message.add_alternative(html_body, subtype="html")
     return message
 
 
-def _send_email_via_resend(subject: str, to_email: str, text: str) -> bool:
+def _send_email_via_resend(subject: str, to_email: str, text: str, html_body: Optional[str] = None) -> bool:
     if not RESEND_API_KEY or not RESEND_FROM_EMAIL:
         return False
     payload = {
@@ -208,6 +293,8 @@ def _send_email_via_resend(subject: str, to_email: str, text: str) -> bool:
         "subject": subject,
         "text": text,
     }
+    if html_body:
+        payload["html"] = html_body
     if SMTP_FROM_EMAIL and SMTP_FROM_EMAIL != RESEND_FROM_EMAIL:
         payload["reply_to"] = SMTP_FROM_EMAIL
     try:
@@ -238,12 +325,12 @@ def _send_email_via_resend(subject: str, to_email: str, text: str) -> bool:
         return False
 
 
-def _send_platform_email(subject: str, to_email: str, text: str) -> bool:
+def _send_platform_email(subject: str, to_email: str, text: str, html_body: Optional[str] = None) -> bool:
     if not to_email:
         logger.warning("Email delivery skipped because no recipient was provided for subject %s.", subject)
         return False
     if RESEND_API_KEY and RESEND_FROM_EMAIL:
-        if _send_email_via_resend(subject, to_email, text):
+        if _send_email_via_resend(subject, to_email, text, html_body=html_body):
             return True
         logger.warning(
             "Resend delivery failed for %s; falling back to SMTP if configured.",
@@ -256,7 +343,7 @@ def _send_platform_email(subject: str, to_email: str, text: str) -> bool:
         )
         return False
 
-    message = _build_email_message(subject, to_email, text)
+    message = _build_email_message(subject, to_email, text, html_body=html_body)
     try:
         if SMTP_USE_TLS:
             context = ssl.create_default_context()
@@ -284,6 +371,7 @@ def _send_access_request_notification(user_doc: dict) -> bool:
         f"Cognivio approval needed: {user_doc.get('email')}",
         ACCESS_APPROVAL_NOTIFY_EMAIL,
         _build_access_request_notification_text(user_doc),
+        html_body=_build_access_request_notification_html(user_doc),
     )
 
 
@@ -295,6 +383,7 @@ def _send_access_request_received_confirmation(user_doc: dict) -> bool:
         "Cognivio sign-up received",
         email,
         _build_access_request_received_text(user_doc),
+        html_body=_build_access_request_received_html(user_doc),
     )
 
 
@@ -306,6 +395,19 @@ def _send_access_approved_confirmation(user_doc: dict) -> bool:
         "Your Cognivio access is approved",
         email,
         _build_access_approved_text(user_doc),
+        html_body=_build_access_approved_html(user_doc),
+    )
+
+
+def _send_access_denied_confirmation(user_doc: dict) -> bool:
+    email = str(user_doc.get("email") or "").strip()
+    if not email:
+        return False
+    return _send_platform_email(
+        "Your Cognivio access request was not approved",
+        email,
+        _build_access_denied_text(user_doc),
+        html_body=_build_access_denied_html(user_doc),
     )
 
 
@@ -367,6 +469,53 @@ def _to_public_backend_url(path: str) -> str:
     if BACKEND_PUBLIC_BASE_URL:
         return f"{BACKEND_PUBLIC_BASE_URL}{path}"
     return path
+
+
+def _create_access_request_action_token(user_doc: dict, action: str) -> str:
+    payload = {
+        "type": "access_request_action",
+        "user_id": user_doc.get("id"),
+        "email": str(user_doc.get("email") or "").strip().lower(),
+        "action": action,
+        "exp": datetime.now(timezone.utc) + timedelta(days=7),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _build_access_request_action_url(user_doc: dict, action: str) -> str:
+    token = _create_access_request_action_token(user_doc, action)
+    return _to_public_backend_url(f"/api/admin/access-request-actions/{action}?token={token}")
+
+
+def _render_access_request_action_result_page(title: str, message: str, tone: str = "neutral") -> str:
+    palette = {
+        "neutral": {"accent": "#334155", "bg": "#f8fafc"},
+        "success": {"accent": "#2563eb", "bg": "#eff6ff"},
+        "danger": {"accent": "#dc2626", "bg": "#fef2f2"},
+        "warning": {"accent": "#b45309", "bg": "#fffbeb"},
+    }
+    colors = palette.get(tone, palette["neutral"])
+    title_safe = html.escape(title)
+    message_safe = html.escape(message)
+    access_url = html.escape(FRONTEND_URL or "https://www.cognivio.live")
+    return f"""
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title_safe}</title>
+  </head>
+  <body style="margin:0;background:{colors['bg']};font-family:Arial,sans-serif;color:#0f172a;">
+    <div style="max-width:640px;margin:64px auto;padding:32px;background:#ffffff;border:1px solid #e2e8f0;border-radius:18px;box-shadow:0 12px 40px rgba(15,23,42,0.08);">
+      <div style="font-size:12px;letter-spacing:0.18em;text-transform:uppercase;color:{colors['accent']};font-weight:700;">Cognivio access review</div>
+      <h1 style="margin:12px 0 16px;font-size:28px;line-height:1.2;">{title_safe}</h1>
+      <p style="margin:0 0 24px;font-size:16px;line-height:1.7;color:#334155;">{message_safe}</p>
+      <a href="{access_url}" style="display:inline-block;padding:12px 20px;background:{colors['accent']};color:#ffffff;text-decoration:none;border-radius:10px;font-weight:600;">Open Cognivio</a>
+    </div>
+  </body>
+</html>
+""".strip()
 
 
 def _resolve_video_playback_url(video: dict) -> Optional[str]:
@@ -1555,7 +1704,7 @@ async def _ensure_master_admin_user() -> None:
     password_hash = hash_password(MASTER_ADMIN_PASSWORD)
     if existing:
         updates = {
-            "name": existing.get("name") or MASTER_ADMIN_NAME,
+            "name": MASTER_ADMIN_NAME,
             "password": password_hash,
             "role": "admin",
             "approval_status": "approved",
@@ -6254,6 +6403,8 @@ async def revoke_access_user(
         updates["approval_note"] = payload.reason
     await db.users.update_one({"id": user_id}, {"$set": updates})
     updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    if _get_user_approval_status(target) == "pending":
+        _send_access_denied_confirmation(updated)
     serialized = _build_user_response_payload(updated)
     return AccessUserRecord(
         id=serialized["id"],
@@ -6270,6 +6421,143 @@ async def revoke_access_user(
         is_active=updated.get("is_active", True) is not False,
         teacher_id=updated.get("teacher_id"),
         workspace_mode=updated.get("workspace_mode"),
+    )
+
+
+@api_router.get("/admin/access-request-actions/{action}")
+async def process_access_request_action(action: str, token: str):
+    if action not in {"approve", "deny"}:
+        raise HTTPException(status_code=404, detail="Unknown access action")
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        return Response(
+            _render_access_request_action_result_page(
+                "This access decision link has expired",
+                "Open Cognivio and review the request from the access approvals page if you still want to act on it.",
+                tone="warning",
+            ),
+            media_type="text/html",
+        )
+    except jwt.InvalidTokenError:
+        return Response(
+            _render_access_request_action_result_page(
+                "This access decision link is invalid",
+                "Use the Cognivio access approvals page after logging in to review the request manually.",
+                tone="danger",
+            ),
+            media_type="text/html",
+        )
+
+    if payload.get("type") != "access_request_action" or payload.get("action") != action:
+        return Response(
+            _render_access_request_action_result_page(
+                "This access decision link is invalid",
+                "Use the Cognivio access approvals page after logging in to review the request manually.",
+                tone="danger",
+            ),
+            media_type="text/html",
+        )
+
+    user_id = str(payload.get("user_id") or "").strip()
+    user_email = str(payload.get("email") or "").strip().lower()
+    if not user_id or not user_email:
+        return Response(
+            _render_access_request_action_result_page(
+                "This access decision link is invalid",
+                "The link does not contain a valid request target.",
+                tone="danger",
+            ),
+            media_type="text/html",
+        )
+
+    target = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    if not target or str(target.get("email") or "").strip().lower() != user_email:
+        return Response(
+            _render_access_request_action_result_page(
+                "This request could not be found",
+                "The access request may already have been removed or processed.",
+                tone="warning",
+            ),
+            media_type="text/html",
+        )
+
+    status = _get_user_approval_status(target)
+    now = datetime.now(timezone.utc).isoformat()
+
+    if action == "approve":
+        if status == "approved" and _is_user_access_active(target):
+            return Response(
+                _render_access_request_action_result_page(
+                    "This applicant is already approved",
+                    f"{target.get('email')} already has active Cognivio access.",
+                    tone="success",
+                ),
+                media_type="text/html",
+            )
+        if status == "revoked":
+            return Response(
+                _render_access_request_action_result_page(
+                    "This request was already denied",
+                    "Open Cognivio if you want to manually re-approve the account from the access approvals page.",
+                    tone="warning",
+                ),
+                media_type="text/html",
+            )
+        updates = {
+            "approval_status": "approved",
+            "approved_at": now,
+            "approved_by": f"email_link:{ACCESS_APPROVAL_NOTIFY_EMAIL or 'admin'}",
+            "revoked_at": None,
+            "revoked_by": None,
+            "is_active": True,
+        }
+        await db.users.update_one({"id": user_id}, {"$set": updates})
+        updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+        _send_access_approved_confirmation(updated)
+        return Response(
+            _render_access_request_action_result_page(
+                "Applicant approved",
+                f"{updated.get('email')} can now sign in to Cognivio with the same email and password used during sign-up.",
+                tone="success",
+            ),
+            media_type="text/html",
+        )
+
+    if status == "approved" and _is_user_access_active(target):
+        return Response(
+            _render_access_request_action_result_page(
+                "This applicant is already approved",
+                "Use the Cognivio access approvals page if you want to remove access after approval.",
+                tone="warning",
+            ),
+            media_type="text/html",
+        )
+    if status == "revoked":
+        return Response(
+            _render_access_request_action_result_page(
+                "This request was already denied",
+                f"{target.get('email')} does not currently have Cognivio access.",
+                tone="danger",
+            ),
+            media_type="text/html",
+        )
+    updates = {
+        "approval_status": "revoked",
+        "revoked_at": now,
+        "revoked_by": f"email_link:{ACCESS_APPROVAL_NOTIFY_EMAIL or 'admin'}",
+        "is_active": False,
+    }
+    await db.users.update_one({"id": user_id}, {"$set": updates})
+    updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    _send_access_denied_confirmation(updated)
+    return Response(
+        _render_access_request_action_result_page(
+            "Applicant denied",
+            f"{updated.get('email')} has been notified that the access request was not approved.",
+            tone="danger",
+        ),
+        media_type="text/html",
     )
 
 

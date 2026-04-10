@@ -85,6 +85,10 @@ def test_send_access_request_notification_prefers_resend(monkeypatch):
     assert captured["json"]["to"] == ["rmc91180@gmail.com"]
     assert captured["json"]["subject"] == "Cognivio approval needed: pilot.teacher@example.com"
     assert "Pilot Teacher" in captured["json"]["text"]
+    assert "Approve now:" in captured["json"]["text"]
+    assert "Deny now:" in captured["json"]["text"]
+    assert "/api/admin/access-request-actions/approve?token=" in captured["json"]["html"]
+    assert "/api/admin/access-request-actions/deny?token=" in captured["json"]["html"]
 
 
 def test_send_access_request_notification_returns_false_without_provider(monkeypatch):
@@ -202,6 +206,33 @@ def test_send_access_approved_confirmation_prefers_resend(monkeypatch):
     assert captured["json"]["to"] == ["pilot.teacher@example.com"]
     assert captured["json"]["subject"] == "Your Cognivio access is approved"
     assert "https://www.cognivio.live" in captured["json"]["text"]
+    assert "Open Cognivio" in captured["json"]["html"]
+
+
+def test_send_access_denied_confirmation_prefers_resend(monkeypatch):
+    captured = {}
+
+    class _Response:
+        ok = True
+        status_code = 200
+        text = '{"id":"email_101"}'
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        captured["json"] = json
+        return _Response()
+
+    monkeypatch.setattr(server, "RESEND_API_KEY", "re_test_123")
+    monkeypatch.setattr(server, "RESEND_FROM_EMAIL", "Cognivio <login@cognivio.live>")
+    monkeypatch.setattr(server, "RESEND_API_BASE_URL", "https://api.resend.com")
+    monkeypatch.setattr(server.requests, "post", _fake_post)
+
+    result = server._send_access_denied_confirmation(_sample_user_doc())
+
+    assert result is True
+    assert captured["json"]["to"] == ["pilot.teacher@example.com"]
+    assert captured["json"]["subject"] == "Your Cognivio access request was not approved"
+    assert "not approved" in captured["json"]["text"]
+    assert "not approved" in captured["json"]["html"]
 
 
 def test_ensure_master_admin_user_creates_or_updates_admin(monkeypatch):
@@ -241,3 +272,100 @@ def test_ensure_master_admin_user_creates_or_updates_admin(monkeypatch):
     assert users.record["approval_status"] == "approved"
     assert users.record["is_active"] is True
     assert users.record["name"] == "RMC Master Admin"
+
+    users.record["name"] = "Old Admin Name"
+    asyncio.run(server._ensure_master_admin_user())
+
+    assert users.record["name"] == "RMC Master Admin"
+
+
+def test_process_access_request_action_approve(monkeypatch):
+    class _Users:
+        def __init__(self):
+            self.record = {
+                "id": "user-123",
+                "name": "Pilot Teacher",
+                "email": "pilot.teacher@example.com",
+                "role": "teacher",
+                "approval_status": "pending",
+                "approval_requested_at": "2026-03-31T10:00:00+00:00",
+                "is_active": False,
+            }
+
+        async def find_one(self, query, projection=None):
+            if self.record and self.record.get("id") == query.get("id"):
+                return dict(self.record)
+            return None
+
+        async def update_one(self, query, update):
+            if self.record and self.record.get("id") == query.get("id"):
+                self.record.update(update.get("$set", {}))
+            return types.SimpleNamespace(modified_count=1)
+
+    users = _Users()
+    fake_db = types.SimpleNamespace(users=users)
+    sent = {}
+
+    def _fake_send(user_doc):
+        sent["email"] = user_doc["email"]
+        return True
+
+    monkeypatch.setattr(server, "db", fake_db)
+    monkeypatch.setattr(server, "ACCESS_APPROVAL_NOTIFY_EMAIL", "rmc91180@gmail.com")
+    monkeypatch.setattr(server, "_send_access_approved_confirmation", _fake_send)
+
+    token = server._create_access_request_action_token(users.record, "approve")
+    response = asyncio.run(server.process_access_request_action("approve", token))
+
+    assert response.status_code == 200
+    assert users.record["approval_status"] == "approved"
+    assert users.record["is_active"] is True
+    assert users.record["approved_by"] == "email_link:rmc91180@gmail.com"
+    assert sent["email"] == "pilot.teacher@example.com"
+    assert "Applicant approved" in response.body.decode("utf-8")
+
+
+def test_process_access_request_action_deny(monkeypatch):
+    class _Users:
+        def __init__(self):
+            self.record = {
+                "id": "user-456",
+                "name": "Pending Teacher",
+                "email": "pending.teacher@example.com",
+                "role": "teacher",
+                "approval_status": "pending",
+                "approval_requested_at": "2026-03-31T10:00:00+00:00",
+                "is_active": False,
+            }
+
+        async def find_one(self, query, projection=None):
+            if self.record and self.record.get("id") == query.get("id"):
+                return dict(self.record)
+            return None
+
+        async def update_one(self, query, update):
+            if self.record and self.record.get("id") == query.get("id"):
+                self.record.update(update.get("$set", {}))
+            return types.SimpleNamespace(modified_count=1)
+
+    users = _Users()
+    fake_db = types.SimpleNamespace(users=users)
+    sent = {}
+
+    def _fake_send(user_doc):
+        sent["email"] = user_doc["email"]
+        return True
+
+    monkeypatch.setattr(server, "db", fake_db)
+    monkeypatch.setattr(server, "ACCESS_APPROVAL_NOTIFY_EMAIL", "rmc91180@gmail.com")
+    monkeypatch.setattr(server, "_send_access_denied_confirmation", _fake_send)
+
+    token = server._create_access_request_action_token(users.record, "deny")
+    response = asyncio.run(server.process_access_request_action("deny", token))
+
+    assert response.status_code == 200
+    assert users.record["approval_status"] == "revoked"
+    assert users.record["is_active"] is False
+    assert users.record["revoked_by"] == "email_link:rmc91180@gmail.com"
+    assert sent["email"] == "pending.teacher@example.com"
+    assert "Applicant denied" in response.body.decode("utf-8")
