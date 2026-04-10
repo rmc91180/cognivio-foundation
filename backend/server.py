@@ -13685,6 +13685,11 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
 
 # Include the router in the main app
 app.include_router(api_router)
+app.add_api_route(
+    "/api/admin/access-request-actions/{action}",
+    process_access_request_action,
+    methods=["GET"],
+)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 origins = _get_optional_env_list("CORS_ORIGINS")
 if not origins:
