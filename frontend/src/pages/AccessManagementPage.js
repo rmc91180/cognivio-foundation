@@ -162,6 +162,11 @@ function AccessSection({
       </div>
       {users.length ? (
         <div className="space-y-3">
+          {section === "pending" ? (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
+              {t("accessManagement.pendingApprovalNote")}
+            </div>
+          ) : null}
           {users.map((user) => (
             <UserRecordCard
               key={user.id}

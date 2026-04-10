@@ -228,10 +228,11 @@ const en = {
     requestAccessFailed: "Failed to submit access request",
     approvalRequiredTitle: "Approval is required before login is enabled",
     approvalRequiredDescription:
-      "Sign up here. Your account will stay pending until Cognivio approves it. Once approved, you can log in with the same email and password.",
+      "Sign up with the email and password you want to use. Your account will stay pending until Cognivio approves that email address. Once approved, you can log in with the same email and password you created here.",
     requestAccessCta: "Request access",
     requestingAccess: "Requesting access...",
-    needApprovalHint: "Need access? Use the Sign up tab and wait for approval before signing in.",
+    needApprovalHint:
+      "Need access? Use the Sign up tab, submit the email and password you want to keep, and wait for approval before signing in.",
     signIn: "Sign in",
     signingIn: "Signing in...",
     signUpCta: "Sign up",
@@ -255,6 +256,8 @@ const en = {
     revokedTitle: "Removed access",
     revokedSummary: "Users whose login access has been disabled.",
     pendingDescription: "Approve new pilot users here after confirming they should enter the workspace.",
+    pendingApprovalNote:
+      "Approving a request activates the submitted email for login. The user's password stays private and is never shown here, but they will sign in later with the same password they created during sign up.",
     approvedDescription: "These users can sign in now. Remove access here if you need to shut off login.",
     revokedDescription: "These users cannot log in. Re-approve them here if access should be restored.",
     policyTitle: "Pilot access policy",

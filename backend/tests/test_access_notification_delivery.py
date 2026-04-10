@@ -70,7 +70,7 @@ def test_send_access_request_notification_prefers_resend(monkeypatch):
         return _Response()
 
     monkeypatch.setattr(server, "RESEND_API_KEY", "re_test_123")
-    monkeypatch.setattr(server, "RESEND_FROM_EMAIL", "Cognivio <pilot@cognivio.live>")
+    monkeypatch.setattr(server, "RESEND_FROM_EMAIL", "Cognivio <login@cognivio.live>")
     monkeypatch.setattr(server, "RESEND_API_BASE_URL", "https://api.resend.com")
     monkeypatch.setattr(server, "ACCESS_APPROVAL_NOTIFY_EMAIL", "rmc91180@gmail.com")
     monkeypatch.setattr(server.requests, "post", _fake_post)
@@ -80,7 +80,7 @@ def test_send_access_request_notification_prefers_resend(monkeypatch):
     assert result is True
     assert captured["url"] == "https://api.resend.com/emails"
     assert captured["headers"]["Authorization"] == "Bearer re_test_123"
-    assert captured["json"]["from"] == "Cognivio <pilot@cognivio.live>"
+    assert captured["json"]["from"] == "Cognivio <login@cognivio.live>"
     assert captured["json"]["to"] == ["rmc91180@gmail.com"]
     assert captured["json"]["subject"] == "Cognivio access request: pilot.teacher@example.com"
     assert "Pilot Teacher" in captured["json"]["text"]

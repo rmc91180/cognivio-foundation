@@ -76,7 +76,7 @@ Recommended Resend setup:
 ACCESS_APPROVAL_REQUIRED=true
 ACCESS_APPROVAL_NOTIFY_EMAIL=rmc91180@gmail.com
 RESEND_API_KEY=<resend-api-key>
-RESEND_FROM_EMAIL=Cognivio <pilot@cognivio.live>
+RESEND_FROM_EMAIL=Cognivio <login@cognivio.live>
 ```
 
 Optional SMTP fallback:
