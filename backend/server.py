@@ -4,7 +4,6 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import MongoClient as SyncMongoClient
 import os
 import logging
 from pathlib import Path
@@ -308,50 +307,6 @@ def _send_access_approved_confirmation(user_doc: dict) -> bool:
         email,
         _build_access_approved_text(user_doc),
     )
-
-
-def _copy_database_to_target(
-    source_uri: str,
-    source_db_name: str,
-    target_uri: str,
-    target_db_name: str,
-) -> Dict[str, Any]:
-    source_client = SyncMongoClient(source_uri, serverSelectionTimeoutMS=30000)
-    target_client = SyncMongoClient(target_uri, serverSelectionTimeoutMS=30000)
-    source_client.admin.command("ping")
-    target_client.admin.command("ping")
-
-    source_db = source_client[source_db_name]
-    target_db = target_client[target_db_name]
-
-    collection_counts: Dict[str, int] = {}
-    total_documents = 0
-    for collection_name in sorted(source_db.list_collection_names()):
-        source_collection = source_db[collection_name]
-        target_collection = target_db[collection_name]
-        count = source_collection.count_documents({})
-        collection_counts[collection_name] = count
-        total_documents += count
-        target_collection.drop()
-
-        if count == 0:
-            continue
-
-        batch: List[dict] = []
-        for document in source_collection.find({}):
-            batch.append(document)
-            if len(batch) >= 500:
-                target_collection.insert_many(batch, ordered=False)
-                batch = []
-        if batch:
-            target_collection.insert_many(batch, ordered=False)
-
-    return {
-        "source_db": source_db_name,
-        "target_db": target_db_name,
-        "collections": collection_counts,
-        "total_documents": total_documents,
-    }
 
 
 def _is_paid_analysis_allowed_for_user(user: Optional[dict]) -> bool:
@@ -1449,8 +1404,6 @@ SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
 SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", "").strip() or SMTP_USERNAME or ACCESS_APPROVAL_NOTIFY_EMAIL
 SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() != "false"
-ATLAS_MIGRATION_TARGET_URL = os.getenv("ATLAS_MIGRATION_TARGET_URL", "").strip()
-ATLAS_MIGRATION_TARGET_DB_NAME = os.getenv("ATLAS_MIGRATION_TARGET_DB_NAME", "").strip()
 DEMO_USERS = [
     {
         "email": "principal@demo.cognivio.app",
@@ -2357,13 +2310,6 @@ class AccessUserListResponse(BaseModel):
 
 class AccessDecisionPayload(BaseModel):
     reason: Optional[str] = None
-
-
-class AtlasMigrationResponse(BaseModel):
-    source_db: str
-    target_db: str
-    collections: Dict[str, int]
-    total_documents: int
 
 class TeacherCreate(BaseModel):
     name: str
@@ -6325,22 +6271,6 @@ async def revoke_access_user(
         teacher_id=updated.get("teacher_id"),
         workspace_mode=updated.get("workspace_mode"),
     )
-
-
-@api_router.post("/admin/atlas-migration/run", response_model=AtlasMigrationResponse)
-async def run_atlas_migration(current_user: dict = Depends(get_current_user)):
-    _require_admin_ops_user(current_user)
-    if not ATLAS_MIGRATION_TARGET_URL or not ATLAS_MIGRATION_TARGET_DB_NAME:
-        raise HTTPException(status_code=400, detail="Atlas migration target is not configured")
-
-    result = await asyncio.to_thread(
-        _copy_database_to_target,
-        mongo_url,
-        _get_required_env("DB_NAME"),
-        ATLAS_MIGRATION_TARGET_URL,
-        ATLAS_MIGRATION_TARGET_DB_NAME,
-    )
-    return AtlasMigrationResponse(**result)
 
 
 def _apply_admin_overrides(
