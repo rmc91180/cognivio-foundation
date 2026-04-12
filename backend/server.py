@@ -447,6 +447,15 @@ def _normalize_privacy_status(value: Optional[str]) -> str:
     return "queued"
 
 
+def _normalize_video_transcode_status(value: Optional[str]) -> str:
+    raw = (value or "").strip().lower()
+    if raw in {"queued", "processing", "completed", "failed", "not_required"}:
+        return raw
+    if raw in {"error", "errored"}:
+        return "failed"
+    return "not_required"
+
+
 def _parse_optional_iso_datetime(value: Optional[str], field_name: str) -> Optional[str]:
     if not value:
         return None
@@ -529,6 +538,13 @@ def _resolve_video_playback_url(video: dict) -> Optional[str]:
         return _to_public_backend_url(f"/uploads/{safe_path}")
     if video.get("privacy_status") is not None and privacy_status != PrivacyProcessingStatus.COMPLETED.value:
         return None
+    processed_url = video.get("processed_file_url")
+    if processed_url:
+        return processed_url
+    processed_path = video.get("processed_file_path")
+    if processed_path:
+        safe_path = str(processed_path).replace("\\", "/").lstrip("/")
+        return _to_public_backend_url(f"/uploads/{safe_path}")
     file_url = video.get("file_url")
     if file_url:
         return file_url
@@ -573,6 +589,7 @@ def _apply_video_response_defaults(video: dict) -> dict:
     video["status"] = _normalize_video_status(video.get("status"))
     video["analysis_status"] = _normalize_video_status(video.get("analysis_status"))
     video["privacy_status"] = _normalize_privacy_status(video.get("privacy_status"))
+    video["transcode_status"] = _normalize_video_transcode_status(video.get("transcode_status"))
     video["privacy_review_required"] = bool(video.get("privacy_review_required", False))
     video["playback_url"] = _resolve_video_playback_url(video)
     video["thumbnail_url"] = _resolve_video_thumbnail_url(video)
@@ -589,6 +606,9 @@ def _sanitize_video_response(video: dict) -> dict:
         "raw_file_url",
         "raw_file_path",
         "raw_s3_key",
+        "processed_s3_key",
+        "processed_file_url",
+        "processed_file_path",
         "raw_thumbnail_path",
         "raw_thumbnail_url",
         "redacted_file_path",
@@ -638,6 +658,18 @@ def _build_s3_key(category: str, filename: str) -> str:
     return f"uploads/{category}/{uuid.uuid4()}_{safe_name}"
 
 
+def _build_video_asset_s3_key(asset_kind: str, teacher_id: str, filename: str) -> str:
+    safe_name = Path(filename).name.replace(" ", "_")
+    safe_teacher_id = Path(str(teacher_id)).name.replace(" ", "_")
+    if asset_kind == "raw":
+        return f"uploads/videos/raw/{safe_teacher_id}/{safe_name}"
+    if asset_kind == "processed":
+        return f"uploads/videos/processed/{safe_teacher_id}/{safe_name}"
+    if asset_kind == "thumbnail":
+        return f"uploads/videos/thumbnails/{safe_teacher_id}/{safe_name}"
+    return _build_s3_key(f"videos/{asset_kind}", safe_name)
+
+
 def _store_path_locally(file_path: Path, category: str, filename: str) -> Tuple[str, str]:
     safe_name = Path(filename).name.replace(" ", "_")
     destination = UPLOAD_DIR / category / f"{uuid.uuid4()}_{safe_name}"
@@ -669,7 +701,12 @@ def _get_s3_public_url(key: str) -> str:
     return f"https://{S3_BUCKET}.s3.amazonaws.com/{key}"
 
 
-async def _upload_file_to_s3(upload: UploadFile, category: str) -> Tuple[str, str]:
+async def _upload_file_to_s3(
+    upload: UploadFile,
+    category: str,
+    *,
+    key_override: Optional[str] = None,
+) -> Tuple[str, str]:
     _ensure_allowed_extension(upload.filename or "")
     if not S3_BUCKET:
         stored_name = f"{uuid.uuid4()}_{Path(upload.filename or 'upload').name}"
@@ -681,7 +718,7 @@ async def _upload_file_to_s3(upload: UploadFile, category: str) -> Tuple[str, st
     tmp_name = f"{uuid.uuid4()}_{Path(upload.filename or 'upload').name}"
     temp_path = UPLOAD_DIR / "tmp" / tmp_name
     await _save_upload_file(upload, temp_path)
-    key = _build_s3_key(category, tmp_name)
+    key = key_override or _build_s3_key(category, tmp_name)
     client = _get_s3_client()
     content_type = upload.content_type or "application/octet-stream"
     try:
@@ -702,10 +739,17 @@ async def _upload_file_to_s3(upload: UploadFile, category: str) -> Tuple[str, st
     return key, _get_s3_public_url(key)
 
 
-def _upload_path_to_s3(file_path: Path, category: str, filename: str, content_type: str) -> Tuple[str, str]:
+def _upload_path_to_s3(
+    file_path: Path,
+    category: str,
+    filename: str,
+    content_type: str,
+    *,
+    key_override: Optional[str] = None,
+) -> Tuple[str, str]:
     if not S3_BUCKET:
         return _store_path_locally(file_path, category, filename)
-    key = _build_s3_key(category, filename)
+    key = key_override or _build_s3_key(category, filename)
     client = _get_s3_client()
     client.upload_file(
         str(file_path),
@@ -1587,6 +1631,8 @@ PRIVACY_REFERENCE_ALLOWED_CONTENT_TYPES = {
 }
 VIDEO_MAX_UPLOAD_BYTES = int(os.getenv("MAX_VIDEO_BYTES", str(1024 * 1024 * 1024)))
 VIDEO_WORKER_COUNT = max(1, int(os.getenv("VIDEO_WORKER_COUNT", "1")))
+VIDEO_TRANSCODE_PIPELINE_ENABLED = os.getenv("VIDEO_TRANSCODE_PIPELINE_ENABLED", "false").lower() == "true"
+VIDEO_TRANSCODE_PROFILE = os.getenv("VIDEO_TRANSCODE_PROFILE", "analysis_master_v1").strip() or "analysis_master_v1"
 CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS = os.getenv("CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS", "false").lower() == "true"
 ADHERENCE_WEIGHT = float(os.getenv("ADHERENCE_WEIGHT", "0.15"))
 PRIVACY_REQUIRE_PROFILE = os.getenv("PRIVACY_REQUIRE_PROFILE", "true").lower() == "true"
@@ -1655,6 +1701,7 @@ api_router = APIRouter(prefix="/api")
 security = HTTPBearer()
 VIDEO_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 VIDEO_WORKER_TASKS: List[asyncio.Task] = []
+VIDEO_TRANSCODE_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 VIDEO_PRIVACY_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 VIDEO_PRIVACY_WORKER_TASKS: List[asyncio.Task] = []
 PRIVACY_MAINTENANCE_TASKS: List[asyncio.Task] = []
@@ -2526,6 +2573,7 @@ class VideoUploadResponse(BaseModel):
     status: str
     privacy_status: str
     analysis_status: str
+    transcode_status: Optional[str] = None
     upload_date: str
     subject: Optional[str] = None
     recorded_at: Optional[str] = None
@@ -2723,6 +2771,14 @@ class VideoProcessingStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class VideoTranscodeStatus(str, Enum):
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    NOT_REQUIRED = "not_required"
 
 
 class PrivacyProcessingStatus(str, Enum):
@@ -4414,6 +4470,47 @@ async def _enqueue_video_processing_job(
     await VIDEO_JOB_QUEUE.put(video_id)
 
 
+async def _enqueue_video_transcode_job(
+    video_id: str,
+    teacher_id: str,
+    user_id: str,
+    file_path: str,
+    *,
+    source_content_type: Optional[str] = None,
+    raw_s3_key: Optional[str] = None,
+    raw_file_url: Optional[str] = None,
+    requested_profile: Optional[str] = None,
+) -> None:
+    if not video_id or not teacher_id or not user_id or not file_path:
+        raise ValueError("video_id, teacher_id, user_id, and file_path are required to enqueue")
+    now = datetime.now(timezone.utc).isoformat()
+    await db.video_transcode_jobs.update_one(
+        {"video_id": video_id},
+        {
+            "$set": {
+                "video_id": video_id,
+                "teacher_id": teacher_id,
+                "user_id": user_id,
+                "file_path": file_path,
+                "raw_s3_key": raw_s3_key,
+                "raw_file_url": raw_file_url,
+                "source_content_type": source_content_type,
+                "requested_profile": requested_profile or VIDEO_TRANSCODE_PROFILE,
+                "status": VideoTranscodeStatus.QUEUED.value,
+                "updated_at": now,
+                "last_error": None,
+            },
+            "$setOnInsert": {
+                "id": str(uuid.uuid4()),
+                "created_at": now,
+                "attempts": 0,
+            },
+        },
+        upsert=True,
+    )
+    await VIDEO_TRANSCODE_JOB_QUEUE.put(video_id)
+
+
 async def _run_video_job(video_id: str) -> None:
     job = await db.video_processing_jobs.find_one({"video_id": video_id}, {"_id": 0})
     if not job:
@@ -4820,14 +4917,22 @@ async def upload_video(
         s3_key = None
         file_url = None
         try:
+            raw_s3_key_override = _build_video_asset_s3_key("raw", teacher_id, filename)
             s3_key, file_url = _upload_path_to_s3(
                 file_path,
                 "videos",
                 filename,
                 content_type or "video/mp4",
+                key_override=raw_s3_key_override,
             )
         except Exception as exc:
             logger.warning(f"S3 upload failed for video {video_id}: {exc}")
+
+        transcode_status = (
+            VideoTranscodeStatus.QUEUED.value
+            if VIDEO_TRANSCODE_PIPELINE_ENABLED
+            else VideoTranscodeStatus.NOT_REQUIRED.value
+        )
 
         video_doc = {
             "id": video_id,
@@ -4841,11 +4946,24 @@ async def upload_video(
             "raw_file_path": relative_path,
             "content_type": content_type or "video/mp4",
             "file_size_bytes": size,
+            "raw_file_size_bytes": size,
+            "processed_s3_key": None,
+            "processed_file_url": None,
+            "processed_file_path": None,
+            "processed_content_type": None,
+            "processed_file_size_bytes": None,
             "teacher_id": teacher_id,
             "uploaded_by": current_user["id"],
             "status": VideoProcessingStatus.QUEUED.value,
             "privacy_status": PrivacyProcessingStatus.QUEUED.value,
             "analysis_status": VideoProcessingStatus.QUEUED.value,
+            "transcode_status": transcode_status,
+            "transcode_started_at": None,
+            "transcode_completed_at": None,
+            "transcode_failed_at": None,
+            "transcode_error": None,
+            "transcode_profile": VIDEO_TRANSCODE_PROFILE,
+            "processing_asset_preference": "raw",
             "privacy_review_required": False,
             "privacy_review_reason": None,
             "privacy_started_at": None,
@@ -4864,6 +4982,18 @@ async def upload_video(
             "analysis_language": preferred_language,
         }
         await db.videos.insert_one(video_doc)
+
+        if VIDEO_TRANSCODE_PIPELINE_ENABLED:
+            await _enqueue_video_transcode_job(
+                video_id=video_id,
+                teacher_id=teacher_id,
+                user_id=current_user["id"],
+                file_path=str(file_path),
+                source_content_type=content_type or "video/mp4",
+                raw_s3_key=s3_key,
+                raw_file_url=file_url,
+                requested_profile=VIDEO_TRANSCODE_PROFILE,
+            )
 
         await db.video_evidence.insert_one({
             "id": str(uuid.uuid4()),
@@ -4919,6 +5049,7 @@ async def upload_video(
             status=VideoProcessingStatus.QUEUED.value,
             privacy_status=PrivacyProcessingStatus.QUEUED.value,
             analysis_status=VideoProcessingStatus.QUEUED.value,
+            transcode_status=transcode_status,
             upload_date=video_doc["upload_date"],
             subject=subject,
             recorded_at=normalized_recorded_at,
@@ -5009,6 +5140,7 @@ async def get_video_status(video_id: str, current_user: dict = Depends(get_curre
         "status": _normalize_video_status(video.get("status")),
         "privacy_status": _normalize_privacy_status(video.get("privacy_status")),
         "analysis_status": _normalize_video_status(video.get("analysis_status")),
+        "transcode_status": _normalize_video_transcode_status(video.get("transcode_status")),
         "privacy_review_required": bool(video.get("privacy_review_required", False)),
         "privacy_review_reason": video.get("privacy_review_reason"),
         "error_message": video.get("error_message"),
@@ -13766,6 +13898,8 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.observations, [("video_id", 1), ("created_at", -1)])
     await _safe_create_index(db.video_processing_jobs, [("video_id", 1)], unique=True)
     await _safe_create_index(db.video_processing_jobs, [("status", 1), ("updated_at", -1)])
+    await _safe_create_index(db.video_transcode_jobs, [("video_id", 1)], unique=True)
+    await _safe_create_index(db.video_transcode_jobs, [("status", 1), ("updated_at", -1)])
     await _safe_create_index(db.video_privacy_jobs, [("video_id", 1)], unique=True)
     await _safe_create_index(db.video_privacy_jobs, [("status", 1), ("updated_at", -1)])
     await _safe_create_index(db.teacher_face_profiles, [("teacher_id", 1), ("status", 1)])

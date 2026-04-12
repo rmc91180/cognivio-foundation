@@ -88,14 +88,22 @@ async def upload_video(
     s3_key = None
     file_url = None
     try:
+        raw_s3_key_override = legacy._build_video_asset_s3_key("raw", teacher_id, filename)
         s3_key, file_url = legacy._upload_path_to_s3(
             file_path,
             "videos",
             filename,
             content_type or "video/mp4",
+            key_override=raw_s3_key_override,
         )
     except Exception as exc:
         legacy.logger.warning(f"S3 upload failed for video {video_id}: {exc}")
+
+    transcode_status = (
+        legacy.VideoTranscodeStatus.QUEUED.value
+        if legacy.VIDEO_TRANSCODE_PIPELINE_ENABLED
+        else legacy.VideoTranscodeStatus.NOT_REQUIRED.value
+    )
 
     video_doc = {
         "id": video_id,
@@ -109,11 +117,24 @@ async def upload_video(
         "raw_file_path": relative_path,
         "content_type": content_type or "video/mp4",
         "file_size_bytes": size,
+        "raw_file_size_bytes": size,
+        "processed_s3_key": None,
+        "processed_file_url": None,
+        "processed_file_path": None,
+        "processed_content_type": None,
+        "processed_file_size_bytes": None,
         "teacher_id": teacher_id,
         "uploaded_by": current_user["id"],
         "status": legacy.VideoProcessingStatus.QUEUED.value,
         "privacy_status": legacy.PrivacyProcessingStatus.QUEUED.value,
         "analysis_status": legacy.VideoProcessingStatus.QUEUED.value,
+        "transcode_status": transcode_status,
+        "transcode_started_at": None,
+        "transcode_completed_at": None,
+        "transcode_failed_at": None,
+        "transcode_error": None,
+        "transcode_profile": legacy.VIDEO_TRANSCODE_PROFILE,
+        "processing_asset_preference": "raw",
         "privacy_review_required": False,
         "privacy_review_reason": None,
         "privacy_started_at": None,
@@ -134,6 +155,18 @@ async def upload_video(
         "analysis_language": preferred_language,
     }
     await video_repository.insert_video(video_doc)
+
+    if legacy.VIDEO_TRANSCODE_PIPELINE_ENABLED:
+        await legacy._enqueue_video_transcode_job(
+            video_id=video_id,
+            teacher_id=teacher_id,
+            user_id=current_user["id"],
+            file_path=str(file_path),
+            source_content_type=content_type or "video/mp4",
+            raw_s3_key=s3_key,
+            raw_file_url=file_url,
+            requested_profile=legacy.VIDEO_TRANSCODE_PROFILE,
+        )
 
     await video_repository.insert_video_evidence(
         {
@@ -184,6 +217,7 @@ async def upload_video(
         status=legacy.VideoProcessingStatus.QUEUED.value,
         privacy_status=legacy.PrivacyProcessingStatus.QUEUED.value,
         analysis_status=legacy.VideoProcessingStatus.QUEUED.value,
+        transcode_status=transcode_status,
         upload_date=video_doc["upload_date"],
         subject=subject,
         recorded_at=normalized_recorded_at,
@@ -255,6 +289,7 @@ async def get_video_status(video_id: str, current_user: dict):
         "status": legacy._normalize_video_status(video.get("status")),
         "privacy_status": legacy._normalize_privacy_status(video.get("privacy_status")),
         "analysis_status": legacy._normalize_video_status(video.get("analysis_status")),
+        "transcode_status": legacy._normalize_video_transcode_status(video.get("transcode_status")),
         "privacy_review_required": bool(video.get("privacy_review_required", False)),
         "privacy_review_reason": video.get("privacy_review_reason"),
         "error_message": video.get("error_message"),
