@@ -142,6 +142,43 @@ def _build_user_response_payload(user_doc: dict) -> dict:
     return cleaned
 
 
+async def _resolve_master_admin_teacher_link(user_doc: dict) -> Optional[dict]:
+    teacher_id = user_doc.get("teacher_id")
+    if teacher_id:
+        teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0, "id": 1, "name": 1, "email": 1})
+        if teacher:
+            return teacher
+    email = str(user_doc.get("email") or "").lower()
+    if not email:
+        return None
+    return await db.teachers.find_one({"email": email}, {"_id": 0, "id": 1, "name": 1, "email": 1})
+
+
+async def _build_master_admin_user_record(user_doc: dict) -> "MasterAdminUserRecord":
+    payload = _build_user_response_payload(user_doc)
+    linked_teacher = await _resolve_master_admin_teacher_link(user_doc)
+    uploads_total = await db.videos.count_documents({"uploaded_by": payload["id"]})
+    assessments_total = await db.assessments.count_documents({"user_id": payload["id"]})
+    return MasterAdminUserRecord(
+        id=payload["id"],
+        email=payload["email"],
+        name=payload.get("name") or "",
+        role=payload.get("role") or "teacher",
+        approval_status=payload.get("approval_status") or "approved",
+        is_active=payload.get("is_active", True) is not False,
+        created_at=payload.get("created_at"),
+        approval_requested_at=payload.get("approval_requested_at"),
+        approved_at=payload.get("approved_at"),
+        revoked_at=payload.get("revoked_at"),
+        last_login_at=payload.get("last_login_at"),
+        workspace_mode=payload.get("workspace_mode"),
+        linked_teacher_id=(linked_teacher or {}).get("id"),
+        linked_teacher_name=(linked_teacher or {}).get("name"),
+        uploads_total=uploads_total,
+        assessments_total=assessments_total,
+    )
+
+
 def _build_access_request_notification_message(user_doc: dict) -> EmailMessage:
     message = EmailMessage()
     message["Subject"] = f"Cognivio approval needed: {user_doc.get('email')}"
@@ -2564,6 +2601,74 @@ class AccessUserListResponse(BaseModel):
 class AccessDecisionPayload(BaseModel):
     reason: Optional[str] = None
 
+
+class MasterAdminOverviewCard(BaseModel):
+    id: str
+    title: str
+    value: int
+    hint: Optional[str] = None
+    tone: str = "neutral"
+
+
+class MasterAdminAlert(BaseModel):
+    id: str
+    severity: str
+    title: str
+    message: str
+    action_label: Optional[str] = None
+    action_path: Optional[str] = None
+
+
+class MasterAdminPreviewItem(BaseModel):
+    id: str
+    label: str
+    meta: Optional[str] = None
+    action_path: Optional[str] = None
+
+
+class MasterAdminOverviewResponse(BaseModel):
+    generated_at: str
+    cards: List[MasterAdminOverviewCard]
+    alerts: List[MasterAdminAlert]
+    dependency_summary: Dict[str, Any]
+    queue_summary: Dict[str, Any]
+    pending_approvals_preview: List[MasterAdminPreviewItem]
+    pipeline_blockers_preview: List[MasterAdminPreviewItem]
+
+
+class MasterAdminUserRecord(BaseModel):
+    id: str
+    email: str
+    name: str
+    role: str
+    approval_status: str
+    is_active: bool = True
+    created_at: Optional[str] = None
+    approval_requested_at: Optional[str] = None
+    approved_at: Optional[str] = None
+    revoked_at: Optional[str] = None
+    last_login_at: Optional[str] = None
+    workspace_mode: Optional[str] = None
+    linked_teacher_id: Optional[str] = None
+    linked_teacher_name: Optional[str] = None
+    uploads_total: int = 0
+    assessments_total: int = 0
+
+
+class MasterAdminUserListResponse(BaseModel):
+    generated_at: str
+    total: int
+    limit: int
+    offset: int
+    items: List[MasterAdminUserRecord]
+    summary: Dict[str, int]
+
+
+class MasterAdminUserDetailResponse(BaseModel):
+    generated_at: str
+    user: MasterAdminUserRecord
+    related: Dict[str, Any]
+
 class TeacherCreate(BaseModel):
     name: str
     email: EmailStr
@@ -3641,6 +3746,13 @@ async def login(user: UserLogin):
             status_code=403,
             detail=f"This account is registered as a {expected_label}. Choose the correct role and try again.",
         )
+    now = datetime.now(timezone.utc).isoformat()
+    await db.users.update_one(
+        {"id": db_user["id"]},
+        {"$set": {"last_login_at": now, "last_seen_at": now}},
+    )
+    db_user["last_login_at"] = now
+    db_user["last_seen_at"] = now
     db_user.pop("_id", None)
     db_user.pop("password", None)
     db_user["role"] = actual_role
@@ -11514,7 +11626,7 @@ async def get_master_admin_bootstrap(current_user: dict = Depends(get_current_us
                 "id": "users-access",
                 "title": "Users and Access",
                 "description": "Global user directory, approvals, revocations, and future auth/session activity.",
-                "status": "planned",
+                "status": "active",
             },
             {
                 "id": "workspaces",
@@ -11560,6 +11672,290 @@ async def get_master_admin_bootstrap(current_user: dict = Depends(get_current_us
             },
         ],
     }
+
+
+@api_router.get("/master-admin/overview", response_model=MasterAdminOverviewResponse)
+async def get_master_admin_overview(current_user: dict = Depends(get_current_user)):
+    _require_master_admin_user(current_user)
+    await refresh_runtime_metrics()
+    now = datetime.now(timezone.utc)
+    cutoff_24h = (now - timedelta(hours=24)).isoformat()
+    cutoff_7d = (now - timedelta(days=7)).isoformat()
+
+    approved_users = await db.users.count_documents({"approval_status": "approved", "is_active": {"$ne": False}})
+    pending_users = await db.users.count_documents({"approval_status": "pending"})
+    revoked_users = await db.users.count_documents(
+        {"$or": [{"approval_status": "revoked"}, {"is_active": False}]}
+    )
+    teacher_users = await db.users.count_documents({"role": "teacher"})
+    admin_users = await db.users.count_documents({"role": {"$in": ["admin", "principal"]}})
+    super_admin_users = await db.users.count_documents({"role": "super_admin"})
+    recent_logins = await db.users.count_documents({"last_login_at": {"$gte": cutoff_7d}})
+
+    uploads_24h = await db.videos.count_documents({"created_at": {"$gte": cutoff_24h}})
+    videos_total = await db.videos.count_documents({})
+    transcode_queue_total = await db.videos.count_documents(
+        {"transcode_status": {"$in": ["queued", "processing"]}}
+    )
+    transcode_failed_total = await db.videos.count_documents({"transcode_status": "failed"})
+    privacy_review_pending = await db.videos.count_documents(
+        {"privacy_status": PrivacyProcessingStatus.REVIEW_REQUIRED.value}
+    )
+    privacy_failed_total = await db.videos.count_documents(
+        {"privacy_status": PrivacyProcessingStatus.FAILED.value}
+    )
+    analysis_failed_total = await db.videos.count_documents({"analysis_status": VideoProcessingStatus.FAILED.value})
+
+    persistent_metrics = app_metrics.snapshot_summary()
+    dependencies = persistent_metrics.get("dependencies", {})
+    unhealthy_dependencies = [name for name, value in dependencies.items() if float(value or 0) <= 0]
+    queues = {
+        "video_queue_depth": VIDEO_JOB_QUEUE.qsize(),
+        "privacy_queue_depth": VIDEO_PRIVACY_JOB_QUEUE.qsize(),
+        "transcode_queue_depth": VIDEO_TRANSCODE_JOB_QUEUE.qsize(),
+    }
+
+    alerts: List[MasterAdminAlert] = []
+    if pending_users:
+        alerts.append(
+            MasterAdminAlert(
+                id="pending-approvals",
+                severity="warning",
+                title="Pending access approvals",
+                message=f"{pending_users} account request(s) are waiting for a decision.",
+                action_label="Open users",
+                action_path="/master-admin/users?approval_status=pending",
+            )
+        )
+    if transcode_failed_total or privacy_failed_total or analysis_failed_total:
+        total_failed = transcode_failed_total + privacy_failed_total + analysis_failed_total
+        alerts.append(
+            MasterAdminAlert(
+                id="pipeline-failures",
+                severity="danger",
+                title="Pipeline failures need review",
+                message=f"{total_failed} video pipeline failure(s) need troubleshooting or retry.",
+                action_label="Open command center",
+                action_path="/master-admin",
+            )
+        )
+    if privacy_review_pending:
+        alerts.append(
+            MasterAdminAlert(
+                id="privacy-review",
+                severity="warning",
+                title="Privacy review queue is not empty",
+                message=f"{privacy_review_pending} video(s) are waiting for manual privacy review.",
+                action_label="Open privacy review",
+                action_path="/privacy-review",
+            )
+        )
+    if unhealthy_dependencies:
+        alerts.append(
+            MasterAdminAlert(
+                id="dependency-health",
+                severity="danger",
+                title="Dependency health degraded",
+                message=f"Unhealthy dependencies detected: {', '.join(unhealthy_dependencies)}.",
+                action_label="Inspect backend",
+                action_path="/master-admin",
+            )
+        )
+    if not alerts:
+        alerts.append(
+            MasterAdminAlert(
+                id="all-clear",
+                severity="success",
+                title="Platform looks stable",
+                message="No urgent platform-wide issues are currently flagged.",
+                action_label=None,
+                action_path=None,
+            )
+        )
+
+    pending_docs = await db.users.find(
+        {"approval_status": "pending"},
+        {"_id": 0, "id": 1, "email": 1, "name": 1, "approval_requested_at": 1},
+    ).sort("approval_requested_at", -1).to_list(5)
+    pending_preview = [
+        MasterAdminPreviewItem(
+            id=doc["id"],
+            label=doc.get("email") or doc.get("name") or doc["id"],
+            meta=doc.get("approval_requested_at"),
+            action_path=f"/master-admin/users/{doc['id']}",
+        )
+        for doc in pending_docs
+    ]
+
+    failed_video_docs = await db.videos.find(
+        {
+            "$or": [
+                {"transcode_status": "failed"},
+                {"privacy_status": PrivacyProcessingStatus.FAILED.value},
+                {"analysis_status": VideoProcessingStatus.FAILED.value},
+            ]
+        },
+        {"_id": 0, "id": 1, "filename": 1, "teacher_id": 1, "status_updated_at": 1},
+    ).sort("status_updated_at", -1).to_list(5)
+    blocker_preview = [
+        MasterAdminPreviewItem(
+            id=doc["id"],
+            label=doc.get("filename") or doc["id"],
+            meta=doc.get("teacher_id") or doc.get("status_updated_at"),
+            action_path=f"/videos/{doc['id']}",
+        )
+        for doc in failed_video_docs
+    ]
+
+    cards = [
+        MasterAdminOverviewCard(
+            id="approved-users",
+            title="Approved users",
+            value=approved_users,
+            hint="All active users who can log in now.",
+        ),
+        MasterAdminOverviewCard(
+            id="pending-users",
+            title="Pending approvals",
+            value=pending_users,
+            hint="Requests waiting for a decision.",
+            tone="warning" if pending_users else "neutral",
+        ),
+        MasterAdminOverviewCard(
+            id="recent-logins",
+            title="Recent logins (7d)",
+            value=recent_logins,
+            hint="Users with a recorded login in the last 7 days.",
+        ),
+        MasterAdminOverviewCard(
+            id="uploads-24h",
+            title="Uploads (24h)",
+            value=uploads_24h,
+            hint="New video uploads created in the last 24 hours.",
+        ),
+        MasterAdminOverviewCard(
+            id="videos-pipeline",
+            title="Videos in pipeline",
+            value=transcode_queue_total + privacy_review_pending,
+            hint="Videos still moving through transcode or privacy review.",
+            tone="warning" if transcode_queue_total + privacy_review_pending else "neutral",
+        ),
+        MasterAdminOverviewCard(
+            id="pipeline-failures",
+            title="Pipeline failures",
+            value=transcode_failed_total + privacy_failed_total + analysis_failed_total,
+            hint="Failures across transcode, privacy, and analysis.",
+            tone="danger" if transcode_failed_total + privacy_failed_total + analysis_failed_total else "neutral",
+        ),
+        MasterAdminOverviewCard(
+            id="teacher-users",
+            title="Teacher accounts",
+            value=teacher_users,
+            hint="Approved or pending teacher-facing login accounts.",
+        ),
+        MasterAdminOverviewCard(
+            id="admin-users",
+            title="Admin accounts",
+            value=admin_users + super_admin_users,
+            hint="School admins plus platform-level super admins.",
+        ),
+    ]
+
+    return MasterAdminOverviewResponse(
+        generated_at=now.isoformat(),
+        cards=cards,
+        alerts=alerts,
+        dependency_summary={
+            "healthy_count": len([value for value in dependencies.values() if float(value or 0) > 0]),
+            "unhealthy": unhealthy_dependencies,
+        },
+        queue_summary=queues,
+        pending_approvals_preview=pending_preview,
+        pipeline_blockers_preview=blocker_preview,
+    )
+
+
+@api_router.get("/master-admin/users", response_model=MasterAdminUserListResponse)
+async def get_master_admin_users(
+    q: Optional[str] = None,
+    role: Optional[str] = None,
+    approval_status: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    has_teacher_link: Optional[bool] = None,
+    limit: int = 50,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_master_admin_user(current_user)
+    safe_limit = max(1, min(limit, 200))
+    safe_offset = max(0, offset)
+    docs = await db.users.find({}, {"_id": 0, "password": 0}).sort("created_at", -1).to_list(2000)
+    records = [await _build_master_admin_user_record(doc) for doc in docs]
+
+    normalized_q = str(q or "").strip().lower()
+    normalized_role = str(role or "").strip().lower()
+    normalized_approval = str(approval_status or "").strip().lower()
+
+    filtered = []
+    for item in records:
+        if normalized_q:
+            haystack = " ".join(
+                [
+                    item.email.lower(),
+                    (item.name or "").lower(),
+                    (item.linked_teacher_name or "").lower(),
+                    (item.linked_teacher_id or "").lower(),
+                ]
+            )
+            if normalized_q not in haystack:
+                continue
+        if normalized_role and item.role != normalized_role:
+            continue
+        if normalized_approval and item.approval_status != normalized_approval:
+            continue
+        if is_active is not None and item.is_active != is_active:
+            continue
+        if has_teacher_link is not None and bool(item.linked_teacher_id) != has_teacher_link:
+            continue
+        filtered.append(item)
+
+    sliced = filtered[safe_offset : safe_offset + safe_limit]
+    summary = {
+        "approved": sum(1 for item in filtered if item.approval_status == "approved" and item.is_active),
+        "pending": sum(1 for item in filtered if item.approval_status == "pending"),
+        "revoked": sum(1 for item in filtered if item.approval_status == "revoked" or not item.is_active),
+        "admins": sum(1 for item in filtered if item.role in {"admin", "super_admin"}),
+        "teachers": sum(1 for item in filtered if item.role == "teacher"),
+    }
+
+    return MasterAdminUserListResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        total=len(filtered),
+        limit=safe_limit,
+        offset=safe_offset,
+        items=sliced,
+        summary=summary,
+    )
+
+
+@api_router.get("/master-admin/users/{user_id}", response_model=MasterAdminUserDetailResponse)
+async def get_master_admin_user_detail(user_id: str, current_user: dict = Depends(get_current_user)):
+    _require_master_admin_user(current_user)
+    doc = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="User not found")
+    user_record = await _build_master_admin_user_record(doc)
+    recent_videos = await db.videos.find(
+        {"uploaded_by": user_id},
+        {"_id": 0, "id": 1, "filename": 1, "status": 1, "created_at": 1},
+    ).sort("created_at", -1).to_list(5)
+    return MasterAdminUserDetailResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        user=user_record,
+        related={
+            "recent_videos": recent_videos,
+        },
+    )
 
 
 @api_router.post("/admin/ops/smoke-cleanup", response_model=AdminSmokeCleanupResponse)

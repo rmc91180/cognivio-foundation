@@ -6,6 +6,8 @@ import { useAuth } from "@/hooks/useAuth";
 import { AuthPage } from "@/pages/AuthPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { MasterAdminPage } from "@/pages/MasterAdminPage";
+import { MasterAdminUsersPage } from "@/pages/MasterAdminUsersPage";
+import { MasterAdminUserDetailPage } from "@/pages/MasterAdminUserDetailPage";
 import { TeachersPage } from "@/pages/TeachersPage";
 import { VideosPage } from "@/pages/VideosPage";
 import { AccessManagementPage } from "@/pages/AccessManagementPage";
@@ -49,6 +51,22 @@ function App() {
           element={
             <ProtectedRoute superAdminOnly>
               <MasterAdminPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/master-admin/users"
+          element={
+            <ProtectedRoute superAdminOnly>
+              <MasterAdminUsersPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/master-admin/users/:userId"
+          element={
+            <ProtectedRoute superAdminOnly>
+              <MasterAdminUserDetailPage />
             </ProtectedRoute>
           }
         />

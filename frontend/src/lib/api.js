@@ -91,6 +91,9 @@ export const adminApi = {
 
 export const masterAdminApi = {
   bootstrap: () => api.get("/api/master-admin/bootstrap"),
+  overview: () => api.get("/api/master-admin/overview"),
+  users: (params = {}) => api.get("/api/master-admin/users", { params }),
+  userDetail: (userId) => api.get(`/api/master-admin/users/${userId}`),
 };
 
 export const opsApi = {
