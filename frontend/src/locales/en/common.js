@@ -214,9 +214,14 @@ const en = {
     registerTab: "Register",
     requestAccessTab: "Request access",
     signUpTab: "Sign up",
-    roleLabel: "I am signing in as",
+    loginRoleLabel: "I am logging in as",
+    signUpRoleLabel: "I am requesting access as",
     teacherRole: "Teacher",
     adminRole: "Administrator",
+    loginTeacherHint: "Choose Teacher if this account was approved for classroom practice, uploads, and reflection work.",
+    loginAdminHint: "Choose Administrator if this account was approved for roster oversight, review, and approvals.",
+    signUpTeacherHint: "Request teacher access if you need your own workspace for uploads, reflections, curriculum, and classroom review.",
+    signUpAdminHint: "Request administrator access if you need oversight tools, approvals, roster review, and coaching management.",
     demoLogins: "Demo logins",
     principalDemo: "Principal: principal@demo.cognivio.app / DemoAccess2026!",
     teacherDemo: "Teacher: teacher@demo.cognivio.app / DemoAccess2026!",
@@ -230,8 +235,10 @@ const en = {
     requestAccessSubmitted: "Access request submitted",
     requestAccessFailed: "Failed to submit access request",
     approvalRequiredTitle: "Approval is required before login is enabled",
-    approvalRequiredDescription:
-      "Sign up with the email and password you want to use. Your account will stay pending until Cognivio approves that email address. Once approved, you can log in with the same email and password you created here.",
+    approvalRequiredTeacherDescription:
+      "Sign up with the teacher email and password you want to keep. Your request will stay pending until Cognivio approves teacher access for that email. Once approved, you will log in with the same teacher role, email, and password.",
+    approvalRequiredAdminDescription:
+      "Sign up with the administrator email and password you want to keep. Your request will stay pending until Cognivio approves administrator access for that email. Once approved, you will log in with the same administrator role, email, and password.",
     requestAccessCta: "Request access",
     requestingAccess: "Requesting access...",
     needApprovalHint:

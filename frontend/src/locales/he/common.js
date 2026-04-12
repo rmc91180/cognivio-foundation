@@ -214,9 +214,14 @@ const he = {
     registerTab: "הרשמה",
     requestAccessTab: "בקשת גישה",
     signUpTab: "הרשמה",
-    roleLabel: "אני נכנס/ת בתור",
+    loginRoleLabel: "אני מתחבר/ת בתור",
+    signUpRoleLabel: "אני מבקש/ת גישה בתור",
     teacherRole: "מורה",
     adminRole: "אדמין",
+    loginTeacherHint: "בחרו מורה אם החשבון הזה אושר לעבודה אישית, העלאות, רפלקציה ובדיקת שיעורים.",
+    loginAdminHint: "בחרו אדמין אם החשבון הזה אושר לפיקוח, סקירה, אישורים וניהול ליווי.",
+    signUpTeacherHint: "בקשו גישת מורה אם אתם צריכים מרחב אישי להעלאות, רפלקציות, תכנית לימודים ובדיקת שיעורים.",
+    signUpAdminHint: "בקשו גישת אדמין אם אתם צריכים כלי פיקוח, אישורים, סקירת רוסטר וניהול ליווי.",
     demoLogins: "כניסות דמו",
     principalDemo: "מנהל: principal@demo.cognivio.app / DemoAccess2026!",
     teacherDemo: "מורה: teacher@demo.cognivio.app / DemoAccess2026!",
@@ -230,8 +235,10 @@ const he = {
     requestAccessSubmitted: "בקשת הגישה נשלחה",
     requestAccessFailed: "שליחת בקשת הגישה נכשלה",
     approvalRequiredTitle: "נדרש אישור לפני שניתן להיכנס",
-    approvalRequiredDescription:
-      "הירשמו עם האימייל והסיסמה שבהם תרצו להשתמש. החשבון יישאר במצב ממתין עד ש-Cognivio תאשר את כתובת האימייל הזו. לאחר האישור תוכלו להתחבר עם אותו אימייל ואותה סיסמה שהגדרתם כאן.",
+    approvalRequiredTeacherDescription:
+      "הירשמו עם אימייל וסיסמה שתרצו לשמור למשתמש מורה. הבקשה תישאר במצב ממתין עד ש-Cognivio תאשר גישת מורה לכתובת הזו. לאחר האישור תוכלו להתחבר עם אותו תפקיד, אותו אימייל ואותה סיסמה.",
+    approvalRequiredAdminDescription:
+      "הירשמו עם אימייל וסיסמה שתרצו לשמור למשתמש אדמין. הבקשה תישאר במצב ממתין עד ש-Cognivio תאשר גישת אדמין לכתובת הזו. לאחר האישור תוכלו להתחבר עם אותו תפקיד, אותו אימייל ואותה סיסמה.",
     requestAccessCta: "בקשת גישה",
     requestingAccess: "שולח בקשת גישה...",
     needApprovalHint:

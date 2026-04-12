@@ -71,6 +71,20 @@ export function AuthPage() {
   };
 
   const busy = loggingIn || registering || requestingAccess;
+  const roleLabel =
+    mode === "login" ? t("auth.loginRoleLabel") : t("auth.signUpRoleLabel");
+  const roleHint =
+    mode === "login"
+      ? t(
+          role === "admin" ? "auth.loginAdminHint" : "auth.loginTeacherHint"
+        )
+      : t(
+          role === "admin" ? "auth.signUpAdminHint" : "auth.signUpTeacherHint"
+        );
+  const approvalDescription =
+    role === "admin"
+      ? t("auth.approvalRequiredAdminDescription")
+      : t("auth.approvalRequiredTeacherDescription");
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-8">
@@ -120,7 +134,7 @@ export function AuthPage() {
         {!isDemo && (
           <div className="mb-4">
             <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-              {t("auth.roleLabel")}
+              {roleLabel}
             </div>
             <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1 text-sm">
               <button
@@ -146,6 +160,7 @@ export function AuthPage() {
                 {t("auth.adminRole")}
               </button>
             </div>
+            <p className="mt-2 text-xs text-slate-500">{roleHint}</p>
           </div>
         )}
 
@@ -162,7 +177,7 @@ export function AuthPage() {
         {!isDemo && approvalRequired && mode === "signup" && (
           <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
             <div className="font-semibold">{t("auth.approvalRequiredTitle")}</div>
-            <div className="mt-1">{t("auth.approvalRequiredDescription")}</div>
+            <div className="mt-1">{approvalDescription}</div>
           </div>
         )}
 
