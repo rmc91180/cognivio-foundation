@@ -2407,10 +2407,12 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str
     name: str
+    role: Optional[str] = "teacher"
 
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+    role: Optional[str] = None
 
 class UserResponse(BaseModel):
     id: str
@@ -3339,6 +3341,13 @@ def create_token(user_id: str) -> str:
 def _is_admin_role(role: Optional[str]) -> bool:
     return role in {"admin", "principal", "super_admin"}
 
+
+def _normalize_requested_role(role: Optional[str]) -> str:
+    raw = str(role or "").strip().lower()
+    if raw in {"admin", "administrator", "principal", "super_admin"}:
+        return "admin"
+    return "teacher"
+
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
         token = credentials.credentials
@@ -3374,6 +3383,7 @@ async def register(user: UserCreate):
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
     
+    desired_role = _normalize_requested_role(user.role)
     user_id = str(uuid.uuid4())
     user_doc = {
         "id": user_id,
@@ -3381,7 +3391,7 @@ async def register(user: UserCreate):
         "name": user.name,
         "password": hash_password(user.password),
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "role": "admin" if user.email.lower() in ADMIN_EMAILS else "teacher",
+        "role": "admin" if user.email.lower() in ADMIN_EMAILS else desired_role,
         "approval_status": "approved",
         "approved_at": datetime.now(timezone.utc).isoformat(),
         "is_active": True,
@@ -3409,6 +3419,7 @@ async def request_access(user: UserCreate):
     existing = await db.users.find_one({"email": email})
     now = datetime.now(timezone.utc).isoformat()
     auto_approved = _is_access_auto_approved_email(email)
+    desired_role = _normalize_requested_role(user.role)
 
     if existing:
         existing_status = _get_user_approval_status(existing)
@@ -3443,7 +3454,7 @@ async def request_access(user: UserCreate):
                     "revoked_at": None,
                     "revoked_by": None,
                     "is_active": False,
-                    "role": existing.get("role") or "teacher",
+                    "role": desired_role,
                 }
             )
         await db.users.update_one({"id": existing["id"]}, {"$set": update_fields})
@@ -3473,7 +3484,7 @@ async def request_access(user: UserCreate):
         "name": user.name,
         "password": hash_password(user.password),
         "created_at": now,
-        "role": "admin" if auto_approved else "teacher",
+        "role": "admin" if auto_approved else desired_role,
         "approval_status": "approved" if auto_approved else "pending",
         "approval_requested_at": now,
         "approved_at": now if auto_approved else None,
@@ -3511,9 +3522,17 @@ async def login(user: UserLogin):
         raise HTTPException(status_code=403, detail="Account pending approval")
     if approval_status == "revoked" or not _is_user_access_active(db_user):
         raise HTTPException(status_code=403, detail="Account access removed")
+    requested_role = _normalize_requested_role(user.role) if user.role else None
+    actual_role = _get_user_role(db_user)
+    if requested_role and requested_role != actual_role:
+        expected_label = "administrator" if actual_role == "admin" else "teacher"
+        raise HTTPException(
+            status_code=403,
+            detail=f"This account is registered as a {expected_label}. Choose the correct role and try again.",
+        )
     db_user.pop("_id", None)
     db_user.pop("password", None)
-    db_user["role"] = _get_user_role(db_user)
+    db_user["role"] = actual_role
     db_user["approval_status"] = approval_status
     enriched_user = await enrich_user_with_workspace_mode(db_user)
 

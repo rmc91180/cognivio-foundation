@@ -23,6 +23,7 @@ export function AuthPage() {
   const isDemo = runtimeConfig.demoMode;
   const approvalRequired = runtimeConfig.registrationApprovalRequired;
   const [mode, setMode] = useState("login");
+  const [role, setRole] = useState("teacher");
   const [form, setForm] = useState({ email: "", password: "", name: "" });
   const nameInputId = "auth-name";
   const emailInputId = "auth-email";
@@ -40,6 +41,7 @@ export function AuthPage() {
       email: form.email,
       password: form.password,
       name: form.name || form.email,
+      role,
     };
 
     if (mode === "signup" && approvalRequired) {
@@ -61,6 +63,7 @@ export function AuthPage() {
         : {
             email: form.email,
             password: form.password,
+            role,
           };
 
     const fn = mode === "signup" ? register : login;
@@ -113,6 +116,38 @@ export function AuthPage() {
             </button>
           )}
         </div>
+
+        {!isDemo && (
+          <div className="mb-4">
+            <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+              {t("auth.roleLabel")}
+            </div>
+            <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1 text-sm">
+              <button
+                type="button"
+                onClick={() => setRole("teacher")}
+                className={`rounded-lg px-3 py-2 ${
+                  role === "teacher"
+                    ? "bg-white text-slate-900 shadow-sm font-semibold"
+                    : "text-slate-500 hover:text-slate-700"
+                }`}
+              >
+                {t("auth.teacherRole")}
+              </button>
+              <button
+                type="button"
+                onClick={() => setRole("admin")}
+                className={`rounded-lg px-3 py-2 ${
+                  role === "admin"
+                    ? "bg-white text-slate-900 shadow-sm font-semibold"
+                    : "text-slate-500 hover:text-slate-700"
+                }`}
+              >
+                {t("auth.adminRole")}
+              </button>
+            </div>
+          </div>
+        )}
 
         {isDemo && (
           <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
