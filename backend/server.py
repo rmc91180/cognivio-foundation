@@ -57,6 +57,7 @@ from privacy_pipeline import analyze_video_privacy, render_redacted_video, get_p
 from frame_selection import scan_video_candidates, score_frame_candidates, select_diverse_frames
 from moment_sampler import segment_video_windows, score_windows, select_lesson_moments
 from audio_pipeline import extract_audio_track, transcribe_audio_file, compute_audio_features
+from video_transcode import transcode_video_asset
 from multimodal_analysis import build_multimodal_analysis_payload
 from recognition_engine import (
     DEFAULT_FIVE_STAR_SCORE_MIN,
@@ -617,6 +618,50 @@ def _sanitize_video_response(video: dict) -> dict:
     }:
         sanitized.pop(field, None)
     return sanitized
+
+
+def _build_transcoded_raw_cleanup_fields(video: dict, completed_at_iso: str) -> Dict[str, Any]:
+    if not VIDEO_TRANSCODE_RAW_CLEANUP_ENABLED:
+        return {}
+    if _normalize_video_transcode_status(video.get("transcode_status")) != VideoTranscodeStatus.COMPLETED.value:
+        return {}
+    if not (video.get("processed_file_path") or video.get("processed_file_url") or video.get("processed_s3_key")):
+        return {}
+    if not (video.get("raw_file_path") or video.get("raw_file_url") or video.get("raw_s3_key")):
+        return {}
+
+    try:
+        completed_at = datetime.fromisoformat(str(completed_at_iso).replace("Z", "+00:00"))
+    except ValueError:
+        completed_at = datetime.now(timezone.utc)
+    if completed_at.tzinfo is None:
+        completed_at = completed_at.replace(tzinfo=timezone.utc)
+    else:
+        completed_at = completed_at.astimezone(timezone.utc)
+
+    expedited_deadline = completed_at + timedelta(hours=VIDEO_TRANSCODE_RAW_RETENTION_HOURS)
+    current_deadline_value = video.get("raw_retention_expires_at")
+    current_deadline: Optional[datetime] = None
+    if current_deadline_value:
+        try:
+            parsed_deadline = datetime.fromisoformat(str(current_deadline_value).replace("Z", "+00:00"))
+            current_deadline = (
+                parsed_deadline.replace(tzinfo=timezone.utc)
+                if parsed_deadline.tzinfo is None
+                else parsed_deadline.astimezone(timezone.utc)
+            )
+        except ValueError:
+            current_deadline = None
+
+    effective_deadline = current_deadline
+    if effective_deadline is None or effective_deadline > expedited_deadline:
+        effective_deadline = expedited_deadline
+
+    return {
+        "raw_retention_expires_at": effective_deadline.isoformat(),
+        "raw_cleanup_policy": "processed_after_privacy",
+        "raw_cleanup_scheduled_at": completed_at.isoformat(),
+    }
 
 
 async def _save_upload_file(upload: UploadFile, target_path: Path) -> None:
@@ -1633,6 +1678,9 @@ VIDEO_MAX_UPLOAD_BYTES = int(os.getenv("MAX_VIDEO_BYTES", str(1024 * 1024 * 1024
 VIDEO_WORKER_COUNT = max(1, int(os.getenv("VIDEO_WORKER_COUNT", "1")))
 VIDEO_TRANSCODE_PIPELINE_ENABLED = os.getenv("VIDEO_TRANSCODE_PIPELINE_ENABLED", "false").lower() == "true"
 VIDEO_TRANSCODE_PROFILE = os.getenv("VIDEO_TRANSCODE_PROFILE", "analysis_master_v1").strip() or "analysis_master_v1"
+VIDEO_TRANSCODE_WORKER_COUNT = max(1, int(os.getenv("VIDEO_TRANSCODE_WORKER_COUNT", "1")))
+VIDEO_TRANSCODE_RAW_CLEANUP_ENABLED = os.getenv("VIDEO_TRANSCODE_RAW_CLEANUP_ENABLED", "true").lower() == "true"
+VIDEO_TRANSCODE_RAW_RETENTION_HOURS = max(1, int(os.getenv("VIDEO_TRANSCODE_RAW_RETENTION_HOURS", "24")))
 CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS = os.getenv("CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS", "false").lower() == "true"
 ADHERENCE_WEIGHT = float(os.getenv("ADHERENCE_WEIGHT", "0.15"))
 PRIVACY_REQUIRE_PROFILE = os.getenv("PRIVACY_REQUIRE_PROFILE", "true").lower() == "true"
@@ -1702,6 +1750,7 @@ security = HTTPBearer()
 VIDEO_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 VIDEO_WORKER_TASKS: List[asyncio.Task] = []
 VIDEO_TRANSCODE_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
+VIDEO_TRANSCODE_WORKER_TASKS: List[asyncio.Task] = []
 VIDEO_PRIVACY_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 VIDEO_PRIVACY_WORKER_TASKS: List[asyncio.Task] = []
 PRIVACY_MAINTENANCE_TASKS: List[asyncio.Task] = []
@@ -1712,8 +1761,10 @@ async def _app_startup() -> None:
     await _ensure_database_indexes()
     await _ensure_master_admin_user()
     await _start_privacy_maintenance_tasks()
+    await _start_video_transcode_workers()
     await _start_privacy_workers()
     await _start_video_workers()
+    await _rehydrate_video_transcode_queue()
     await _rehydrate_video_privacy_queue()
     await _rehydrate_video_processing_queue()
     if not DEMO_MODE:
@@ -4340,6 +4391,7 @@ async def _run_video_privacy_job(video_id: str) -> None:
                 logger.warning(f"Redacted thumbnail upload failed for {video_id}: {exc}")
 
             finished_at = datetime.now(timezone.utc).isoformat()
+            raw_cleanup_fields = _build_transcoded_raw_cleanup_fields(video, finished_at)
             await db.videos.update_one(
                 {"id": video_id},
                 {
@@ -4365,6 +4417,7 @@ async def _run_video_privacy_job(video_id: str) -> None:
                         "redacted_thumbnail_path": redacted_thumbnail_relative_path,
                         "redacted_thumbnail_url": redacted_thumbnail_url,
                         "status_updated_at": finished_at,
+                        **raw_cleanup_fields,
                     }
                 },
             )
@@ -4378,6 +4431,7 @@ async def _run_video_privacy_job(video_id: str) -> None:
                     "redacted_thumbnail_path": redacted_thumbnail_relative_path,
                     "fallback_mode": analysis["fallback_mode"],
                     "teacher_track_id": analysis["teacher_track_id"],
+                    "raw_retention_expires_at": raw_cleanup_fields.get("raw_retention_expires_at"),
                 },
             )
             await db.video_evidence.update_one(
@@ -4511,6 +4565,151 @@ async def _enqueue_video_transcode_job(
     await VIDEO_TRANSCODE_JOB_QUEUE.put(video_id)
 
 
+async def _run_video_transcode_job(video_id: str) -> None:
+    job = await db.video_transcode_jobs.find_one({"video_id": video_id}, {"_id": 0})
+    if not job:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    claim = await db.video_transcode_jobs.update_one(
+        {
+            "video_id": video_id,
+            "status": {"$in": [VideoTranscodeStatus.QUEUED.value, VideoTranscodeStatus.FAILED.value]},
+        },
+        {
+            "$set": {
+                "status": VideoTranscodeStatus.PROCESSING.value,
+                "updated_at": now,
+                "started_at": now,
+                "last_error": None,
+            },
+            "$inc": {"attempts": 1},
+        },
+    )
+    if claim.modified_count == 0:
+        return
+    await db.videos.update_one(
+        {"id": video_id},
+        {
+            "$set": {
+                "transcode_status": VideoTranscodeStatus.PROCESSING.value,
+                "transcode_started_at": now,
+                "transcode_failed_at": None,
+                "transcode_completed_at": None,
+                "transcode_error": None,
+                "status": VideoProcessingStatus.PROCESSING.value,
+                "status_updated_at": now,
+            }
+        },
+    )
+
+    finished_at = datetime.now(timezone.utc).isoformat()
+    success = False
+    error_message: Optional[str] = None
+    job_final_status = VideoTranscodeStatus.FAILED.value
+    try:
+        video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+        if not video:
+            raise RuntimeError("Video not found")
+
+        source_path = job.get("file_path") or video.get("raw_file_path") or video.get("file_path")
+        if not source_path:
+            raise RuntimeError("Transcode source path is missing")
+        source_path = str(source_path)
+        if not os.path.isabs(source_path):
+            source_path = str(UPLOAD_DIR / source_path)
+        if not Path(source_path).exists():
+            raise RuntimeError("Transcode source file is missing")
+
+        teacher_id = job.get("teacher_id") or video.get("teacher_id")
+        if not teacher_id:
+            raise RuntimeError("Teacher ID missing for transcode job")
+
+        output_relative_path = f"processed/{teacher_id}/{video_id}.mp4"
+        output_full_path = UPLOAD_DIR / output_relative_path
+        transcode_result = await asyncio.to_thread(
+            transcode_video_asset,
+            source_path,
+            str(output_full_path),
+        )
+        processed_s3_key_override = _build_video_asset_s3_key("processed", teacher_id, f"{video_id}.mp4")
+        processed_s3_key, processed_file_url = _upload_path_to_s3(
+            output_full_path,
+            "processed-videos",
+            f"{video_id}.mp4",
+            transcode_result.get("content_type") or "video/mp4",
+            key_override=processed_s3_key_override,
+        )
+        finished_at = datetime.now(timezone.utc).isoformat()
+        await db.videos.update_one(
+            {"id": video_id},
+            {
+                "$set": {
+                    "status": VideoProcessingStatus.QUEUED.value,
+                    "transcode_status": VideoTranscodeStatus.COMPLETED.value,
+                    "transcode_started_at": now,
+                    "transcode_completed_at": finished_at,
+                    "transcode_failed_at": None,
+                    "transcode_error": None,
+                    "processed_s3_key": processed_s3_key,
+                    "processed_file_url": processed_file_url,
+                    "processed_file_path": output_relative_path,
+                    "processed_content_type": transcode_result.get("content_type") or "video/mp4",
+                    "processed_file_size_bytes": transcode_result.get("file_size_bytes"),
+                    "processing_asset_preference": "processed",
+                    "status_updated_at": finished_at,
+                }
+            },
+        )
+        await db.video_transcode_jobs.update_one(
+            {"video_id": video_id},
+            {
+                "$set": {
+                    "processed_s3_key": processed_s3_key,
+                    "processed_file_url": processed_file_url,
+                    "processed_file_path": output_relative_path,
+                }
+            },
+        )
+        await _enqueue_video_privacy_job(
+            video_id=video_id,
+            teacher_id=teacher_id,
+            user_id=job.get("user_id") or video.get("uploaded_by"),
+            file_path=str(output_full_path),
+        )
+        success = True
+        job_final_status = VideoTranscodeStatus.COMPLETED.value
+    except Exception as exc:
+        error_message = str(exc)
+        finished_at = datetime.now(timezone.utc).isoformat()
+        await db.videos.update_one(
+            {"id": video_id},
+            {
+                "$set": {
+                    "status": VideoProcessingStatus.FAILED.value,
+                    "transcode_status": VideoTranscodeStatus.FAILED.value,
+                    "transcode_started_at": now,
+                    "transcode_completed_at": None,
+                    "transcode_failed_at": finished_at,
+                    "transcode_error": error_message,
+                    "status_updated_at": finished_at,
+                }
+            },
+        )
+        logger.error(f"Video transcode worker failed for {video_id}: {error_message}")
+    finally:
+        await db.video_transcode_jobs.update_one(
+            {"video_id": video_id},
+            {
+                "$set": {
+                    "status": job_final_status,
+                    "updated_at": finished_at,
+                    "finished_at": finished_at,
+                    "last_error": error_message if not success else None,
+                }
+            },
+        )
+
+
 async def _run_video_job(video_id: str) -> None:
     job = await db.video_processing_jobs.find_one({"video_id": video_id}, {"_id": 0})
     if not job:
@@ -4580,6 +4779,33 @@ async def _video_processing_worker(worker_label: str) -> None:
         raise
 
 
+async def _video_transcode_worker(worker_label: str) -> None:
+    logger.info(f"Video transcode worker {worker_label} started")
+    try:
+        while True:
+            video_id = await VIDEO_TRANSCODE_JOB_QUEUE.get()
+            try:
+                await _run_video_transcode_job(video_id)
+                record_worker_result(
+                    worker_type="transcode",
+                    job_id=video_id,
+                    success=True,
+                )
+            except Exception as exc:
+                logger.error(f"Video transcode worker {worker_label} failed on {video_id}: {exc}")
+                record_worker_result(
+                    worker_type="transcode",
+                    job_id=video_id,
+                    success=False,
+                    failure_reason=str(exc),
+                )
+            finally:
+                VIDEO_TRANSCODE_JOB_QUEUE.task_done()
+    except asyncio.CancelledError:
+        logger.info(f"Video transcode worker {worker_label} stopped")
+        raise
+
+
 async def _video_privacy_worker(worker_label: str) -> None:
     logger.info(f"Privacy worker {worker_label} started")
     try:
@@ -4616,6 +4842,17 @@ async def _start_video_workers() -> None:
             name=f"video-worker-{index + 1}",
         )
         VIDEO_WORKER_TASKS.append(task)
+
+
+async def _start_video_transcode_workers() -> None:
+    if VIDEO_TRANSCODE_WORKER_TASKS:
+        return
+    for index in range(VIDEO_TRANSCODE_WORKER_COUNT):
+        task = asyncio.create_task(
+            _video_transcode_worker(f"video-transcode-worker-{index + 1}"),
+            name=f"video-transcode-worker-{index + 1}",
+        )
+        VIDEO_TRANSCODE_WORKER_TASKS.append(task)
 
 
 async def _start_privacy_workers() -> None:
@@ -4683,6 +4920,70 @@ async def _rehydrate_video_processing_queue() -> None:
         )
 
 
+async def _rehydrate_video_transcode_queue() -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    await db.video_transcode_jobs.update_many(
+        {"status": VideoTranscodeStatus.PROCESSING.value},
+        {
+            "$set": {
+                "status": VideoTranscodeStatus.QUEUED.value,
+                "updated_at": now,
+            }
+        },
+    )
+    await db.videos.update_many(
+        {"transcode_status": VideoTranscodeStatus.PROCESSING.value},
+        {
+            "$set": {
+                "transcode_status": VideoTranscodeStatus.QUEUED.value,
+                "status_updated_at": now,
+            }
+        },
+    )
+    pending_jobs = await db.video_transcode_jobs.find(
+        {"status": VideoTranscodeStatus.QUEUED.value},
+        {"_id": 0, "video_id": 1},
+    ).to_list(2000)
+    queued_ids = {job["video_id"] for job in pending_jobs if job.get("video_id")}
+    for video_id in queued_ids:
+        await VIDEO_TRANSCODE_JOB_QUEUE.put(video_id)
+    pending_videos = await db.videos.find(
+        {
+            "transcode_status": {"$in": [VideoTranscodeStatus.QUEUED.value, VideoTranscodeStatus.PROCESSING.value]},
+        },
+        {
+            "_id": 0,
+            "id": 1,
+            "teacher_id": 1,
+            "uploaded_by": 1,
+            "processed_file_path": 1,
+            "raw_file_path": 1,
+            "file_path": 1,
+        },
+    ).to_list(2000)
+    for video in pending_videos:
+        video_id = video.get("id")
+        file_path = (
+            video.get("processed_file_path")
+            or video.get("raw_file_path")
+            or video.get("file_path")
+        )
+        teacher_id = video.get("teacher_id")
+        user_id = video.get("uploaded_by")
+        if not video_id or not file_path or not teacher_id or not user_id:
+            continue
+        if video_id in queued_ids:
+            continue
+        full_path = str(UPLOAD_DIR / str(file_path))
+        await _enqueue_video_transcode_job(
+            video_id=video_id,
+            teacher_id=teacher_id,
+            user_id=user_id,
+            file_path=full_path,
+            requested_profile=VIDEO_TRANSCODE_PROFILE,
+        )
+
+
 async def _rehydrate_video_privacy_queue() -> None:
     now = datetime.now(timezone.utc).isoformat()
     await db.video_privacy_jobs.update_many(
@@ -4711,12 +5012,32 @@ async def _rehydrate_video_privacy_queue() -> None:
     for video_id in queued_ids:
         await VIDEO_PRIVACY_JOB_QUEUE.put(video_id)
     pending_videos = await db.videos.find(
-        {"privacy_status": {"$in": [PrivacyProcessingStatus.QUEUED.value, PrivacyProcessingStatus.PROCESSING.value]}},
-        {"_id": 0, "id": 1, "teacher_id": 1, "uploaded_by": 1, "raw_file_path": 1, "file_path": 1},
+        {
+            "privacy_status": {"$in": [PrivacyProcessingStatus.QUEUED.value, PrivacyProcessingStatus.PROCESSING.value]},
+            "$or": [
+                {"transcode_status": {"$exists": False}},
+                {"transcode_status": VideoTranscodeStatus.NOT_REQUIRED.value},
+                {"transcode_status": VideoTranscodeStatus.COMPLETED.value},
+                {"transcode_status": VideoTranscodeStatus.FAILED.value},
+            ],
+        },
+        {
+            "_id": 0,
+            "id": 1,
+            "teacher_id": 1,
+            "uploaded_by": 1,
+            "processed_file_path": 1,
+            "raw_file_path": 1,
+            "file_path": 1,
+        },
     ).to_list(2000)
     for video in pending_videos:
         video_id = video.get("id")
-        file_path = video.get("raw_file_path") or video.get("file_path")
+        file_path = (
+            video.get("processed_file_path")
+            or video.get("raw_file_path")
+            or video.get("file_path")
+        )
         teacher_id = video.get("teacher_id")
         user_id = video.get("uploaded_by")
         if not video_id or not file_path or not teacher_id or not user_id:
@@ -5017,12 +5338,13 @@ async def upload_video(
         except Exception:
             logger.warning("Unable to update recording compliance after upload")
 
-        await _enqueue_video_privacy_job(
-            video_id=video_id,
-            teacher_id=teacher_id,
-            user_id=current_user["id"],
-            file_path=str(file_path),
-        )
+        if not VIDEO_TRANSCODE_PIPELINE_ENABLED:
+            await _enqueue_video_privacy_job(
+                video_id=video_id,
+                teacher_id=teacher_id,
+                user_id=current_user["id"],
+                file_path=str(file_path),
+            )
         await _log_privacy_audit_event(
             "privacy_video_uploaded",
             "video",
@@ -5196,7 +5518,11 @@ async def retry_video_privacy(video_id: str, current_user: dict = Depends(get_cu
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     await _get_teacher_or_404(video.get("teacher_id"), current_user)
-    relative_path = video.get("raw_file_path") or video.get("file_path")
+    relative_path = (
+        video.get("processed_file_path")
+        or video.get("raw_file_path")
+        or video.get("file_path")
+    )
     if not relative_path:
         raise HTTPException(status_code=409, detail="Retry unavailable for videos without local source")
     full_path = UPLOAD_DIR / str(relative_path)
@@ -5389,7 +5715,11 @@ async def resolve_video_privacy_review(
         raise HTTPException(status_code=400, detail="Unsupported privacy review decision")
     await db.videos.update_one({"id": video_id}, {"$set": update_fields})
     if payload.decision in {"approve_teacher_track", "blur_all_and_continue", "rerun"}:
-        relative_path = video.get("raw_file_path") or video.get("file_path")
+        relative_path = (
+            video.get("processed_file_path")
+            or video.get("raw_file_path")
+            or video.get("file_path")
+        )
         if relative_path:
             await _enqueue_video_privacy_job(
                 video_id=video_id,
@@ -13932,6 +14262,11 @@ async def _stop_video_workers() -> None:
             task.cancel()
         await asyncio.gather(*VIDEO_WORKER_TASKS, return_exceptions=True)
         VIDEO_WORKER_TASKS.clear()
+    if VIDEO_TRANSCODE_WORKER_TASKS:
+        for task in VIDEO_TRANSCODE_WORKER_TASKS:
+            task.cancel()
+        await asyncio.gather(*VIDEO_TRANSCODE_WORKER_TASKS, return_exceptions=True)
+        VIDEO_TRANSCODE_WORKER_TASKS.clear()
     if VIDEO_PRIVACY_WORKER_TASKS:
         for task in VIDEO_PRIVACY_WORKER_TASKS:
             task.cancel()

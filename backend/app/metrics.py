@@ -42,7 +42,7 @@ def normalize_modalities(modalities: Optional[list[str]]) -> str:
 
 def normalize_worker_type(worker_type: Optional[str]) -> str:
     normalized = _normalize(worker_type)
-    return normalized if normalized in {"video", "privacy", "maintenance"} else "unknown"
+    return normalized if normalized in {"video", "privacy", "maintenance", "transcode"} else "unknown"
 
 
 def normalize_status(success: Optional[bool] = None, *, fallback: str = "unknown") -> str:
@@ -78,7 +78,7 @@ def normalize_model(model: Optional[str]) -> str:
 
 def normalize_job_type(job_type: Optional[str]) -> str:
     normalized = _normalize(job_type)
-    return normalized if normalized in {"video", "privacy", "maintenance"} else "unknown"
+    return normalized if normalized in {"video", "privacy", "maintenance", "transcode"} else "unknown"
 
 
 def normalize_dependency(dependency: Optional[str]) -> str:

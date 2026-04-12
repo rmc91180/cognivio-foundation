@@ -194,3 +194,111 @@ def test_build_privacy_profile_summary_returns_missing_defaults():
     assert profile.status == "missing"
     assert profile.reference_count == 0
     assert profile.needs_refresh is True
+
+
+def test_build_transcoded_raw_cleanup_fields_shortens_retention_when_processed_asset_exists(monkeypatch):
+    monkeypatch.setattr(server, "VIDEO_TRANSCODE_RAW_CLEANUP_ENABLED", True)
+    monkeypatch.setattr(server, "VIDEO_TRANSCODE_RAW_RETENTION_HOURS", 24)
+
+    fields = server._build_transcoded_raw_cleanup_fields(
+        {
+            "transcode_status": "completed",
+            "processed_file_path": "processed/t1/v1.mp4",
+            "raw_file_path": "videos/t1/v1.mov",
+            "raw_retention_expires_at": "2026-05-01T00:00:00+00:00",
+        },
+        "2026-04-12T10:00:00+00:00",
+    )
+
+    assert fields["raw_retention_expires_at"] == "2026-04-13T10:00:00+00:00"
+    assert fields["raw_cleanup_policy"] == "processed_after_privacy"
+    assert fields["raw_cleanup_scheduled_at"] == "2026-04-12T10:00:00+00:00"
+
+
+def test_build_transcoded_raw_cleanup_fields_skips_non_transcoded_videos(monkeypatch):
+    monkeypatch.setattr(server, "VIDEO_TRANSCODE_RAW_CLEANUP_ENABLED", True)
+    monkeypatch.setattr(server, "VIDEO_TRANSCODE_RAW_RETENTION_HOURS", 24)
+
+    fields = server._build_transcoded_raw_cleanup_fields(
+        {
+            "transcode_status": "not_required",
+            "processed_file_path": None,
+            "raw_file_path": "videos/t1/v1.mov",
+        },
+        "2026-04-12T10:00:00+00:00",
+    )
+
+    assert fields == {}
+
+
+@pytest.mark.asyncio
+async def test_rehydrate_video_privacy_queue_waits_for_transcode_and_prefers_processed_asset(monkeypatch):
+    class _Cursor:
+        def __init__(self, items):
+            self.items = items
+
+        async def to_list(self, _limit):
+            return list(self.items)
+
+    class _Collection:
+        def __init__(self, find_results):
+            self.find_results = list(find_results)
+            self.find_calls = []
+            self.update_many_calls = []
+
+        async def update_many(self, filter_doc, update_doc):
+            self.update_many_calls.append((filter_doc, update_doc))
+
+        def find(self, filter_doc, projection):
+            self.find_calls.append((filter_doc, projection))
+            index = len(self.find_calls) - 1
+            return _Cursor(self.find_results[index] if index < len(self.find_results) else [])
+
+    privacy_jobs = _Collection([[]])
+    videos = _Collection(
+        [[
+            {
+                "id": "video_1",
+                "teacher_id": "teacher_1",
+                "uploaded_by": "user_1",
+                "processed_file_path": "processed/teacher_1/video_1.mp4",
+                "raw_file_path": "videos/teacher_1/video_1.mov",
+                "file_path": "videos/teacher_1/video_1.mov",
+            }
+        ]]
+    )
+
+    enqueued = []
+
+    async def _enqueue_video_privacy_job(**kwargs):
+        enqueued.append(kwargs)
+
+    monkeypatch.setattr(
+        server,
+        "db",
+        types.SimpleNamespace(video_privacy_jobs=privacy_jobs, videos=videos),
+    )
+    monkeypatch.setattr(server, "UPLOAD_DIR", Path("/tmp/cognivio-test-uploads"))
+    monkeypatch.setattr(server, "_enqueue_video_privacy_job", _enqueue_video_privacy_job)
+    queue = server.asyncio.Queue()
+    monkeypatch.setattr(server, "VIDEO_PRIVACY_JOB_QUEUE", queue)
+
+    await server._rehydrate_video_privacy_queue()
+
+    assert len(videos.find_calls) == 1
+    query_filter, _projection = videos.find_calls[0]
+    assert query_filter["privacy_status"] == {"$in": ["queued", "processing"]}
+    assert query_filter["$or"] == [
+        {"transcode_status": {"$exists": False}},
+        {"transcode_status": "not_required"},
+        {"transcode_status": "completed"},
+        {"transcode_status": "failed"},
+    ]
+    assert enqueued == [
+        {
+            "video_id": "video_1",
+            "teacher_id": "teacher_1",
+            "user_id": "user_1",
+            "file_path": str(Path("/tmp/cognivio-test-uploads") / "processed/teacher_1/video_1.mp4"),
+        }
+    ]

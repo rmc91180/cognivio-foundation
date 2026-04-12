@@ -192,12 +192,13 @@ async def upload_video(
     except Exception:
         legacy.logger.warning("Unable to update recording compliance after upload")
 
-    await legacy._enqueue_video_privacy_job(
-        video_id=video_id,
-        teacher_id=teacher_id,
-        user_id=current_user["id"],
-        file_path=str(file_path),
-    )
+    if not legacy.VIDEO_TRANSCODE_PIPELINE_ENABLED:
+        await legacy._enqueue_video_privacy_job(
+            video_id=video_id,
+            teacher_id=teacher_id,
+            user_id=current_user["id"],
+            file_path=str(file_path),
+        )
     await legacy._log_privacy_audit_event(
         "privacy_video_uploaded",
         "video",
@@ -349,7 +350,11 @@ async def retry_video_privacy(video_id: str, current_user: dict):
     if not video:
         raise legacy.HTTPException(status_code=404, detail="Video not found")
     await teacher_repository.get_teacher_or_404(video.get("teacher_id"), current_user)
-    relative_path = video.get("raw_file_path") or video.get("file_path")
+    relative_path = (
+        video.get("processed_file_path")
+        or video.get("raw_file_path")
+        or video.get("file_path")
+    )
     if not relative_path:
         raise legacy.HTTPException(status_code=409, detail="Retry unavailable for videos without local source")
     full_path = legacy.UPLOAD_DIR / str(relative_path)

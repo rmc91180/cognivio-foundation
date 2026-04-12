@@ -36,6 +36,11 @@ _STATE: Dict[str, Any] = {
             "failed_jobs": 0,
             "recent_failures": deque(maxlen=_MAX_RECENT_ITEMS),
         },
+        "transcode": {
+            "completed_jobs": 0,
+            "failed_jobs": 0,
+            "recent_failures": deque(maxlen=_MAX_RECENT_ITEMS),
+        },
     },
 }
 

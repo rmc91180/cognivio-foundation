@@ -12,6 +12,7 @@ from .routers import REGISTERED_ROUTERS
 from .workers import (
     maintenance_worker,
     privacy_worker,
+    transcode_worker,
     video_worker,
 )
 
@@ -26,6 +27,12 @@ def create_app():
     app.state.observability = observability
     app.state.metrics = metrics
     app.state.worker_registry = (
+        {
+            "name": "video_transcode_workers",
+            "module": "app.workers.transcode_worker",
+            "queue": "VIDEO_TRANSCODE_JOB_QUEUE",
+            "status": "bridged",
+        },
         {
             "name": "video_workers",
             "module": "app.workers.video_worker",
@@ -46,6 +53,7 @@ def create_app():
         },
     )
     app.state.worker_modules = {
+        "transcode": transcode_worker,
         "video": video_worker,
         "privacy": privacy_worker,
         "maintenance": maintenance_worker,
