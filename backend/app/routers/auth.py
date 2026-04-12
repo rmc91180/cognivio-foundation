@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 import server as legacy
 
@@ -17,8 +17,8 @@ async def register(user: legacy.UserCreate):
 
 
 @router.post("/auth/login", response_model=legacy.TokenResponse)
-async def login(user: legacy.UserLogin):
-    return await login_user(user)
+async def login(user: legacy.UserLogin, request: Request):
+    return await login_user(user, request)
 
 
 @router.get("/auth/me", response_model=legacy.UserResponse)

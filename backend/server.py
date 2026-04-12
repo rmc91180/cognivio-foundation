@@ -179,6 +179,118 @@ async def _build_master_admin_user_record(user_doc: dict) -> "MasterAdminUserRec
     )
 
 
+def _to_access_user_record(user_doc: dict) -> "AccessUserRecord":
+    payload = _build_user_response_payload(user_doc)
+    return AccessUserRecord(
+        id=payload["id"],
+        email=payload["email"],
+        name=payload["name"],
+        created_at=payload["created_at"],
+        role=payload.get("role"),
+        approval_status=payload.get("approval_status") or "approved",
+        approval_requested_at=user_doc.get("approval_requested_at"),
+        approved_at=user_doc.get("approved_at"),
+        approved_by=user_doc.get("approved_by"),
+        revoked_at=user_doc.get("revoked_at"),
+        revoked_by=user_doc.get("revoked_by"),
+        is_active=user_doc.get("is_active", True) is not False,
+        teacher_id=user_doc.get("teacher_id"),
+        workspace_mode=user_doc.get("workspace_mode"),
+    )
+
+
+async def _approve_user_access(
+    target: dict,
+    *,
+    actor_label: str,
+    reason: Optional[str] = None,
+) -> dict:
+    user_id = target["id"]
+    now = datetime.now(timezone.utc).isoformat()
+    updates = {
+        "approval_status": "approved",
+        "approved_at": now,
+        "approved_by": actor_label,
+        "revoked_at": None,
+        "revoked_by": None,
+        "is_active": True,
+    }
+    if reason:
+        updates["approval_note"] = reason
+    await db.users.update_one({"id": user_id}, {"$set": updates})
+    updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    await _log_auth_event(
+        "approval_granted",
+        email=updated.get("email"),
+        user_id=updated.get("id"),
+        result="success",
+        reason=reason,
+    )
+    _send_access_approved_confirmation(updated)
+    return updated
+
+
+async def _revoke_user_access(
+    target: dict,
+    *,
+    actor_label: str,
+    reason: Optional[str] = None,
+) -> dict:
+    user_id = target["id"]
+    now = datetime.now(timezone.utc).isoformat()
+    updates = {
+        "approval_status": "revoked",
+        "revoked_at": now,
+        "revoked_by": actor_label,
+        "is_active": False,
+    }
+    if reason:
+        updates["approval_note"] = reason
+    await db.users.update_one({"id": user_id}, {"$set": updates})
+    updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    event_type = "approval_denied" if _get_user_approval_status(target) == "pending" else "access_revoked"
+    await _log_auth_event(
+        event_type,
+        email=updated.get("email"),
+        user_id=updated.get("id"),
+        result="success",
+        reason=reason,
+    )
+    if _get_user_approval_status(target) == "pending":
+        _send_access_denied_confirmation(updated)
+    return updated
+
+
+async def _reactivate_user_access(
+    target: dict,
+    *,
+    actor_label: str,
+    reason: Optional[str] = None,
+) -> dict:
+    user_id = target["id"]
+    now = datetime.now(timezone.utc).isoformat()
+    updates = {
+        "approval_status": "approved",
+        "approved_at": target.get("approved_at") or now,
+        "approved_by": actor_label,
+        "revoked_at": None,
+        "revoked_by": None,
+        "is_active": True,
+    }
+    if reason:
+        updates["approval_note"] = reason
+    await db.users.update_one({"id": user_id}, {"$set": updates})
+    updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    await _log_auth_event(
+        "access_reactivated",
+        email=updated.get("email"),
+        user_id=updated.get("id"),
+        result="success",
+        reason=reason,
+    )
+    return updated
+
+
 def _build_access_request_notification_message(user_doc: dict) -> EmailMessage:
     message = EmailMessage()
     message["Subject"] = f"Cognivio approval needed: {user_doc.get('email')}"
@@ -949,6 +1061,83 @@ async def _log_recognition_audit_event(
         )
     except Exception as exc:
         logger.warning(f"Unable to write recognition audit event {event_type} for {target_type}:{target_id}: {exc}")
+
+
+def _extract_request_metadata(request: Optional[Request]) -> Dict[str, Optional[str]]:
+    if not request:
+        return {"ip_address": None, "user_agent": None}
+    client_host = None
+    if getattr(request, "client", None):
+        client_host = request.client.host
+    user_agent = request.headers.get("user-agent") if getattr(request, "headers", None) else None
+    return {
+        "ip_address": client_host,
+        "user_agent": user_agent,
+    }
+
+
+async def _log_auth_event(
+    event_type: str,
+    *,
+    email: Optional[str] = None,
+    user_id: Optional[str] = None,
+    role_selected: Optional[str] = None,
+    result: Optional[str] = None,
+    reason: Optional[str] = None,
+    ip_address: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> None:
+    try:
+        await db.auth_event_log.insert_one(
+            {
+                "id": str(uuid.uuid4()),
+                "email": str(email or "").lower() or None,
+                "user_id": user_id,
+                "event_type": event_type,
+                "role_selected": role_selected,
+                "result": result,
+                "reason": reason,
+                "ip_address": ip_address,
+                "user_agent": user_agent,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    except Exception as exc:
+        logger.warning("Unable to write auth event %s for %s: %s", event_type, email or user_id, exc)
+
+
+async def _log_master_admin_audit_event(
+    *,
+    actor: dict,
+    action: str,
+    target_type: str,
+    target_id: str,
+    reason: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    try:
+        await db.master_admin_audit_events.insert_one(
+            {
+                "id": str(uuid.uuid4()),
+                "actor_user_id": actor.get("id"),
+                "actor_email": actor.get("email"),
+                "actor_role": _get_user_role(actor),
+                "action": action,
+                "target_type": target_type,
+                "target_id": target_id,
+                "reason": reason,
+                "metadata": _to_json_safe(metadata or {}),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    except Exception as exc:
+        logger.warning(
+            "Unable to write master admin audit event %s for %s:%s: %s",
+            action,
+            target_type,
+            target_id,
+            exc,
+        )
 
 
 def _resolve_upload_path_for_cleanup(file_path: Optional[str]) -> Optional[Path]:
@@ -2669,6 +2858,53 @@ class MasterAdminUserDetailResponse(BaseModel):
     user: MasterAdminUserRecord
     related: Dict[str, Any]
 
+
+class AuthEventRecord(BaseModel):
+    id: str
+    email: Optional[str] = None
+    user_id: Optional[str] = None
+    event_type: str
+    role_selected: Optional[str] = None
+    result: Optional[str] = None
+    reason: Optional[str] = None
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    created_at: str
+
+
+class AuthEventListResponse(BaseModel):
+    generated_at: str
+    total: int
+    limit: int
+    offset: int
+    items: List[AuthEventRecord]
+
+
+class MasterAdminAuditEventRecord(BaseModel):
+    id: str
+    actor_user_id: Optional[str] = None
+    actor_email: Optional[str] = None
+    actor_role: Optional[str] = None
+    action: str
+    target_type: str
+    target_id: str
+    reason: Optional[str] = None
+    metadata: Dict[str, Any] = {}
+    created_at: str
+
+
+class MasterAdminAuditEventListResponse(BaseModel):
+    generated_at: str
+    total: int
+    limit: int
+    offset: int
+    items: List[MasterAdminAuditEventRecord]
+
+
+class MasterAdminUserActionPayload(BaseModel):
+    reason: Optional[str] = None
+    confirmation_text: Optional[str] = None
+
 class TeacherCreate(BaseModel):
     name: str
     email: EmailStr
@@ -3625,13 +3861,14 @@ async def register(user: UserCreate):
 
 
 @api_router.post("/auth/request-access", response_model=AccessRequestResponse)
-async def request_access(user: UserCreate):
+async def request_access(user: UserCreate, request: Request):
     from app.services.workspace_service import enrich_user_with_workspace_mode
 
     if DEMO_MODE:
         raise HTTPException(status_code=403, detail="Access requests are disabled for demo mode")
 
     email = user.email.lower()
+    request_meta = _extract_request_metadata(request)
     existing = await db.users.find_one({"email": email})
     now = datetime.now(timezone.utc).isoformat()
     auto_approved = _is_access_auto_approved_email(email)
@@ -3677,6 +3914,16 @@ async def request_access(user: UserCreate):
         refreshed = await db.users.find_one({"id": existing["id"]}, {"_id": 0})
         if auto_approved:
             enriched_user = await enrich_user_with_workspace_mode(refreshed)
+            await _log_auth_event(
+                "approval_granted",
+                email=email,
+                user_id=refreshed.get("id"),
+                role_selected=desired_role,
+                result="success",
+                reason="system:auto_admin_allowlist",
+                ip_address=request_meta["ip_address"],
+                user_agent=request_meta["user_agent"],
+            )
             logger.info("Auto-approved access request for allowlisted admin email %s", email)
             return AccessRequestResponse(
                 status="approved",
@@ -3684,6 +3931,15 @@ async def request_access(user: UserCreate):
                 message="Access is approved. You can now log in.",
                 approval_status=_get_user_approval_status(enriched_user),
             )
+        await _log_auth_event(
+            "request_access",
+            email=email,
+            user_id=refreshed.get("id"),
+            role_selected=desired_role,
+            result="pending",
+            ip_address=request_meta["ip_address"],
+            user_agent=request_meta["user_agent"],
+        )
         _send_access_request_notification(refreshed)
         _send_access_request_received_confirmation(refreshed)
         return AccessRequestResponse(
@@ -3710,6 +3966,16 @@ async def request_access(user: UserCreate):
     await db.users.insert_one(user_doc)
     if auto_approved:
         enriched_user = await enrich_user_with_workspace_mode(user_doc)
+        await _log_auth_event(
+            "approval_granted",
+            email=email,
+            user_id=user_id,
+            role_selected=desired_role,
+            result="success",
+            reason="system:auto_admin_allowlist",
+            ip_address=request_meta["ip_address"],
+            user_agent=request_meta["user_agent"],
+        )
         logger.info("Auto-approved access request for allowlisted admin email %s", email)
         return AccessRequestResponse(
             status="approved",
@@ -3717,6 +3983,15 @@ async def request_access(user: UserCreate):
             message="Access is approved. You can now log in.",
             approval_status=_get_user_approval_status(enriched_user),
         )
+    await _log_auth_event(
+        "request_access",
+        email=email,
+        user_id=user_id,
+        role_selected=desired_role,
+        result="pending",
+        ip_address=request_meta["ip_address"],
+        user_agent=request_meta["user_agent"],
+    )
     _send_access_request_notification(user_doc)
     _send_access_request_received_confirmation(user_doc)
     return AccessRequestResponse(
@@ -3727,21 +4002,62 @@ async def request_access(user: UserCreate):
     )
 
 @api_router.post("/auth/login", response_model=TokenResponse)
-async def login(user: UserLogin):
+async def login(user: UserLogin, request: Request):
     from app.services.workspace_service import enrich_user_with_workspace_mode
 
-    db_user = await db.users.find_one({"email": user.email})
+    email = str(user.email or "").lower()
+    request_meta = _extract_request_metadata(request)
+    db_user = await db.users.find_one({"email": email})
+    requested_role = _normalize_requested_role(user.role) if user.role else None
     if not db_user or not verify_password(user.password, db_user["password"]):
+        await _log_auth_event(
+            "login_failed",
+            email=email,
+            role_selected=requested_role,
+            result="failure",
+            reason="invalid_credentials",
+            ip_address=request_meta["ip_address"],
+            user_agent=request_meta["user_agent"],
+        )
         raise HTTPException(status_code=401, detail="Invalid credentials")
     approval_status = _get_user_approval_status(db_user)
     if approval_status == "pending":
+        await _log_auth_event(
+            "login_failed",
+            email=email,
+            user_id=db_user.get("id"),
+            role_selected=requested_role,
+            result="failure",
+            reason="pending_approval",
+            ip_address=request_meta["ip_address"],
+            user_agent=request_meta["user_agent"],
+        )
         raise HTTPException(status_code=403, detail="Account pending approval")
     if approval_status == "revoked" or not _is_user_access_active(db_user):
+        await _log_auth_event(
+            "login_failed",
+            email=email,
+            user_id=db_user.get("id"),
+            role_selected=requested_role,
+            result="failure",
+            reason="access_removed",
+            ip_address=request_meta["ip_address"],
+            user_agent=request_meta["user_agent"],
+        )
         raise HTTPException(status_code=403, detail="Account access removed")
-    requested_role = _normalize_requested_role(user.role) if user.role else None
     actual_role = _get_user_role(db_user)
     if requested_role and requested_role != actual_role:
         expected_label = "administrator" if actual_role == "admin" else "teacher"
+        await _log_auth_event(
+            "login_failed",
+            email=email,
+            user_id=db_user.get("id"),
+            role_selected=requested_role,
+            result="failure",
+            reason="role_mismatch",
+            ip_address=request_meta["ip_address"],
+            user_agent=request_meta["user_agent"],
+        )
         raise HTTPException(
             status_code=403,
             detail=f"This account is registered as a {expected_label}. Choose the correct role and try again.",
@@ -3758,6 +4074,16 @@ async def login(user: UserLogin):
     db_user["role"] = actual_role
     db_user["approval_status"] = approval_status
     enriched_user = await enrich_user_with_workspace_mode(db_user)
+
+    await _log_auth_event(
+        "login_success",
+        email=email,
+        user_id=db_user.get("id"),
+        role_selected=requested_role or actual_role,
+        result="success",
+        ip_address=request_meta["ip_address"],
+        user_agent=request_meta["user_agent"],
+    )
 
     token = create_token(db_user["id"])
     return TokenResponse(
@@ -6906,27 +7232,7 @@ async def get_admin_feedback_digest(current_user: dict = Depends(get_current_use
 async def list_access_users(current_user: dict = Depends(get_current_user)):
     _require_admin_ops_user(current_user)
     docs = await db.users.find({}, {"_id": 0, "password": 0}).sort("created_at", -1).to_list(1000)
-    serialized = []
-    for doc in docs:
-        payload = _build_user_response_payload(doc)
-        serialized.append(
-            AccessUserRecord(
-                id=payload["id"],
-                email=payload["email"],
-                name=payload["name"],
-                created_at=payload["created_at"],
-                role=payload.get("role"),
-                approval_status=payload.get("approval_status") or "approved",
-                approval_requested_at=doc.get("approval_requested_at"),
-                approved_at=doc.get("approved_at"),
-                approved_by=doc.get("approved_by"),
-                revoked_at=doc.get("revoked_at"),
-                revoked_by=doc.get("revoked_by"),
-                is_active=doc.get("is_active", True) is not False,
-                teacher_id=doc.get("teacher_id"),
-                workspace_mode=doc.get("workspace_mode"),
-            )
-        )
+    serialized = [_to_access_user_record(doc) for doc in docs]
     return AccessUserListResponse(
         pending=[item for item in serialized if item.approval_status == "pending"],
         approved=[item for item in serialized if item.approval_status == "approved" and item.is_active],
@@ -6944,37 +7250,12 @@ async def approve_access_user(
     target = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
-    now = datetime.now(timezone.utc).isoformat()
-    updates = {
-        "approval_status": "approved",
-        "approved_at": now,
-        "approved_by": current_user.get("email") or current_user["id"],
-        "revoked_at": None,
-        "revoked_by": None,
-        "is_active": True,
-    }
-    if payload.reason:
-        updates["approval_note"] = payload.reason
-    await db.users.update_one({"id": user_id}, {"$set": updates})
-    updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
-    _send_access_approved_confirmation(updated)
-    serialized = _build_user_response_payload(updated)
-    return AccessUserRecord(
-        id=serialized["id"],
-        email=serialized["email"],
-        name=serialized["name"],
-        created_at=serialized["created_at"],
-        role=serialized.get("role"),
-        approval_status=serialized.get("approval_status") or "approved",
-        approval_requested_at=updated.get("approval_requested_at"),
-        approved_at=updated.get("approved_at"),
-        approved_by=updated.get("approved_by"),
-        revoked_at=updated.get("revoked_at"),
-        revoked_by=updated.get("revoked_by"),
-        is_active=updated.get("is_active", True) is not False,
-        teacher_id=updated.get("teacher_id"),
-        workspace_mode=updated.get("workspace_mode"),
+    updated = await _approve_user_access(
+        target,
+        actor_label=current_user.get("email") or current_user["id"],
+        reason=payload.reason,
     )
+    return _to_access_user_record(updated)
 
 
 @api_router.post("/admin/access-users/{user_id}/revoke", response_model=AccessUserRecord)
@@ -6989,36 +7270,12 @@ async def revoke_access_user(
     target = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
-    now = datetime.now(timezone.utc).isoformat()
-    updates = {
-        "approval_status": "revoked",
-        "revoked_at": now,
-        "revoked_by": current_user.get("email") or current_user["id"],
-        "is_active": False,
-    }
-    if payload.reason:
-        updates["approval_note"] = payload.reason
-    await db.users.update_one({"id": user_id}, {"$set": updates})
-    updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
-    if _get_user_approval_status(target) == "pending":
-        _send_access_denied_confirmation(updated)
-    serialized = _build_user_response_payload(updated)
-    return AccessUserRecord(
-        id=serialized["id"],
-        email=serialized["email"],
-        name=serialized["name"],
-        created_at=serialized["created_at"],
-        role=serialized.get("role"),
-        approval_status=serialized.get("approval_status") or "approved",
-        approval_requested_at=updated.get("approval_requested_at"),
-        approved_at=updated.get("approved_at"),
-        approved_by=updated.get("approved_by"),
-        revoked_at=updated.get("revoked_at"),
-        revoked_by=updated.get("revoked_by"),
-        is_active=updated.get("is_active", True) is not False,
-        teacher_id=updated.get("teacher_id"),
-        workspace_mode=updated.get("workspace_mode"),
+    updated = await _revoke_user_access(
+        target,
+        actor_label=current_user.get("email") or current_user["id"],
+        reason=payload.reason,
     )
+    return _to_access_user_record(updated)
 
 
 @api_router.get("/admin/access-request-actions/{action}")
@@ -7111,6 +7368,13 @@ async def process_access_request_action(action: str, token: str):
         }
         await db.users.update_one({"id": user_id}, {"$set": updates})
         updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+        await _log_auth_event(
+            "approval_granted",
+            email=updated.get("email"),
+            user_id=updated.get("id"),
+            result="success",
+            reason="email_link_approval",
+        )
         _send_access_approved_confirmation(updated)
         return Response(
             _render_access_request_action_result_page(
@@ -7147,6 +7411,13 @@ async def process_access_request_action(action: str, token: str):
     }
     await db.users.update_one({"id": user_id}, {"$set": updates})
     updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    await _log_auth_event(
+        "approval_denied",
+        email=updated.get("email"),
+        user_id=updated.get("id"),
+        result="success",
+        reason="email_link_denial",
+    )
     _send_access_denied_confirmation(updated)
     return Response(
         _render_access_request_action_result_page(
@@ -11625,7 +11896,7 @@ async def get_master_admin_bootstrap(current_user: dict = Depends(get_current_us
             {
                 "id": "users-access",
                 "title": "Users and Access",
-                "description": "Global user directory, approvals, revocations, and future auth/session activity.",
+                "description": "Global user directory, approvals, revocations, and account lifecycle actions.",
                 "status": "active",
             },
             {
@@ -11662,7 +11933,7 @@ async def get_master_admin_bootstrap(current_user: dict = Depends(get_current_us
                 "id": "audit-security",
                 "title": "Audit and Security",
                 "description": "Platform audit trails, auth events, and security-sensitive actions.",
-                "status": "planned",
+                "status": "active",
             },
             {
                 "id": "support-recovery",
@@ -11955,6 +12226,180 @@ async def get_master_admin_user_detail(user_id: str, current_user: dict = Depend
         related={
             "recent_videos": recent_videos,
         },
+    )
+
+
+@api_router.post("/master-admin/users/{user_id}/approve", response_model=AccessUserRecord)
+async def master_admin_approve_user(
+    user_id: str,
+    payload: MasterAdminUserActionPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_master_admin_user(current_user)
+    target = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    updated = await _approve_user_access(
+        target,
+        actor_label=current_user.get("email") or current_user["id"],
+        reason=payload.reason,
+    )
+    await _log_master_admin_audit_event(
+        actor=current_user,
+        action="approve_user_access",
+        target_type="user",
+        target_id=user_id,
+        reason=payload.reason,
+        metadata={"email": updated.get("email"), "approval_status": updated.get("approval_status")},
+    )
+    return _to_access_user_record(updated)
+
+
+@api_router.post("/master-admin/users/{user_id}/revoke", response_model=AccessUserRecord)
+async def master_admin_revoke_user(
+    user_id: str,
+    payload: MasterAdminUserActionPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_master_admin_user(current_user)
+    if user_id == current_user.get("id"):
+        raise HTTPException(status_code=400, detail="You cannot revoke your own access")
+    target = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    expected_confirmation = str(target.get("email") or "").strip().lower()
+    actual_confirmation = str(payload.confirmation_text or "").strip().lower()
+    if not payload.reason:
+        raise HTTPException(status_code=400, detail="A reason is required before access can be revoked")
+    if expected_confirmation and actual_confirmation != expected_confirmation:
+        raise HTTPException(status_code=400, detail="Confirmation text must match the target email exactly")
+    updated = await _revoke_user_access(
+        target,
+        actor_label=current_user.get("email") or current_user["id"],
+        reason=payload.reason,
+    )
+    await _log_master_admin_audit_event(
+        actor=current_user,
+        action="revoke_user_access",
+        target_type="user",
+        target_id=user_id,
+        reason=payload.reason,
+        metadata={"email": updated.get("email"), "approval_status": updated.get("approval_status")},
+    )
+    return _to_access_user_record(updated)
+
+
+@api_router.post("/master-admin/users/{user_id}/reactivate", response_model=AccessUserRecord)
+async def master_admin_reactivate_user(
+    user_id: str,
+    payload: MasterAdminUserActionPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_master_admin_user(current_user)
+    target = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not payload.reason:
+        raise HTTPException(status_code=400, detail="A reason is required before access can be reactivated")
+    updated = await _reactivate_user_access(
+        target,
+        actor_label=current_user.get("email") or current_user["id"],
+        reason=payload.reason,
+    )
+    await _log_master_admin_audit_event(
+        actor=current_user,
+        action="reactivate_user_access",
+        target_type="user",
+        target_id=user_id,
+        reason=payload.reason,
+        metadata={"email": updated.get("email"), "approval_status": updated.get("approval_status")},
+    )
+    return _to_access_user_record(updated)
+
+
+@api_router.get("/master-admin/auth-events", response_model=AuthEventListResponse)
+async def get_master_admin_auth_events(
+    q: Optional[str] = None,
+    event_type: Optional[str] = None,
+    result: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_master_admin_user(current_user)
+    docs = await db.auth_event_log.find({}, {"_id": 0}).sort("created_at", -1).to_list(5000)
+    normalized_q = str(q or "").strip().lower()
+    normalized_event_type = str(event_type or "").strip().lower()
+    normalized_result = str(result or "").strip().lower()
+    filtered = []
+    for doc in docs:
+        if normalized_q:
+            haystack = " ".join(
+                [
+                    str(doc.get("email") or "").lower(),
+                    str(doc.get("user_id") or "").lower(),
+                    str(doc.get("reason") or "").lower(),
+                ]
+            )
+            if normalized_q not in haystack:
+                continue
+        if normalized_event_type and str(doc.get("event_type") or "").lower() != normalized_event_type:
+            continue
+        if normalized_result and str(doc.get("result") or "").lower() != normalized_result:
+            continue
+        filtered.append(AuthEventRecord(**doc))
+    safe_limit = max(1, min(limit, 200))
+    safe_offset = max(0, offset)
+    sliced = filtered[safe_offset : safe_offset + safe_limit]
+    return AuthEventListResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        total=len(filtered),
+        limit=safe_limit,
+        offset=safe_offset,
+        items=sliced,
+    )
+
+
+@api_router.get("/master-admin/audit-events", response_model=MasterAdminAuditEventListResponse)
+async def get_master_admin_audit_events(
+    q: Optional[str] = None,
+    action: Optional[str] = None,
+    target_type: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_master_admin_user(current_user)
+    docs = await db.master_admin_audit_events.find({}, {"_id": 0}).sort("created_at", -1).to_list(5000)
+    normalized_q = str(q or "").strip().lower()
+    normalized_action = str(action or "").strip().lower()
+    normalized_target_type = str(target_type or "").strip().lower()
+    filtered = []
+    for doc in docs:
+        if normalized_q:
+            haystack = " ".join(
+                [
+                    str(doc.get("actor_email") or "").lower(),
+                    str(doc.get("target_id") or "").lower(),
+                    str(doc.get("reason") or "").lower(),
+                ]
+            )
+            if normalized_q not in haystack:
+                continue
+        if normalized_action and str(doc.get("action") or "").lower() != normalized_action:
+            continue
+        if normalized_target_type and str(doc.get("target_type") or "").lower() != normalized_target_type:
+            continue
+        filtered.append(MasterAdminAuditEventRecord(**doc))
+    safe_limit = max(1, min(limit, 200))
+    safe_offset = max(0, offset)
+    sliced = filtered[safe_offset : safe_offset + safe_limit]
+    return MasterAdminAuditEventListResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        total=len(filtered),
+        limit=safe_limit,
+        offset=safe_offset,
+        items=sliced,
     )
 
 
@@ -14711,6 +15156,13 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.teacher_face_profiles, [("teacher_id", 1), ("status", 1)])
     await _safe_create_index(db.teacher_face_references, [("teacher_id", 1), ("profile_id", 1)])
     await _safe_create_index(db.teacher_face_references, [("retention_expires_at", 1)])
+    await _safe_create_index(db.auth_event_log, [("created_at", -1)])
+    await _safe_create_index(db.auth_event_log, [("email", 1), ("created_at", -1)])
+    await _safe_create_index(db.auth_event_log, [("user_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.auth_event_log, [("event_type", 1), ("created_at", -1)])
+    await _safe_create_index(db.master_admin_audit_events, [("created_at", -1)])
+    await _safe_create_index(db.master_admin_audit_events, [("actor_user_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.master_admin_audit_events, [("target_type", 1), ("target_id", 1), ("created_at", -1)])
     await _safe_create_index(db.privacy_audit_events, [("target_type", 1), ("target_id", 1), ("created_at", -1)])
     await _safe_create_index(db.recognition_badges, [("teacher_id", 1), ("awarded_at", -1)])
     await _safe_create_index(db.recognition_badges, [("video_id", 1), ("status", 1)])

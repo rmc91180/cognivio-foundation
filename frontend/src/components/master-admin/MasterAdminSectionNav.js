@@ -5,6 +5,8 @@ import { useTranslation } from "react-i18next";
 const ITEMS = [
   { to: "/master-admin", key: "overview" },
   { to: "/master-admin/users", key: "users" },
+  { to: "/master-admin/auth-activity", key: "auth" },
+  { to: "/master-admin/audit", key: "audit" },
 ];
 
 export function MasterAdminSectionNav() {
@@ -32,4 +34,3 @@ export function MasterAdminSectionNav() {
     </div>
   );
 }
-

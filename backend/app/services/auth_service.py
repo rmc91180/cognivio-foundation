@@ -38,22 +38,8 @@ async def register_user(user: legacy.UserCreate) -> legacy.TokenResponse:
     )
 
 
-async def login_user(user: legacy.UserLogin) -> legacy.TokenResponse:
-    db_user = await legacy.db.users.find_one({"email": user.email})
-    if not db_user or not legacy.verify_password(user.password, db_user["password"]):
-        raise legacy.HTTPException(status_code=401, detail="Invalid credentials")
-
-    token = legacy.create_token(db_user["id"])
-    return legacy.TokenResponse(
-        token=token,
-        user=legacy.UserResponse(
-            id=db_user["id"],
-            email=db_user["email"],
-            name=db_user["name"],
-            created_at=db_user["created_at"],
-            role=legacy._get_user_role(db_user),
-        ),
-    )
+async def login_user(user: legacy.UserLogin, request) -> legacy.TokenResponse:
+    return await legacy.login(user, request)
 
 
 async def get_current_user_profile(current_user: dict) -> legacy.UserResponse:

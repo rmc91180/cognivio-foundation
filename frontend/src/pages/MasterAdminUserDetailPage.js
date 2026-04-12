@@ -1,9 +1,11 @@
-import React from "react";
-import { useQuery } from "@tanstack/react-query";
+import React, { useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 import { LayoutShell } from "@/components/LayoutShell";
-import { Badge, ErrorState, LoadingState, PageHeader, Panel } from "@/components/ui";
+import { useAuth } from "@/hooks/useAuth";
+import { Badge, Button, Dialog, ErrorState, Field, Input, LoadingState, PageHeader, Panel, Textarea } from "@/components/ui";
 import { MasterAdminSectionNav } from "@/components/master-admin/MasterAdminSectionNav";
 import { masterAdminApi } from "@/lib/api";
 
@@ -27,6 +29,11 @@ export function MasterAdminUserDetailPage() {
   const { t, i18n } = useTranslation();
   const locale = i18n.language?.startsWith("he") ? "he-IL" : "en-US";
   const { userId } = useParams();
+  const { user: currentUser } = useAuth();
+  const queryClient = useQueryClient();
+  const [dialogMode, setDialogMode] = useState(null);
+  const [reason, setReason] = useState("");
+  const [confirmationText, setConfirmationText] = useState("");
 
   const { data, isLoading, isError, refetch, isFetching } = useQuery({
     queryKey: ["master-admin-user-detail", userId],
@@ -35,6 +42,76 @@ export function MasterAdminUserDetailPage() {
   });
 
   const user = data?.user;
+  const isSelf = user?.id && currentUser?.id && user.id === currentUser.id;
+
+  const closeDialog = () => {
+    setDialogMode(null);
+    setReason("");
+    setConfirmationText("");
+  };
+
+  const actionMutation = useMutation({
+    mutationFn: async ({ mode, payload }) => {
+      if (mode === "approve") {
+        return masterAdminApi.approveUser(userId, payload);
+      }
+      if (mode === "revoke") {
+        return masterAdminApi.revokeUser(userId, payload);
+      }
+      if (mode === "reactivate") {
+        return masterAdminApi.reactivateUser(userId, payload);
+      }
+      throw new Error(`Unsupported action: ${mode}`);
+    },
+    onSuccess: (_, variables) => {
+      toast.success(t(`masterAdminUserDetail.${variables.mode}Success`));
+      queryClient.invalidateQueries({ queryKey: ["master-admin-user-detail", userId] });
+      queryClient.invalidateQueries({ queryKey: ["master-admin-users"] });
+      queryClient.invalidateQueries({ queryKey: ["master-admin-auth-events"] });
+      queryClient.invalidateQueries({ queryKey: ["master-admin-audit-events"] });
+      closeDialog();
+    },
+    onError: (error, variables) => {
+      toast.error(error?.response?.data?.detail || t(`masterAdminUserDetail.${variables.mode}Failed`));
+    },
+  });
+
+  const dialogConfig = useMemo(() => {
+    if (!user || !dialogMode) return null;
+    if (dialogMode === "approve") {
+      return {
+        title: t("masterAdminUserDetail.approveDialogTitle", { email: user.email }),
+        description: t("masterAdminUserDetail.approveDialogDescription"),
+        confirmLabel: t("masterAdminUserDetail.approve"),
+      };
+    }
+    if (dialogMode === "revoke") {
+      return {
+        title: t("masterAdminUserDetail.revokeDialogTitle", { email: user.email }),
+        description: t("masterAdminUserDetail.revokeDialogDescription", { email: user.email }),
+        confirmLabel: t("masterAdminUserDetail.revoke"),
+      };
+    }
+    if (dialogMode === "reactivate") {
+      return {
+        title: t("masterAdminUserDetail.reactivateDialogTitle", { email: user.email }),
+        description: t("masterAdminUserDetail.reactivateDialogDescription"),
+        confirmLabel: t("masterAdminUserDetail.reactivate"),
+      };
+    }
+    return null;
+  }, [dialogMode, t, user]);
+
+  const submitAction = () => {
+    if (!dialogMode) return;
+    actionMutation.mutate({
+      mode: dialogMode,
+      payload: {
+        reason: reason.trim() || undefined,
+        confirmation_text: confirmationText.trim() || undefined,
+      },
+    });
+  };
 
   return (
     <LayoutShell>
@@ -79,11 +156,45 @@ export function MasterAdminUserDetailPage() {
                   <div className="text-2xl font-semibold text-slate-900">{user.name || "—"}</div>
                   <div className="mt-1 text-sm text-slate-600">{user.email}</div>
                 </div>
-                <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap gap-2">
                   <Badge variant={statusVariant(user.approval_status)}>
                     {t(`masterAdminUsers.statusMap.${user.approval_status}`)}
                   </Badge>
                   <Badge variant="neutral">{t(`masterAdminUsers.roleMap.${user.role}`)}</Badge>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 bg-white p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">{t("masterAdminUserDetail.actionsTitle")}</div>
+                    <div className="mt-1 text-sm text-slate-500">{t("masterAdminUserDetail.actionsDescription")}</div>
+                  </div>
+                  {isSelf ? (
+                    <Badge variant="warning">{t("masterAdminUserDetail.selfProtected")}</Badge>
+                  ) : null}
+                </div>
+                <div className="mt-4 flex flex-wrap gap-3">
+                  {user.approval_status === "pending" ? (
+                    <>
+                      <Button type="button" onClick={() => setDialogMode("approve")}>
+                        {t("masterAdminUserDetail.approve")}
+                      </Button>
+                      <Button type="button" variant="danger" onClick={() => setDialogMode("revoke")} disabled={isSelf}>
+                        {t("masterAdminUserDetail.deny")}
+                      </Button>
+                    </>
+                  ) : null}
+                  {user.approval_status === "approved" ? (
+                    <Button type="button" variant="danger" onClick={() => setDialogMode("revoke")} disabled={isSelf}>
+                      {t("masterAdminUserDetail.revoke")}
+                    </Button>
+                  ) : null}
+                  {user.approval_status === "revoked" ? (
+                    <Button type="button" variant="success" onClick={() => setDialogMode("reactivate")}>
+                      {t("masterAdminUserDetail.reactivate")}
+                    </Button>
+                  ) : null}
                 </div>
               </div>
 
@@ -156,7 +267,43 @@ export function MasterAdminUserDetailPage() {
           </>
         ) : null}
       </div>
+      <Dialog
+        open={Boolean(dialogConfig)}
+        onClose={() => (actionMutation.isPending ? null : closeDialog())}
+        title={dialogConfig?.title}
+        description={dialogConfig?.description}
+        closeLabel={t("labels.close")}
+        actions={
+          <>
+            <Button type="button" variant="secondary" onClick={closeDialog} disabled={actionMutation.isPending}>
+              {t("masterAdminUserDetail.cancel")}
+            </Button>
+            <Button type="button" variant={dialogMode === "revoke" ? "danger" : dialogMode === "reactivate" ? "success" : "primary"} onClick={submitAction} disabled={actionMutation.isPending}>
+              {actionMutation.isPending ? t("masterAdminUserDetail.saving") : dialogConfig?.confirmLabel}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <Field label={t("masterAdminUserDetail.reasonLabel")}>
+            <Textarea
+              rows={4}
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+              placeholder={t("masterAdminUserDetail.reasonPlaceholder")}
+            />
+          </Field>
+          {dialogMode === "revoke" ? (
+            <Field label={t("masterAdminUserDetail.confirmationLabel", { email: user?.email || "" })}>
+              <Input
+                value={confirmationText}
+                onChange={(event) => setConfirmationText(event.target.value)}
+                placeholder={t("masterAdminUserDetail.confirmationPlaceholder")}
+              />
+            </Field>
+          ) : null}
+        </div>
+      </Dialog>
     </LayoutShell>
   );
 }
-
