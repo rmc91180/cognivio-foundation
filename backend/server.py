@@ -409,6 +409,324 @@ async def _build_master_admin_workspace_records() -> List["MasterAdminWorkspaceR
     return workspace_records
 
 
+def _build_user_lookup_map(user_docs: List[dict]) -> Dict[str, dict]:
+    return {str(doc.get("id") or ""): doc for doc in user_docs if doc.get("id")}
+
+
+def _build_teacher_lookup_map(teacher_docs: List[dict]) -> Dict[str, dict]:
+    return {str(doc.get("id") or ""): doc for doc in teacher_docs if doc.get("id")}
+
+
+def _video_latest_error(video: dict) -> Optional[str]:
+    return (
+        video.get("transcode_error")
+        or video.get("privacy_error")
+        or video.get("error_message")
+        or video.get("playback_error")
+    )
+
+
+def _video_stage(video: dict) -> str:
+    transcode_status = _normalize_video_transcode_status(video.get("transcode_status"))
+    privacy_status = _normalize_privacy_status(video.get("privacy_status"))
+    analysis_status = _normalize_video_status(video.get("analysis_status"))
+    status = _normalize_video_status(video.get("status"))
+
+    if transcode_status in {VideoTranscodeStatus.QUEUED.value, VideoTranscodeStatus.PROCESSING.value}:
+        return "transcode"
+    if privacy_status in {
+        PrivacyProcessingStatus.QUEUED.value,
+        PrivacyProcessingStatus.PROCESSING.value,
+        PrivacyProcessingStatus.REVIEW_REQUIRED.value,
+        PrivacyProcessingStatus.FAILED.value,
+    }:
+        return "privacy"
+    if analysis_status in {
+        VideoProcessingStatus.QUEUED.value,
+        VideoProcessingStatus.PROCESSING.value,
+        VideoProcessingStatus.FAILED.value,
+    }:
+        return "analysis"
+    if status == VideoProcessingStatus.COMPLETED.value:
+        return "playback"
+    return "upload"
+
+
+def _video_incident_state(video: dict) -> str:
+    if _video_latest_error(video):
+        return "active"
+    if _normalize_video_status(video.get("status")) == VideoProcessingStatus.COMPLETED.value:
+        return "clear"
+    return "monitoring"
+
+
+def _video_asset_state(file_path: Optional[str], *, public_url: Optional[str] = None) -> str:
+    if public_url:
+        return "public"
+    if file_path:
+        return "present"
+    return "missing"
+
+
+async def _refresh_processing_incidents() -> List[dict]:
+    user_docs = await db.users.find({}, {"_id": 0}).to_list(5000)
+    teacher_docs = await db.teachers.find({}, {"_id": 0}).to_list(5000)
+    video_docs = await db.videos.find({}, {"_id": 0}).to_list(10000)
+    user_lookup = _build_user_lookup_map(user_docs)
+    teacher_lookup = _build_teacher_lookup_map(teacher_docs)
+    active_keys: set[str] = set()
+    incident_docs: List[dict] = []
+
+    for video in video_docs:
+        incident_type = None
+        severity = "warning"
+        transcode_status = _normalize_video_transcode_status(video.get("transcode_status"))
+        privacy_status = _normalize_privacy_status(video.get("privacy_status"))
+        analysis_status = _normalize_video_status(video.get("analysis_status"))
+
+        if transcode_status == VideoTranscodeStatus.FAILED.value:
+            incident_type = "transcode_failed"
+            severity = "danger"
+        elif privacy_status == PrivacyProcessingStatus.FAILED.value:
+            incident_type = "privacy_failed"
+            severity = "danger"
+        elif privacy_status == PrivacyProcessingStatus.REVIEW_REQUIRED.value:
+            incident_type = "privacy_review_required"
+            severity = "warning"
+        elif analysis_status == VideoProcessingStatus.FAILED.value:
+            incident_type = "analysis_failed"
+            severity = "danger"
+        elif not (video.get("processed_public_url") or video.get("public_url") or video.get("file_path")):
+            incident_type = "playback_unavailable"
+            severity = "warning"
+
+        if not incident_type:
+            continue
+
+        teacher = teacher_lookup.get(str(video.get("teacher_id") or ""))
+        uploader = user_lookup.get(str(video.get("uploaded_by") or ""))
+        owner = user_lookup.get(str((teacher or {}).get("created_by") or ""))
+        key = f"{video.get('id')}:{incident_type}"
+        active_keys.add(key)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        existing = await db.processing_incidents.find_one({"id": key}, {"_id": 0})
+        doc = {
+            "id": key,
+            "video_id": video.get("id"),
+            "teacher_id": video.get("teacher_id"),
+            "teacher_name": (teacher or {}).get("name"),
+            "uploader_user_id": video.get("uploaded_by"),
+            "uploader_email": (uploader or {}).get("email"),
+            "owner_user_id": (teacher or {}).get("created_by"),
+            "owner_email": (owner or {}).get("email"),
+            "filename": video.get("filename"),
+            "incident_type": incident_type,
+            "stage": _video_stage(video),
+            "severity": severity,
+            "state": "active",
+            "latest_error": _video_latest_error(video),
+            "first_seen_at": (existing or {}).get("first_seen_at") or video.get("status_updated_at") or video.get("created_at") or now_iso,
+            "last_seen_at": now_iso,
+            "resolved_at": None,
+        }
+        await db.processing_incidents.update_one({"id": key}, {"$set": doc}, upsert=True)
+        incident_docs.append(doc)
+
+    existing_docs = await db.processing_incidents.find({}, {"_id": 0}).to_list(10000)
+    for incident in existing_docs:
+        if incident.get("id") in active_keys:
+            continue
+        if incident.get("state") == "resolved":
+            incident_docs.append(incident)
+            continue
+        resolved = dict(incident)
+        resolved["state"] = "resolved"
+        resolved["resolved_at"] = datetime.now(timezone.utc).isoformat()
+        resolved["last_seen_at"] = resolved["resolved_at"]
+        await db.processing_incidents.update_one({"id": resolved["id"]}, {"$set": resolved}, upsert=True)
+        incident_docs.append(resolved)
+
+    return incident_docs
+
+
+async def _build_master_admin_video_records() -> List["MasterAdminVideoRecord"]:
+    user_docs = await db.users.find({}, {"_id": 0}).to_list(5000)
+    teacher_docs = await db.teachers.find({}, {"_id": 0}).to_list(5000)
+    video_docs = await db.videos.find({}, {"_id": 0}).to_list(10000)
+    user_lookup = _build_user_lookup_map(user_docs)
+    teacher_lookup = _build_teacher_lookup_map(teacher_docs)
+    records: List[MasterAdminVideoRecord] = []
+    for video in video_docs:
+        teacher = teacher_lookup.get(str(video.get("teacher_id") or ""))
+        uploader = user_lookup.get(str(video.get("uploaded_by") or ""))
+        owner = user_lookup.get(str((teacher or {}).get("created_by") or ""))
+        records.append(
+            MasterAdminVideoRecord(
+                id=video.get("id"),
+                filename=video.get("filename"),
+                teacher_id=video.get("teacher_id"),
+                teacher_name=(teacher or {}).get("name"),
+                uploader_user_id=video.get("uploaded_by"),
+                uploader_email=(uploader or {}).get("email"),
+                owner_user_id=(teacher or {}).get("created_by"),
+                owner_email=(owner or {}).get("email"),
+                status=_normalize_video_status(video.get("status")),
+                privacy_status=_normalize_privacy_status(video.get("privacy_status")),
+                analysis_status=_normalize_video_status(video.get("analysis_status")),
+                transcode_status=_normalize_video_transcode_status(video.get("transcode_status")),
+                upload_date=video.get("upload_date") or video.get("created_at"),
+                status_updated_at=video.get("status_updated_at"),
+                file_size_bytes=video.get("file_size_bytes"),
+                processed_file_size_bytes=video.get("processed_file_size_bytes"),
+                raw_asset_state=_video_asset_state(video.get("raw_file_path") or video.get("file_path"), public_url=video.get("public_url")),
+                processed_asset_state=_video_asset_state(video.get("processed_file_path"), public_url=video.get("processed_public_url")),
+                playback_state="ready" if (video.get("processed_public_url") or video.get("public_url")) else "missing",
+                latest_error=_video_latest_error(video),
+                incident_state=_video_incident_state(video),
+            )
+        )
+    records.sort(key=lambda item: (item.incident_state != "active", item.status_updated_at or "", item.upload_date or ""))
+    return records
+
+
+async def _build_dependency_health_snapshot() -> List["MasterAdminDependencyRecord"]:
+    await refresh_runtime_metrics()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    dependency_values = app_metrics.snapshot_summary().get("dependencies") or {}
+    storage_healthy = _upload_storage_is_healthy() and bool(S3_BUCKET)
+    return [
+        MasterAdminDependencyRecord(
+            id="atlas",
+            name="MongoDB Atlas",
+            healthy=bool(dependency_values.get("mongodb")),
+            status="healthy" if dependency_values.get("mongodb") else "unhealthy",
+            latest_probe_at=now_iso,
+            latest_failure_note=None if dependency_values.get("mongodb") else "Latest Atlas ping probe failed.",
+            remediation="Verify Atlas credentials, cluster availability, and network access.",
+            metadata={"database_name": os.getenv("DB_NAME")},
+        ),
+        MasterAdminDependencyRecord(
+            id="r2",
+            name="Cloudflare R2",
+            healthy=storage_healthy,
+            status="healthy" if storage_healthy else "unhealthy",
+            latest_probe_at=now_iso,
+            latest_failure_note=None if storage_healthy else "Object storage is unavailable or not configured.",
+            remediation="Verify R2 endpoint, bucket, and access keys in Railway.",
+            metadata={"bucket": S3_BUCKET, "endpoint": S3_ENDPOINT},
+        ),
+        MasterAdminDependencyRecord(
+            id="resend",
+            name="Resend",
+            healthy=bool(RESEND_API_KEY and RESEND_FROM_EMAIL),
+            status="healthy" if (RESEND_API_KEY and RESEND_FROM_EMAIL) else "unhealthy",
+            latest_probe_at=now_iso,
+            latest_failure_note=None if (RESEND_API_KEY and RESEND_FROM_EMAIL) else "Resend is missing API configuration.",
+            remediation="Set RESEND_API_KEY and RESEND_FROM_EMAIL in the backend environment.",
+            metadata={"from_email": RESEND_FROM_EMAIL},
+        ),
+        MasterAdminDependencyRecord(
+            id="openai",
+            name="OpenAI",
+            healthy=bool(dependency_values.get("openai")),
+            status="healthy" if dependency_values.get("openai") else "unhealthy",
+            latest_probe_at=now_iso,
+            latest_failure_note=None if dependency_values.get("openai") else "OpenAI client or API key is not available.",
+            remediation="Verify OPENAI_API_KEY and backend OpenAI runtime access.",
+            metadata={"configured": bool(OPENAI_API_KEY)},
+        ),
+        MasterAdminDependencyRecord(
+            id="railway",
+            name="Railway Runtime",
+            healthy=bool(dependency_values.get("railway_runtime", 1.0)),
+            status="healthy" if dependency_values.get("railway_runtime", 1.0) else "unhealthy",
+            latest_probe_at=now_iso,
+            latest_failure_note=None,
+            remediation="Check Railway deploy logs and service restart state.",
+            metadata={"environment": os.getenv("RAILWAY_ENVIRONMENT_NAME")},
+        ),
+    ]
+
+
+async def _build_global_ai_quality_snapshot() -> Dict[str, Any]:
+    workspace_rows = await _build_master_admin_workspace_records()
+    feedback_docs = await db.assessment_report_feedback.find({}, {"_id": 0}).to_list(10000)
+    override_docs = await db.admin_assessment_overrides.find({}, {"_id": 0}).to_list(10000)
+    useful = sum(1 for item in feedback_docs if item.get("feedback_value") == "useful")
+    not_useful = sum(1 for item in feedback_docs if item.get("feedback_value") == "not_useful")
+    incidents = await _refresh_processing_incidents()
+    active_incidents = [item for item in incidents if item.get("state") == "active"]
+    failure_clusters: Dict[str, Dict[str, Any]] = {}
+    for incident in active_incidents:
+        cluster = failure_clusters.setdefault(
+            incident.get("incident_type") or "unknown",
+            {"incident_type": incident.get("incident_type") or "unknown", "count": 0, "examples": []},
+        )
+        cluster["count"] += 1
+        if len(cluster["examples"]) < 3:
+            cluster["examples"].append(
+                {
+                    "video_id": incident.get("video_id"),
+                    "filename": incident.get("filename"),
+                    "owner_email": incident.get("owner_email"),
+                }
+            )
+    specialist_activity = await _get_specialist_activity_snapshot({"id": "system", "email": "system@cognivio.live", "role": "admin"})
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "metrics": {
+            "total_feedback": useful + not_useful,
+            "useful_feedback": useful,
+            "not_useful_feedback": not_useful,
+            "useful_feedback_rate": round(useful / (useful + not_useful), 3) if (useful + not_useful) else None,
+            "total_overrides": len(override_docs),
+            "active_incidents": len(active_incidents),
+            "workspaces_with_failures": sum(1 for row in workspace_rows if row.failure_count),
+        },
+        "by_workspace": sorted(
+            [
+                {
+                    "owner_user_id": row.owner_user_id,
+                    "owner_email": row.owner_email,
+                    "workspace_mode": row.workspace_mode,
+                    "upload_count": row.upload_count,
+                    "assessment_count": row.assessment_count,
+                    "failure_count": row.failure_count,
+                    "health_state": row.health_state,
+                }
+                for row in workspace_rows
+            ],
+            key=lambda item: (-int(item.get("failure_count") or 0), str(item.get("owner_email") or "")),
+        ),
+        "failure_clusters": sorted(failure_clusters.values(), key=lambda item: (-int(item["count"]), str(item["incident_type"]))),
+        "specialist_activity": specialist_activity,
+    }
+
+
+def _build_support_bundle(
+    *,
+    target_type: str,
+    target_id: str,
+    user: Optional[dict] = None,
+    sessions: Optional[List[dict]] = None,
+    auth_events: Optional[List[dict]] = None,
+    audit_events: Optional[List[dict]] = None,
+    videos: Optional[List[dict]] = None,
+    incidents: Optional[List[dict]] = None,
+) -> Dict[str, Any]:
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "target_type": target_type,
+        "target_id": target_id,
+        "user": _to_json_safe(user or {}),
+        "sessions": _to_json_safe(sessions or []),
+        "auth_events": _to_json_safe(auth_events or []),
+        "audit_events": _to_json_safe(audit_events or []),
+        "videos": _to_json_safe(videos or []),
+        "incidents": _to_json_safe(incidents or []),
+    }
+
+
 async def _approve_user_access(
     target: dict,
     *,
@@ -1174,6 +1492,26 @@ def _delete_s3_key(key: Optional[str]) -> None:
         client.delete_object(Bucket=S3_BUCKET, Key=key)
     except Exception as exc:
         logger.warning(f"Unable to delete S3 object {key}: {exc}")
+
+
+def _materialize_video_asset_locally(
+    video: dict,
+    *,
+    asset_order: List[Tuple[Optional[str], Optional[str], Optional[str]]],
+) -> Path:
+    for relative_path, s3_key, filename_hint in asset_order:
+        if relative_path:
+            candidate = UPLOAD_DIR / str(relative_path)
+            if candidate.exists():
+                return candidate
+        if s3_key and S3_BUCKET:
+            safe_name = Path(filename_hint or str(s3_key)).name or f"{uuid.uuid4()}.bin"
+            local_path = UPLOAD_DIR / "tmp" / "master-admin-retry" / str(video.get("id") or "video") / safe_name
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            client = _get_s3_client()
+            client.download_file(S3_BUCKET, s3_key, str(local_path))
+            return local_path
+    raise HTTPException(status_code=409, detail="Retry unavailable because no source asset can be materialized")
 
 
 async def _get_teacher_or_404(teacher_id: str, current_user: dict) -> dict:
@@ -3107,6 +3445,148 @@ class MasterAdminWorkspaceDetailResponse(BaseModel):
     related: Dict[str, Any]
 
 
+class ProcessingIncidentRecord(BaseModel):
+    id: str
+    video_id: str
+    teacher_id: Optional[str] = None
+    teacher_name: Optional[str] = None
+    uploader_user_id: Optional[str] = None
+    uploader_email: Optional[str] = None
+    owner_user_id: Optional[str] = None
+    owner_email: Optional[str] = None
+    filename: Optional[str] = None
+    incident_type: str
+    stage: str
+    severity: str
+    state: str
+    latest_error: Optional[str] = None
+    first_seen_at: str
+    last_seen_at: str
+    resolved_at: Optional[str] = None
+
+
+class ProcessingIncidentListResponse(BaseModel):
+    generated_at: str
+    total: int
+    limit: int
+    offset: int
+    items: List[ProcessingIncidentRecord]
+    summary: Dict[str, int]
+
+
+class MasterAdminVideoRecord(BaseModel):
+    id: str
+    filename: Optional[str] = None
+    teacher_id: Optional[str] = None
+    teacher_name: Optional[str] = None
+    uploader_user_id: Optional[str] = None
+    uploader_email: Optional[str] = None
+    owner_user_id: Optional[str] = None
+    owner_email: Optional[str] = None
+    status: str
+    privacy_status: str
+    analysis_status: str
+    transcode_status: str
+    upload_date: Optional[str] = None
+    status_updated_at: Optional[str] = None
+    file_size_bytes: Optional[int] = None
+    processed_file_size_bytes: Optional[int] = None
+    raw_asset_state: str = "unknown"
+    processed_asset_state: str = "unknown"
+    playback_state: str = "unknown"
+    latest_error: Optional[str] = None
+    incident_state: str = "clear"
+
+
+class MasterAdminVideoListResponse(BaseModel):
+    generated_at: str
+    total: int
+    limit: int
+    offset: int
+    items: List[MasterAdminVideoRecord]
+    summary: Dict[str, int]
+
+
+class MasterAdminVideoDetailResponse(BaseModel):
+    generated_at: str
+    video: MasterAdminVideoRecord
+    related: Dict[str, Any]
+
+
+class MasterAdminStorageSummaryResponse(BaseModel):
+    generated_at: str
+    summary: Dict[str, Any]
+    top_consumers: List[Dict[str, Any]]
+    orphan_candidates: List[Dict[str, Any]]
+    retention_backlog: List[Dict[str, Any]]
+
+
+class MasterAdminDependencyRecord(BaseModel):
+    id: str
+    name: str
+    healthy: bool
+    status: str
+    latest_probe_at: Optional[str] = None
+    latest_failure_note: Optional[str] = None
+    remediation: Optional[str] = None
+    metadata: Dict[str, Any] = {}
+
+
+class MasterAdminDependencyHealthResponse(BaseModel):
+    generated_at: str
+    summary: Dict[str, int]
+    items: List[MasterAdminDependencyRecord]
+
+
+class MasterAdminAIQualityResponse(BaseModel):
+    generated_at: str
+    metrics: Dict[str, Any]
+    by_workspace: List[Dict[str, Any]]
+    failure_clusters: List[Dict[str, Any]]
+    specialist_activity: Dict[str, Any]
+
+
+class UserSessionRecord(BaseModel):
+    id: str
+    user_id: str
+    email: Optional[str] = None
+    role: Optional[str] = None
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    created_at: str
+    last_seen_at: Optional[str] = None
+    revoked_at: Optional[str] = None
+    revoked_by: Optional[str] = None
+    revoke_reason: Optional[str] = None
+
+
+class MasterAdminSupportResponse(BaseModel):
+    generated_at: str
+    query: Optional[str] = None
+    users: List[MasterAdminUserRecord]
+    auth_events: List["AuthEventRecord"]
+    audit_events: List["MasterAdminAuditEventRecord"]
+    sessions: List[UserSessionRecord]
+    related: Dict[str, Any]
+
+
+class MasterAdminSessionActionPayload(BaseModel):
+    reason: Optional[str] = None
+    confirmation_text: Optional[str] = None
+
+
+class MasterAdminDiagnosticBundleRequest(BaseModel):
+    target_type: str
+    target_id: str
+
+
+class MasterAdminDiagnosticBundleResponse(BaseModel):
+    generated_at: str
+    target_type: str
+    target_id: str
+    bundle: Dict[str, Any]
+
+
 class AuthEventRecord(BaseModel):
     id: str
     email: Optional[str] = None
@@ -4031,11 +4511,37 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
-def create_token(user_id: str) -> str:
+async def _create_user_session(*, user: dict, role: str, request: Optional[Request]) -> str:
+    session_id = str(uuid.uuid4())
+    request_meta = _extract_request_metadata(request)
+    now = datetime.now(timezone.utc).isoformat()
+    await db.user_sessions.insert_one(
+        {
+            "id": session_id,
+            "user_id": user.get("id"),
+            "email": user.get("email"),
+            "role": role,
+            "ip_address": request_meta.get("ip_address"),
+            "user_agent": request_meta.get("user_agent"),
+            "created_at": now,
+            "last_seen_at": now,
+            "revoked_at": None,
+            "revoked_by": None,
+            "revoke_reason": None,
+        }
+    )
+    return session_id
+
+
+def create_token(user_id: str, *, session_id: Optional[str] = None) -> str:
+    issued_at = datetime.now(timezone.utc)
     payload = {
         "user_id": user_id,
-        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS)
+        "exp": issued_at + timedelta(hours=JWT_EXPIRATION_HOURS),
+        "iat": issued_at,
     }
+    if session_id:
+        payload["sid"] = session_id
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 def _is_admin_role(role: Optional[str]) -> bool:
@@ -4058,12 +4564,19 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         user = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
+        session_id = payload.get("sid")
+        if session_id:
+            session = await db.user_sessions.find_one({"id": session_id}, {"_id": 0})
+            if not session or session.get("revoked_at"):
+                raise HTTPException(status_code=401, detail="Session expired")
         if _get_user_approval_status(user) == "pending":
             raise HTTPException(status_code=403, detail="Account pending approval")
         if _get_user_approval_status(user) == "revoked" or not _is_user_access_active(user):
             raise HTTPException(status_code=403, detail="Account access removed")
         user["role"] = _get_user_role(user)
         user["approval_status"] = _get_user_approval_status(user)
+        if session_id:
+            user["session_id"] = session_id
         return user
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
@@ -4072,7 +4585,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 
 # ==================== AUTH ENDPOINTS ====================
 @api_router.post("/auth/register", response_model=TokenResponse)
-async def register(user: UserCreate):
+async def register(user: UserCreate, request: Request):
     from app.services.workspace_service import enrich_user_with_workspace_mode
 
     if DEMO_MODE:
@@ -4099,7 +4612,8 @@ async def register(user: UserCreate):
     await db.users.insert_one(user_doc)
     enriched_user = await enrich_user_with_workspace_mode(user_doc)
     
-    token = create_token(user_id)
+    session_id = await _create_user_session(user=enriched_user, role=_get_user_role(enriched_user), request=request)
+    token = create_token(user_id, session_id=session_id)
     return TokenResponse(
         token=token,
         user=UserResponse(
@@ -4333,7 +4847,8 @@ async def login(user: UserLogin, request: Request):
         user_agent=request_meta["user_agent"],
     )
 
-    token = create_token(db_user["id"])
+    session_id = await _create_user_session(user=db_user, role=actual_role, request=request)
+    token = create_token(db_user["id"], session_id=session_id)
     return TokenResponse(
         token=token,
         user=UserResponse(**enriched_user)
@@ -12157,25 +12672,25 @@ async def get_master_admin_bootstrap(current_user: dict = Depends(get_current_us
                 "id": "videos-processing",
                 "title": "Videos and Processing",
                 "description": "Global pipeline visibility across upload, transcode, privacy, analysis, and playback.",
-                "status": "planned",
+                "status": "active",
             },
             {
                 "id": "storage-data",
                 "title": "Storage and Data",
                 "description": "Atlas and R2 footprint, retention health, and data lifecycle integrity.",
-                "status": "planned",
+                "status": "active",
             },
             {
                 "id": "ai-quality",
                 "title": "AI and Analysis Quality",
                 "description": "Global analysis quality, fallback patterns, specialist activity, and override signals.",
-                "status": "planned",
+                "status": "active",
             },
             {
                 "id": "dependencies",
                 "title": "Integrations and Dependencies",
                 "description": "Health and remediation guidance for Atlas, R2, Resend, OpenAI, and runtime infrastructure.",
-                "status": "planned",
+                "status": "active",
             },
             {
                 "id": "audit-security",
@@ -12187,7 +12702,7 @@ async def get_master_admin_bootstrap(current_user: dict = Depends(get_current_us
                 "id": "support-recovery",
                 "title": "Support and Recovery",
                 "description": "Guided operational tools for user support, incident response, and safe recovery actions.",
-                "status": "planned",
+                "status": "active",
             },
         ],
     }
@@ -12785,6 +13300,448 @@ async def get_master_admin_workspace_detail(
             "recent_failures": recent_failures,
             "memory_entries": memory_entries,
         },
+    )
+
+
+@api_router.get("/master-admin/incidents", response_model=ProcessingIncidentListResponse)
+async def get_master_admin_processing_incidents(
+    q: Optional[str] = None,
+    state: Optional[str] = None,
+    severity: Optional[str] = None,
+    incident_type: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_master_admin_user(current_user)
+    docs = await _refresh_processing_incidents()
+    normalized_q = str(q or "").strip().lower()
+    normalized_state = str(state or "").strip().lower()
+    normalized_severity = str(severity or "").strip().lower()
+    normalized_type = str(incident_type or "").strip().lower()
+    filtered: List[ProcessingIncidentRecord] = []
+    for item in docs:
+        if normalized_q:
+            haystack = " ".join(
+                [
+                    str(item.get("filename") or "").lower(),
+                    str(item.get("teacher_name") or "").lower(),
+                    str(item.get("owner_email") or "").lower(),
+                    str(item.get("latest_error") or "").lower(),
+                ]
+            )
+            if normalized_q not in haystack:
+                continue
+        if normalized_state and str(item.get("state") or "").lower() != normalized_state:
+            continue
+        if normalized_severity and str(item.get("severity") or "").lower() != normalized_severity:
+            continue
+        if normalized_type and str(item.get("incident_type") or "").lower() != normalized_type:
+            continue
+        filtered.append(ProcessingIncidentRecord(**item))
+    filtered.sort(key=lambda item: (item.state != "active", item.severity != "danger", item.last_seen_at), reverse=False)
+    safe_limit = max(1, min(limit, 200))
+    safe_offset = max(0, offset)
+    sliced = filtered[safe_offset : safe_offset + safe_limit]
+    return ProcessingIncidentListResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        total=len(filtered),
+        limit=safe_limit,
+        offset=safe_offset,
+        items=sliced,
+        summary={
+            "active": sum(1 for item in filtered if item.state == "active"),
+            "resolved": sum(1 for item in filtered if item.state == "resolved"),
+            "danger": sum(1 for item in filtered if item.severity == "danger"),
+            "warning": sum(1 for item in filtered if item.severity == "warning"),
+        },
+    )
+
+
+@api_router.get("/master-admin/videos", response_model=MasterAdminVideoListResponse)
+async def get_master_admin_videos(
+    q: Optional[str] = None,
+    stage: Optional[str] = None,
+    incident_state: Optional[str] = None,
+    owner_user_id: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_master_admin_user(current_user)
+    records = await _build_master_admin_video_records()
+    normalized_q = str(q or "").strip().lower()
+    normalized_stage = str(stage or "").strip().lower()
+    normalized_incident_state = str(incident_state or "").strip().lower()
+    normalized_owner = str(owner_user_id or "").strip()
+    filtered: List[MasterAdminVideoRecord] = []
+    for item in records:
+        if normalized_q:
+            haystack = " ".join(
+                [
+                    str(item.filename or "").lower(),
+                    str(item.teacher_name or "").lower(),
+                    str(item.uploader_email or "").lower(),
+                    str(item.owner_email or "").lower(),
+                    str(item.latest_error or "").lower(),
+                ]
+            )
+            if normalized_q not in haystack:
+                continue
+        if normalized_stage and _video_stage(item.model_dump()) != normalized_stage:
+            continue
+        if normalized_incident_state and str(item.incident_state).lower() != normalized_incident_state:
+            continue
+        if normalized_owner and str(item.owner_user_id or "") != normalized_owner:
+            continue
+        filtered.append(item)
+    safe_limit = max(1, min(limit, 200))
+    safe_offset = max(0, offset)
+    sliced = filtered[safe_offset : safe_offset + safe_limit]
+    return MasterAdminVideoListResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        total=len(filtered),
+        limit=safe_limit,
+        offset=safe_offset,
+        items=sliced,
+        summary={
+            "total": len(filtered),
+            "active_incidents": sum(1 for item in filtered if item.incident_state == "active"),
+            "transcode_failed": sum(1 for item in filtered if item.transcode_status == VideoTranscodeStatus.FAILED.value),
+            "privacy_failed": sum(1 for item in filtered if item.privacy_status == PrivacyProcessingStatus.FAILED.value),
+            "analysis_failed": sum(1 for item in filtered if item.analysis_status == VideoProcessingStatus.FAILED.value),
+        },
+    )
+
+
+@api_router.get("/master-admin/videos/{video_id}", response_model=MasterAdminVideoDetailResponse)
+async def get_master_admin_video_detail(video_id: str, current_user: dict = Depends(get_current_user)):
+    _require_master_admin_user(current_user)
+    records = await _build_master_admin_video_records()
+    record = next((item for item in records if item.id == video_id), None)
+    if not record:
+        raise HTTPException(status_code=404, detail="Video not found")
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    incidents = [item for item in await _refresh_processing_incidents() if item.get("video_id") == video_id]
+    return MasterAdminVideoDetailResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        video=record,
+        related={
+            "timeline": [
+                {"id": "uploaded", "label": "Uploaded", "at": (video or {}).get("upload_date") or (video or {}).get("created_at"), "status": "completed"},
+                {"id": "transcode", "label": "Transcode", "at": (video or {}).get("transcode_completed_at") or (video or {}).get("transcode_failed_at") or (video or {}).get("transcode_started_at"), "status": record.transcode_status},
+                {"id": "privacy", "label": "Privacy", "at": (video or {}).get("privacy_completed_at") or (video or {}).get("privacy_failed_at") or (video or {}).get("privacy_started_at"), "status": record.privacy_status},
+                {"id": "analysis", "label": "Analysis", "at": (video or {}).get("status_updated_at"), "status": record.analysis_status},
+            ],
+            "asset_locations": {
+                "raw_file_path": (video or {}).get("raw_file_path") or (video or {}).get("file_path"),
+                "processed_file_path": (video or {}).get("processed_file_path"),
+                "public_url": (video or {}).get("public_url"),
+                "processed_public_url": (video or {}).get("processed_public_url"),
+                "redacted_file_path": (video or {}).get("redacted_file_path"),
+            },
+            "jobs": {
+                "processing": await db.video_processing_jobs.find_one({"video_id": video_id}, {"_id": 0}),
+                "privacy": await db.video_privacy_jobs.find_one({"video_id": video_id}, {"_id": 0}),
+                "transcode": await db.video_transcode_jobs.find_one({"video_id": video_id}, {"_id": 0}),
+            },
+            "incidents": incidents,
+        },
+    )
+
+
+@api_router.post("/master-admin/videos/{video_id}/retry-analysis", response_model=Dict[str, Any])
+async def master_admin_retry_video_analysis(video_id: str, current_user: dict = Depends(get_current_user)):
+    _require_master_admin_user(current_user)
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    full_path = _materialize_video_asset_locally(
+        video,
+        asset_order=[
+            (video.get("redacted_file_path"), video.get("redacted_s3_key"), video.get("filename")),
+            (video.get("processed_file_path"), video.get("processed_s3_key"), video.get("filename")),
+            (video.get("file_path"), video.get("s3_key"), video.get("filename")),
+        ],
+    )
+    queued_at = datetime.now(timezone.utc).isoformat()
+    await db.videos.update_one(
+        {"id": video_id},
+        {"$set": {"status": VideoProcessingStatus.QUEUED.value, "analysis_status": VideoProcessingStatus.QUEUED.value, "status_updated_at": queued_at, "error_message": None}},
+    )
+    await _enqueue_video_processing_job(
+        video_id=video_id,
+        teacher_id=video.get("teacher_id"),
+        user_id=video.get("uploaded_by") or current_user["id"],
+        file_path=str(full_path),
+    )
+    await _log_master_admin_audit_event(
+        actor=current_user,
+        action="retry_video_analysis",
+        target_type="video",
+        target_id=video_id,
+        metadata={"requeued_at": queued_at},
+    )
+    return {"video_id": video_id, "analysis_status": VideoProcessingStatus.QUEUED.value, "requeued_at": queued_at}
+
+
+@api_router.post("/master-admin/videos/{video_id}/retry-privacy", response_model=Dict[str, Any])
+async def master_admin_retry_video_privacy(video_id: str, current_user: dict = Depends(get_current_user)):
+    _require_master_admin_user(current_user)
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    full_path = _materialize_video_asset_locally(
+        video,
+        asset_order=[
+            (video.get("processed_file_path"), video.get("processed_s3_key"), video.get("filename")),
+            (video.get("raw_file_path"), video.get("raw_s3_key"), video.get("filename")),
+            (video.get("file_path"), video.get("s3_key"), video.get("filename")),
+        ],
+    )
+    queued_at = datetime.now(timezone.utc).isoformat()
+    await db.videos.update_one(
+        {"id": video_id},
+        {
+            "$set": {
+                "status": VideoProcessingStatus.QUEUED.value,
+                "privacy_status": PrivacyProcessingStatus.QUEUED.value,
+                "analysis_status": VideoProcessingStatus.QUEUED.value,
+                "privacy_review_required": False,
+                "privacy_review_reason": None,
+                "privacy_error": None,
+                "status_updated_at": queued_at,
+            }
+        },
+    )
+    await _enqueue_video_privacy_job(
+        video_id=video_id,
+        teacher_id=video.get("teacher_id"),
+        user_id=video.get("uploaded_by") or current_user["id"],
+        file_path=str(full_path),
+    )
+    await _log_master_admin_audit_event(
+        actor=current_user,
+        action="retry_video_privacy",
+        target_type="video",
+        target_id=video_id,
+        metadata={"requeued_at": queued_at},
+    )
+    return {"video_id": video_id, "privacy_status": PrivacyProcessingStatus.QUEUED.value, "requeued_at": queued_at}
+
+
+@api_router.post("/master-admin/videos/{video_id}/retry-transcode", response_model=Dict[str, Any])
+async def master_admin_retry_video_transcode(video_id: str, current_user: dict = Depends(get_current_user)):
+    _require_master_admin_user(current_user)
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    full_path = _materialize_video_asset_locally(
+        video,
+        asset_order=[
+            (video.get("raw_file_path"), video.get("raw_s3_key"), video.get("filename")),
+            (video.get("file_path"), video.get("s3_key"), video.get("filename")),
+        ],
+    )
+    queued_at = datetime.now(timezone.utc).isoformat()
+    await db.videos.update_one(
+        {"id": video_id},
+        {
+            "$set": {
+                "transcode_status": VideoTranscodeStatus.QUEUED.value,
+                "privacy_status": PrivacyProcessingStatus.QUEUED.value,
+                "analysis_status": VideoProcessingStatus.QUEUED.value,
+                "status": VideoProcessingStatus.QUEUED.value,
+                "transcode_error": None,
+                "status_updated_at": queued_at,
+            }
+        },
+    )
+    await _enqueue_video_transcode_job(
+        video_id=video_id,
+        teacher_id=video.get("teacher_id"),
+        user_id=video.get("uploaded_by") or current_user["id"],
+        file_path=str(full_path),
+    )
+    await _log_master_admin_audit_event(
+        actor=current_user,
+        action="retry_video_transcode",
+        target_type="video",
+        target_id=video_id,
+        metadata={"requeued_at": queued_at},
+    )
+    return {"video_id": video_id, "transcode_status": VideoTranscodeStatus.QUEUED.value, "requeued_at": queued_at}
+
+
+@api_router.get("/master-admin/storage", response_model=MasterAdminStorageSummaryResponse)
+async def get_master_admin_storage_summary(current_user: dict = Depends(get_current_user)):
+    _require_master_admin_user(current_user)
+    videos = await db.videos.find({}, {"_id": 0}).to_list(10000)
+    teachers = await db.teachers.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(5000)
+    teacher_lookup = _build_teacher_lookup_map(teachers)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    consumers: Dict[str, Dict[str, Any]] = {}
+    for video in videos:
+        teacher = teacher_lookup.get(str(video.get("teacher_id") or ""))
+        key = str((teacher or {}).get("id") or video.get("teacher_id") or "unknown")
+        row = consumers.setdefault(
+            key,
+            {
+                "teacher_id": (teacher or {}).get("id") or video.get("teacher_id"),
+                "teacher_name": (teacher or {}).get("name") or "Unknown teacher",
+                "raw_bytes": 0,
+                "processed_bytes": 0,
+                "video_count": 0,
+            },
+        )
+        row["raw_bytes"] += int(video.get("file_size_bytes") or 0)
+        row["processed_bytes"] += int(video.get("processed_file_size_bytes") or 0)
+        row["video_count"] += 1
+    retention_backlog = [
+        {"id": video.get("id"), "filename": video.get("filename"), "retention_expires_at": video.get("raw_retention_expires_at")}
+        for video in videos
+        if video.get("raw_retention_expires_at") and str(video.get("raw_retention_expires_at")) <= now_iso
+    ]
+    orphan_candidates = [
+        {"id": video.get("id"), "filename": video.get("filename"), "reason": "processed asset missing public URL"}
+        for video in videos
+        if video.get("processed_file_path") and not video.get("processed_public_url")
+    ]
+    return MasterAdminStorageSummaryResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        summary={
+            "raw_asset_count": sum(1 for video in videos if video.get("raw_file_path") or video.get("file_path")),
+            "processed_asset_count": sum(1 for video in videos if video.get("processed_file_path")),
+            "raw_bytes": sum(int(video.get("file_size_bytes") or 0) for video in videos),
+            "processed_bytes": sum(int(video.get("processed_file_size_bytes") or 0) for video in videos),
+            "retention_backlog_count": len(retention_backlog),
+            "orphan_candidate_count": len(orphan_candidates),
+            "r2_configured": bool(S3_BUCKET),
+        },
+        top_consumers=sorted(
+            consumers.values(),
+            key=lambda item: (-(int(item.get("raw_bytes") or 0) + int(item.get("processed_bytes") or 0)), str(item.get("teacher_name") or "")),
+        )[:10],
+        orphan_candidates=orphan_candidates[:50],
+        retention_backlog=retention_backlog[:50],
+    )
+
+
+@api_router.get("/master-admin/dependencies", response_model=MasterAdminDependencyHealthResponse)
+async def get_master_admin_dependency_health(current_user: dict = Depends(get_current_user)):
+    _require_master_admin_user(current_user)
+    items = await _build_dependency_health_snapshot()
+    return MasterAdminDependencyHealthResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        summary={"healthy": sum(1 for item in items if item.healthy), "unhealthy": sum(1 for item in items if not item.healthy)},
+        items=items,
+    )
+
+
+@api_router.get("/master-admin/ai-quality", response_model=MasterAdminAIQualityResponse)
+async def get_master_admin_ai_quality(current_user: dict = Depends(get_current_user)):
+    _require_master_admin_user(current_user)
+    return MasterAdminAIQualityResponse(**(await _build_global_ai_quality_snapshot()))
+
+
+@api_router.get("/master-admin/support", response_model=MasterAdminSupportResponse)
+async def get_master_admin_support_console(q: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+    _require_master_admin_user(current_user)
+    normalized_q = str(q or "").strip().lower()
+    user_docs = await db.users.find({}, {"_id": 0, "password": 0}).to_list(5000)
+    matching_docs = [
+        doc for doc in user_docs
+        if not normalized_q
+        or normalized_q in " ".join([str(doc.get("email") or "").lower(), str(doc.get("name") or "").lower(), str(doc.get("id") or "").lower()])
+    ][:10]
+    users = [await _build_master_admin_user_record(doc) for doc in matching_docs]
+    matching_ids = {user.id for user in users}
+    auth_docs = await db.auth_event_log.find({}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    audit_docs = await db.master_admin_audit_events.find({}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    session_docs = await db.user_sessions.find({}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    videos = await db.videos.find({"uploaded_by": {"$in": list(matching_ids)}} if matching_ids else {}, {"_id": 0, "id": 1, "filename": 1, "status": 1, "privacy_status": 1, "analysis_status": 1, "status_updated_at": 1}).sort("status_updated_at", -1).to_list(20)
+    incidents = [item for item in await _refresh_processing_incidents() if not matching_ids or item.get("uploader_user_id") in matching_ids or item.get("owner_user_id") in matching_ids][:20]
+    return MasterAdminSupportResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        query=q,
+        users=users,
+        auth_events=[AuthEventRecord(**doc) for doc in auth_docs if not matching_ids or doc.get("user_id") in matching_ids][:20],
+        audit_events=[MasterAdminAuditEventRecord(**doc) for doc in audit_docs if not matching_ids or doc.get("target_id") in matching_ids or doc.get("actor_user_id") in matching_ids][:20],
+        sessions=[UserSessionRecord(**doc) for doc in session_docs if not matching_ids or doc.get("user_id") in matching_ids][:20],
+        related={"videos": videos, "incidents": incidents},
+    )
+
+
+@api_router.post("/master-admin/users/{user_id}/sessions/revoke", response_model=Dict[str, Any])
+async def master_admin_revoke_user_sessions(
+    user_id: str,
+    payload: MasterAdminSessionActionPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_master_admin_user(current_user)
+    target = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    expected_confirmation = str(target.get("email") or "").strip().lower()
+    actual_confirmation = str(payload.confirmation_text or "").strip().lower()
+    if not payload.reason:
+        raise HTTPException(status_code=400, detail="A reason is required before revoking sessions")
+    if expected_confirmation and actual_confirmation != expected_confirmation:
+        raise HTTPException(status_code=400, detail="Confirmation text must match the target email exactly")
+    now = datetime.now(timezone.utc).isoformat()
+    result = await db.user_sessions.update_many(
+        {"user_id": user_id, "revoked_at": None},
+        {"$set": {"revoked_at": now, "revoked_by": current_user.get("email") or current_user.get("id"), "revoke_reason": payload.reason}},
+    )
+    await _log_master_admin_audit_event(
+        actor=current_user,
+        action="revoke_user_sessions",
+        target_type="user",
+        target_id=user_id,
+        reason=payload.reason,
+        metadata={"email": target.get("email"), "revoked_sessions": getattr(result, "modified_count", 0)},
+    )
+    return {"user_id": user_id, "revoked_sessions": getattr(result, "modified_count", 0), "revoked_at": now}
+
+
+@api_router.post("/master-admin/diagnostic-bundles/export", response_model=MasterAdminDiagnosticBundleResponse)
+async def export_master_admin_diagnostic_bundle(
+    payload: MasterAdminDiagnosticBundleRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_master_admin_user(current_user)
+    if payload.target_type not in {"user", "video"}:
+        raise HTTPException(status_code=400, detail="Unsupported diagnostic target")
+    target_id = payload.target_id
+    if payload.target_type == "user":
+        user_doc = await db.users.find_one({"id": target_id}, {"_id": 0, "password": 0})
+        if not user_doc:
+            raise HTTPException(status_code=404, detail="User not found")
+        sessions = await db.user_sessions.find({"user_id": target_id}, {"_id": 0}).sort("created_at", -1).to_list(100)
+        auth_events = await db.auth_event_log.find({"user_id": target_id}, {"_id": 0}).sort("created_at", -1).to_list(100)
+        audit_events = await db.master_admin_audit_events.find({"$or": [{"target_id": target_id}, {"actor_user_id": target_id}]}, {"_id": 0}).sort("created_at", -1).to_list(100)
+        videos = await db.videos.find({"uploaded_by": target_id}, {"_id": 0}).sort("status_updated_at", -1).to_list(100)
+        incidents = [item for item in await _refresh_processing_incidents() if item.get("uploader_user_id") == target_id or item.get("owner_user_id") == target_id]
+        bundle = _build_support_bundle(target_type="user", target_id=target_id, user=user_doc, sessions=sessions, auth_events=auth_events, audit_events=audit_events, videos=videos, incidents=incidents)
+    else:
+        video_doc = await db.videos.find_one({"id": target_id}, {"_id": 0})
+        if not video_doc:
+            raise HTTPException(status_code=404, detail="Video not found")
+        user_doc = await db.users.find_one({"id": video_doc.get("uploaded_by")}, {"_id": 0, "password": 0}) if video_doc.get("uploaded_by") else None
+        incidents = [item for item in await _refresh_processing_incidents() if item.get("video_id") == target_id]
+        bundle = _build_support_bundle(target_type="video", target_id=target_id, user=user_doc, videos=[video_doc], incidents=incidents)
+    await _log_master_admin_audit_event(
+        actor=current_user,
+        action="export_diagnostic_bundle",
+        target_type=payload.target_type,
+        target_id=target_id,
+        metadata={"bundle_keys": sorted(bundle.keys())},
+    )
+    return MasterAdminDiagnosticBundleResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        target_type=payload.target_type,
+        target_id=target_id,
+        bundle=bundle,
     )
 
 
@@ -15545,9 +16502,13 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.auth_event_log, [("email", 1), ("created_at", -1)])
     await _safe_create_index(db.auth_event_log, [("user_id", 1), ("created_at", -1)])
     await _safe_create_index(db.auth_event_log, [("event_type", 1), ("created_at", -1)])
+    await _safe_create_index(db.user_sessions, [("user_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.user_sessions, [("revoked_at", 1), ("created_at", -1)])
     await _safe_create_index(db.master_admin_audit_events, [("created_at", -1)])
     await _safe_create_index(db.master_admin_audit_events, [("actor_user_id", 1), ("created_at", -1)])
     await _safe_create_index(db.master_admin_audit_events, [("target_type", 1), ("target_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.processing_incidents, [("state", 1), ("severity", 1), ("last_seen_at", -1)])
+    await _safe_create_index(db.processing_incidents, [("video_id", 1), ("incident_type", 1)], unique=True)
     await _safe_create_index(db.privacy_audit_events, [("target_type", 1), ("target_id", 1), ("created_at", -1)])
     await _safe_create_index(db.recognition_badges, [("teacher_id", 1), ("awarded_at", -1)])
     await _safe_create_index(db.recognition_badges, [("video_id", 1), ("status", 1)])

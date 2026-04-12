@@ -101,6 +101,18 @@ export const masterAdminApi = {
   approveUser: (userId, payload = {}) => api.post(`/api/master-admin/users/${userId}/approve`, payload),
   revokeUser: (userId, payload = {}) => api.post(`/api/master-admin/users/${userId}/revoke`, payload),
   reactivateUser: (userId, payload = {}) => api.post(`/api/master-admin/users/${userId}/reactivate`, payload),
+  incidents: (params = {}) => api.get("/api/master-admin/incidents", { params }),
+  videos: (params = {}) => api.get("/api/master-admin/videos", { params }),
+  videoDetail: (videoId) => api.get(`/api/master-admin/videos/${videoId}`),
+  retryVideoAnalysis: (videoId) => api.post(`/api/master-admin/videos/${videoId}/retry-analysis`),
+  retryVideoPrivacy: (videoId) => api.post(`/api/master-admin/videos/${videoId}/retry-privacy`),
+  retryVideoTranscode: (videoId) => api.post(`/api/master-admin/videos/${videoId}/retry-transcode`),
+  storage: () => api.get("/api/master-admin/storage"),
+  dependencies: () => api.get("/api/master-admin/dependencies"),
+  aiQuality: () => api.get("/api/master-admin/ai-quality"),
+  support: (params = {}) => api.get("/api/master-admin/support", { params }),
+  revokeSessions: (userId, payload = {}) => api.post(`/api/master-admin/users/${userId}/sessions/revoke`, payload),
+  exportDiagnosticBundle: (payload) => api.post("/api/master-admin/diagnostic-bundles/export", payload),
 };
 
 export const opsApi = {

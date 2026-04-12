@@ -6,6 +6,12 @@ const ITEMS = [
   { to: "/master-admin", key: "overview" },
   { to: "/master-admin/users", key: "users" },
   { to: "/master-admin/workspaces", key: "workspaces" },
+  { to: "/master-admin/videos", key: "videos" },
+  { to: "/master-admin/storage", key: "storage" },
+  { to: "/master-admin/dependencies", key: "dependencies" },
+  { to: "/master-admin/ai-quality", key: "aiQuality" },
+  { to: "/master-admin/incidents", key: "incidents" },
+  { to: "/master-admin/support", key: "support" },
   { to: "/master-admin/auth-activity", key: "auth" },
   { to: "/master-admin/audit", key: "audit" },
 ];

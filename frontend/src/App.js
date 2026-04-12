@@ -12,6 +12,13 @@ import { MasterAdminAuthActivityPage } from "@/pages/MasterAdminAuthActivityPage
 import { MasterAdminAuditPage } from "@/pages/MasterAdminAuditPage";
 import { MasterAdminWorkspacesPage } from "@/pages/MasterAdminWorkspacesPage";
 import { MasterAdminWorkspaceDetailPage } from "@/pages/MasterAdminWorkspaceDetailPage";
+import { MasterAdminVideosPage } from "@/pages/MasterAdminVideosPage";
+import { MasterAdminVideoDetailPage } from "@/pages/MasterAdminVideoDetailPage";
+import { MasterAdminStoragePage } from "@/pages/MasterAdminStoragePage";
+import { MasterAdminDependenciesPage } from "@/pages/MasterAdminDependenciesPage";
+import { MasterAdminAIQualityPage } from "@/pages/MasterAdminAIQualityPage";
+import { MasterAdminIncidentsPage } from "@/pages/MasterAdminIncidentsPage";
+import { MasterAdminSupportPage } from "@/pages/MasterAdminSupportPage";
 import { TeachersPage } from "@/pages/TeachersPage";
 import { VideosPage } from "@/pages/VideosPage";
 import { AccessManagementPage } from "@/pages/AccessManagementPage";
@@ -87,6 +94,62 @@ function App() {
           element={
             <ProtectedRoute superAdminOnly>
               <MasterAdminWorkspaceDetailPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/master-admin/videos"
+          element={
+            <ProtectedRoute superAdminOnly>
+              <MasterAdminVideosPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/master-admin/videos/:videoId"
+          element={
+            <ProtectedRoute superAdminOnly>
+              <MasterAdminVideoDetailPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/master-admin/storage"
+          element={
+            <ProtectedRoute superAdminOnly>
+              <MasterAdminStoragePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/master-admin/dependencies"
+          element={
+            <ProtectedRoute superAdminOnly>
+              <MasterAdminDependenciesPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/master-admin/ai-quality"
+          element={
+            <ProtectedRoute superAdminOnly>
+              <MasterAdminAIQualityPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/master-admin/incidents"
+          element={
+            <ProtectedRoute superAdminOnly>
+              <MasterAdminIncidentsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/master-admin/support"
+          element={
+            <ProtectedRoute superAdminOnly>
+              <MasterAdminSupportPage />
             </ProtectedRoute>
           }
         />

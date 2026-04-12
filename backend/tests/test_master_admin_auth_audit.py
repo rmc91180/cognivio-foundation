@@ -45,7 +45,7 @@ class _Collection:
         self.docs.append(dict(payload))
         return types.SimpleNamespace(inserted_id=payload.get("id"))
 
-    async def update_one(self, query, update):
+    async def update_one(self, query, update, upsert=False):
         updated = 0
         for index, doc in enumerate(self.docs):
             if self._matches(doc, query):
@@ -55,7 +55,24 @@ class _Collection:
                 self.docs[index] = next_doc
                 updated += 1
                 break
+        if not updated and upsert:
+            payload = dict(query)
+            for key, value in (update.get("$set") or {}).items():
+                payload[key] = value
+            self.docs.append(payload)
+            updated = 1
         return _UpdateResult(updated)
+
+    async def update_many(self, query, update):
+        updated = 0
+        for index, doc in enumerate(self.docs):
+            if self._matches(doc, query):
+                next_doc = dict(doc)
+                for key, value in (update.get("$set") or {}).items():
+                    next_doc[key] = value
+                self.docs[index] = next_doc
+                updated += 1
+        return types.SimpleNamespace(modified_count=updated)
 
     @staticmethod
     def _project(doc, projection):
@@ -111,12 +128,19 @@ def fake_db(monkeypatch):
         assessments=_Collection([]),
         auth_event_log=_Collection([]),
         master_admin_audit_events=_Collection([]),
+        user_sessions=_Collection([]),
+        processing_incidents=_Collection([]),
+        assessment_report_feedback=_Collection([]),
+        admin_assessment_overrides=_Collection([]),
+        video_processing_jobs=_Collection([]),
+        video_privacy_jobs=_Collection([]),
+        video_transcode_jobs=_Collection([]),
     )
     monkeypatch.setattr(server, "db", db)
     monkeypatch.setattr(workspace_service, "enrich_user_with_workspace_mode", lambda user_doc: asyncio.sleep(0, result=user_doc))
     monkeypatch.setattr(server, "_send_access_approved_confirmation", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(server, "_send_access_denied_confirmation", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(server, "create_token", lambda subject: f"token-{subject}")
+    monkeypatch.setattr(server, "create_token", lambda subject, **kwargs: f"token-{subject}")
     return db
 
 
@@ -143,6 +167,7 @@ def test_login_writes_success_auth_event(monkeypatch, fake_db):
     )
 
     assert result.token == "token-u1"
+    assert len(fake_db.user_sessions.docs) == 1
     assert any(
         event["event_type"] == "login_success"
         and event["email"] == "teacher@example.com"
