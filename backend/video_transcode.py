@@ -20,12 +20,17 @@ def transcode_video_asset(
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    scale_filter = f"scale='min(iw,{max_height}*16/9)':min(ih,{max_height}):force_original_aspect_ratio=decrease"
+    max_width = int(max_height * 16 / 9)
+    scale_filter = f"scale={max_width}:{max_height}:force_original_aspect_ratio=decrease"
     command = [
         ffmpeg_path,
         "-y",
         "-i",
         str(input_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
         "-vf",
         scale_filter,
         "-c:v",
@@ -34,6 +39,8 @@ def transcode_video_asset(
         str(preset),
         "-crf",
         str(crf),
+        "-pix_fmt",
+        "yuv420p",
         "-c:a",
         "aac",
         "-b:a",

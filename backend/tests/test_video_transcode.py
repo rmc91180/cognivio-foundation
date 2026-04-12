@@ -55,6 +55,9 @@ def test_transcode_video_asset_runs_ffmpeg_and_returns_metadata(monkeypatch, tmp
         "preset": "fast",
         "audio_bitrate": "96k",
     }
+    assert recorded["command"][4:8] == ["-map", "0:v:0", "-map", "0:a:0?"]
+    assert "-pix_fmt" in recorded["command"]
+    assert "yuv420p" in recorded["command"]
     assert recorded["command"][-1] == str(output_path)
     assert "-movflags" in recorded["command"]
     assert "+faststart" in recorded["command"]
