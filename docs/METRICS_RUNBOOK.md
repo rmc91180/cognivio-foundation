@@ -30,6 +30,36 @@ Unhealthy:
 - endpoint unavailable
 - endpoint returns empty or truncated payload
 
+### Master Admin command center
+
+Check:
+- `GET /api/master-admin/overview`
+
+Healthy:
+- response `200`
+- cards, alerts, dependency summary, and queue summary all return
+
+Unhealthy:
+- endpoint unavailable
+- summary sections missing
+- counts obviously contradict live platform state
+
+### Master Admin workspaces
+
+Check:
+- `GET /api/master-admin/workspaces`
+- `GET /api/master-admin/workspaces/{owner_user_id}`
+
+Healthy:
+- response `200`
+- workspace rows include health state, activity state, and pilot state
+- detail view includes teacher roster, linkage state, and recent failures
+
+Unhealthy:
+- workspaces missing despite active admin-owned teachers
+- detail view cannot load known workspaces
+- linkage and privacy counts are obviously stale
+
 ### Internal admin summary
 
 Check:
@@ -82,6 +112,23 @@ Immediate action:
 - identify whether backlog is `video`, `privacy`, or `maintenance`
 - inspect latest failures
 - confirm worker loops are still running
+
+### Workspace health drift
+
+Symptoms:
+- multiple workspaces show `attention` or `blocked`
+- privacy-gap counts are climbing
+- unlinked-teacher-login counts are appearing
+
+Check:
+1. `/api/master-admin/workspaces`
+2. one affected workspace detail
+3. linked teacher users and recent upload/processing records
+
+Immediate action:
+- confirm whether the issue is onboarding, privacy setup, or pipeline failure
+- use the workspace detail page to identify which teachers are affected
+- route the issue to product support or platform remediation based on cause
 
 ### Dependency health unhealthy
 

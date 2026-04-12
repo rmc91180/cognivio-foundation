@@ -94,6 +94,8 @@ export const masterAdminApi = {
   overview: () => api.get("/api/master-admin/overview"),
   users: (params = {}) => api.get("/api/master-admin/users", { params }),
   userDetail: (userId) => api.get(`/api/master-admin/users/${userId}`),
+  workspaces: (params = {}) => api.get("/api/master-admin/workspaces", { params }),
+  workspaceDetail: (ownerUserId) => api.get(`/api/master-admin/workspaces/${ownerUserId}`),
   authEvents: (params = {}) => api.get("/api/master-admin/auth-events", { params }),
   auditEvents: (params = {}) => api.get("/api/master-admin/audit-events", { params }),
   approveUser: (userId, payload = {}) => api.post(`/api/master-admin/users/${userId}/approve`, payload),

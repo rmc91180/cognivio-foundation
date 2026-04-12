@@ -199,6 +199,216 @@ def _to_access_user_record(user_doc: dict) -> "AccessUserRecord":
     )
 
 
+def _parse_master_admin_iso(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _workspace_activity_state(last_activity_at: Optional[str]) -> str:
+    dt = _parse_master_admin_iso(last_activity_at)
+    if not dt:
+        return "inactive"
+    now = datetime.now(timezone.utc)
+    age = now - dt.astimezone(timezone.utc)
+    if age <= timedelta(days=14):
+        return "active"
+    return "stale"
+
+
+def _workspace_health_state(
+    *,
+    failure_count: int,
+    privacy_gap_count: int,
+    unlinked_user_count: int,
+    pending_teacher_users: int,
+    activity_state: str,
+) -> str:
+    if failure_count > 0:
+        return "blocked"
+    if privacy_gap_count > 0 or unlinked_user_count > 0 or pending_teacher_users > 0:
+        return "attention"
+    if activity_state != "active":
+        return "stale"
+    return "healthy"
+
+
+def _workspace_pilot_state(*, teacher_count: int, upload_count: int, assessment_count: int) -> str:
+    if upload_count > 0 or assessment_count > 0:
+        return "live"
+    if teacher_count > 0:
+        return "configured"
+    return "setup_needed"
+
+
+def _workspace_issue_summary(
+    *,
+    failure_count: int,
+    privacy_gap_count: int,
+    unlinked_user_count: int,
+    pending_teacher_users: int,
+    activity_state: str,
+) -> Optional[str]:
+    issues: List[str] = []
+    if failure_count:
+        issues.append(f"{failure_count} pipeline issue(s)")
+    if privacy_gap_count:
+        issues.append(f"{privacy_gap_count} missing privacy profile(s)")
+    if unlinked_user_count:
+        issues.append(f"{unlinked_user_count} unlinked teacher login(s)")
+    if pending_teacher_users:
+        issues.append(f"{pending_teacher_users} pending teacher access request(s)")
+    if not issues and activity_state != "active":
+        issues.append("No recent workspace activity")
+    return ", ".join(issues[:3]) if issues else None
+
+
+async def _build_master_admin_workspace_records() -> List["MasterAdminWorkspaceRecord"]:
+    from app.services.workspace_service import resolve_workspace_mode
+
+    admin_docs = await db.users.find(
+        {"role": {"$in": ["admin", "principal"]}, "approval_status": "approved", "is_active": {"$ne": False}},
+        {"_id": 0, "password": 0},
+    ).to_list(2000)
+    teacher_docs = await db.teachers.find({}, {"_id": 0}).to_list(5000)
+    user_docs = await db.users.find({}, {"_id": 0, "password": 0}).to_list(5000)
+    video_docs = await db.videos.find(
+        {},
+        {"_id": 0, "id": 1, "teacher_id": 1, "created_at": 1, "status_updated_at": 1, "transcode_status": 1, "privacy_status": 1, "analysis_status": 1},
+    ).to_list(10000)
+    assessment_docs = await db.assessments.find({}, {"_id": 0, "teacher_id": 1, "created_at": 1}).to_list(10000)
+    privacy_docs = await db.teacher_face_profiles.find(
+        {"status": "active"},
+        {"_id": 0, "teacher_id": 1, "updated_at": 1, "created_at": 1},
+    ).to_list(5000)
+    memory_docs = await db.organization_memory.find({}, {"_id": 0, "owner_id": 1, "updated_at": 1}).to_list(5000)
+
+    teachers_by_owner: Dict[str, List[dict]] = {}
+    for teacher in teacher_docs:
+        owner_id = teacher.get("created_by")
+        if not owner_id:
+            continue
+        teachers_by_owner.setdefault(owner_id, []).append(teacher)
+
+    owner_docs: Dict[str, dict] = {doc["id"]: doc for doc in admin_docs if doc.get("id")}
+    owner_ids = set(owner_docs.keys()) | set(teachers_by_owner.keys())
+    workspace_records: List[MasterAdminWorkspaceRecord] = []
+
+    for owner_id in sorted(owner_ids):
+        owner_doc = owner_docs.get(owner_id) or {
+            "id": owner_id,
+            "email": None,
+            "name": "Unknown workspace owner",
+            "role": "admin",
+            "approval_status": "approved",
+            "is_active": True,
+        }
+        teacher_list = teachers_by_owner.get(owner_id, [])
+        teacher_ids = {teacher.get("id") for teacher in teacher_list if teacher.get("id")}
+        teacher_emails = {(teacher.get("email") or "").strip().lower() for teacher in teacher_list if teacher.get("email")}
+        matching_teacher_users = [
+            user for user in user_docs
+            if _get_user_role(user) == "teacher"
+            and (
+                (user.get("teacher_id") in teacher_ids if user.get("teacher_id") else False)
+                or ((user.get("email") or "").strip().lower() in teacher_emails if teacher_emails else False)
+            )
+        ]
+        approved_teacher_users = sum(
+            1 for user in matching_teacher_users
+            if _get_user_approval_status(user) == "approved" and _is_user_access_active(user)
+        )
+        pending_teacher_users = sum(1 for user in matching_teacher_users if _get_user_approval_status(user) == "pending")
+        unlinked_user_count = sum(
+            1 for user in matching_teacher_users
+            if not user.get("teacher_id") or user.get("teacher_id") not in teacher_ids
+        )
+        school_count = len({teacher.get("school_id") for teacher in teacher_list if teacher.get("school_id")})
+        workspace_videos = [video for video in video_docs if video.get("teacher_id") in teacher_ids]
+        workspace_assessments = [item for item in assessment_docs if item.get("teacher_id") in teacher_ids]
+        privacy_teacher_ids = {item.get("teacher_id") for item in privacy_docs if item.get("teacher_id") in teacher_ids}
+        privacy_gap_count = sum(1 for teacher_id in teacher_ids if teacher_id not in privacy_teacher_ids)
+        failure_count = sum(
+            1
+            for video in workspace_videos
+            if video.get("transcode_status") == "failed"
+            or video.get("privacy_status") in {PrivacyProcessingStatus.FAILED.value, PrivacyProcessingStatus.REVIEW_REQUIRED.value}
+            or video.get("analysis_status") == VideoProcessingStatus.FAILED.value
+        )
+        memory_entry_count = sum(1 for item in memory_docs if item.get("owner_id") == owner_id)
+        activity_candidates: List[str] = []
+        for source in teacher_list:
+            if source.get("created_at"):
+                activity_candidates.append(source.get("created_at"))
+            if source.get("next_coaching_conference"):
+                activity_candidates.append(source.get("next_coaching_conference"))
+        for source in matching_teacher_users:
+            if source.get("last_login_at"):
+                activity_candidates.append(source.get("last_login_at"))
+            if source.get("created_at"):
+                activity_candidates.append(source.get("created_at"))
+        for source in workspace_videos:
+            if source.get("status_updated_at"):
+                activity_candidates.append(source.get("status_updated_at"))
+            if source.get("created_at"):
+                activity_candidates.append(source.get("created_at"))
+        for source in workspace_assessments:
+            if source.get("created_at"):
+                activity_candidates.append(source.get("created_at"))
+        for source in memory_docs:
+            if source.get("owner_id") == owner_id and source.get("updated_at"):
+                activity_candidates.append(source.get("updated_at"))
+        last_activity_at = max(activity_candidates, default=None)
+        mode_snapshot = await resolve_workspace_mode(owner_doc)
+        activity_state = _workspace_activity_state(last_activity_at)
+        pilot_state = _workspace_pilot_state(
+            teacher_count=len(teacher_list),
+            upload_count=len(workspace_videos),
+            assessment_count=len(workspace_assessments),
+        )
+        health_state = _workspace_health_state(
+            failure_count=failure_count,
+            privacy_gap_count=privacy_gap_count,
+            unlinked_user_count=unlinked_user_count,
+            pending_teacher_users=pending_teacher_users,
+            activity_state=activity_state,
+        )
+        workspace_records.append(
+            MasterAdminWorkspaceRecord(
+                id=owner_id,
+                owner_user_id=owner_id,
+                owner_name=owner_doc.get("name"),
+                owner_email=owner_doc.get("email"),
+                workspace_mode=mode_snapshot.get("effective_mode"),
+                teacher_count=len(teacher_list),
+                approved_teacher_users=approved_teacher_users,
+                pending_teacher_users=pending_teacher_users,
+                school_count=school_count,
+                upload_count=len(workspace_videos),
+                assessment_count=len(workspace_assessments),
+                failure_count=failure_count,
+                privacy_gap_count=privacy_gap_count,
+                unlinked_user_count=unlinked_user_count,
+                memory_entry_count=memory_entry_count,
+                last_activity_at=last_activity_at,
+                health_state=health_state,
+                activity_state=activity_state,
+                pilot_state=pilot_state,
+                issue_summary=_workspace_issue_summary(
+                    failure_count=failure_count,
+                    privacy_gap_count=privacy_gap_count,
+                    unlinked_user_count=unlinked_user_count,
+                    pending_teacher_users=pending_teacher_users,
+                    activity_state=activity_state,
+                ),
+            )
+        )
+    return workspace_records
+
+
 async def _approve_user_access(
     target: dict,
     *,
@@ -2856,6 +3066,44 @@ class MasterAdminUserListResponse(BaseModel):
 class MasterAdminUserDetailResponse(BaseModel):
     generated_at: str
     user: MasterAdminUserRecord
+    related: Dict[str, Any]
+
+
+class MasterAdminWorkspaceRecord(BaseModel):
+    id: str
+    owner_user_id: str
+    owner_name: Optional[str] = None
+    owner_email: Optional[str] = None
+    workspace_mode: Optional[str] = None
+    teacher_count: int = 0
+    approved_teacher_users: int = 0
+    pending_teacher_users: int = 0
+    school_count: int = 0
+    upload_count: int = 0
+    assessment_count: int = 0
+    failure_count: int = 0
+    privacy_gap_count: int = 0
+    unlinked_user_count: int = 0
+    memory_entry_count: int = 0
+    last_activity_at: Optional[str] = None
+    health_state: str = "healthy"
+    activity_state: str = "inactive"
+    pilot_state: str = "setup_needed"
+    issue_summary: Optional[str] = None
+
+
+class MasterAdminWorkspaceListResponse(BaseModel):
+    generated_at: str
+    total: int
+    limit: int
+    offset: int
+    items: List[MasterAdminWorkspaceRecord]
+    summary: Dict[str, int]
+
+
+class MasterAdminWorkspaceDetailResponse(BaseModel):
+    generated_at: str
+    workspace: MasterAdminWorkspaceRecord
     related: Dict[str, Any]
 
 
@@ -11903,7 +12151,7 @@ async def get_master_admin_bootstrap(current_user: dict = Depends(get_current_us
                 "id": "workspaces",
                 "title": "Organizations and Workspaces",
                 "description": "Cross-workspace visibility into adoption, blockages, and support needs.",
-                "status": "planned",
+                "status": "active",
             },
             {
                 "id": "videos-processing",
@@ -12400,6 +12648,143 @@ async def get_master_admin_audit_events(
         limit=safe_limit,
         offset=safe_offset,
         items=sliced,
+    )
+
+
+@api_router.get("/master-admin/workspaces", response_model=MasterAdminWorkspaceListResponse)
+async def get_master_admin_workspaces(
+    q: Optional[str] = None,
+    health_state: Optional[str] = None,
+    activity_state: Optional[str] = None,
+    pilot_state: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_master_admin_user(current_user)
+    docs = await _build_master_admin_workspace_records()
+    normalized_q = str(q or "").strip().lower()
+    normalized_health = str(health_state or "").strip().lower()
+    normalized_activity = str(activity_state or "").strip().lower()
+    normalized_pilot = str(pilot_state or "").strip().lower()
+    filtered: List[MasterAdminWorkspaceRecord] = []
+    for item in docs:
+        if normalized_q:
+            haystack = " ".join(
+                [
+                    str(item.owner_name or "").lower(),
+                    str(item.owner_email or "").lower(),
+                    str(item.issue_summary or "").lower(),
+                    str(item.workspace_mode or "").lower(),
+                ]
+            )
+            if normalized_q not in haystack:
+                continue
+        if normalized_health and str(item.health_state).lower() != normalized_health:
+            continue
+        if normalized_activity and str(item.activity_state).lower() != normalized_activity:
+            continue
+        if normalized_pilot and str(item.pilot_state).lower() != normalized_pilot:
+            continue
+        filtered.append(item)
+    filtered.sort(key=lambda item: (item.health_state != "blocked", item.health_state != "attention", item.last_activity_at or ""), reverse=False)
+    safe_limit = max(1, min(limit, 200))
+    safe_offset = max(0, offset)
+    sliced = filtered[safe_offset : safe_offset + safe_limit]
+    summary = {
+        "healthy": sum(1 for item in filtered if item.health_state == "healthy"),
+        "attention": sum(1 for item in filtered if item.health_state == "attention"),
+        "blocked": sum(1 for item in filtered if item.health_state == "blocked"),
+        "active": sum(1 for item in filtered if item.activity_state == "active"),
+        "stale": sum(1 for item in filtered if item.activity_state == "stale"),
+        "live": sum(1 for item in filtered if item.pilot_state == "live"),
+        "setup_needed": sum(1 for item in filtered if item.pilot_state == "setup_needed"),
+    }
+    return MasterAdminWorkspaceListResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        total=len(filtered),
+        limit=safe_limit,
+        offset=safe_offset,
+        items=sliced,
+        summary=summary,
+    )
+
+
+@api_router.get("/master-admin/workspaces/{owner_user_id}", response_model=MasterAdminWorkspaceDetailResponse)
+async def get_master_admin_workspace_detail(
+    owner_user_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_master_admin_user(current_user)
+    workspace = next((item for item in await _build_master_admin_workspace_records() if item.owner_user_id == owner_user_id), None)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    teachers = await db.teachers.find(
+        {"created_by": owner_user_id},
+        {"_id": 0, "id": 1, "name": 1, "email": 1, "subject": 1, "school_id": 1, "created_at": 1, "next_coaching_conference": 1},
+    ).to_list(500)
+    teacher_ids = {item.get("id") for item in teachers if item.get("id")}
+    teacher_emails = {(item.get("email") or "").strip().lower() for item in teachers if item.get("email")}
+    users = await db.users.find({}, {"_id": 0, "password": 0}).to_list(2000)
+    linked_users = [
+        user for user in users
+        if _get_user_role(user) == "teacher"
+        and (
+            (user.get("teacher_id") in teacher_ids if user.get("teacher_id") else False)
+            or ((user.get("email") or "").strip().lower() in teacher_emails if teacher_emails else False)
+        )
+    ]
+    unlinked_users = [
+        {
+            "id": user.get("id"),
+            "email": user.get("email"),
+            "name": user.get("name"),
+            "approval_status": _get_user_approval_status(user),
+            "last_login_at": user.get("last_login_at"),
+        }
+        for user in linked_users
+        if not user.get("teacher_id") or user.get("teacher_id") not in teacher_ids
+    ]
+    owner_doc = await db.users.find_one({"id": owner_user_id}, {"_id": 0, "password": 0})
+    privacy_profiles = await db.teacher_face_profiles.find(
+        {"teacher_id": {"$in": list(teacher_ids)}, "status": "active"},
+        {"_id": 0, "teacher_id": 1, "updated_at": 1},
+    ).to_list(500)
+    privacy_by_teacher = {item.get("teacher_id"): item for item in privacy_profiles if item.get("teacher_id")}
+    teachers_with_status = [
+        {
+            **teacher,
+            "privacy_ready": teacher.get("id") in privacy_by_teacher,
+            "privacy_updated_at": (privacy_by_teacher.get(teacher.get("id")) or {}).get("updated_at"),
+        }
+        for teacher in teachers
+    ]
+    recent_failures = await db.videos.find(
+        {
+            "teacher_id": {"$in": list(teacher_ids)},
+            "$or": [
+                {"transcode_status": "failed"},
+                {"privacy_status": {"$in": [PrivacyProcessingStatus.FAILED.value, PrivacyProcessingStatus.REVIEW_REQUIRED.value]}},
+                {"analysis_status": VideoProcessingStatus.FAILED.value},
+            ],
+        },
+        {"_id": 0, "id": 1, "teacher_id": 1, "filename": 1, "transcode_status": 1, "privacy_status": 1, "analysis_status": 1, "status_updated_at": 1},
+    ).sort("status_updated_at", -1).to_list(10)
+    memory_entries = await db.organization_memory.find(
+        {"owner_id": owner_user_id},
+        {"_id": 0, "id": 1, "scope_type": 1, "scope_id": 1, "memory_type": 1, "updated_at": 1},
+    ).sort("updated_at", -1).to_list(20)
+    return MasterAdminWorkspaceDetailResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        workspace=workspace,
+        related={
+            "owner": owner_doc,
+            "teachers": teachers_with_status,
+            "unlinked_users": unlinked_users,
+            "recent_failures": recent_failures,
+            "memory_entries": memory_entries,
+        },
     )
 
 

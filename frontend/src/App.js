@@ -10,6 +10,8 @@ import { MasterAdminUsersPage } from "@/pages/MasterAdminUsersPage";
 import { MasterAdminUserDetailPage } from "@/pages/MasterAdminUserDetailPage";
 import { MasterAdminAuthActivityPage } from "@/pages/MasterAdminAuthActivityPage";
 import { MasterAdminAuditPage } from "@/pages/MasterAdminAuditPage";
+import { MasterAdminWorkspacesPage } from "@/pages/MasterAdminWorkspacesPage";
+import { MasterAdminWorkspaceDetailPage } from "@/pages/MasterAdminWorkspaceDetailPage";
 import { TeachersPage } from "@/pages/TeachersPage";
 import { VideosPage } from "@/pages/VideosPage";
 import { AccessManagementPage } from "@/pages/AccessManagementPage";
@@ -69,6 +71,22 @@ function App() {
           element={
             <ProtectedRoute superAdminOnly>
               <MasterAdminUserDetailPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/master-admin/workspaces"
+          element={
+            <ProtectedRoute superAdminOnly>
+              <MasterAdminWorkspacesPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/master-admin/workspaces/:ownerUserId"
+          element={
+            <ProtectedRoute superAdminOnly>
+              <MasterAdminWorkspaceDetailPage />
             </ProtectedRoute>
           }
         />

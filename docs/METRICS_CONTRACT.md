@@ -18,6 +18,62 @@ Prometheus-compatible metrics pipeline.
 - Metrics are emitted in Prometheus text format.
 - The current in-memory observability module remains available for lightweight
   admin diagnostics and recent-failure summaries.
+- The Master Admin backend also exposes derived operational summaries through
+  internal JSON endpoints. These are not raw Prometheus metrics, but they are
+  stable product telemetry contracts that the internal platform backend can
+  build against.
+
+## Master Admin Derived Telemetry Contract
+
+These contracts are derived from database state, queues, and runtime health for
+internal-only platform oversight:
+
+### `/api/master-admin/overview`
+
+- Global user counts by role and approval state
+- Queue depth summary
+- Dependency health summary
+- Pending-approval preview
+- Pipeline-blocker preview
+
+### `/api/master-admin/auth-events`
+
+- Durable auth event history
+- Successful and failed login traces
+- Approval and revocation traces
+- Request metadata such as:
+  - IP address
+  - user agent
+  - result
+  - reason
+
+### `/api/master-admin/audit-events`
+
+- Sensitive Master Admin action log
+- Actor, target, action, and reason
+- Structured metadata for safe internal review
+
+### `/api/master-admin/workspaces`
+
+- Admin-owned workspace rollups
+- Teacher counts
+- Upload and assessment counts
+- Failure counts
+- Privacy-gap counts
+- Linkage-integrity counts
+- Last-activity timestamps
+- Derived states:
+  - health state
+  - activity state
+  - pilot state
+
+### `/api/master-admin/workspaces/{owner_user_id}`
+
+- One workspace's owner summary
+- Teacher roster preview
+- Unlinked teacher-login preview
+- Recent pipeline failures
+- Workspace memory activity
 
 ## Metric Catalog
 
