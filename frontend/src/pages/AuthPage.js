@@ -41,7 +41,7 @@ export function AuthPage() {
       email: form.email,
       password: form.password,
       name: form.name || form.email,
-      role,
+      ...(!isDemo ? { role } : {}),
     };
 
     if (mode === "signup" && approvalRequired) {
@@ -63,7 +63,7 @@ export function AuthPage() {
         : {
             email: form.email,
             password: form.password,
-            role,
+            ...(!isDemo ? { role } : {}),
           };
 
     const fn = mode === "signup" ? register : login;

@@ -1,8 +1,7 @@
 import React from "react";
 import { useQuery } from "@tanstack/react-query";
-import { LayoutShell } from "@/components/LayoutShell";
-import { EmptyState, ErrorState, LoadingState, PageHeader, Panel } from "@/components/ui";
-import { MasterAdminSectionNav } from "@/components/master-admin/MasterAdminSectionNav";
+import { EmptyState, ErrorState, LoadingState, Panel } from "@/components/ui";
+import { MasterAdminMetricCard, MasterAdminMetricGrid, MasterAdminPageScaffold } from "@/components/master-admin/MasterAdminPageScaffold";
 import { masterAdminApi } from "@/lib/api";
 
 export function MasterAdminAIQualityPage() {
@@ -12,43 +11,34 @@ export function MasterAdminAIQualityPage() {
   });
 
   return (
-    <LayoutShell>
-      <div className="space-y-6 p-6">
-        <PageHeader
-          title="Master Admin AI quality"
-          description="Global AI quality, specialist activity, and failure clustering across the platform."
-          meta="This is the platform-wide intelligence review layer."
-          actions={
-            <button
-              type="button"
-              onClick={() => refetch()}
-              disabled={isFetching}
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {isFetching ? "Refreshing..." : "Refresh"}
-            </button>
-          }
-        />
-        <MasterAdminSectionNav />
+    <MasterAdminPageScaffold
+      title="Master Admin AI quality"
+      description="Global AI quality, specialist activity, and failure clustering across the platform."
+      meta="This is the platform-wide intelligence review layer."
+      actions={
+        <button
+          type="button"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          className="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-sm text-white hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {isFetching ? "Refreshing..." : "Refresh"}
+        </button>
+      }
+      railNote="This is the internal quality lens for AI output. Use it to detect systemic drift, not to review one classroom case in isolation."
+    >
         {isLoading ? <LoadingState message="Loading AI quality..." /> : null}
         {isError ? <ErrorState title="Unable to load AI quality" message="Refresh and try again." /> : null}
         {!isLoading && !isError ? (
           <>
-            <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
-              {[
-                ["Feedback records", data?.metrics?.total_feedback ?? 0],
-                ["Useful feedback", data?.metrics?.useful_feedback ?? 0],
-                ["Not useful", data?.metrics?.not_useful_feedback ?? 0],
-                ["Useful rate", data?.metrics?.useful_feedback_rate ?? "—"],
-                ["Overrides", data?.metrics?.total_overrides ?? 0],
-                ["Active incidents", data?.metrics?.active_incidents ?? 0],
-              ].map(([label, value]) => (
-                <Panel key={label} className="space-y-1 bg-slate-50">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</div>
-                  <div className="text-2xl font-semibold text-slate-900">{value}</div>
-                </Panel>
-              ))}
-            </div>
+            <MasterAdminMetricGrid className="xl:grid-cols-6">
+              <MasterAdminMetricCard label="Feedback records" value={data?.metrics?.total_feedback ?? 0} />
+              <MasterAdminMetricCard label="Useful feedback" value={data?.metrics?.useful_feedback ?? 0} tone="success" />
+              <MasterAdminMetricCard label="Not useful" value={data?.metrics?.not_useful_feedback ?? 0} tone="warning" />
+              <MasterAdminMetricCard label="Useful rate" value={data?.metrics?.useful_feedback_rate ?? "—"} />
+              <MasterAdminMetricCard label="Overrides" value={data?.metrics?.total_overrides ?? 0} />
+              <MasterAdminMetricCard label="Active incidents" value={data?.metrics?.active_incidents ?? 0} tone="danger" />
+            </MasterAdminMetricGrid>
             <div className="grid gap-6 xl:grid-cols-2">
               <Panel className="space-y-4">
                 <div>
@@ -115,7 +105,6 @@ export function MasterAdminAIQualityPage() {
             </Panel>
           </>
         ) : null}
-      </div>
-    </LayoutShell>
+    </MasterAdminPageScaffold>
   );
 }

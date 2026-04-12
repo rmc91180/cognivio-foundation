@@ -1,7 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { LayoutShell } from "@/components/LayoutShell";
 import {
   Badge,
   Button,
@@ -10,10 +9,9 @@ import {
   Field,
   Input,
   LoadingState,
-  PageHeader,
   Panel,
 } from "@/components/ui";
-import { MasterAdminSectionNav } from "@/components/master-admin/MasterAdminSectionNav";
+import { MasterAdminPageScaffold } from "@/components/master-admin/MasterAdminPageScaffold";
 import { masterAdminApi } from "@/lib/api";
 
 function formatTimestamp(value, locale) {
@@ -44,20 +42,17 @@ export function MasterAdminAuditPage() {
   });
 
   return (
-    <LayoutShell>
-      <div className="space-y-6 p-6">
-        <PageHeader
-          title={t("masterAdminAudit.title")}
-          description={t("masterAdminAudit.description")}
-          meta={t("masterAdminAudit.meta")}
-          actions={
-            <Button type="button" variant="secondary" onClick={() => refetch()} disabled={isFetching}>
-              {isFetching ? t("masterAdminAudit.refreshing") : t("masterAdminAudit.refresh")}
-            </Button>
-          }
-        />
-
-        <MasterAdminSectionNav />
+    <MasterAdminPageScaffold
+      title={t("masterAdminAudit.title")}
+      description={t("masterAdminAudit.description")}
+      meta={t("masterAdminAudit.meta")}
+      actions={
+        <Button type="button" variant="secondary" onClick={() => refetch()} disabled={isFetching}>
+          {isFetching ? t("masterAdminAudit.refreshing") : t("masterAdminAudit.refresh")}
+        </Button>
+      }
+      railNote="Audit is the system of record for operator behavior. If a support or access action might be questioned later, the reason text here matters."
+    >
 
         <Panel className="space-y-4">
           <div className="grid gap-4 lg:grid-cols-[1.4fr,0.9fr,0.9fr]">
@@ -138,8 +133,6 @@ export function MasterAdminAuditPage() {
             )}
           </Panel>
         ) : null}
-      </div>
-    </LayoutShell>
+    </MasterAdminPageScaffold>
   );
 }
-

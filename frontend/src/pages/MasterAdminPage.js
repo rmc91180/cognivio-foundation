@@ -2,9 +2,8 @@ import React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { LayoutShell } from "@/components/LayoutShell";
-import { Badge, ErrorState, LoadingState, PageHeader, Panel } from "@/components/ui";
-import { MasterAdminSectionNav } from "@/components/master-admin/MasterAdminSectionNav";
+import { Badge, ErrorState, LoadingState, Panel } from "@/components/ui";
+import { MasterAdminMetricCard, MasterAdminMetricGrid, MasterAdminPageScaffold } from "@/components/master-admin/MasterAdminPageScaffold";
 import { masterAdminApi } from "@/lib/api";
 
 function SectionCard({ section, t }) {
@@ -45,30 +44,23 @@ export function MasterAdminPage() {
   });
 
   return (
-    <LayoutShell>
-      <div className="space-y-6 p-6">
-        <PageHeader
-          title={t("masterAdmin.title")}
-          description={t("masterAdmin.description")}
-          meta={t("masterAdmin.meta", { email: bootstrapData?.user?.email || "—" })}
-          actions={
-            <button
-              type="button"
-              onClick={() => refetch()}
-              disabled={isFetching}
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {isFetching ? t("masterAdmin.refreshing") : t("masterAdmin.refresh")}
-            </button>
-          }
-        />
-
-        <MasterAdminSectionNav />
-
-        <Panel className="space-y-3 border-amber-200 bg-amber-50/80">
-          <div className="text-sm font-semibold text-slate-900">{t("masterAdmin.internalOnlyTitle")}</div>
-          <div className="text-sm text-slate-700">{t("masterAdmin.internalOnlyDescription")}</div>
-        </Panel>
+    <MasterAdminPageScaffold
+      title={t("masterAdmin.title")}
+      description={t("masterAdmin.description")}
+      meta={t("masterAdmin.meta", { email: bootstrapData?.user?.email || "—" })}
+      actions={
+        <button
+          type="button"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          className="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-sm text-white hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {isFetching ? t("masterAdmin.refreshing") : t("masterAdmin.refresh")}
+        </button>
+      }
+      railNoteTitle={t("masterAdmin.internalOnlyTitle")}
+      railNote={t("masterAdmin.internalOnlyDescription")}
+    >
 
         {isLoading ? <LoadingState message={t("masterAdmin.loading")} /> : null}
         {isError ? (
@@ -80,26 +72,17 @@ export function MasterAdminPage() {
 
         {!isLoading && !isError ? (
           <>
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <MasterAdminMetricGrid>
               {(data?.cards || []).map((card) => (
-                <Panel key={card.id} className="space-y-2">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    {card.title}
-                  </div>
-                  <div className="text-3xl font-semibold text-slate-900">{card.value}</div>
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="text-sm text-slate-500">{card.hint}</div>
-                    {card.tone !== "neutral" ? (
-                      <Badge variant={card.tone === "danger" ? "danger" : "warning"}>
-                        {card.tone === "danger"
-                          ? t("masterAdmin.cardDanger")
-                          : t("masterAdmin.cardAttention")}
-                      </Badge>
-                    ) : null}
-                  </div>
-                </Panel>
+                <MasterAdminMetricCard
+                  key={card.id}
+                  label={card.title}
+                  value={card.value}
+                  hint={card.hint}
+                  tone={card.tone === "danger" ? "danger" : card.tone === "warning" ? "warning" : "neutral"}
+                />
               ))}
-            </div>
+            </MasterAdminMetricGrid>
 
             <div className="grid gap-6 xl:grid-cols-[1.2fr,0.8fr]">
               <Panel className="space-y-4">
@@ -281,7 +264,6 @@ export function MasterAdminPage() {
             </Panel>
           </>
         ) : null}
-      </div>
-    </LayoutShell>
+    </MasterAdminPageScaffold>
   );
 }

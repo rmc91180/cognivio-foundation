@@ -2,7 +2,6 @@ import React, { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { LayoutShell } from "@/components/LayoutShell";
 import {
   Badge,
   Button,
@@ -11,10 +10,9 @@ import {
   Field,
   Input,
   LoadingState,
-  PageHeader,
   Panel,
 } from "@/components/ui";
-import { MasterAdminSectionNav } from "@/components/master-admin/MasterAdminSectionNav";
+import { MasterAdminMetricCard, MasterAdminMetricGrid, MasterAdminPageScaffold } from "@/components/master-admin/MasterAdminPageScaffold";
 import { masterAdminApi } from "@/lib/api";
 
 function formatTimestamp(value) {
@@ -80,20 +78,17 @@ export function MasterAdminVideosPage() {
   };
 
   return (
-    <LayoutShell>
-      <div className="space-y-6 p-6">
-        <PageHeader
-          title="Master Admin videos"
-          description="Platform-wide processing registry for uploads, transcode, privacy, analysis, and playback."
-          meta="One place to find any video and understand its current pipeline state."
-          actions={
-            <Button type="button" variant="secondary" onClick={() => refetch()} disabled={isFetching}>
-              {isFetching ? "Refreshing..." : "Refresh"}
-            </Button>
-          }
-        />
-
-        <MasterAdminSectionNav />
+    <MasterAdminPageScaffold
+      title="Master Admin videos"
+      description="Platform-wide processing registry for uploads, transcode, privacy, analysis, and playback."
+      meta="One place to find any video and understand its current pipeline state."
+      actions={
+        <Button type="button" variant="secondary" onClick={() => refetch()} disabled={isFetching}>
+          {isFetching ? "Refreshing..." : "Refresh"}
+        </Button>
+      }
+      railNote="Start with incident state and latest error, then branch into retry actions only when the underlying asset and queue state make sense."
+    >
 
         <Panel className="space-y-4">
           <form className="grid gap-4 lg:grid-cols-[1.4fr,0.8fr,0.8fr,auto]" onSubmit={onSearchSubmit}>
@@ -131,20 +126,13 @@ export function MasterAdminVideosPage() {
             </div>
           </form>
 
-          <div className="grid gap-4 md:grid-cols-5">
-            {[
-              ["Total", data?.summary?.total ?? 0],
-              ["Active incidents", data?.summary?.active_incidents ?? 0],
-              ["Transcode failed", data?.summary?.transcode_failed ?? 0],
-              ["Privacy failed", data?.summary?.privacy_failed ?? 0],
-              ["Analysis failed", data?.summary?.analysis_failed ?? 0],
-            ].map(([label, value]) => (
-              <Panel key={label} className="space-y-1 bg-slate-50">
-                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</div>
-                <div className="text-2xl font-semibold text-slate-900">{value}</div>
-              </Panel>
-            ))}
-          </div>
+          <MasterAdminMetricGrid className="xl:grid-cols-5">
+            <MasterAdminMetricCard label="Total" value={data?.summary?.total ?? 0} />
+            <MasterAdminMetricCard label="Active incidents" value={data?.summary?.active_incidents ?? 0} tone="danger" />
+            <MasterAdminMetricCard label="Transcode failed" value={data?.summary?.transcode_failed ?? 0} tone="danger" />
+            <MasterAdminMetricCard label="Privacy failed" value={data?.summary?.privacy_failed ?? 0} tone="warning" />
+            <MasterAdminMetricCard label="Analysis failed" value={data?.summary?.analysis_failed ?? 0} tone="warning" />
+          </MasterAdminMetricGrid>
         </Panel>
 
         {isLoading ? <LoadingState message="Loading video registry..." /> : null}
@@ -238,7 +226,6 @@ export function MasterAdminVideosPage() {
             )}
           </Panel>
         ) : null}
-      </div>
-    </LayoutShell>
+    </MasterAdminPageScaffold>
   );
 }

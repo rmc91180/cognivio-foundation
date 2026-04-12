@@ -2,7 +2,6 @@ import React, { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { LayoutShell } from "@/components/LayoutShell";
 import {
   Badge,
   Button,
@@ -11,10 +10,9 @@ import {
   Field,
   Input,
   LoadingState,
-  PageHeader,
   Panel,
 } from "@/components/ui";
-import { MasterAdminSectionNav } from "@/components/master-admin/MasterAdminSectionNav";
+import { MasterAdminMetricCard, MasterAdminMetricGrid, MasterAdminPageScaffold } from "@/components/master-admin/MasterAdminPageScaffold";
 import { masterAdminApi } from "@/lib/api";
 
 function stateVariant(value) {
@@ -67,20 +65,17 @@ export function MasterAdminWorkspacesPage() {
   };
 
   return (
-    <LayoutShell>
-      <div className="space-y-6 p-6">
-        <PageHeader
-          title={t("masterAdminWorkspaces.title")}
-          description={t("masterAdminWorkspaces.description")}
-          meta={t("masterAdminWorkspaces.meta")}
-          actions={
-            <Button type="button" variant="secondary" onClick={() => refetch()} disabled={isFetching}>
-              {isFetching ? t("masterAdminWorkspaces.refreshing") : t("masterAdminWorkspaces.refresh")}
-            </Button>
-          }
-        />
-
-        <MasterAdminSectionNav />
+    <MasterAdminPageScaffold
+      title={t("masterAdminWorkspaces.title")}
+      description={t("masterAdminWorkspaces.description")}
+      meta={t("masterAdminWorkspaces.meta")}
+      actions={
+        <Button type="button" variant="secondary" onClick={() => refetch()} disabled={isFetching}>
+          {isFetching ? t("masterAdminWorkspaces.refreshing") : t("masterAdminWorkspaces.refresh")}
+        </Button>
+      }
+      railNote="Use workspaces to spot platform-wide configuration drift, stale pilots, and linkage issues before they show up as support tickets."
+    >
 
         <Panel className="space-y-4">
           <form className="grid gap-4 lg:grid-cols-[1.5fr,0.8fr,0.8fr,0.8fr,auto]" onSubmit={handleSearchSubmit}>
@@ -133,24 +128,12 @@ export function MasterAdminWorkspacesPage() {
             </div>
           </form>
 
-          <div className="grid gap-4 md:grid-cols-4">
-            <Panel className="space-y-1 bg-slate-50">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("masterAdminWorkspaces.total")}</div>
-              <div className="text-2xl font-semibold text-slate-900">{data?.total ?? 0}</div>
-            </Panel>
-            <Panel className="space-y-1 bg-slate-50">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("masterAdminWorkspaces.summaryBlocked")}</div>
-              <div className="text-2xl font-semibold text-slate-900">{data?.summary?.blocked ?? 0}</div>
-            </Panel>
-            <Panel className="space-y-1 bg-slate-50">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("masterAdminWorkspaces.summaryAttention")}</div>
-              <div className="text-2xl font-semibold text-slate-900">{data?.summary?.attention ?? 0}</div>
-            </Panel>
-            <Panel className="space-y-1 bg-slate-50">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("masterAdminWorkspaces.summaryLive")}</div>
-              <div className="text-2xl font-semibold text-slate-900">{data?.summary?.live ?? 0}</div>
-            </Panel>
-          </div>
+          <MasterAdminMetricGrid>
+            <MasterAdminMetricCard label={t("masterAdminWorkspaces.total")} value={data?.total ?? 0} />
+            <MasterAdminMetricCard label={t("masterAdminWorkspaces.summaryBlocked")} value={data?.summary?.blocked ?? 0} tone="danger" />
+            <MasterAdminMetricCard label={t("masterAdminWorkspaces.summaryAttention")} value={data?.summary?.attention ?? 0} tone="warning" />
+            <MasterAdminMetricCard label={t("masterAdminWorkspaces.summaryLive")} value={data?.summary?.live ?? 0} tone="success" />
+          </MasterAdminMetricGrid>
         </Panel>
 
         {isLoading ? <LoadingState message={t("masterAdminWorkspaces.loading")} /> : null}
@@ -231,7 +214,6 @@ export function MasterAdminWorkspacesPage() {
             )}
           </Panel>
         ) : null}
-      </div>
-    </LayoutShell>
+    </MasterAdminPageScaffold>
   );
 }

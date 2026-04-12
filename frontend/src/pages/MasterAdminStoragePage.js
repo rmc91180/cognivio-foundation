@@ -1,9 +1,8 @@
 import React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { LayoutShell } from "@/components/LayoutShell";
-import { EmptyState, ErrorState, LoadingState, PageHeader, Panel } from "@/components/ui";
-import { MasterAdminSectionNav } from "@/components/master-admin/MasterAdminSectionNav";
+import { EmptyState, ErrorState, LoadingState, Panel } from "@/components/ui";
+import { MasterAdminMetricCard, MasterAdminMetricGrid, MasterAdminPageScaffold } from "@/components/master-admin/MasterAdminPageScaffold";
 import { masterAdminApi } from "@/lib/api";
 
 function formatBytes(value) {
@@ -22,43 +21,34 @@ export function MasterAdminStoragePage() {
   });
 
   return (
-    <LayoutShell>
-      <div className="space-y-6 p-6">
-        <PageHeader
-          title="Master Admin storage"
-          description="Inspect storage footprint, retention pressure, and asset cleanup risks."
-          meta="Storage health should be visible here without shell access."
-          actions={
-            <button
-              type="button"
-              onClick={() => refetch()}
-              disabled={isFetching}
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {isFetching ? "Refreshing..." : "Refresh"}
-            </button>
-          }
-        />
-        <MasterAdminSectionNav />
+    <MasterAdminPageScaffold
+      title="Master Admin storage"
+      description="Inspect storage footprint, retention pressure, and asset cleanup risks."
+      meta="Storage health should be visible here without shell access."
+      actions={
+        <button
+          type="button"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          className="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-sm text-white hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {isFetching ? "Refreshing..." : "Refresh"}
+        </button>
+      }
+      railNote="This page is for storage pressure, retention drift, and cleanup anomalies. Teachers and school admins should never need to think about any of this."
+    >
         {isLoading ? <LoadingState message="Loading storage summary..." /> : null}
         {isError ? <ErrorState title="Unable to load storage summary" message="Refresh and try again." /> : null}
         {!isLoading && !isError ? (
           <>
-            <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
-              {[
-                ["Raw assets", data?.summary?.raw_asset_count ?? 0],
-                ["Processed assets", data?.summary?.processed_asset_count ?? 0],
-                ["Raw bytes", formatBytes(data?.summary?.raw_bytes)],
-                ["Processed bytes", formatBytes(data?.summary?.processed_bytes)],
-                ["Retention backlog", data?.summary?.retention_backlog_count ?? 0],
-                ["Orphan candidates", data?.summary?.orphan_candidate_count ?? 0],
-              ].map(([label, value]) => (
-                <Panel key={label} className="space-y-1 bg-slate-50">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</div>
-                  <div className="text-2xl font-semibold text-slate-900">{value}</div>
-                </Panel>
-              ))}
-            </div>
+            <MasterAdminMetricGrid className="xl:grid-cols-6">
+              <MasterAdminMetricCard label="Raw assets" value={data?.summary?.raw_asset_count ?? 0} />
+              <MasterAdminMetricCard label="Processed assets" value={data?.summary?.processed_asset_count ?? 0} />
+              <MasterAdminMetricCard label="Raw bytes" value={formatBytes(data?.summary?.raw_bytes)} />
+              <MasterAdminMetricCard label="Processed bytes" value={formatBytes(data?.summary?.processed_bytes)} />
+              <MasterAdminMetricCard label="Retention backlog" value={data?.summary?.retention_backlog_count ?? 0} tone="warning" />
+              <MasterAdminMetricCard label="Orphan candidates" value={data?.summary?.orphan_candidate_count ?? 0} tone="warning" />
+            </MasterAdminMetricGrid>
 
             <div className="grid gap-6 xl:grid-cols-2">
               <Panel className="space-y-4">
@@ -132,7 +122,6 @@ export function MasterAdminStoragePage() {
             </Panel>
           </>
         ) : null}
-      </div>
-    </LayoutShell>
+    </MasterAdminPageScaffold>
   );
 }

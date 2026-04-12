@@ -11,6 +11,12 @@ test.describe('Authentication', () => {
 
   const emailInput = (page) => page.locator('input[type="email"]');
   const passwordInput = (page) => page.locator('input[type="password"]');
+  const selectRole = async (page, role: 'teacher' | 'admin') => {
+    const button = page.getByRole('button', { name: role === 'admin' ? /administrator/i : /teacher/i });
+    if (await button.count()) {
+      await button.click();
+    }
+  };
 
   test('displays login form', async ({ page }) => {
     await expect(page.getByRole('heading', { name: /cognivio/i })).toBeVisible();
@@ -29,6 +35,7 @@ test.describe('Authentication', () => {
   });
 
   test('successfully logs in as admin and reaches the dashboard', async ({ page }) => {
+    await selectRole(page, 'admin');
     await emailInput(page).fill(ADMIN_EMAIL);
     await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
@@ -40,6 +47,7 @@ test.describe('Authentication', () => {
   });
 
   test('persists authentication across page reload', async ({ page }) => {
+    await selectRole(page, 'admin');
     await emailInput(page).fill(ADMIN_EMAIL);
     await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
@@ -52,6 +60,7 @@ test.describe('Authentication', () => {
   });
 
   test('successfully logs in as teacher and reaches the teacher workspace', async ({ page }) => {
+    await selectRole(page, 'teacher');
     await emailInput(page).fill(TEACHER_EMAIL);
     await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
@@ -71,6 +80,7 @@ test.describe('Authentication', () => {
   });
 
   test('logout clears session', async ({ page }) => {
+    await selectRole(page, 'admin');
     await emailInput(page).fill(ADMIN_EMAIL);
     await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();

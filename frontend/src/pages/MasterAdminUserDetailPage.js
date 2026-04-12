@@ -3,10 +3,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { LayoutShell } from "@/components/LayoutShell";
 import { useAuth } from "@/hooks/useAuth";
-import { Badge, Button, Dialog, ErrorState, Field, Input, LoadingState, PageHeader, Panel, Textarea } from "@/components/ui";
-import { MasterAdminSectionNav } from "@/components/master-admin/MasterAdminSectionNav";
+import { Badge, Button, Dialog, ErrorState, Field, Input, LoadingState, Panel, Textarea } from "@/components/ui";
+import { MasterAdminPageScaffold } from "@/components/master-admin/MasterAdminPageScaffold";
 import { masterAdminApi } from "@/lib/api";
 
 function formatTimestamp(value, locale) {
@@ -114,26 +113,23 @@ export function MasterAdminUserDetailPage() {
   };
 
   return (
-    <LayoutShell>
-      <div className="space-y-6 p-6">
-        <PageHeader
-          title={t("masterAdminUserDetail.title")}
-          description={t("masterAdminUserDetail.description")}
-          meta={user ? t("masterAdminUserDetail.meta", { email: user.email }) : null}
-          actions={
-            <button
-              type="button"
-              onClick={() => refetch()}
-              disabled={isFetching}
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {isFetching ? t("masterAdminUserDetail.refreshing") : t("masterAdminUserDetail.refresh")}
-            </button>
-          }
-        />
-
-        <MasterAdminSectionNav />
-
+    <>
+      <MasterAdminPageScaffold
+        title={t("masterAdminUserDetail.title")}
+        description={t("masterAdminUserDetail.description")}
+        meta={user ? t("masterAdminUserDetail.meta", { email: user.email }) : null}
+        actions={
+          <button
+            type="button"
+            onClick={() => refetch()}
+            disabled={isFetching}
+            className="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-sm text-white hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isFetching ? t("masterAdminUserDetail.refreshing") : t("masterAdminUserDetail.refresh")}
+          </button>
+        }
+        railNote="This page is for sensitive lifecycle actions. Approvals, revocations, and reactivations should always include enough reason text to survive an audit review."
+      >
         <div>
           <Link to="/master-admin/users" className="text-sm font-medium text-primary hover:text-primary/80">
             {t("masterAdminUserDetail.backToUsers")}
@@ -266,7 +262,7 @@ export function MasterAdminUserDetailPage() {
             </div>
           </>
         ) : null}
-      </div>
+      </MasterAdminPageScaffold>
       <Dialog
         open={Boolean(dialogConfig)}
         onClose={() => (actionMutation.isPending ? null : closeDialog())}
@@ -304,6 +300,6 @@ export function MasterAdminUserDetailPage() {
           ) : null}
         </div>
       </Dialog>
-    </LayoutShell>
+    </>
   );
 }

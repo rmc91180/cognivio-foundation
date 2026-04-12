@@ -2,9 +2,8 @@ import React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { toast } from "sonner";
-import { LayoutShell } from "@/components/LayoutShell";
-import { Badge, Button, ErrorState, LoadingState, PageHeader, Panel } from "@/components/ui";
-import { MasterAdminSectionNav } from "@/components/master-admin/MasterAdminSectionNav";
+import { Badge, Button, ErrorState, LoadingState, Panel } from "@/components/ui";
+import { MasterAdminPageScaffold } from "@/components/master-admin/MasterAdminPageScaffold";
 import { masterAdminApi } from "@/lib/api";
 
 function formatTimestamp(value) {
@@ -43,19 +42,17 @@ export function MasterAdminVideoDetailPage() {
   const video = data?.video;
 
   return (
-    <LayoutShell>
-      <div className="space-y-6 p-6">
-        <PageHeader
-          title="Video troubleshooting"
-          description="Review one video end to end: pipeline state, assets, jobs, and incident trail."
-          meta={video ? `${video.filename || video.id}` : null}
-          actions={
-            <Button type="button" variant="secondary" onClick={() => refetch()} disabled={isFetching}>
-              {isFetching ? "Refreshing..." : "Refresh"}
-            </Button>
-          }
-        />
-        <MasterAdminSectionNav />
+    <MasterAdminPageScaffold
+      title="Video troubleshooting"
+      description="Review one video end to end: pipeline state, assets, jobs, and incident trail."
+      meta={video ? `${video.filename || video.id}` : null}
+      actions={
+        <Button type="button" variant="secondary" onClick={() => refetch()} disabled={isFetching}>
+          {isFetching ? "Refreshing..." : "Refresh"}
+        </Button>
+      }
+      railNote="This page is intentionally detailed. Start with current state, latest error, and asset location before you retry anything."
+    >
         <div>
           <Link to="/master-admin/videos" className="text-sm font-medium text-primary hover:text-primary/80">
             Back to videos
@@ -172,7 +169,6 @@ export function MasterAdminVideoDetailPage() {
             </div>
           </>
         ) : null}
-      </div>
-    </LayoutShell>
+    </MasterAdminPageScaffold>
   );
 }

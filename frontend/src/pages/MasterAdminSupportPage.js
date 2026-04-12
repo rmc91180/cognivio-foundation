@@ -2,9 +2,8 @@ import React, { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { LayoutShell } from "@/components/LayoutShell";
-import { Badge, Button, Dialog, EmptyState, ErrorState, Field, Input, LoadingState, PageHeader, Panel, Textarea } from "@/components/ui";
-import { MasterAdminSectionNav } from "@/components/master-admin/MasterAdminSectionNav";
+import { Badge, Button, Dialog, EmptyState, ErrorState, Field, Input, LoadingState, Panel, Textarea } from "@/components/ui";
+import { MasterAdminPageScaffold } from "@/components/master-admin/MasterAdminPageScaffold";
 import { masterAdminApi } from "@/lib/api";
 
 function formatTimestamp(value) {
@@ -67,19 +66,18 @@ export function MasterAdminSupportPage() {
   };
 
   return (
-    <LayoutShell>
-      <div className="space-y-6 p-6">
-        <PageHeader
-          title="Master Admin support"
-          description="Guided user-level troubleshooting, session control, and safe diagnostic export."
-          meta="This is the support console for common platform issues."
-          actions={
-            <Button type="button" variant="secondary" onClick={() => refetch()} disabled={isFetching}>
-              {isFetching ? "Refreshing..." : "Refresh"}
-            </Button>
-          }
-        />
-        <MasterAdminSectionNav />
+    <>
+      <MasterAdminPageScaffold
+        title="Master Admin support"
+        description="Guided user-level troubleshooting, session control, and safe diagnostic export."
+        meta="This is the support console for common platform issues."
+        actions={
+          <Button type="button" variant="secondary" onClick={() => refetch()} disabled={isFetching}>
+            {isFetching ? "Refreshing..." : "Refresh"}
+          </Button>
+        }
+        railNote="Use support when you already know the person or account involved. For broader platform failures, start from incidents, videos, or dependencies first."
+      >
         <Panel className="space-y-4">
           <form className="grid gap-4 lg:grid-cols-[1.4fr,auto]" onSubmit={submitSearch}>
             <Field label="Find user">
@@ -227,7 +225,7 @@ export function MasterAdminSupportPage() {
             </div>
           </>
         ) : null}
-      </div>
+      </MasterAdminPageScaffold>
 
       <Dialog
         open={Boolean(sessionDialog)}
@@ -265,6 +263,6 @@ export function MasterAdminSupportPage() {
           </Field>
         </div>
       </Dialog>
-    </LayoutShell>
+    </>
   );
 }

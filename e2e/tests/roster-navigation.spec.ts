@@ -6,6 +6,12 @@ const DEMO_PASSWORD = 'DemoAccess2026!';
 test.describe('Admin Navigation Smoke', () => {
   const emailInput = (page) => page.locator('input[type="email"]');
   const passwordInput = (page) => page.locator('input[type="password"]');
+  const selectAdminRole = async (page) => {
+    const button = page.getByRole('button', { name: /administrator/i });
+    if (await button.count()) {
+      await button.click();
+    }
+  };
 
   const ensureSeededDemoData = async (page) => {
     const token = await page.evaluate(() => localStorage.getItem('cognivio_token'));
@@ -28,6 +34,7 @@ test.describe('Admin Navigation Smoke', () => {
 
   test.beforeEach(async ({ page }) => {
     await page.goto('/login');
+    await selectAdminRole(page);
     await emailInput(page).fill(DEMO_EMAIL);
     await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();

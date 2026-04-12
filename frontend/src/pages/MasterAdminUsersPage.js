@@ -2,7 +2,6 @@ import React, { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { LayoutShell } from "@/components/LayoutShell";
 import {
   Badge,
   Button,
@@ -11,10 +10,9 @@ import {
   Field,
   Input,
   LoadingState,
-  PageHeader,
   Panel,
 } from "@/components/ui";
-import { MasterAdminSectionNav } from "@/components/master-admin/MasterAdminSectionNav";
+import { MasterAdminMetricCard, MasterAdminMetricGrid, MasterAdminPageScaffold } from "@/components/master-admin/MasterAdminPageScaffold";
 import { masterAdminApi } from "@/lib/api";
 
 function statusVariant(value) {
@@ -69,20 +67,17 @@ export function MasterAdminUsersPage() {
   };
 
   return (
-    <LayoutShell>
-      <div className="space-y-6 p-6">
-        <PageHeader
-          title={t("masterAdminUsers.title")}
-          description={t("masterAdminUsers.description")}
-          meta={t("masterAdminUsers.meta")}
-          actions={
-            <Button type="button" variant="secondary" onClick={() => refetch()} disabled={isFetching}>
-              {isFetching ? t("masterAdminUsers.refreshing") : t("masterAdminUsers.refresh")}
-            </Button>
-          }
-        />
-
-        <MasterAdminSectionNav />
+    <MasterAdminPageScaffold
+      title={t("masterAdminUsers.title")}
+      description={t("masterAdminUsers.description")}
+      meta={t("masterAdminUsers.meta")}
+      actions={
+        <Button type="button" variant="secondary" onClick={() => refetch()} disabled={isFetching}>
+          {isFetching ? t("masterAdminUsers.refreshing") : t("masterAdminUsers.refresh")}
+        </Button>
+      }
+      railNote="Manage global access from here. Approvals, revocations, and user detail remain separate from school-level coaching pages."
+    >
 
         <Panel className="space-y-4">
           <form className="grid gap-4 lg:grid-cols-[1.4fr,0.8fr,0.8fr,auto]" onSubmit={handleSearchSubmit}>
@@ -122,28 +117,13 @@ export function MasterAdminUsersPage() {
             </div>
           </form>
 
-          <div className="grid gap-4 md:grid-cols-5">
-            <Panel className="space-y-1 bg-slate-50">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("masterAdminUsers.total")}</div>
-              <div className="text-2xl font-semibold text-slate-900">{data?.total ?? 0}</div>
-            </Panel>
-            <Panel className="space-y-1 bg-slate-50">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("masterAdminUsers.approved")}</div>
-              <div className="text-2xl font-semibold text-slate-900">{data?.summary?.approved ?? 0}</div>
-            </Panel>
-            <Panel className="space-y-1 bg-slate-50">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("masterAdminUsers.pending")}</div>
-              <div className="text-2xl font-semibold text-slate-900">{data?.summary?.pending ?? 0}</div>
-            </Panel>
-            <Panel className="space-y-1 bg-slate-50">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("masterAdminUsers.admins")}</div>
-              <div className="text-2xl font-semibold text-slate-900">{data?.summary?.admins ?? 0}</div>
-            </Panel>
-            <Panel className="space-y-1 bg-slate-50">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("masterAdminUsers.teachers")}</div>
-              <div className="text-2xl font-semibold text-slate-900">{data?.summary?.teachers ?? 0}</div>
-            </Panel>
-          </div>
+          <MasterAdminMetricGrid className="xl:grid-cols-5">
+            <MasterAdminMetricCard label={t("masterAdminUsers.total")} value={data?.total ?? 0} />
+            <MasterAdminMetricCard label={t("masterAdminUsers.approved")} value={data?.summary?.approved ?? 0} tone="success" />
+            <MasterAdminMetricCard label={t("masterAdminUsers.pending")} value={data?.summary?.pending ?? 0} tone="warning" />
+            <MasterAdminMetricCard label={t("masterAdminUsers.admins")} value={data?.summary?.admins ?? 0} />
+            <MasterAdminMetricCard label={t("masterAdminUsers.teachers")} value={data?.summary?.teachers ?? 0} />
+          </MasterAdminMetricGrid>
         </Panel>
 
         {isLoading ? <LoadingState message={t("masterAdminUsers.loading")} /> : null}
@@ -233,8 +213,6 @@ export function MasterAdminUsersPage() {
             )}
           </Panel>
         ) : null}
-      </div>
-    </LayoutShell>
+    </MasterAdminPageScaffold>
   );
 }
-

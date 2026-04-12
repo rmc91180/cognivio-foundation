@@ -1,9 +1,8 @@
 import React, { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
-import { LayoutShell } from "@/components/LayoutShell";
-import { Badge, EmptyState, ErrorState, LoadingState, PageHeader, Panel } from "@/components/ui";
-import { MasterAdminSectionNav } from "@/components/master-admin/MasterAdminSectionNav";
+import { Badge, EmptyState, ErrorState, LoadingState, Panel } from "@/components/ui";
+import { MasterAdminMetricCard, MasterAdminMetricGrid, MasterAdminPageScaffold } from "@/components/master-admin/MasterAdminPageScaffold";
 import { masterAdminApi } from "@/lib/api";
 
 function formatTimestamp(value) {
@@ -37,36 +36,29 @@ export function MasterAdminIncidentsPage() {
   };
 
   return (
-    <LayoutShell>
-      <div className="space-y-6 p-6">
-        <PageHeader
-          title="Master Admin incidents"
-          description="Centralized queue for pipeline and operational issues."
-          meta="Use this to triage active failures before they become support tickets."
-          actions={
-            <button
-              type="button"
-              onClick={() => refetch()}
-              disabled={isFetching}
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {isFetching ? "Refreshing..." : "Refresh"}
-            </button>
-          }
-        />
-        <MasterAdminSectionNav />
-        <Panel className="grid gap-4 md:grid-cols-4">
-          {[
-            ["Active", data?.summary?.active ?? 0],
-            ["Resolved", data?.summary?.resolved ?? 0],
-            ["Danger", data?.summary?.danger ?? 0],
-            ["Warning", data?.summary?.warning ?? 0],
-          ].map(([label, value]) => (
-            <Panel key={label} className="space-y-1 bg-slate-50">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</div>
-              <div className="text-2xl font-semibold text-slate-900">{value}</div>
-            </Panel>
-          ))}
+    <MasterAdminPageScaffold
+      title="Master Admin incidents"
+      description="Centralized queue for pipeline and operational issues."
+      meta="Use this to triage active failures before they become support tickets."
+      actions={
+        <button
+          type="button"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          className="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-sm text-white hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {isFetching ? "Refreshing..." : "Refresh"}
+        </button>
+      }
+      railNote="Incident review starts here. Once you identify the failing video or dependency, continue from the detail page rather than retrying from memory."
+    >
+        <Panel className="space-y-4">
+          <MasterAdminMetricGrid>
+            <MasterAdminMetricCard label="Active" value={data?.summary?.active ?? 0} tone="danger" />
+            <MasterAdminMetricCard label="Resolved" value={data?.summary?.resolved ?? 0} tone="success" />
+            <MasterAdminMetricCard label="Danger" value={data?.summary?.danger ?? 0} tone="danger" />
+            <MasterAdminMetricCard label="Warning" value={data?.summary?.warning ?? 0} tone="warning" />
+          </MasterAdminMetricGrid>
           <div className="md:col-span-4 flex flex-wrap gap-2">
             <button type="button" className="rounded-full border px-3 py-1 text-sm" onClick={() => setFilter("state", "")}>All states</button>
             <button type="button" className="rounded-full border px-3 py-1 text-sm" onClick={() => setFilter("state", "active")}>Active</button>
@@ -108,7 +100,6 @@ export function MasterAdminIncidentsPage() {
             )}
           </Panel>
         ) : null}
-      </div>
-    </LayoutShell>
+    </MasterAdminPageScaffold>
   );
 }

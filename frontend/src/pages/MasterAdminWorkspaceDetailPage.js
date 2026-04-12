@@ -2,9 +2,8 @@ import React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { LayoutShell } from "@/components/LayoutShell";
-import { Badge, ErrorState, LoadingState, PageHeader, Panel } from "@/components/ui";
-import { MasterAdminSectionNav } from "@/components/master-admin/MasterAdminSectionNav";
+import { Badge, ErrorState, LoadingState, Panel } from "@/components/ui";
+import { MasterAdminPageScaffold } from "@/components/master-admin/MasterAdminPageScaffold";
 import { masterAdminApi } from "@/lib/api";
 
 function stateVariant(value) {
@@ -38,26 +37,22 @@ export function MasterAdminWorkspaceDetailPage() {
   const related = data?.related || {};
 
   return (
-    <LayoutShell>
-      <div className="space-y-6 p-6">
-        <PageHeader
-          title={t("masterAdminWorkspaceDetail.title")}
-          description={t("masterAdminWorkspaceDetail.description")}
-          meta={workspace ? t("masterAdminWorkspaceDetail.meta", { email: workspace.owner_email || "—" }) : null}
-          actions={
-            <button
-              type="button"
-              onClick={() => refetch()}
-              disabled={isFetching}
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {isFetching ? t("masterAdminWorkspaceDetail.refreshing") : t("masterAdminWorkspaceDetail.refresh")}
-            </button>
-          }
-        />
-
-        <MasterAdminSectionNav />
-
+    <MasterAdminPageScaffold
+      title={t("masterAdminWorkspaceDetail.title")}
+      description={t("masterAdminWorkspaceDetail.description")}
+      meta={workspace ? t("masterAdminWorkspaceDetail.meta", { email: workspace.owner_email || "—" }) : null}
+      actions={
+        <button
+          type="button"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          className="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-sm text-white hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {isFetching ? t("masterAdminWorkspaceDetail.refreshing") : t("masterAdminWorkspaceDetail.refresh")}
+        </button>
+      }
+      railNote="Workspace detail is the bridge between user-level support and platform-level operations. Use it to confirm whether an issue is isolated or structural."
+    >
         <div>
           <Link to="/master-admin/workspaces" className="text-sm font-medium text-primary hover:text-primary/80">
             {t("masterAdminWorkspaceDetail.backToWorkspaces")}
@@ -227,7 +222,6 @@ export function MasterAdminWorkspaceDetailPage() {
             </div>
           </>
         ) : null}
-      </div>
-    </LayoutShell>
+    </MasterAdminPageScaffold>
   );
 }

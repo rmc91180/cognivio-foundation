@@ -1,7 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { LayoutShell } from "@/components/LayoutShell";
 import {
   Badge,
   Button,
@@ -10,10 +9,9 @@ import {
   Field,
   Input,
   LoadingState,
-  PageHeader,
   Panel,
 } from "@/components/ui";
-import { MasterAdminSectionNav } from "@/components/master-admin/MasterAdminSectionNav";
+import { MasterAdminMetricCard, MasterAdminMetricGrid, MasterAdminPageScaffold } from "@/components/master-admin/MasterAdminPageScaffold";
 import { masterAdminApi } from "@/lib/api";
 
 function formatTimestamp(value, locale) {
@@ -52,20 +50,17 @@ export function MasterAdminAuthActivityPage() {
   const failureCount = events.filter((item) => item.result === "failure").length;
 
   return (
-    <LayoutShell>
-      <div className="space-y-6 p-6">
-        <PageHeader
-          title={t("masterAdminAuth.title")}
-          description={t("masterAdminAuth.description")}
-          meta={t("masterAdminAuth.meta")}
-          actions={
-            <Button type="button" variant="secondary" onClick={() => refetch()} disabled={isFetching}>
-              {isFetching ? t("masterAdminAuth.refreshing") : t("masterAdminAuth.refresh")}
-            </Button>
-          }
-        />
-
-        <MasterAdminSectionNav />
+    <MasterAdminPageScaffold
+      title={t("masterAdminAuth.title")}
+      description={t("masterAdminAuth.description")}
+      meta={t("masterAdminAuth.meta")}
+      actions={
+        <Button type="button" variant="secondary" onClick={() => refetch()} disabled={isFetching}>
+          {isFetching ? t("masterAdminAuth.refreshing") : t("masterAdminAuth.refresh")}
+        </Button>
+      }
+      railNote="Use auth activity to answer who attempted to access the platform, what role they chose, and whether the event succeeded or failed."
+    >
 
         <Panel className="space-y-4">
           <div className="grid gap-4 lg:grid-cols-[1.4fr,0.8fr,0.8fr,auto]">
@@ -105,20 +100,11 @@ export function MasterAdminAuthActivityPage() {
             </Field>
           </div>
 
-          <div className="grid gap-4 md:grid-cols-3">
-            <Panel className="space-y-1 bg-slate-50">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("masterAdminAuth.totalEvents")}</div>
-              <div className="text-2xl font-semibold text-slate-900">{data?.total ?? 0}</div>
-            </Panel>
-            <Panel className="space-y-1 bg-slate-50">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("masterAdminAuth.successfulEvents")}</div>
-              <div className="text-2xl font-semibold text-slate-900">{successCount}</div>
-            </Panel>
-            <Panel className="space-y-1 bg-slate-50">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("masterAdminAuth.failedEvents")}</div>
-              <div className="text-2xl font-semibold text-slate-900">{failureCount}</div>
-            </Panel>
-          </div>
+          <MasterAdminMetricGrid className="xl:grid-cols-3">
+            <MasterAdminMetricCard label={t("masterAdminAuth.totalEvents")} value={data?.total ?? 0} />
+            <MasterAdminMetricCard label={t("masterAdminAuth.successfulEvents")} value={successCount} tone="success" />
+            <MasterAdminMetricCard label={t("masterAdminAuth.failedEvents")} value={failureCount} tone="danger" />
+          </MasterAdminMetricGrid>
         </Panel>
 
         {isLoading ? <LoadingState message={t("masterAdminAuth.loading")} /> : null}
@@ -174,8 +160,6 @@ export function MasterAdminAuthActivityPage() {
             )}
           </Panel>
         ) : null}
-      </div>
-    </LayoutShell>
+    </MasterAdminPageScaffold>
   );
 }
-
