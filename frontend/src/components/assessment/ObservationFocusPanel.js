@@ -15,9 +15,10 @@ export function ObservationFocusPanel({
   const { t, i18n } = useTranslation();
   const isHebrew = i18n.resolvedLanguage === "he";
   const normalizedFocusNote = (focusNote || "").trim();
-  const normalizedPriorityElements = Array.isArray(priorityElements)
-    ? priorityElements.filter(Boolean)
-    : [];
+  const normalizedPriorityElements = useMemo(
+    () => (Array.isArray(priorityElements) ? priorityElements.filter(Boolean) : []),
+    [priorityElements]
+  );
   const shouldRender = Boolean(normalizedFocusNote || normalizedPriorityElements.length);
 
   const { data: frameworkDetailRes } = useQuery({

@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useCallback } from "react";
+import React, { useRef, useState, useEffect, useCallback, useMemo } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { assessmentApi, exemplarApi, observationApi, recognitionApi, shareAssetApi, videoApi } from "@/lib/api";
@@ -27,10 +27,14 @@ export function VideoPlayerPage() {
   const [videoStatus, setVideoStatus] = useState("processing");
   const [wsConnected, setWsConnected] = useState(false);
   const isRtl = i18n.dir() === "rtl";
-  const dateTimeFormatter = new Intl.DateTimeFormat(i18n.language === "he" ? "he-IL" : "en-US", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
+  const dateTimeFormatter = useMemo(
+    () =>
+      new Intl.DateTimeFormat(i18n.language === "he" ? "he-IL" : "en-US", {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }),
+    [i18n.language]
+  );
   const scoreFormatter = new Intl.NumberFormat(i18n.language === "he" ? "he-IL" : "en-US", {
     minimumFractionDigits: 1,
     maximumFractionDigits: 1,

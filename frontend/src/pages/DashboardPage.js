@@ -394,7 +394,7 @@ export function DashboardPage() {
       roster.map((row) => row.department || t("labels.noDepartment"))
     ).size;
     return { teacherCount, assessmentCount, deptCount };
-  }, [roster]);
+  }, [roster, t]);
   const prioritySupportCount = useMemo(
     () =>
       roster.filter(
@@ -425,7 +425,7 @@ export function DashboardPage() {
           };
         })
         .sort((a, b) => a.name.localeCompare(b.name)),
-    [roster, teacherMetaById]
+    [roster, teacherMetaById, t]
   );
   const supportKpiRows = useMemo(
     () =>
@@ -441,7 +441,7 @@ export function DashboardPage() {
     if (selectedFromTrend) return selectedFromTrend;
     const matched = teacherOptions.find((teacher) => teacher.id === trendTeacherId);
     return matched?.name || t("dashboard.selectedTeacher");
-  }, [domainTrendsRes, teacherOptions, trendTeacherId]);
+  }, [domainTrendsRes, teacherOptions, trendTeacherId, t]);
   const domainTrendChartData = useMemo(() => {
     if (!trendPeriods.length || !trendDomains.length) return [];
     return trendPeriods.map((period) => {
@@ -520,7 +520,7 @@ export function DashboardPage() {
         label: label.toLowerCase(),
       });
     });
-  }, [focusAreaData]);
+  }, [focusAreaData, t]);
 
 
   const departmentData = useMemo(() => {
@@ -567,7 +567,7 @@ export function DashboardPage() {
         delta,
       };
     });
-  }, [roster, previousRoster]);
+  }, [roster, previousRoster, t]);
   const departmentKpiRows = useMemo(() => {
     const counts = {};
     teacherKpiRows.forEach((row) => {
@@ -581,7 +581,7 @@ export function DashboardPage() {
         averageScore: row.averageScore,
       }))
       .sort((a, b) => a.department.localeCompare(b.department));
-  }, [departmentData, teacherKpiRows]);
+  }, [departmentData, teacherKpiRows, t]);
 
   const departmentOptions = useMemo(() => {
     const set = new Set();

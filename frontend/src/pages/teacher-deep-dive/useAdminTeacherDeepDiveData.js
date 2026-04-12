@@ -125,8 +125,14 @@ export function useAdminTeacherDeepDiveData({ teacherId, periodMonths = 3 }) {
   }, [latestAssessment, sortedObservations]);
 
   const latestObservation = latestLessonObservations[0] || null;
-  const currentReflectionEntries = reflectionHistoryRes?.current_entries || [];
-  const reflectionHistory = reflectionHistoryRes?.history || [];
+  const currentReflectionEntries = useMemo(
+    () => reflectionHistoryRes?.current_entries || [],
+    [reflectionHistoryRes]
+  );
+  const reflectionHistory = useMemo(
+    () => reflectionHistoryRes?.history || [],
+    [reflectionHistoryRes]
+  );
 
   const latestTeacherReflection = useMemo(
     () =>
@@ -204,7 +210,7 @@ export function useAdminTeacherDeepDiveData({ teacherId, periodMonths = 3 }) {
     };
   }, [dashboardRes, elementNameById]);
 
-  const goals = actionPlanRes?.goals || [];
+  const goals = useMemo(() => actionPlanRes?.goals || [], [actionPlanRes]);
 
   const openGoals = useMemo(
     () =>

@@ -84,8 +84,14 @@ export function ReflectionRecordPage() {
     },
   });
 
-  const currentEntries = reflectionHistoryRes?.current_entries || [];
-  const reflectionHistory = reflectionHistoryRes?.history || [];
+  const currentEntries = useMemo(
+    () => reflectionHistoryRes?.current_entries || [],
+    [reflectionHistoryRes]
+  );
+  const reflectionHistory = useMemo(
+    () => reflectionHistoryRes?.history || [],
+    [reflectionHistoryRes]
+  );
 
   const latestTeacherReflection = useMemo(
     () =>
