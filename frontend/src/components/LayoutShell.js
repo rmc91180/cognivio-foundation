@@ -19,12 +19,13 @@ import { BrandMark } from "@/components/BrandMark";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { authApi } from "@/lib/api";
 import { toast } from "sonner";
-import { isAdminUser } from "@/lib/userRoutes";
+import { isAdminUser, isSuperAdminUser } from "@/lib/userRoutes";
 
 export function LayoutShell({ children }) {
   const { t } = useTranslation();
   const { user, logout, setUserProfile } = useAuth();
   const isAdmin = isAdminUser(user);
+  const isSuperAdmin = isSuperAdminUser(user);
   const workspaceMode = user?.workspace_mode || "school";
   const workspaceModeMutation = useMutation({
     mutationFn: (payload) => authApi.setWorkspaceMode(payload),
@@ -48,6 +49,14 @@ export function LayoutShell({ children }) {
           <LanguageSwitcher compact />
         </div>
         <nav className="mt-5 space-y-1.5 px-3 text-sm">
+          {isSuperAdmin ? (
+            <div className="mb-3">
+              <div className="px-3 pb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                {t("nav.platformBackend")}
+              </div>
+              <NavItem to="/master-admin" icon={ShieldCheck} label={t("nav.masterAdmin")} />
+            </div>
+          ) : null}
           {isAdmin ? (
             <>
               <NavItem to="/dashboard" icon={LayoutDashboard} label={t("nav.dashboard")} />

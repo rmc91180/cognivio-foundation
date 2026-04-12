@@ -52,6 +52,8 @@ const en = {
     priorityElements: "Priority rubric elements",
   },
   nav: {
+    platformBackend: "Platform backend",
+    masterAdmin: "Master Admin",
     dashboard: "Dashboard",
     teachers: "Teachers",
     videos: "Videos & Assessments",
@@ -73,6 +75,33 @@ const en = {
     workspaceModeUpdateFailed: "Failed to update workspace mode",
     logout: "Logout",
     notAuthenticated: "Not authenticated",
+  },
+  masterAdmin: {
+    title: "Master Admin Backend",
+    description:
+      "Internal-only platform console for system health, global oversight, user lifecycle control, and operational troubleshooting.",
+    meta: "Signed in as {{email}}",
+    refresh: "Refresh",
+    refreshing: "Refreshing...",
+    loading: "Loading Master Admin backend...",
+    loadFailedTitle: "Unable to load the Master Admin backend",
+    loadFailedMessage:
+      "Refresh and try again. If this persists, verify master-admin route access and backend bootstrap health.",
+    internalOnlyTitle: "Internal platform backend",
+    internalOnlyDescription:
+      "This route family is separate from school administrator, teacher, and training dashboards. It is reserved for platform operations only.",
+    summaryRole: "Access level",
+    summaryRoleHint: "This page is available only to the Master Admin boundary.",
+    summarySections: "Sections",
+    summarySectionsHint: "Each section becomes a dedicated backend workflow surface.",
+    summaryScope: "Scope",
+    summaryScopeValue: "Global",
+    summaryScopeHint: "This backend is platform-wide, not limited to one admin workspace.",
+    sectionsTitle: "Planned backend sections",
+    sectionsDescription:
+      "Sprint MA1 establishes the route family, guardrails, and section map. The later sprints fill these sections with global operational capabilities.",
+    statusActive: "Active now",
+    statusPlanned: "Planned",
   },
   timeScope: {
     latestClass: "Latest class",

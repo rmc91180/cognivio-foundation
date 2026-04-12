@@ -102,6 +102,8 @@ def _to_json_safe(value: Any) -> Any:
 
 def _get_user_role(user: dict) -> str:
     email = (user or {}).get("email", "").lower()
+    if email and email in SUPER_ADMIN_EMAILS:
+        return "super_admin"
     if email and email in ADMIN_EMAILS:
         return "admin"
     role = (user or {}).get("role")
@@ -1624,11 +1626,13 @@ JWT_EXPIRATION_HOURS = 24
 # Demo mode (fixed demo users, registration disabled)
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 ADMIN_EMAILS = set(email.lower() for email in _get_optional_env_list("ADMIN_EMAILS"))
+SUPER_ADMIN_EMAILS = set(email.lower() for email in _get_optional_env_list("SUPER_ADMIN_EMAILS"))
 MASTER_ADMIN_EMAIL = os.getenv("MASTER_ADMIN_EMAIL", "").strip().lower()
 MASTER_ADMIN_PASSWORD = os.getenv("MASTER_ADMIN_PASSWORD", "").strip()
 MASTER_ADMIN_NAME = os.getenv("MASTER_ADMIN_NAME", "Cognivio Master Admin").strip() or "Cognivio Master Admin"
 if MASTER_ADMIN_EMAIL:
     ADMIN_EMAILS.add(MASTER_ADMIN_EMAIL)
+    SUPER_ADMIN_EMAILS.add(MASTER_ADMIN_EMAIL)
 ACCESS_APPROVAL_REQUIRED = os.getenv("ACCESS_APPROVAL_REQUIRED", "true").lower() == "true"
 ACCESS_APPROVAL_NOTIFY_EMAIL = (
     os.getenv("ACCESS_APPROVAL_NOTIFY_EMAIL", "rmc91180@gmail.com").strip()
@@ -1804,7 +1808,7 @@ async def _ensure_master_admin_user() -> None:
         updates = {
             "name": MASTER_ADMIN_NAME,
             "password": password_hash,
-            "role": "admin",
+            "role": "super_admin",
             "approval_status": "approved",
             "approved_at": existing.get("approved_at") or now,
             "approved_by": "system:master_admin_bootstrap",
@@ -1823,7 +1827,7 @@ async def _ensure_master_admin_user() -> None:
         "name": MASTER_ADMIN_NAME,
         "password": password_hash,
         "created_at": now,
-        "role": "admin",
+        "role": "super_admin",
         "approval_status": "approved",
         "approval_requested_at": now,
         "approved_at": now,
@@ -11480,6 +11484,82 @@ def _require_admin_ops_user(current_user: dict) -> None:
     role = _get_user_role(current_user)
     if not _is_admin_role(role):
         raise HTTPException(status_code=403, detail="Admin access required")
+
+
+def _require_master_admin_user(current_user: dict) -> None:
+    role = _get_user_role(current_user)
+    if role != "super_admin":
+        raise HTTPException(status_code=403, detail="Master admin access required")
+
+
+@api_router.get("/master-admin/bootstrap")
+async def get_master_admin_bootstrap(current_user: dict = Depends(get_current_user)):
+    _require_master_admin_user(current_user)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "user": {
+            "id": current_user["id"],
+            "email": current_user.get("email"),
+            "name": current_user.get("name"),
+            "role": _get_user_role(current_user),
+        },
+        "sections": [
+            {
+                "id": "command-center",
+                "title": "Command Center",
+                "description": "Platform-wide health, approvals, queue pressure, and immediate operational priorities.",
+                "status": "active",
+            },
+            {
+                "id": "users-access",
+                "title": "Users and Access",
+                "description": "Global user directory, approvals, revocations, and future auth/session activity.",
+                "status": "planned",
+            },
+            {
+                "id": "workspaces",
+                "title": "Organizations and Workspaces",
+                "description": "Cross-workspace visibility into adoption, blockages, and support needs.",
+                "status": "planned",
+            },
+            {
+                "id": "videos-processing",
+                "title": "Videos and Processing",
+                "description": "Global pipeline visibility across upload, transcode, privacy, analysis, and playback.",
+                "status": "planned",
+            },
+            {
+                "id": "storage-data",
+                "title": "Storage and Data",
+                "description": "Atlas and R2 footprint, retention health, and data lifecycle integrity.",
+                "status": "planned",
+            },
+            {
+                "id": "ai-quality",
+                "title": "AI and Analysis Quality",
+                "description": "Global analysis quality, fallback patterns, specialist activity, and override signals.",
+                "status": "planned",
+            },
+            {
+                "id": "dependencies",
+                "title": "Integrations and Dependencies",
+                "description": "Health and remediation guidance for Atlas, R2, Resend, OpenAI, and runtime infrastructure.",
+                "status": "planned",
+            },
+            {
+                "id": "audit-security",
+                "title": "Audit and Security",
+                "description": "Platform audit trails, auth events, and security-sensitive actions.",
+                "status": "planned",
+            },
+            {
+                "id": "support-recovery",
+                "title": "Support and Recovery",
+                "description": "Guided operational tools for user support, incident response, and safe recovery actions.",
+                "status": "planned",
+            },
+        ],
+    }
 
 
 @api_router.post("/admin/ops/smoke-cleanup", response_model=AdminSmokeCleanupResponse)

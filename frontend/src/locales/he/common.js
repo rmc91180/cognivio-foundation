@@ -52,6 +52,8 @@ const he = {
     priorityElements: "רכיבי רובריקה בעדיפות",
   },
   nav: {
+    platformBackend: "מערכת תפעול פלטפורמה",
+    masterAdmin: "מנהל-על",
     dashboard: "לוח בקרה",
     teachers: "מורים",
     videos: "וידאו והערכות",
@@ -73,6 +75,33 @@ const he = {
     workspaceModeUpdateFailed: "עדכון מצב סביבת העבודה נכשל",
     logout: "התנתקות",
     notAuthenticated: "לא מחובר",
+  },
+  masterAdmin: {
+    title: "מערכת מנהל-העל",
+    description:
+      "מרחב פנימי בלבד לבריאות מערכת, פיקוח גלובלי, שליטה במחזור חיי משתמשים ופתרון תקלות תפעוליות.",
+    meta: "מחובר/ת בתור {{email}}",
+    refresh: "רענון",
+    refreshing: "מרענן...",
+    loading: "טוען את מערכת מנהל-העל...",
+    loadFailedTitle: "לא ניתן לטעון את מערכת מנהל-העל",
+    loadFailedMessage:
+      "רעננו ונסו שוב. אם הבעיה נמשכת, בדקו את הרשאות הגישה למסלול מנהל-העל ואת בריאות bootstrap בשרת.",
+    internalOnlyTitle: "מערכת פלטפורמה פנימית",
+    internalOnlyDescription:
+      "משפחת מסלולים זו נפרדת מלוחות הבקרה של אדמין בית ספר, מורה ותוכנית הכשרה. היא שמורה לתפעול הפלטפורמה בלבד.",
+    summaryRole: "רמת גישה",
+    summaryRoleHint: "העמוד הזה זמין רק תחת גבול ההרשאה של מנהל-העל.",
+    summarySections: "מקטעים",
+    summarySectionsHint: "כל מקטע יהפוך למשטח עבודה ייעודי של ה-backend.",
+    summaryScope: "היקף",
+    summaryScopeValue: "גלובלי",
+    summaryScopeHint: "המערכת הזו חוצה את כל הפלטפורמה ואינה מוגבלת למרחב של אדמין יחיד.",
+    sectionsTitle: "מקטעי ה-backend המתוכננים",
+    sectionsDescription:
+      "Sprint MA1 מקים את משפחת המסלולים, את שכבת ההגנה ואת מפת המקטעים. הספרינטים הבאים ימלאו את המקטעים ביכולות תפעול גלובליות.",
+    statusActive: "פעיל כעת",
+    statusPlanned: "מתוכנן",
   },
   timeScope: {
     latestClass: "השיעור האחרון",

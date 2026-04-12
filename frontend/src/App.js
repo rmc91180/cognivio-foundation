@@ -5,6 +5,7 @@ import { ProtectedRoute } from "@/components/ProtectedRoute";
 import { useAuth } from "@/hooks/useAuth";
 import { AuthPage } from "@/pages/AuthPage";
 import { DashboardPage } from "@/pages/DashboardPage";
+import { MasterAdminPage } from "@/pages/MasterAdminPage";
 import { TeachersPage } from "@/pages/TeachersPage";
 import { VideosPage } from "@/pages/VideosPage";
 import { AccessManagementPage } from "@/pages/AccessManagementPage";
@@ -43,6 +44,14 @@ function App() {
     <AuthProvider>
       <Routes>
         <Route path="/login" element={<AuthPage />} />
+        <Route
+          path="/master-admin"
+          element={
+            <ProtectedRoute superAdminOnly>
+              <MasterAdminPage />
+            </ProtectedRoute>
+          }
+        />
         <Route
           path="/dashboard"
           element={

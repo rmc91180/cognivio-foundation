@@ -89,6 +89,10 @@ export const adminApi = {
   revokeAccessUser: (userId, payload = {}) => api.post(`/api/admin/access-users/${userId}/revoke`, payload),
 };
 
+export const masterAdminApi = {
+  bootstrap: () => api.get("/api/master-admin/bootstrap"),
+};
+
 export const opsApi = {
   readiness: () => api.get("/api/admin/ops/readiness"),
   launchHealth: () => api.get("/api/admin/ops/launch-health"),

@@ -268,7 +268,7 @@ def test_ensure_master_admin_user_creates_or_updates_admin(monkeypatch):
 
     assert users.record is not None
     assert users.record["email"] == "rmc91180@gmail.com"
-    assert users.record["role"] == "admin"
+    assert users.record["role"] == "super_admin"
     assert users.record["approval_status"] == "approved"
     assert users.record["is_active"] is True
     assert users.record["name"] == "RMC Master Admin"

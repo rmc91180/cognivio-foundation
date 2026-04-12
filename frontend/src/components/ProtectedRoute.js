@@ -2,9 +2,9 @@ import React from "react";
 import { Navigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "@/hooks/useAuth";
-import { getDefaultHomeRoute, isAdminUser } from "@/lib/userRoutes";
+import { getDefaultHomeRoute, isAdminUser, isSuperAdminUser } from "@/lib/userRoutes";
 
-export function ProtectedRoute({ children, adminOnly = false }) {
+export function ProtectedRoute({ children, adminOnly = false, superAdminOnly = false }) {
   const { t } = useTranslation();
   const { user, initializing } = useAuth();
 
@@ -20,6 +20,10 @@ export function ProtectedRoute({ children, adminOnly = false }) {
 
   if (!user) {
     return <Navigate to="/login" replace />;
+  }
+
+  if (superAdminOnly && !isSuperAdminUser(user)) {
+    return <Navigate to={getDefaultHomeRoute(user)} replace />;
   }
 
   if (adminOnly && !isAdminUser(user)) {
