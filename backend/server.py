@@ -100,20 +100,82 @@ def _to_json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
 
 
-def _get_user_role(user: dict) -> str:
-    email = (user or {}).get("email", "").lower()
+VALID_TENANT_ROLES = {"teacher", "school_admin", "training_admin", "super_admin"}
+VALID_ORGANIZATION_TYPES = {"school", "training"}
+
+
+def _clean_optional_string(value: Optional[str]) -> Optional[str]:
+    cleaned = str(value or "").strip()
+    return cleaned or None
+
+
+def _legacy_role_for_tenant_role(tenant_role: Optional[str]) -> str:
+    normalized = str(tenant_role or "").strip().lower()
+    if normalized == "super_admin":
+        return "super_admin"
+    if normalized in {"school_admin", "training_admin"}:
+        return "admin"
+    return "teacher"
+
+
+def _normalize_requested_role(role: Optional[str]) -> str:
+    normalized = str(role or "").strip().lower()
+    if normalized in {"school_admin", "school-admin", "principal", "admin", "administrator"}:
+        return "school_admin"
+    if normalized in {"training_admin", "training-admin", "teacher_training_admin", "teacher-training-admin"}:
+        return "training_admin"
+    if normalized == "super_admin":
+        return "super_admin"
+    return "teacher"
+
+
+def _format_tenant_role_label(tenant_role: Optional[str]) -> str:
+    normalized = str(tenant_role or "").strip().lower()
+    labels = {
+        "teacher": "teacher",
+        "school_admin": "school administrator",
+        "training_admin": "teacher training administrator",
+        "super_admin": "master administrator",
+    }
+    return labels.get(normalized, "teacher")
+
+
+def _normalize_organization_type(
+    value: Optional[str],
+    tenant_role: Optional[str] = None,
+) -> Optional[str]:
+    normalized = str(value or "").strip().lower()
+    if normalized in VALID_ORGANIZATION_TYPES:
+        return normalized
+    normalized_role = str(tenant_role or "").strip().lower()
+    if normalized_role == "training_admin":
+        return "training"
+    if normalized_role in {"teacher", "school_admin"}:
+        return "school"
+    return None
+
+
+def _get_user_tenant_role(user: Optional[dict]) -> str:
+    email = str((user or {}).get("email") or "").lower()
     if email and email in SUPER_ADMIN_EMAILS:
         return "super_admin"
+    tenant_role = str((user or {}).get("tenant_role") or "").strip().lower()
+    if tenant_role in VALID_TENANT_ROLES:
+        return tenant_role
     if email and email in ADMIN_EMAILS:
-        return "admin"
-    role = (user or {}).get("role")
-    if role:
-        return "admin" if role == "principal" else role
-    if email == "principal@demo.cognivio.app":
-        return "admin"
-    if email == "teacher@demo.cognivio.app":
-        return "teacher"
+        return "school_admin"
+    role = str((user or {}).get("role") or "").strip().lower()
+    if role == "super_admin":
+        return "super_admin"
+    if role == "training_admin":
+        return "training_admin"
+    if role in {"admin", "principal"}:
+        return "school_admin"
     return "teacher"
+
+
+def _get_user_role(user: dict) -> str:
+    return _legacy_role_for_tenant_role(_get_user_tenant_role(user))
 
 
 def _get_user_approval_status(user: Optional[dict]) -> str:
@@ -138,6 +200,8 @@ def _is_access_auto_approved_email(email: str) -> bool:
 def _build_user_response_payload(user_doc: dict) -> dict:
     cleaned = {k: v for k, v in (user_doc or {}).items() if k not in {"_id", "password"}}
     cleaned["role"] = _get_user_role(user_doc)
+    cleaned["tenant_role"] = _get_user_tenant_role(user_doc)
+    cleaned["tenant_status"] = _get_user_approval_status(user_doc)
     cleaned["approval_status"] = _get_user_approval_status(user_doc)
     return cleaned
 
@@ -154,9 +218,185 @@ async def _resolve_master_admin_teacher_link(user_doc: dict) -> Optional[dict]:
     return await db.teachers.find_one({"email": email}, {"_id": 0, "id": 1, "name": 1, "email": 1})
 
 
+async def _resolve_user_tenancy_context(user_doc: Optional[dict]) -> Dict[str, Any]:
+    if not user_doc:
+        return {}
+
+    teachers_collection = getattr(db, "teachers", None)
+    schools_collection = getattr(db, "schools", None)
+    organizations_collection = getattr(db, "organizations", None)
+    users_collection = getattr(db, "users", None)
+
+    payload = _build_user_response_payload(user_doc)
+    tenant_role = payload.get("tenant_role") or "teacher"
+    organization_id = payload.get("organization_id")
+    organization_type = _normalize_organization_type(payload.get("organization_type"), tenant_role)
+    organization_name = _clean_optional_string(payload.get("organization_name"))
+    school_id = payload.get("school_id")
+    school_name = _clean_optional_string(payload.get("school_name"))
+    manager_user_id = payload.get("manager_user_id")
+    manager_email = _clean_optional_string(payload.get("manager_email"))
+    manager_name = _clean_optional_string(payload.get("manager_name"))
+
+    if not school_id and payload.get("teacher_id"):
+        teacher_doc = None
+        if teachers_collection is not None:
+            teacher_doc = await teachers_collection.find_one(
+                {"id": payload.get("teacher_id")},
+                {"_id": 0, "school_id": 1},
+            )
+        school_id = (teacher_doc or {}).get("school_id") or school_id
+
+    if not school_id:
+        email = str(payload.get("email") or "").strip().lower()
+        teacher_doc = None
+        if email and teachers_collection is not None:
+            teacher_doc = await teachers_collection.find_one(
+                {"email": email},
+                {"_id": 0, "school_id": 1},
+            )
+        school_id = (teacher_doc or {}).get("school_id") or school_id
+
+    school_doc = None
+    if school_id and schools_collection is not None:
+        school_doc = await schools_collection.find_one(
+            {"id": school_id},
+            {"_id": 0, "id": 1, "name": 1, "organization_id": 1},
+        )
+        school_name = school_name or _clean_optional_string((school_doc or {}).get("name"))
+        if not organization_id:
+            organization_id = (school_doc or {}).get("organization_id") or organization_id
+
+    if tenant_role == "school_admin" and not school_doc and schools_collection is not None:
+        owned_school = await schools_collection.find_one(
+            {"user_id": payload.get("id")},
+            {"_id": 0, "id": 1, "name": 1, "organization_id": 1},
+        )
+        if owned_school:
+            school_id = school_id or owned_school.get("id")
+            school_name = school_name or _clean_optional_string(owned_school.get("name"))
+            organization_id = organization_id or owned_school.get("organization_id")
+
+    organization_doc = None
+    if organization_id and organizations_collection is not None:
+        organization_doc = await organizations_collection.find_one(
+            {"id": organization_id},
+            {"_id": 0, "id": 1, "name": 1, "organization_type": 1, "status": 1},
+        )
+        organization_name = organization_name or _clean_optional_string((organization_doc or {}).get("name"))
+        organization_type = _normalize_organization_type(
+            (organization_doc or {}).get("organization_type") or organization_type,
+            tenant_role,
+        )
+
+    if manager_user_id and (not manager_email or not manager_name) and users_collection is not None:
+        manager_doc = await users_collection.find_one(
+            {"id": manager_user_id},
+            {"_id": 0, "name": 1, "email": 1},
+        )
+        if manager_doc:
+            manager_email = manager_email or _clean_optional_string(manager_doc.get("email"))
+            manager_name = manager_name or _clean_optional_string(manager_doc.get("name"))
+
+    return {
+        "tenant_role": tenant_role,
+        "tenant_status": payload.get("tenant_status") or payload.get("approval_status") or "approved",
+        "organization_id": organization_id,
+        "organization_type": organization_type,
+        "organization_name": organization_name,
+        "organization_status": (organization_doc or {}).get("status"),
+        "school_id": school_id,
+        "school_name": school_name,
+        "manager_user_id": manager_user_id,
+        "manager_name": manager_name,
+        "manager_email": manager_email,
+        "requested_organization_name": _clean_optional_string(payload.get("requested_organization_name")),
+        "requested_school_name": _clean_optional_string(payload.get("requested_school_name")),
+        "requested_manager_email": _clean_optional_string(payload.get("requested_manager_email")),
+    }
+
+
+async def _build_user_tenancy_migration_preview(user_doc: Optional[dict]) -> Dict[str, Any]:
+    context = await _resolve_user_tenancy_context(user_doc)
+    missing_required = []
+    if context.get("tenant_role") in {"teacher", "school_admin"}:
+        if not context.get("organization_name") and not context.get("requested_organization_name"):
+            missing_required.append("organization_name")
+        if not context.get("school_name") and not context.get("requested_school_name"):
+            missing_required.append("school_name")
+    if context.get("tenant_role") == "training_admin":
+        if not context.get("organization_name") and not context.get("requested_organization_name"):
+            missing_required.append("organization_name")
+    return {
+        **context,
+        "is_complete": not missing_required,
+        "missing_required_fields": missing_required,
+    }
+
+
+def _normalize_access_request_tenancy_fields(user: "UserCreate", desired_tenant_role: str) -> Dict[str, Any]:
+    organization_name = _clean_optional_string(user.organization_name)
+    school_name = _clean_optional_string(user.school_name)
+    requested_manager_email = _clean_optional_string(user.requested_manager_email)
+    if requested_manager_email:
+        requested_manager_email = requested_manager_email.lower()
+    organization_type = _normalize_organization_type(user.organization_type, desired_tenant_role)
+
+    if desired_tenant_role in {"teacher", "school_admin", "training_admin"} and not organization_name:
+        raise HTTPException(status_code=400, detail="Organization name is required")
+    if desired_tenant_role in {"teacher", "school_admin"} and not school_name:
+        raise HTTPException(status_code=400, detail="School name is required")
+
+    return {
+        "organization_type": organization_type,
+        "requested_organization_name": organization_name,
+        "requested_school_name": school_name,
+        "requested_manager_email": requested_manager_email,
+    }
+
+
+async def _ensure_school_organization_for_user(
+    *,
+    current_user: dict,
+    school_name: str,
+    district_name: Optional[str] = None,
+) -> dict:
+    existing_org_id = current_user.get("organization_id")
+    if existing_org_id:
+        existing_org = await db.organizations.find_one({"id": existing_org_id}, {"_id": 0})
+        if existing_org:
+            return existing_org
+
+    organization_name = _clean_optional_string(current_user.get("organization_name")) or _clean_optional_string(district_name) or school_name
+    organization_id = str(uuid.uuid4())
+    doc = {
+        "id": organization_id,
+        "name": organization_name,
+        "organization_type": "school",
+        "status": "active",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_by": current_user["id"],
+    }
+    await db.organizations.insert_one(doc)
+    await db.users.update_one(
+        {"id": current_user["id"]},
+        {
+            "$set": {
+                "organization_id": organization_id,
+                "organization_type": "school",
+                "organization_name": organization_name,
+                "tenant_role": _get_user_tenant_role(current_user),
+                "tenant_status": _get_user_approval_status(current_user),
+            }
+        },
+    )
+    return doc
+
+
 async def _build_master_admin_user_record(user_doc: dict) -> "MasterAdminUserRecord":
     payload = _build_user_response_payload(user_doc)
     linked_teacher = await _resolve_master_admin_teacher_link(user_doc)
+    tenancy = await _resolve_user_tenancy_context(user_doc)
     uploads_total = await db.videos.count_documents({"uploaded_by": payload["id"]})
     assessments_total = await db.assessments.count_documents({"user_id": payload["id"]})
     return MasterAdminUserRecord(
@@ -172,6 +412,16 @@ async def _build_master_admin_user_record(user_doc: dict) -> "MasterAdminUserRec
         revoked_at=payload.get("revoked_at"),
         last_login_at=payload.get("last_login_at"),
         workspace_mode=payload.get("workspace_mode"),
+        tenant_role=tenancy.get("tenant_role"),
+        tenant_status=tenancy.get("tenant_status"),
+        organization_id=tenancy.get("organization_id"),
+        organization_type=tenancy.get("organization_type"),
+        organization_name=tenancy.get("organization_name") or tenancy.get("requested_organization_name"),
+        school_id=tenancy.get("school_id"),
+        school_name=tenancy.get("school_name") or tenancy.get("requested_school_name"),
+        manager_user_id=tenancy.get("manager_user_id"),
+        manager_name=tenancy.get("manager_name"),
+        manager_email=tenancy.get("manager_email") or tenancy.get("requested_manager_email"),
         linked_teacher_id=(linked_teacher or {}).get("id"),
         linked_teacher_name=(linked_teacher or {}).get("name"),
         uploads_total=uploads_total,
@@ -196,6 +446,15 @@ def _to_access_user_record(user_doc: dict) -> "AccessUserRecord":
         is_active=user_doc.get("is_active", True) is not False,
         teacher_id=user_doc.get("teacher_id"),
         workspace_mode=user_doc.get("workspace_mode"),
+        tenant_role=payload.get("tenant_role"),
+        tenant_status=payload.get("tenant_status") or payload.get("approval_status"),
+        organization_id=user_doc.get("organization_id"),
+        organization_type=user_doc.get("organization_type"),
+        organization_name=user_doc.get("organization_name") or user_doc.get("requested_organization_name"),
+        school_id=user_doc.get("school_id"),
+        school_name=user_doc.get("school_name") or user_doc.get("requested_school_name"),
+        manager_user_id=user_doc.get("manager_user_id"),
+        manager_email=user_doc.get("manager_email") or user_doc.get("requested_manager_email"),
     )
 
 
@@ -2555,6 +2814,11 @@ async def _app_startup() -> None:
             updates = {}
             if existing.get("role") != desired_role:
                 updates["role"] = desired_role
+            desired_tenant_role = "school_admin" if desired_role == "admin" else "teacher"
+            if existing.get("tenant_role") != desired_tenant_role:
+                updates["tenant_role"] = desired_tenant_role
+            if existing.get("tenant_status") != "approved":
+                updates["tenant_status"] = "approved"
             if updates:
                 await db.users.update_one({"email": demo["email"]}, {"$set": updates})
             continue
@@ -2567,6 +2831,8 @@ async def _app_startup() -> None:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "is_demo": True,
             "role": demo.get("role", "teacher"),
+            "tenant_role": "school_admin" if demo.get("role") == "admin" else "teacher",
+            "tenant_status": "approved",
         }
         await db.users.insert_one(user_doc)
 
@@ -2583,6 +2849,8 @@ async def _ensure_master_admin_user() -> None:
             "name": MASTER_ADMIN_NAME,
             "password": password_hash,
             "role": "super_admin",
+            "tenant_role": "super_admin",
+            "tenant_status": "approved",
             "approval_status": "approved",
             "approved_at": existing.get("approved_at") or now,
             "approved_by": "system:master_admin_bootstrap",
@@ -2602,6 +2870,8 @@ async def _ensure_master_admin_user() -> None:
         "password": password_hash,
         "created_at": now,
         "role": "super_admin",
+        "tenant_role": "super_admin",
+        "tenant_status": "approved",
         "approval_status": "approved",
         "approval_requested_at": now,
         "approved_at": now,
@@ -3284,6 +3554,10 @@ class UserCreate(BaseModel):
     password: str
     name: str
     role: Optional[str] = "teacher"
+    organization_type: Optional[str] = None
+    organization_name: Optional[str] = None
+    school_name: Optional[str] = None
+    requested_manager_email: Optional[EmailStr] = None
 
 class UserLogin(BaseModel):
     email: EmailStr
@@ -3296,9 +3570,22 @@ class UserResponse(BaseModel):
     name: str
     created_at: str
     role: Optional[str] = None
+    tenant_role: Optional[str] = None
+    tenant_status: Optional[str] = None
     workspace_mode: Optional[str] = None
     teacher_id: Optional[str] = None
     approval_status: Optional[str] = None
+    organization_id: Optional[str] = None
+    organization_type: Optional[str] = None
+    organization_name: Optional[str] = None
+    school_id: Optional[str] = None
+    school_name: Optional[str] = None
+    manager_user_id: Optional[str] = None
+    manager_name: Optional[str] = None
+    manager_email: Optional[str] = None
+    requested_organization_name: Optional[str] = None
+    requested_school_name: Optional[str] = None
+    requested_manager_email: Optional[str] = None
 
 class TokenResponse(BaseModel):
     token: str
@@ -3310,6 +3597,10 @@ class AccessRequestResponse(BaseModel):
     email: str
     message: str
     approval_status: str
+    tenant_role: Optional[str] = None
+    organization_type: Optional[str] = None
+    organization_name: Optional[str] = None
+    school_name: Optional[str] = None
 
 
 class AccessUserRecord(BaseModel):
@@ -3327,6 +3618,15 @@ class AccessUserRecord(BaseModel):
     is_active: bool = True
     teacher_id: Optional[str] = None
     workspace_mode: Optional[str] = None
+    tenant_role: Optional[str] = None
+    tenant_status: Optional[str] = None
+    organization_id: Optional[str] = None
+    organization_type: Optional[str] = None
+    organization_name: Optional[str] = None
+    school_id: Optional[str] = None
+    school_name: Optional[str] = None
+    manager_user_id: Optional[str] = None
+    manager_email: Optional[str] = None
 
 
 class AccessUserListResponse(BaseModel):
@@ -3386,6 +3686,16 @@ class MasterAdminUserRecord(BaseModel):
     revoked_at: Optional[str] = None
     last_login_at: Optional[str] = None
     workspace_mode: Optional[str] = None
+    tenant_role: Optional[str] = None
+    tenant_status: Optional[str] = None
+    organization_id: Optional[str] = None
+    organization_type: Optional[str] = None
+    organization_name: Optional[str] = None
+    school_id: Optional[str] = None
+    school_name: Optional[str] = None
+    manager_user_id: Optional[str] = None
+    manager_name: Optional[str] = None
+    manager_email: Optional[str] = None
     linked_teacher_id: Optional[str] = None
     linked_teacher_name: Optional[str] = None
     uploads_total: int = 0
@@ -3673,6 +3983,20 @@ class SchoolResponse(BaseModel):
     id: str
     name: str
     district_name: Optional[str] = None
+    organization_id: Optional[str] = None
+    created_at: str
+
+
+class OrganizationCreate(BaseModel):
+    name: str
+    organization_type: str
+
+
+class OrganizationResponse(BaseModel):
+    id: str
+    name: str
+    organization_type: str
+    status: str
     created_at: str
 
 class FrameworkSelection(BaseModel):
@@ -4547,12 +4871,10 @@ def create_token(user_id: str, *, session_id: Optional[str] = None) -> str:
 def _is_admin_role(role: Optional[str]) -> bool:
     return role in {"admin", "principal", "super_admin"}
 
-
-def _normalize_requested_role(role: Optional[str]) -> str:
-    raw = str(role or "").strip().lower()
-    if raw in {"admin", "administrator", "principal", "super_admin"}:
-        return "admin"
-    return "teacher"
+def _requested_role_matches_user(requested_role: Optional[str], user_doc: dict) -> bool:
+    if not requested_role:
+        return True
+    return requested_role == _get_user_tenant_role(user_doc)
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
@@ -4597,6 +4919,7 @@ async def register(user: UserCreate, request: Request):
         raise HTTPException(status_code=400, detail="Email already registered")
     
     desired_role = _normalize_requested_role(user.role)
+    tenancy_fields = _normalize_access_request_tenancy_fields(user, desired_role)
     user_id = str(uuid.uuid4())
     user_doc = {
         "id": user_id,
@@ -4604,10 +4927,13 @@ async def register(user: UserCreate, request: Request):
         "name": user.name,
         "password": hash_password(user.password),
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "role": "admin" if user.email.lower() in ADMIN_EMAILS else desired_role,
+        "role": "admin" if user.email.lower() in ADMIN_EMAILS else _legacy_role_for_tenant_role(desired_role),
+        "tenant_role": "school_admin" if user.email.lower() in ADMIN_EMAILS else desired_role,
+        "tenant_status": "approved",
         "approval_status": "approved",
         "approved_at": datetime.now(timezone.utc).isoformat(),
         "is_active": True,
+        **tenancy_fields,
     }
     await db.users.insert_one(user_doc)
     enriched_user = await enrich_user_with_workspace_mode(user_doc)
@@ -4635,6 +4961,7 @@ async def request_access(user: UserCreate, request: Request):
     now = datetime.now(timezone.utc).isoformat()
     auto_approved = _is_access_auto_approved_email(email)
     desired_role = _normalize_requested_role(user.role)
+    tenancy_fields = _normalize_access_request_tenancy_fields(user, desired_role)
 
     if existing:
         existing_status = _get_user_approval_status(existing)
@@ -4646,6 +4973,7 @@ async def request_access(user: UserCreate, request: Request):
             "name": user.name,
             "password": hash_password(user.password),
             "updated_at": now,
+            **tenancy_fields,
         }
         if auto_approved:
             update_fields.update(
@@ -4657,6 +4985,8 @@ async def request_access(user: UserCreate, request: Request):
                     "revoked_by": None,
                     "is_active": True,
                     "role": "admin",
+                    "tenant_role": "school_admin",
+                    "tenant_status": "approved",
                 }
             )
         else:
@@ -4669,7 +4999,9 @@ async def request_access(user: UserCreate, request: Request):
                     "revoked_at": None,
                     "revoked_by": None,
                     "is_active": False,
-                    "role": desired_role,
+                    "role": _legacy_role_for_tenant_role(desired_role),
+                    "tenant_role": desired_role,
+                    "tenant_status": "pending",
                 }
             )
         await db.users.update_one({"id": existing["id"]}, {"$set": update_fields})
@@ -4692,6 +5024,10 @@ async def request_access(user: UserCreate, request: Request):
                 email=email,
                 message="Access is approved. You can now log in.",
                 approval_status=_get_user_approval_status(enriched_user),
+                tenant_role=_get_user_tenant_role(enriched_user),
+                organization_type=enriched_user.get("organization_type"),
+                organization_name=enriched_user.get("organization_name") or enriched_user.get("requested_organization_name"),
+                school_name=enriched_user.get("school_name") or enriched_user.get("requested_school_name"),
             )
         await _log_auth_event(
             "request_access",
@@ -4709,6 +5045,10 @@ async def request_access(user: UserCreate, request: Request):
             email=email,
             message="Access request submitted. Approval is required before login.",
             approval_status="pending",
+            tenant_role=desired_role,
+            organization_type=tenancy_fields.get("organization_type"),
+            organization_name=tenancy_fields.get("requested_organization_name"),
+            school_name=tenancy_fields.get("requested_school_name"),
         )
 
     user_id = str(uuid.uuid4())
@@ -4718,12 +5058,15 @@ async def request_access(user: UserCreate, request: Request):
         "name": user.name,
         "password": hash_password(user.password),
         "created_at": now,
-        "role": "admin" if auto_approved else desired_role,
+        "role": "admin" if auto_approved else _legacy_role_for_tenant_role(desired_role),
+        "tenant_role": "school_admin" if auto_approved else desired_role,
+        "tenant_status": "approved" if auto_approved else "pending",
         "approval_status": "approved" if auto_approved else "pending",
         "approval_requested_at": now,
         "approved_at": now if auto_approved else None,
         "approved_by": "system:auto_admin_allowlist" if auto_approved else None,
         "is_active": True if auto_approved else False,
+        **tenancy_fields,
     }
     await db.users.insert_one(user_doc)
     if auto_approved:
@@ -4744,6 +5087,10 @@ async def request_access(user: UserCreate, request: Request):
             email=email,
             message="Access is approved. You can now log in.",
             approval_status=_get_user_approval_status(enriched_user),
+            tenant_role=_get_user_tenant_role(enriched_user),
+            organization_type=enriched_user.get("organization_type"),
+            organization_name=enriched_user.get("organization_name") or enriched_user.get("requested_organization_name"),
+            school_name=enriched_user.get("school_name") or enriched_user.get("requested_school_name"),
         )
     await _log_auth_event(
         "request_access",
@@ -4761,6 +5108,10 @@ async def request_access(user: UserCreate, request: Request):
         email=email,
         message="Access request submitted. Approval is required before login.",
         approval_status="pending",
+        tenant_role=desired_role,
+        organization_type=tenancy_fields.get("organization_type"),
+        organization_name=tenancy_fields.get("requested_organization_name"),
+        school_name=tenancy_fields.get("requested_school_name"),
     )
 
 @api_router.post("/auth/login", response_model=TokenResponse)
@@ -4808,8 +5159,9 @@ async def login(user: UserLogin, request: Request):
         )
         raise HTTPException(status_code=403, detail="Account access removed")
     actual_role = _get_user_role(db_user)
-    if requested_role and requested_role != actual_role:
-        expected_label = "administrator" if actual_role == "admin" else "teacher"
+    actual_tenant_role = _get_user_tenant_role(db_user)
+    if requested_role and not _requested_role_matches_user(requested_role, db_user):
+        expected_label = _format_tenant_role_label(actual_tenant_role)
         await _log_auth_event(
             "login_failed",
             email=email,
@@ -4834,6 +5186,8 @@ async def login(user: UserLogin, request: Request):
     db_user.pop("_id", None)
     db_user.pop("password", None)
     db_user["role"] = actual_role
+    db_user["tenant_role"] = actual_tenant_role
+    db_user["tenant_status"] = approval_status
     db_user["approval_status"] = approval_status
     enriched_user = await enrich_user_with_workspace_mode(db_user)
 
@@ -5151,12 +5505,18 @@ async def create_school(
     payload: SchoolCreate,
     current_user: dict = Depends(get_current_user),
 ):
+    organization = await _ensure_school_organization_for_user(
+        current_user=current_user,
+        school_name=payload.name,
+        district_name=payload.district_name,
+    )
     school_id = str(uuid.uuid4())
     doc = {
         "id": school_id,
         "name": payload.name,
         "district_name": payload.district_name,
         "user_id": current_user["id"],
+        "organization_id": organization["id"],
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.schools.insert_one(doc)
@@ -5166,8 +5526,11 @@ async def create_school(
 
 @api_router.get("/schools", response_model=List[SchoolResponse])
 async def list_schools(current_user: dict = Depends(get_current_user)):
+    query: Dict[str, Any] = {"user_id": current_user["id"]}
+    if current_user.get("organization_id"):
+        query = {"organization_id": current_user["organization_id"]}
     schools = await db.schools.find(
-        {"user_id": current_user["id"]},
+        query,
         {"_id": 0, "user_id": 0},
     ).to_list(1000)
     return [SchoolResponse(**s) for s in schools]
@@ -16502,6 +16865,10 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.auth_event_log, [("email", 1), ("created_at", -1)])
     await _safe_create_index(db.auth_event_log, [("user_id", 1), ("created_at", -1)])
     await _safe_create_index(db.auth_event_log, [("event_type", 1), ("created_at", -1)])
+    await _safe_create_index(db.users, [("tenant_role", 1), ("tenant_status", 1), ("created_at", -1)])
+    await _safe_create_index(db.users, [("organization_id", 1), ("tenant_role", 1), ("created_at", -1)])
+    await _safe_create_index(db.organizations, [("organization_type", 1), ("status", 1), ("name", 1)])
+    await _safe_create_index(db.schools, [("organization_id", 1), ("name", 1)])
     await _safe_create_index(db.user_sessions, [("user_id", 1), ("created_at", -1)])
     await _safe_create_index(db.user_sessions, [("revoked_at", 1), ("created_at", -1)])
     await _safe_create_index(db.master_admin_audit_events, [("created_at", -1)])

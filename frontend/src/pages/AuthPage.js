@@ -24,10 +24,20 @@ export function AuthPage() {
   const approvalRequired = runtimeConfig.registrationApprovalRequired;
   const [mode, setMode] = useState("login");
   const [role, setRole] = useState("teacher");
-  const [form, setForm] = useState({ email: "", password: "", name: "" });
+  const [form, setForm] = useState({
+    email: "",
+    password: "",
+    name: "",
+    organization_name: "",
+    school_name: "",
+    requested_manager_email: "",
+  });
   const nameInputId = "auth-name";
   const emailInputId = "auth-email";
   const passwordInputId = "auth-password";
+  const organizationInputId = "auth-organization";
+  const schoolInputId = "auth-school";
+  const managerEmailInputId = "auth-manager-email";
 
   useEffect(() => {
     if (user) {
@@ -37,17 +47,28 @@ export function AuthPage() {
 
   const onSubmit = async (e) => {
     e.preventDefault();
+    const isTeacherRole = role === "teacher";
+    const needsSchoolName = role === "teacher" || role === "school_admin";
     const signupPayload = {
       email: form.email,
       password: form.password,
       name: form.name || form.email,
+      organization_name: form.organization_name,
+      ...(needsSchoolName ? { school_name: form.school_name } : {}),
+      ...(isTeacherRole && form.requested_manager_email
+        ? { requested_manager_email: form.requested_manager_email }
+        : {}),
       ...(!isDemo ? { role } : {}),
     };
 
     if (mode === "signup" && approvalRequired) {
       try {
         const res = await requestAccessAsync(signupPayload);
-        setForm((current) => ({ ...current, password: "" }));
+        setForm((current) => ({
+          ...current,
+          password: "",
+          requested_manager_email: "",
+        }));
         if (res?.data?.status === "approved") {
           setMode("login");
         }
@@ -71,20 +92,42 @@ export function AuthPage() {
   };
 
   const busy = loggingIn || registering || requestingAccess;
+  const isTeacherRole = role === "teacher";
+  const isSchoolAdminRole = role === "school_admin";
+  const isTrainingAdminRole = role === "training_admin";
+  const requiresOrganizationFields = mode === "signup" && !isDemo;
+  const requiresSchoolName = requiresOrganizationFields && !isTrainingAdminRole;
+  const requiresManagerEmail = requiresOrganizationFields && isTeacherRole;
   const roleLabel =
     mode === "login" ? t("auth.loginRoleLabel") : t("auth.signUpRoleLabel");
   const roleHint =
     mode === "login"
       ? t(
-          role === "admin" ? "auth.loginAdminHint" : "auth.loginTeacherHint"
+          isSchoolAdminRole
+            ? "auth.loginSchoolAdminHint"
+            : isTrainingAdminRole
+            ? "auth.loginTrainingAdminHint"
+            : "auth.loginTeacherHint"
         )
       : t(
-          role === "admin" ? "auth.signUpAdminHint" : "auth.signUpTeacherHint"
+          isSchoolAdminRole
+            ? "auth.signUpSchoolAdminHint"
+            : isTrainingAdminRole
+            ? "auth.signUpTrainingAdminHint"
+            : "auth.signUpTeacherHint"
         );
   const approvalDescription =
-    role === "admin"
-      ? t("auth.approvalRequiredAdminDescription")
+    isSchoolAdminRole
+      ? t("auth.approvalRequiredSchoolAdminDescription")
+      : isTrainingAdminRole
+      ? t("auth.approvalRequiredTrainingAdminDescription")
       : t("auth.approvalRequiredTeacherDescription");
+  const organizationFieldLabel = isTrainingAdminRole
+    ? t("auth.trainingOrganizationName")
+    : t("auth.schoolOrOrganizationName");
+  const organizationFieldHint = isTrainingAdminRole
+    ? t("auth.trainingOrganizationHint")
+    : t("auth.schoolOrganizationHint");
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-8">
@@ -136,7 +179,7 @@ export function AuthPage() {
             <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
               {roleLabel}
             </div>
-            <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1 text-sm">
+            <div className="grid grid-cols-1 gap-2 rounded-xl bg-slate-100 p-1 text-sm sm:grid-cols-3">
               <button
                 type="button"
                 onClick={() => setRole("teacher")}
@@ -150,14 +193,25 @@ export function AuthPage() {
               </button>
               <button
                 type="button"
-                onClick={() => setRole("admin")}
+                onClick={() => setRole("school_admin")}
                 className={`rounded-lg px-3 py-2 ${
-                  role === "admin"
+                  isSchoolAdminRole
                     ? "bg-white text-slate-900 shadow-sm font-semibold"
                     : "text-slate-500 hover:text-slate-700"
                 }`}
               >
-                {t("auth.adminRole")}
+                {t("auth.schoolAdminRole")}
+              </button>
+              <button
+                type="button"
+                onClick={() => setRole("training_admin")}
+                className={`rounded-lg px-3 py-2 ${
+                  isTrainingAdminRole
+                    ? "bg-white text-slate-900 shadow-sm font-semibold"
+                    : "text-slate-500 hover:text-slate-700"
+                }`}
+              >
+                {t("auth.trainingAdminRole")}
               </button>
             </div>
             <p className="mt-2 text-xs text-slate-500">{roleHint}</p>
@@ -194,6 +248,36 @@ export function AuthPage() {
               />
             </Field>
           )}
+          {requiresOrganizationFields && (
+            <Field label={organizationFieldLabel} htmlFor={organizationInputId}>
+              <Input
+                id={organizationInputId}
+                type="text"
+                required
+                value={form.organization_name}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, organization_name: e.target.value }))
+                }
+              />
+              <p className="mt-2 text-xs text-slate-500">{organizationFieldHint}</p>
+            </Field>
+          )}
+          {requiresSchoolName && (
+            <Field label={t("auth.schoolName")} htmlFor={schoolInputId}>
+              <Input
+                id={schoolInputId}
+                type="text"
+                required
+                value={form.school_name}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, school_name: e.target.value }))
+                }
+              />
+              <p className="mt-2 text-xs text-slate-500">
+                {t("auth.schoolNameHint")}
+              </p>
+            </Field>
+          )}
           <Field label={t("auth.email")} htmlFor={emailInputId}>
             <Input
               id={emailInputId}
@@ -205,6 +289,27 @@ export function AuthPage() {
               }
             />
           </Field>
+          {requiresManagerEmail && (
+            <Field
+              label={t("auth.requestedManagerEmail")}
+              htmlFor={managerEmailInputId}
+            >
+              <Input
+                id={managerEmailInputId}
+                type="email"
+                value={form.requested_manager_email}
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    requested_manager_email: e.target.value,
+                  }))
+                }
+              />
+              <p className="mt-2 text-xs text-slate-500">
+                {t("auth.requestedManagerEmailHint")}
+              </p>
+            </Field>
+          )}
           <Field label={t("auth.password")} htmlFor={passwordInputId}>
             <Input
               id={passwordInputId}

@@ -220,7 +220,7 @@ def test_review_exemplar_submission_approve_creates_library_item():
                     decision="approve",
                     reason="Approved for publication.",
                 ),
-                {"id": "admin_1", "email": "principal@demo.cognivio.app"},
+                {"id": "admin_1", "email": "principal@demo.cognivio.app", "role": "admin"},
             )
         )
     finally:

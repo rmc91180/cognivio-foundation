@@ -313,7 +313,7 @@ def test_review_video_recognition_approve_creates_badge():
                     badge_type=server.FIVE_STAR_BADGE,
                     reason="Strong instructional quality.",
                 ),
-                {"id": "admin_1", "email": "principal@demo.cognivio.app"},
+                {"id": "admin_1", "email": "principal@demo.cognivio.app", "role": "admin"},
             )
         )
     finally:
