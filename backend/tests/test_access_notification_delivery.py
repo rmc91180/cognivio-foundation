@@ -370,8 +370,6 @@ def test_process_access_request_action_deny(monkeypatch):
     response = asyncio.run(server.process_access_request_action("deny", token))
 
     assert response.status_code == 200
-    assert users.record["approval_status"] == "revoked"
-    assert users.record["is_active"] is False
-    assert users.record["revoked_by"] == "email_link:rmc91180@gmail.com"
+    assert users.record is None
     assert sent["email"] == "pending.teacher@example.com"
     assert "Applicant denied" in response.body.decode("utf-8")

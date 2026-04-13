@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
@@ -28,6 +28,7 @@ export function MasterAdminUserDetailPage() {
   const { t, i18n } = useTranslation();
   const locale = i18n.language?.startsWith("he") ? "he-IL" : "en-US";
   const { userId } = useParams();
+  const navigate = useNavigate();
   const { user: currentUser } = useAuth();
   const queryClient = useQueryClient();
   const [dialogMode, setDialogMode] = useState(null);
@@ -73,16 +74,21 @@ export function MasterAdminUserDetailPage() {
       if (mode === "approve") {
         return masterAdminApi.approveUser(userId, payload);
       }
-      if (mode === "revoke") {
-        return masterAdminApi.revokeUser(userId, payload);
-      }
-      if (mode === "reactivate") {
-        return masterAdminApi.reactivateUser(userId, payload);
+      if (mode === "delete") {
+        return masterAdminApi.deleteUser(userId, payload);
       }
       throw new Error(`Unsupported action: ${mode}`);
     },
     onSuccess: (_, variables) => {
       toast.success(t(`masterAdminUserDetail.${variables.mode}Success`));
+      if (variables.mode === "delete") {
+        queryClient.invalidateQueries({ queryKey: ["master-admin-users"] });
+        queryClient.invalidateQueries({ queryKey: ["master-admin-auth-events"] });
+        queryClient.invalidateQueries({ queryKey: ["master-admin-audit-events"] });
+        closeDialog();
+        navigate("/master-admin/users", { replace: true });
+        return;
+      }
       queryClient.invalidateQueries({ queryKey: ["master-admin-user-detail", userId] });
       queryClient.invalidateQueries({ queryKey: ["master-admin-users"] });
       queryClient.invalidateQueries({ queryKey: ["master-admin-auth-events"] });
@@ -103,18 +109,11 @@ export function MasterAdminUserDetailPage() {
         confirmLabel: t("masterAdminUserDetail.approve"),
       };
     }
-    if (dialogMode === "revoke") {
+    if (dialogMode === "delete") {
       return {
-        title: t("masterAdminUserDetail.revokeDialogTitle", { email: user.email }),
-        description: t("masterAdminUserDetail.revokeDialogDescription", { email: user.email }),
-        confirmLabel: t("masterAdminUserDetail.revoke"),
-      };
-    }
-    if (dialogMode === "reactivate") {
-      return {
-        title: t("masterAdminUserDetail.reactivateDialogTitle", { email: user.email }),
-        description: t("masterAdminUserDetail.reactivateDialogDescription"),
-        confirmLabel: t("masterAdminUserDetail.reactivate"),
+        title: t("masterAdminUserDetail.deleteDialogTitle", { email: user.email }),
+        description: t("masterAdminUserDetail.deleteDialogDescription", { email: user.email }),
+        confirmLabel: t("masterAdminUserDetail.delete"),
       };
     }
     return null;
@@ -207,19 +206,14 @@ export function MasterAdminUserDetailPage() {
                       <Button type="button" onClick={() => setDialogMode("approve")}>
                         {t("masterAdminUserDetail.approve")}
                       </Button>
-                      <Button type="button" variant="danger" onClick={() => setDialogMode("revoke")} disabled={isSelf}>
+                      <Button type="button" variant="danger" onClick={() => setDialogMode("delete")} disabled={isSelf}>
                         {t("masterAdminUserDetail.deny")}
                       </Button>
                     </>
                   ) : null}
                   {user.approval_status === "approved" ? (
-                    <Button type="button" variant="danger" onClick={() => setDialogMode("revoke")} disabled={isSelf}>
-                      {t("masterAdminUserDetail.revoke")}
-                    </Button>
-                  ) : null}
-                  {user.approval_status === "revoked" ? (
-                    <Button type="button" variant="success" onClick={() => setDialogMode("reactivate")}>
-                      {t("masterAdminUserDetail.reactivate")}
+                    <Button type="button" variant="danger" onClick={() => setDialogMode("delete")} disabled={isSelf}>
+                      {t("masterAdminUserDetail.delete")}
                     </Button>
                   ) : null}
                 </div>

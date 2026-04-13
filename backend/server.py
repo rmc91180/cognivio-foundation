@@ -185,7 +185,7 @@ def _get_user_role(user: dict) -> str:
 
 def _get_user_approval_status(user: Optional[dict]) -> str:
     status = str((user or {}).get("approval_status") or "").strip().lower()
-    if status in {"pending", "approved", "revoked"}:
+    if status in {"pending", "approved", "revoked", "deleted"}:
         return status
     return "approved"
 
@@ -1425,6 +1425,107 @@ async def _reactivate_user_access(
     return updated
 
 
+async def _hard_delete_user_access(
+    target: dict,
+    *,
+    actor: dict,
+    reason: Optional[str] = None,
+) -> dict:
+    user_id = target["id"]
+    email = str(target.get("email") or "").strip().lower()
+    deleted_snapshot = {
+        **{key: value for key, value in target.items() if key != "_id"},
+        "approval_status": "deleted",
+        "is_active": False,
+        "deleted_at": datetime.now(timezone.utc).isoformat(),
+        "deleted_by": actor.get("email") or actor.get("id"),
+    }
+
+    linked_teacher = None
+    linked_teacher_id = target.get("teacher_id")
+    if linked_teacher_id and hasattr(db, "teachers"):
+        linked_teacher = await db.teachers.find_one({"id": linked_teacher_id}, {"_id": 0})
+    if not linked_teacher and email and hasattr(db, "teachers"):
+        linked_teacher = await db.teachers.find_one({"email": email}, {"_id": 0})
+
+    if linked_teacher:
+        await _cleanup_teacher_smoke_artifacts(linked_teacher, delete_user_emails=[email] if email else None)
+    else:
+        if hasattr(db.users, "delete_one"):
+            await db.users.delete_one({"id": user_id})
+        elif hasattr(db.users, "delete_many"):
+            await db.users.delete_many({"id": user_id})
+        elif hasattr(db.users, "record"):
+            if getattr(db.users, "record", None) and db.users.record.get("id") == user_id:
+                db.users.record = None
+        else:
+            docs = list(getattr(db.users, "docs", []))
+            db.users.docs = [doc for doc in docs if doc.get("id") != user_id]
+
+    if hasattr(db, "user_sessions"):
+        if hasattr(db.user_sessions, "delete_many"):
+            await db.user_sessions.delete_many({"user_id": user_id})
+        else:
+            db.user_sessions.docs = [doc for doc in getattr(db.user_sessions, "docs", []) if doc.get("user_id") != user_id]
+    if hasattr(db, "auth_event_log"):
+        if hasattr(db.auth_event_log, "delete_many"):
+            await db.auth_event_log.delete_many({"$or": [{"user_id": user_id}, {"email": email}]})
+        else:
+            db.auth_event_log.docs = [
+                doc
+                for doc in getattr(db.auth_event_log, "docs", [])
+                if doc.get("user_id") != user_id and doc.get("email") != email
+            ]
+
+    if hasattr(db, "schools"):
+        await db.schools.update_many(
+            {"user_id": user_id},
+            {"$set": {"user_id": None, "updated_at": datetime.now(timezone.utc).isoformat()}},
+        )
+    if hasattr(db, "teachers") and email:
+        await db.teachers.update_many(
+            {"manager_email": email},
+            {"$set": {"manager_email": None, "manager_name": None}},
+        )
+    if hasattr(db, "users") and email:
+        if hasattr(db.users, "update_many"):
+            await db.users.update_many(
+                {"manager_email": email},
+                {"$set": {"manager_email": None, "manager_name": None}},
+            )
+        elif hasattr(db.users, "docs"):
+            for index, doc in enumerate(list(db.users.docs)):
+                if doc.get("manager_email") == email:
+                    next_doc = dict(doc)
+                    next_doc["manager_email"] = None
+                    next_doc["manager_name"] = None
+                    db.users.docs[index] = next_doc
+    if hasattr(db, "organizations"):
+        await db.organizations.update_many(
+            {"created_by": user_id},
+            {"$set": {"created_by": actor.get("email") or actor.get("id")}},
+        )
+        org_docs = await db.organizations.find({}, {"_id": 0, "id": 1}).to_list(1000)
+        for org in org_docs:
+            org_id = org.get("id")
+            if not org_id:
+                continue
+            user_count = await db.users.count_documents({"organization_id": org_id})
+            school_count = await db.schools.count_documents({"organization_id": org_id}) if hasattr(db, "schools") else 0
+            if user_count == 0 and school_count == 0:
+                await db.organizations.delete_one({"id": org_id})
+
+    event_type = "approval_deleted" if _get_user_approval_status(target) == "pending" else "account_deleted"
+    await _log_auth_event(
+        event_type,
+        email=email,
+        user_id=user_id,
+        result="success",
+        reason=reason,
+    )
+    return deleted_snapshot
+
+
 def _build_access_request_notification_message(user_doc: dict) -> EmailMessage:
     message = EmailMessage()
     message["Subject"] = f"Cognivio approval needed: {user_doc.get('email')}"
@@ -1606,6 +1707,74 @@ def _build_access_denied_html(user_doc: dict) -> str:
 """.strip()
 
 
+def _build_password_reset_url(token: str) -> str:
+    frontend_base = (FRONTEND_URL or BACKEND_PUBLIC_BASE_URL or "https://www.cognivio.live").rstrip("/")
+    return f"{frontend_base}/login?reset_token={quote(token, safe='')}"
+
+
+def _build_password_reset_email_text(user_doc: dict, token: str) -> str:
+    reset_url = _build_password_reset_url(token)
+    return "\n".join(
+        [
+            "We received a request to reset your Cognivio password.",
+            "",
+            f"Email: {user_doc.get('email')}",
+            "",
+            "Use the link below to choose a new password.",
+            reset_url,
+            "",
+            "This link expires in 60 minutes.",
+            "If you did not request a password reset, you can ignore this email.",
+        ]
+    )
+
+
+def _build_password_reset_email_html(user_doc: dict, token: str) -> str:
+    email_value = html.escape(str(user_doc.get("email") or ""))
+    reset_url = html.escape(_build_password_reset_url(token))
+    return f"""
+<div style="font-family: Arial, sans-serif; color: #0f172a; line-height: 1.5;">
+  <h2 style="margin: 0 0 16px;">Reset your Cognivio password</h2>
+  <p style="margin: 0 0 8px;"><strong>Email:</strong> {email_value}</p>
+  <p style="margin: 0 0 18px;">We received a request to reset your Cognivio password. Use the button below to choose a new one.</p>
+  <p style="margin: 0 0 18px;">
+    <a href="{reset_url}" style="display:inline-block;padding:12px 20px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:600;">Reset password</a>
+  </p>
+  <p style="margin: 0 0 8px;">This link expires in 60 minutes.</p>
+  <p style="margin: 0;">If you did not request a password reset, you can ignore this email.</p>
+</div>
+""".strip()
+
+
+def _build_password_reset_success_text(user_doc: dict) -> str:
+    sign_in_url = FRONTEND_URL or BACKEND_PUBLIC_BASE_URL or "https://www.cognivio.live"
+    return "\n".join(
+        [
+            "Your Cognivio password has been updated.",
+            "",
+            f"Email: {user_doc.get('email')}",
+            "",
+            "You can now sign in with your new password.",
+            f"Sign in here: {sign_in_url}",
+        ]
+    )
+
+
+def _build_password_reset_success_html(user_doc: dict) -> str:
+    email_value = html.escape(str(user_doc.get("email") or ""))
+    sign_in_url = html.escape(FRONTEND_URL or BACKEND_PUBLIC_BASE_URL or "https://www.cognivio.live")
+    return f"""
+<div style="font-family: Arial, sans-serif; color: #0f172a; line-height: 1.5;">
+  <h2 style="margin: 0 0 16px;">Your Cognivio password was updated</h2>
+  <p style="margin: 0 0 8px;"><strong>Email:</strong> {email_value}</p>
+  <p style="margin: 0 0 18px;">You can now sign in with your new password.</p>
+  <p style="margin: 0;">
+    <a href="{sign_in_url}" style="display:inline-block;padding:12px 20px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:600;">Open Cognivio</a>
+  </p>
+</div>
+""".strip()
+
+
 def _build_email_message(subject: str, to_email: str, text: str, html_body: Optional[str] = None) -> EmailMessage:
     message = EmailMessage()
     message["Subject"] = subject
@@ -1741,6 +1910,43 @@ def _send_access_denied_confirmation(user_doc: dict) -> bool:
         email,
         _build_access_denied_text(user_doc),
         html_body=_build_access_denied_html(user_doc),
+    )
+
+
+def _build_password_reset_token(user_doc: dict) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": user_doc.get("id"),
+        "email": user_doc.get("email"),
+        "purpose": "password_reset",
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(hours=1)).timestamp()),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _send_password_reset_email(user_doc: dict) -> bool:
+    email = str(user_doc.get("email") or "").strip()
+    if not email:
+        return False
+    token = _build_password_reset_token(user_doc)
+    return _send_platform_email(
+        "Reset your Cognivio password",
+        email,
+        _build_password_reset_email_text(user_doc, token),
+        html_body=_build_password_reset_email_html(user_doc, token),
+    )
+
+
+def _send_password_reset_success_email(user_doc: dict) -> bool:
+    email = str(user_doc.get("email") or "").strip()
+    if not email:
+        return False
+    return _send_platform_email(
+        "Your Cognivio password was updated",
+        email,
+        _build_password_reset_success_text(user_doc),
+        html_body=_build_password_reset_success_html(user_doc),
     )
 
 
@@ -4379,6 +4585,15 @@ class UserLogin(BaseModel):
     password: str
     role: Optional[str] = None
 
+
+class PasswordResetRequestPayload(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetConfirmPayload(BaseModel):
+    token: str
+    password: str
+
 class UserResponse(BaseModel):
     id: str
     email: str
@@ -6093,6 +6308,93 @@ async def login(user: UserLogin, request: Request):
         token=token,
         user=UserResponse(**enriched_user)
     )
+
+
+@api_router.post("/auth/password-reset/request")
+async def request_password_reset(
+    payload: PasswordResetRequestPayload,
+    request: Request,
+):
+    email = str(payload.email or "").strip().lower()
+    request_meta = _extract_request_metadata(request)
+    db_user = await db.users.find_one({"email": email}, {"_id": 0})
+    if db_user and _get_user_approval_status(db_user) == "approved" and _is_user_access_active(db_user):
+        _send_password_reset_email(db_user)
+        await _log_auth_event(
+            "password_reset_requested",
+            email=email,
+            user_id=db_user.get("id"),
+            result="success",
+            ip_address=request_meta["ip_address"],
+            user_agent=request_meta["user_agent"],
+        )
+    else:
+        await _log_auth_event(
+            "password_reset_requested",
+            email=email,
+            result="ignored",
+            reason="user_not_resettable",
+            ip_address=request_meta["ip_address"],
+            user_agent=request_meta["user_agent"],
+        )
+    return {
+        "status": "ok",
+        "message": "If this email is an approved Cognivio account, a password reset link has been sent.",
+    }
+
+
+@api_router.post("/auth/password-reset/confirm")
+async def confirm_password_reset(
+    payload: PasswordResetConfirmPayload,
+    request: Request,
+):
+    try:
+        token_payload = jwt.decode(payload.token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError as exc:
+        raise HTTPException(status_code=400, detail="This password reset link has expired") from exc
+    except jwt.PyJWTError as exc:
+        raise HTTPException(status_code=400, detail="This password reset link is invalid") from exc
+
+    if token_payload.get("purpose") != "password_reset":
+        raise HTTPException(status_code=400, detail="This password reset link is invalid")
+
+    user_id = token_payload.get("sub")
+    email = str(token_payload.get("email") or "").strip().lower()
+    if not user_id or not email:
+        raise HTTPException(status_code=400, detail="This password reset link is invalid")
+
+    db_user = await db.users.find_one({"id": user_id, "email": email}, {"_id": 0})
+    if not db_user or _get_user_approval_status(db_user) != "approved" or not _is_user_access_active(db_user):
+        raise HTTPException(status_code=400, detail="Password reset is unavailable for this account")
+
+    if len(str(payload.password or "")) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters long")
+
+    now = datetime.now(timezone.utc).isoformat()
+    await db.users.update_one(
+        {"id": user_id},
+        {
+            "$set": {
+                "password": hash_password(payload.password),
+                "password_reset_at": now,
+                "last_seen_at": now,
+            }
+        },
+    )
+    if hasattr(db, "user_sessions"):
+        await db.user_sessions.delete_many({"user_id": user_id})
+    refreshed_user = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    _send_password_reset_success_email(refreshed_user or {"email": email})
+    request_meta = _extract_request_metadata(request)
+    await _log_auth_event(
+        "password_reset_completed",
+        email=email,
+        user_id=user_id,
+        result="success",
+        ip_address=request_meta["ip_address"],
+        user_agent=request_meta["user_agent"],
+    )
+    return {"status": "ok", "message": "Password updated successfully. You can now sign in."}
 
 @api_router.get("/auth/me", response_model=UserResponse)
 async def get_me(current_user: dict = Depends(get_current_user)):
@@ -9411,26 +9713,26 @@ async def process_access_request_action(action: str, token: str):
             ),
             media_type="text/html",
         )
-    updates = {
-        "approval_status": "revoked",
-        "revoked_at": now,
-        "revoked_by": f"email_link:{ACCESS_APPROVAL_NOTIFY_EMAIL or 'admin'}",
-        "is_active": False,
-    }
-    await db.users.update_one({"id": user_id}, {"$set": updates})
-    updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    updated = await _hard_delete_user_access(
+        target,
+        actor={
+            "id": "email_link_admin",
+            "email": f"email_link:{ACCESS_APPROVAL_NOTIFY_EMAIL or 'admin'}",
+        },
+        reason="email_link_denial",
+    )
     await _log_auth_event(
         "approval_denied",
-        email=updated.get("email"),
-        user_id=updated.get("id"),
+        email=user_email,
+        user_id=user_id,
         result="success",
         reason="email_link_denial",
     )
-    _send_access_denied_confirmation(updated)
+    _send_access_denied_confirmation(target)
     return Response(
         _render_access_request_action_result_page(
             "Applicant denied",
-            f"{updated.get('email')} has been notified that the access request was not approved.",
+            f"{user_email} has been notified that the access request was not approved.",
             tone="danger",
         ),
         media_type="text/html",
@@ -14055,7 +14357,7 @@ async def get_master_admin_overview(current_user: dict = Depends(get_current_use
                 title="Dependency health degraded",
                 message=f"Unhealthy dependencies detected: {', '.join(unhealthy_dependencies)}.",
                 action_label="Inspect backend",
-                action_path="/master-admin",
+                action_path="/master-admin/dependencies",
             )
         )
     if organizations_at_limit:
@@ -14444,20 +14746,20 @@ async def master_admin_revoke_user(
         raise HTTPException(status_code=400, detail="A reason is required before access can be revoked")
     if expected_confirmation and actual_confirmation != expected_confirmation:
         raise HTTPException(status_code=400, detail="Confirmation text must match the target email exactly")
-    updated = await _revoke_user_access(
+    deleted = await _hard_delete_user_access(
         target,
-        actor_label=current_user.get("email") or current_user["id"],
+        actor=current_user,
         reason=payload.reason,
     )
     await _log_master_admin_audit_event(
         actor=current_user,
-        action="revoke_user_access",
+        action="delete_user_access",
         target_type="user",
         target_id=user_id,
         reason=payload.reason,
-        metadata={"email": updated.get("email"), "approval_status": updated.get("approval_status")},
+        metadata={"email": deleted.get("email"), "approval_status": deleted.get("approval_status")},
     )
-    return _to_access_user_record(updated)
+    return _to_access_user_record(deleted)
 
 
 @api_router.post("/master-admin/users/{user_id}/reactivate", response_model=AccessUserRecord)

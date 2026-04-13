@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "@/hooks/useAuth";
 import { BrandMark } from "@/components/BrandMark";
@@ -28,23 +28,30 @@ function SegmentButton({ active, onClick, children }) {
 export function AuthPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const location = useLocation();
   const {
     user,
     login,
     register,
     requestAccessAsync,
+    requestPasswordResetAsync,
+    confirmPasswordResetAsync,
     loggingIn,
     registering,
     requestingAccess,
+    requestingPasswordReset,
+    confirmingPasswordReset,
   } = useAuth();
   const isDemo = runtimeConfig.demoMode;
   const approvalRequired = runtimeConfig.registrationApprovalRequired;
   const [mode, setMode] = useState("login");
+  const [showPasswordResetRequest, setShowPasswordResetRequest] = useState(false);
   const [accessType, setAccessType] = useState("teacher");
   const [institutionType, setInstitutionType] = useState("school");
   const [form, setForm] = useState({
     email: "",
     password: "",
+    password_confirm: "",
     name: "",
     organization_name: "",
     school_name: "",
@@ -57,12 +64,26 @@ export function AuthPage() {
   const organizationInputId = "auth-organization";
   const subgroupInputId = "auth-subgroup";
   const managerEmailInputId = "auth-manager-email";
+  const passwordConfirmInputId = "auth-password-confirm";
+  const resetToken = useMemo(
+    () => new URLSearchParams(location.search).get("reset_token") || "",
+    [location.search]
+  );
+  const isResetConfirmMode = Boolean(resetToken);
+  const isResetRequestMode = mode === "login" && showPasswordResetRequest && !isResetConfirmMode;
 
   useEffect(() => {
     if (user) {
       navigate(getDefaultHomeRoute(user), { replace: true });
     }
   }, [navigate, user]);
+
+  useEffect(() => {
+    if (isResetConfirmMode) {
+      setMode("login");
+      setShowPasswordResetRequest(false);
+    }
+  }, [isResetConfirmMode]);
 
   const derivedRole = useMemo(() => {
     if (accessType === "administrator") {
@@ -146,6 +167,37 @@ export function AuthPage() {
 
   const onSubmit = async (e) => {
     e.preventDefault();
+    if (isResetConfirmMode) {
+      if (form.password !== form.password_confirm) {
+        return;
+      }
+      try {
+        await confirmPasswordResetAsync({
+          token: resetToken,
+          password: form.password,
+        });
+        setForm((current) => ({
+          ...current,
+          password: "",
+          password_confirm: "",
+        }));
+        navigate("/login", { replace: true });
+      } catch {
+        return;
+      }
+      return;
+    }
+
+    if (isResetRequestMode) {
+      try {
+        await requestPasswordResetAsync({ email: form.email });
+        setShowPasswordResetRequest(false);
+      } catch {
+        return;
+      }
+      return;
+    }
+
     const signupPayload = {
       email: form.email,
       password: form.password,
@@ -188,7 +240,39 @@ export function AuthPage() {
     fn(payload);
   };
 
-  const busy = loggingIn || registering || requestingAccess;
+  const busy =
+    loggingIn ||
+    registering ||
+    requestingAccess ||
+    requestingPasswordReset ||
+    confirmingPasswordReset;
+  const submitLabel = isResetConfirmMode
+    ? busy
+      ? t("auth.resetPasswordSubmitting")
+      : t("auth.resetPasswordSubmit")
+    : isResetRequestMode
+      ? busy
+        ? t("auth.passwordResetRequestSubmitting")
+        : t("auth.passwordResetRequestSubmit")
+      : busy
+        ? mode === "signup"
+          ? approvalRequired
+            ? t("auth.signingUp")
+            : t("auth.creatingAccount")
+          : t("auth.signingIn")
+        : mode === "login"
+          ? t("auth.signIn")
+          : t("auth.signUpCta");
+  const pageTitle = isResetConfirmMode
+    ? t("auth.resetPasswordTitle")
+    : isResetRequestMode
+      ? t("auth.forgotPasswordTitle")
+      : t("auth.title");
+  const pageSubtitle = isResetConfirmMode
+    ? t("auth.resetPasswordSubtitle")
+    : isResetRequestMode
+      ? t("auth.forgotPasswordSubtitle")
+      : t("auth.subtitle");
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-8">
@@ -201,17 +285,21 @@ export function AuthPage() {
             <BrandMark compact />
           </div>
           <h1 className="font-heading text-2xl font-semibold tracking-tight text-slate-900">
-            {t("auth.title")}
+            {pageTitle}
           </h1>
-          <p className="mt-1 text-sm text-slate-500">{t("auth.subtitle")}</p>
+          <p className="mt-1 text-sm text-slate-500">{pageSubtitle}</p>
         </div>
 
-        <div className="mb-4 flex gap-2 rounded-xl bg-slate-100 p-1 text-xs">
+        {!isResetConfirmMode ? (
+          <div className="mb-4 flex gap-2 rounded-xl bg-slate-100 p-1 text-xs">
           <button
             type="button"
-            onClick={() => setMode("login")}
+            onClick={() => {
+              setMode("login");
+              setShowPasswordResetRequest(false);
+            }}
             className={`flex-1 rounded px-3 py-2 ${
-              mode === "login"
+              mode === "login" && !showPasswordResetRequest
                 ? "bg-white text-slate-900 shadow-sm font-semibold"
                 : "text-slate-500 hover:text-slate-700"
             }`}
@@ -221,7 +309,10 @@ export function AuthPage() {
           {!isDemo && (
             <button
               type="button"
-              onClick={() => setMode("signup")}
+              onClick={() => {
+                setMode("signup");
+                setShowPasswordResetRequest(false);
+              }}
               className={`flex-1 rounded px-3 py-2 ${
                 mode === "signup"
                   ? "bg-white text-slate-900 shadow-sm font-semibold"
@@ -231,9 +322,10 @@ export function AuthPage() {
               {t("auth.signUpTab")}
             </button>
           )}
-        </div>
+          </div>
+        ) : null}
 
-        {!isDemo && (
+        {!isDemo && !isResetRequestMode && !isResetConfirmMode ? (
           <div className="mb-4 space-y-4">
             <div>
               <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
@@ -268,7 +360,7 @@ export function AuthPage() {
 
             <p className="text-xs text-slate-500">{roleHint}</p>
           </div>
-        )}
+        ) : null}
 
         {isDemo && (
           <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
@@ -279,7 +371,7 @@ export function AuthPage() {
           </div>
         )}
 
-        {!isDemo && approvalRequired && mode === "signup" && (
+        {!isDemo && approvalRequired && mode === "signup" && !isResetConfirmMode && !isResetRequestMode && (
           <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
             <div className="font-semibold">{t("auth.approvalRequiredTitle")}</div>
             <div className="mt-1">{approvalDescription}</div>
@@ -287,7 +379,7 @@ export function AuthPage() {
         )}
 
         <form onSubmit={onSubmit} className="space-y-4">
-          {mode === "signup" && !isDemo && (
+          {mode === "signup" && !isDemo && !isResetConfirmMode && !isResetRequestMode && (
             <>
               <Panel className="space-y-4 border-slate-200 bg-slate-50">
                 <div>
@@ -356,7 +448,7 @@ export function AuthPage() {
             </>
           )}
 
-          {mode === "signup" && !isDemo && (
+          {mode === "signup" && !isDemo && !isResetConfirmMode && !isResetRequestMode && (
             <Field label={t("auth.name")} htmlFor={nameInputId}>
               <Input
                 id={nameInputId}
@@ -367,7 +459,14 @@ export function AuthPage() {
             </Field>
           )}
 
-          <Field label={t("auth.email")} htmlFor={emailInputId}>
+          <Field
+            label={
+              isResetRequestMode
+                ? t("auth.passwordResetEmailLabel")
+                : t("auth.email")
+            }
+            htmlFor={emailInputId}
+          >
             <Input
               id={emailInputId}
               type="email"
@@ -377,7 +476,11 @@ export function AuthPage() {
             />
           </Field>
 
-          <Field label={t("auth.password")} htmlFor={passwordInputId}>
+          {!isResetRequestMode ? (
+            <Field
+              label={isResetConfirmMode ? t("auth.newPassword") : t("auth.password")}
+              htmlFor={passwordInputId}
+            >
             <Input
               id={passwordInputId}
               type="password"
@@ -385,22 +488,59 @@ export function AuthPage() {
               value={form.password}
               onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
             />
-          </Field>
+            </Field>
+          ) : null}
+
+          {isResetConfirmMode ? (
+            <Field label={t("auth.confirmNewPassword")} htmlFor={passwordConfirmInputId}>
+              <Input
+                id={passwordConfirmInputId}
+                type="password"
+                required
+                value={form.password_confirm || ""}
+                onChange={(e) => setForm((f) => ({ ...f, password_confirm: e.target.value }))}
+              />
+            </Field>
+          ) : null}
+
+          {isResetConfirmMode && form.password && form.password_confirm && form.password !== form.password_confirm ? (
+            <p className="text-xs text-rose-600">{t("auth.passwordMismatch")}</p>
+          ) : null}
 
           <Button type="submit" disabled={busy} fullWidth className="mt-2 shadow-brand">
-            {busy
-              ? mode === "signup"
-                ? approvalRequired
-                  ? t("auth.signingUp")
-                  : t("auth.creatingAccount")
-                : t("auth.signingIn")
-              : mode === "login"
-                ? t("auth.signIn")
-                : t("auth.signUpCta")}
+            {submitLabel}
           </Button>
         </form>
 
-        {!isDemo && approvalRequired && mode === "login" ? (
+        {mode === "login" && !isResetRequestMode && !isResetConfirmMode ? (
+          <div className="mt-3 text-center">
+            <button
+              type="button"
+              onClick={() => setShowPasswordResetRequest(true)}
+              className="text-xs font-medium text-primary hover:text-primary/80"
+            >
+              {t("auth.forgotPasswordLink")}
+            </button>
+          </div>
+        ) : null}
+
+        {isResetRequestMode || isResetConfirmMode ? (
+          <div className="mt-4 text-center">
+            <button
+              type="button"
+              onClick={() => {
+                setShowPasswordResetRequest(false);
+                setForm((current) => ({ ...current, password: "", password_confirm: "" }));
+                navigate("/login", { replace: true });
+              }}
+              className="text-xs font-medium text-primary hover:text-primary/80"
+            >
+              {t("auth.backToLogin")}
+            </button>
+          </div>
+        ) : null}
+
+        {!isDemo && approvalRequired && mode === "login" && !isResetRequestMode && !isResetConfirmMode ? (
           <p className="mt-4 text-center text-xs text-slate-500">
             {t("auth.needApprovalHint")}
           </p>

@@ -231,7 +231,7 @@ def test_master_admin_revoke_requires_exact_confirmation_text(fake_db):
     assert "match the target email" in exc.value.detail
 
 
-def test_master_admin_approve_and_reactivate_write_audit_events(fake_db):
+def test_master_admin_approve_and_delete_write_audit_events(fake_db):
     fake_db.users.docs.extend(
         [
             {
@@ -264,7 +264,7 @@ def test_master_admin_approve_and_reactivate_write_audit_events(fake_db):
     )
     assert approved.approval_status == "approved"
 
-    revoked = asyncio.run(
+    deleted = asyncio.run(
         server.master_admin_revoke_user(
             "u1",
             server.MasterAdminUserActionPayload(
@@ -274,21 +274,12 @@ def test_master_admin_approve_and_reactivate_write_audit_events(fake_db):
             current_user={"id": "super-1", "email": "rmc91180@gmail.com", "role": "super_admin"},
         )
     )
-    assert revoked.approval_status == "revoked"
-
-    reactivated = asyncio.run(
-        server.master_admin_reactivate_user(
-            "u1",
-            server.MasterAdminUserActionPayload(reason="Access restored"),
-            current_user={"id": "super-1", "email": "rmc91180@gmail.com", "role": "super_admin"},
-        )
-    )
-    assert reactivated.approval_status == "approved"
+    assert deleted.approval_status == "deleted"
+    assert [doc["id"] for doc in fake_db.users.docs] == ["super-1"]
 
     actions = [event["action"] for event in fake_db.master_admin_audit_events.docs]
     assert "approve_user_access" in actions
-    assert "revoke_user_access" in actions
-    assert "reactivate_user_access" in actions
+    assert "delete_user_access" in actions
 
 
 def test_master_admin_event_endpoints_return_logged_activity(fake_db):

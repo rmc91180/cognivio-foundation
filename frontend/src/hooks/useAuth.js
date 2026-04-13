@@ -89,6 +89,26 @@ export function AuthProvider({ children }) {
     },
   });
 
+  const requestPasswordResetMutation = useMutation({
+    mutationFn: authApi.requestPasswordReset,
+    onSuccess: (res) => {
+      toast.success(res?.data?.message || t("auth.passwordResetRequestSubmitted"));
+    },
+    onError: (error) => {
+      toast.error(getErrorMessage(error, t("auth.passwordResetRequestFailed")));
+    },
+  });
+
+  const confirmPasswordResetMutation = useMutation({
+    mutationFn: authApi.confirmPasswordReset,
+    onSuccess: (res) => {
+      toast.success(res?.data?.message || t("auth.passwordResetConfirmSuccess"));
+    },
+    onError: (error) => {
+      toast.error(getErrorMessage(error, t("auth.passwordResetConfirmFailed")));
+    },
+  });
+
   const logout = () => {
     localStorage.removeItem("cognivio_token");
     setUser(null);
@@ -102,9 +122,15 @@ export function AuthProvider({ children }) {
     register: (payload) => registerMutation.mutate(payload),
     requestAccess: (payload) => requestAccessMutation.mutate(payload),
     requestAccessAsync: (payload) => requestAccessMutation.mutateAsync(payload),
+    requestPasswordReset: (payload) => requestPasswordResetMutation.mutate(payload),
+    requestPasswordResetAsync: (payload) => requestPasswordResetMutation.mutateAsync(payload),
+    confirmPasswordReset: (payload) => confirmPasswordResetMutation.mutate(payload),
+    confirmPasswordResetAsync: (payload) => confirmPasswordResetMutation.mutateAsync(payload),
     loggingIn: loginMutation.isPending,
     registering: registerMutation.isPending,
     requestingAccess: requestAccessMutation.isPending,
+    requestingPasswordReset: requestPasswordResetMutation.isPending,
+    confirmingPasswordReset: confirmPasswordResetMutation.isPending,
     logout,
     refreshUser,
     setUserProfile: (nextUser) => setUser(nextUser),
