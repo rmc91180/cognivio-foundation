@@ -8,6 +8,7 @@ const GROUPS = [
     label: "Command center",
     items: [
       { to: "/master-admin", key: "overview", caption: "Platform pulse and active risk." },
+      { to: "/master-admin/users?approval_status=pending", key: "approvals", caption: "Pending access requests awaiting master-admin review." },
       { to: "/master-admin/users", key: "users", caption: "Global user lifecycle and access." },
       { to: "/master-admin/organizations", key: "institutions", caption: "Institution identity, seat caps, and usage." },
       { to: "/master-admin/workspaces", key: "workspaces", caption: "Workspace health and linkage." },

@@ -79,7 +79,8 @@ export function DashboardPage({ forcedWorkspaceMode = null }) {
   const tenantRole = getUserTenantRole(user);
   const isSchoolAdmin = tenantRole === "school_admin";
   const isTrainingAdmin = tenantRole === "training_admin";
-  const isAdmin = isSchoolAdmin || isTrainingAdmin;
+  const isSuperAdmin = tenantRole === "super_admin";
+  const isAdmin = isSchoolAdmin || isTrainingAdmin || isSuperAdmin;
   const effectiveWorkspaceMode =
     forcedWorkspaceMode || (isTrainingAdmin ? "training" : user?.workspace_mode || "school");
   const dashboardHomeRoute = getDefaultHomeRoute(user);

@@ -8,6 +8,7 @@ import { useAdminTeacherDeepDiveData } from "@/pages/teacher-deep-dive/useAdminT
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
+import { isSuperAdminUser } from "@/lib/userRoutes";
 
 export function TeacherProfilePage() {
   const { teacherId } = useParams();
@@ -36,6 +37,22 @@ export function TeacherProfilePage() {
     ? `/videos/${latestAssessment.video_id}`
     : `/videos?teacher_id=${teacherId}`;
   const adminActionTasks = coachingTasks.slice(0, 3);
+  const isSuperAdmin = isSuperAdminUser(user);
+  const teacherContextCards = [
+    {
+      label: t("teacherProfile.contextSchoolLabel"),
+      value: teacherRes?.school_name || t("teacherProfile.contextUnknown"),
+    },
+    {
+      label: t("teacherProfile.contextOrganizationLabel"),
+      value: teacherRes?.organization_name || t("teacherProfile.contextUnknown"),
+    },
+    {
+      label: t("teacherProfile.contextAdministratorLabel"),
+      value:
+        teacherRes?.manager_name || teacherRes?.manager_email || t("teacherProfile.contextUnknown"),
+    },
+  ];
 
   const handleExportReport = async (format) => {
     try {
@@ -116,10 +133,38 @@ export function TeacherProfilePage() {
               label: t("teacherProfile.openReflectionRecord"),
               to: `/teachers/${teacherId}/reflections`,
             },
+            ...(isSuperAdmin
+              ? [
+                  {
+                    label: t("teacherProfile.openOperationsPage"),
+                    to: `/teachers/${teacherId}/operations`,
+                  },
+                ]
+              : []),
           ]}
         />
 
-        <section className="rounded-xl border border-slate-200 bg-white p-5">
+        <section className="mt-6 rounded-xl border border-slate-200 bg-white p-5">
+          <SectionHeader
+            eyebrow={t("teacherProfile.contextEyebrow")}
+            title={t("teacherProfile.contextTitle")}
+            description={t("teacherProfile.contextDescription")}
+          />
+          <div className="mt-4 grid gap-4 md:grid-cols-3">
+            {teacherContextCards.map((card) => (
+              <Panel key={card.label} className="h-full">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  {card.label}
+                </div>
+                <div className="mt-2 text-sm font-semibold text-slate-900">
+                  {card.value}
+                </div>
+              </Panel>
+            ))}
+          </div>
+        </section>
+
+        <section className="mt-6 rounded-xl border border-slate-200 bg-white p-5">
           <SectionHeader
             eyebrow={t("teacherProfile.pageGuideTitle")}
             title={t("teacherProfile.pageGuideTitle")}

@@ -2,7 +2,6 @@ import React from "react";
 import { NavLink } from "react-router-dom";
 import {
   BookOpen,
-  ClipboardList,
   History,
   Layers,
   LayoutDashboard,
@@ -49,6 +48,12 @@ export function LayoutShell({ children }) {
                 {t("nav.platformBackend")}
               </div>
               <NavItem to="/master-admin" icon={ShieldCheck} label={t("nav.masterAdmin")} />
+              <div className="mt-3 px-3 pb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                {t("nav.operationalAccess")}
+              </div>
+              <NavItem to="/teachers" icon={Users} label={t("nav.teachers")} />
+              <NavItem to="/videos" icon={PlayCircle} label={t("nav.videos")} />
+              <NavItem to="/privacy-review" icon={ShieldCheck} label={t("nav.privacyReview")} />
             </div>
           ) : null}
           {isAdmin ? (
@@ -67,7 +72,6 @@ export function LayoutShell({ children }) {
               <NavItem to="/all-star-library" icon={BookOpen} label={t("nav.allStarLibrary")} />
               {isSchoolAdmin ? (
                 <>
-                  <NavItem to="/access-management" icon={ClipboardList} label={t("nav.accessManagement")} />
                   <NavItem to="/privacy-review" icon={ShieldCheck} label={t("nav.privacyReview")} />
                   <NavItem to="/recognition-review" icon={Trophy} label={t("nav.recognitionReview")} />
                   <NavItem to="/school-setup" icon={Layers} label={t("nav.schoolSetup")} />

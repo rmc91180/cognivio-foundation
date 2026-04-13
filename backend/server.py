@@ -1459,7 +1459,7 @@ def _build_access_request_notification_text(user_doc: dict) -> str:
             f"Approve now: {approve_url}",
             f"Deny now: {deny_url}",
             "",
-            "You can also review this request from the Cognivio access-management page after logging in.",
+            "You can also review this request from the Cognivio master-admin access approvals page after logging in.",
         ]
     )
 
@@ -1491,7 +1491,7 @@ def _build_access_request_notification_html(user_doc: dict) -> str:
     <a href="{approve_url}" style="display:inline-block;padding:12px 20px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:600;margin-right:12px;">Approve</a>
     <a href="{deny_url}" style="display:inline-block;padding:12px 20px;background:#dc2626;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:600;">Deny</a>
   </p>
-  <p style="margin: 0; color: #475569;">You can also review this request from the Cognivio access-management page after logging in.</p>
+  <p style="margin: 0; color: #475569;">You can also review this request from the Cognivio master-admin access approvals page after logging in.</p>
 </div>
 """.strip()
 
@@ -2174,6 +2174,57 @@ async def _get_teacher_or_404(teacher_id: str, current_user: dict) -> dict:
     if await _teacher_is_visible_to_user(teacher, current_user):
         return teacher
     raise HTTPException(status_code=403, detail="Not authorized for this teacher")
+
+
+async def _enrich_teacher_with_tenancy_context(teacher: Optional[dict]) -> dict:
+    enriched = dict(teacher or {})
+    if not enriched:
+        return enriched
+
+    school = await _get_school_for_teacher(enriched)
+    linked_user = await _find_user_by_email(enriched.get("email"))
+
+    organization_id = (
+        enriched.get("organization_id")
+        or (linked_user or {}).get("organization_id")
+        or (school or {}).get("organization_id")
+    )
+    organization_doc = None
+    if organization_id and hasattr(db, "organizations"):
+        organization_doc = await db.organizations.find_one({"id": organization_id}, {"_id": 0})
+
+    school_name = (
+        _clean_optional_string(enriched.get("school_name"))
+        or _clean_optional_string((linked_user or {}).get("school_name"))
+        or _clean_optional_string((school or {}).get("name"))
+    )
+    organization_name = (
+        _clean_optional_string(enriched.get("organization_name"))
+        or _clean_optional_string((linked_user or {}).get("organization_name"))
+        or _clean_optional_string((organization_doc or {}).get("name"))
+    )
+    organization_type = _normalize_organization_type(
+        enriched.get("organization_type")
+        or (linked_user or {}).get("organization_type")
+        or (organization_doc or {}).get("organization_type"),
+        (linked_user or {}).get("tenant_role") or "teacher",
+    )
+
+    manager_name = _clean_optional_string((linked_user or {}).get("manager_name"))
+    manager_email = _clean_optional_string((linked_user or {}).get("manager_email"))
+
+    if (not manager_name or not manager_email) and school and school.get("user_id") and hasattr(db, "users"):
+        school_admin = await db.users.find_one({"id": school.get("user_id")}, {"_id": 0, "name": 1, "email": 1})
+        if school_admin:
+            manager_name = manager_name or _clean_optional_string(school_admin.get("name"))
+            manager_email = manager_email or _clean_optional_string(school_admin.get("email"))
+
+    enriched["school_name"] = school_name
+    enriched["organization_name"] = organization_name
+    enriched["organization_type"] = organization_type
+    enriched["manager_name"] = manager_name
+    enriched["manager_email"] = manager_email
+    return enriched
 
 
 async def _get_school_for_teacher(teacher: Optional[dict]) -> Optional[dict]:
@@ -4770,6 +4821,11 @@ class TeacherResponse(BaseModel):
     grade_level: str
     department: Optional[str] = None
     school_id: Optional[str] = None
+    school_name: Optional[str] = None
+    organization_type: Optional[str] = None
+    organization_name: Optional[str] = None
+    manager_name: Optional[str] = None
+    manager_email: Optional[str] = None
     category: Optional[str] = None
     category_custom: Optional[str] = None
     next_coaching_conference: Optional[str] = None
@@ -5986,7 +6042,11 @@ async def login(user: UserLogin, request: Request):
         raise HTTPException(status_code=403, detail="Account access removed")
     actual_role = _get_user_role(db_user)
     actual_tenant_role = _get_user_tenant_role(db_user)
-    if requested_role and not _requested_role_matches_user(requested_role, db_user):
+    if (
+        requested_role
+        and actual_tenant_role != "super_admin"
+        and not _requested_role_matches_user(requested_role, db_user)
+    ):
         expected_label = _format_tenant_role_label(actual_tenant_role)
         await _log_auth_event(
             "login_failed",
@@ -6370,6 +6430,7 @@ async def list_schools(current_user: dict = Depends(get_current_user)):
 @api_router.get("/teachers/{teacher_id}", response_model=TeacherResponse)
 async def get_teacher(teacher_id: str, request: Request, current_user: dict = Depends(get_current_user)):
     teacher = await _get_teacher_or_404(teacher_id, current_user)
+    teacher = await _enrich_teacher_with_tenancy_context(teacher)
     teacher.pop("created_by", None)
     language = _resolve_request_language(request, default="en")
     return TeacherResponse(**_localize_teacher_payload(teacher, language))
@@ -9248,7 +9309,7 @@ async def process_access_request_action(action: str, token: str):
         return Response(
             _render_access_request_action_result_page(
                 "This access decision link has expired",
-                "Open Cognivio and review the request from the access approvals page if you still want to act on it.",
+                "Open Cognivio and review the request from the master-admin access approvals page if you still want to act on it.",
                 tone="warning",
             ),
             media_type="text/html",
@@ -9257,7 +9318,7 @@ async def process_access_request_action(action: str, token: str):
         return Response(
             _render_access_request_action_result_page(
                 "This access decision link is invalid",
-                "Use the Cognivio access approvals page after logging in to review the request manually.",
+                "Use the Cognivio master-admin access approvals page after logging in to review the request manually.",
                 tone="danger",
             ),
             media_type="text/html",
@@ -9267,7 +9328,7 @@ async def process_access_request_action(action: str, token: str):
         return Response(
             _render_access_request_action_result_page(
                 "This access decision link is invalid",
-                "Use the Cognivio access approvals page after logging in to review the request manually.",
+                "Use the Cognivio master-admin access approvals page after logging in to review the request manually.",
                 tone="danger",
             ),
             media_type="text/html",
@@ -9313,7 +9374,7 @@ async def process_access_request_action(action: str, token: str):
             return Response(
                 _render_access_request_action_result_page(
                     "This request was already denied",
-                    "Open Cognivio if you want to manually re-approve the account from the access approvals page.",
+                    "Open Cognivio if you want to manually re-approve the account from the master-admin access approvals page.",
                     tone="warning",
                 ),
                 media_type="text/html",
@@ -9336,7 +9397,7 @@ async def process_access_request_action(action: str, token: str):
         return Response(
             _render_access_request_action_result_page(
                 "This applicant is already approved",
-                "Use the Cognivio access approvals page if you want to remove access after approval.",
+                "Use the Cognivio master-admin access approvals page if you want to remove access after approval.",
                 tone="warning",
             ),
             media_type="text/html",

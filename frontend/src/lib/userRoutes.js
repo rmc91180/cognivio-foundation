@@ -41,6 +41,7 @@ export function getDashboardHomeRoute(user) {
 
 export function canAccessTenantRole(user, allowedTenantRoles = []) {
   if (!allowedTenantRoles?.length) return true;
+  if (isSuperAdminUser(user)) return true;
   return allowedTenantRoles.includes(normalizeTenantRole(user));
 }
 

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { opsApi, privacyReviewApi, videoApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
@@ -145,7 +145,9 @@ export function PrivacyReviewQueuePage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const location = useLocation();
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
+  const selectedTeacherId = useMemo(() => new URLSearchParams(location.search).get("teacher_id") || "", [location.search]);
 
   const {
     data: queueRes,
@@ -202,7 +204,13 @@ export function PrivacyReviewQueuePage() {
     },
   });
 
-  const queueItems = useMemo(() => queueRes?.items || [], [queueRes]);
+  const queueItems = useMemo(() => {
+    const items = queueRes?.items || [];
+    if (!selectedTeacherId) {
+      return items;
+    }
+    return items.filter((item) => item.teacher_id === selectedTeacherId);
+  }, [queueRes, selectedTeacherId]);
 
   if (!isAdmin) {
     return (

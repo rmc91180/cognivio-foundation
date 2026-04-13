@@ -278,6 +278,24 @@ export function MasterAdminUserDetailPage() {
                   </div>
                 </div>
               </div>
+
+              {user.linked_teacher_id ? (
+                <div className="rounded-xl border border-slate-200 bg-white p-4">
+                  <div className="text-sm font-semibold text-slate-900">{t("masterAdminUserDetail.teacherActionsTitle")}</div>
+                  <div className="mt-1 text-sm text-slate-500">{t("masterAdminUserDetail.teacherActionsDescription")}</div>
+                  <div className="mt-4 flex flex-wrap gap-3">
+                    <Link to={`/teachers/${user.linked_teacher_id}`} className="text-sm font-medium text-primary hover:text-primary/80">
+                      {t("masterAdminUserDetail.openTeacherSummary")}
+                    </Link>
+                    <Link to={`/teachers/${user.linked_teacher_id}/operations`} className="text-sm font-medium text-primary hover:text-primary/80">
+                      {t("masterAdminUserDetail.openTeacherOperations")}
+                    </Link>
+                    <Link to={`/videos?teacher_id=${user.linked_teacher_id}`} className="text-sm font-medium text-primary hover:text-primary/80">
+                      {t("masterAdminUserDetail.openTeacherVideos")}
+                    </Link>
+                  </div>
+                </div>
+              ) : null}
             </Panel>
 
             <div className="grid gap-6 xl:grid-cols-2">

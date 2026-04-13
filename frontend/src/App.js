@@ -22,10 +22,10 @@ import { MasterAdminIncidentsPage } from "@/pages/MasterAdminIncidentsPage";
 import { MasterAdminSupportPage } from "@/pages/MasterAdminSupportPage";
 import { TeachersPage } from "@/pages/TeachersPage";
 import { VideosPage } from "@/pages/VideosPage";
-import { AccessManagementPage } from "@/pages/AccessManagementPage";
 import { TeacherProfilePage } from "@/pages/TeacherProfilePage";
 import { TeacherLatestLessonPage } from "@/pages/TeacherLatestLessonPage";
 import { TeacherHistoryPage } from "@/pages/TeacherHistoryPage";
+import { TeacherOperationsPage } from "@/pages/TeacherOperationsPage";
 import { CoachingHubPage } from "@/pages/CoachingHubPage";
 import { MasterSchedulePage } from "@/pages/MasterSchedulePage";
 import { VideoPlayerPage } from "@/pages/VideoPlayerPage";
@@ -235,6 +235,14 @@ function App() {
           }
         />
         <Route
+          path="/teachers/:teacherId/operations"
+          element={
+            <ProtectedRoute allowedTenantRoles={["super_admin"]}>
+              <TeacherOperationsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
           path="/teachers/:teacherId/action-plan"
           element={
             <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
@@ -295,14 +303,6 @@ function App() {
           element={
             <ProtectedRoute allowedTenantRoles={["teacher", "school_admin", "training_admin"]}>
               <VideosPage />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/access-management"
-          element={
-            <ProtectedRoute allowedTenantRoles={["school_admin"]}>
-              <AccessManagementPage />
             </ProtectedRoute>
           }
         />

@@ -1,4 +1,4 @@
-import { isAdminUser } from "@/lib/userRoutes";
+import { isAdminUser, isSuperAdminUser } from "@/lib/userRoutes";
 
 export function getCoachingHubRoute(user, teacherId, tab = "") {
   const base = isAdminUser(user)
@@ -23,7 +23,10 @@ export function getTeacherHomeRoute(user, teacherId) {
 }
 
 export function getMaterialsRoute(user, teacherId) {
-  return isAdminUser(user) ? `/teachers/${teacherId}` : "/my-workspace/materials";
+  if (isSuperAdminUser(user)) {
+    return `/teachers/${teacherId}/operations`;
+  }
+  return isAdminUser(user) ? `/privacy-review?teacher_id=${encodeURIComponent(teacherId)}` : "/my-workspace/materials";
 }
 
 export function getConferenceRoute(user, teacherId) {
