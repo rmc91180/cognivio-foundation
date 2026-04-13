@@ -1,5 +1,6 @@
 import React from "react";
-import { NavLink } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
+import { NavLink, useNavigate } from "react-router-dom";
 import {
   BookOpen,
   ClipboardList,
@@ -16,6 +17,7 @@ import { useTranslation } from "react-i18next";
 import { useAuth } from "@/hooks/useAuth";
 import { BrandMark } from "@/components/BrandMark";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { Button } from "@/components/ui";
 import {
   getDashboardHomeRoute,
   getUserTenantRole,
@@ -24,16 +26,31 @@ import {
   isSuperAdminUser,
   isTrainingAdminUser,
 } from "@/lib/userRoutes";
+import { clearPreviewSession } from "@/lib/previewMode";
 
 export function LayoutShell({ children }) {
   const { t } = useTranslation();
-  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const { user, logout, refreshUser } = useAuth();
   const isAdmin = isAdminUser(user);
   const isSuperAdmin = isSuperAdminUser(user);
   const isSchoolAdmin = isSchoolAdminUser(user);
   const isTrainingAdmin = isTrainingAdminUser(user);
   const tenantRole = getUserTenantRole(user);
   const dashboardHomeRoute = getDashboardHomeRoute(user);
+  const isPreviewMode = Boolean(user?.is_preview_mode);
+
+  const exitPreviewMode = async () => {
+    clearPreviewSession();
+    queryClient.clear();
+    try {
+      await refreshUser();
+    } catch {
+      return;
+    }
+    navigate("/master-admin", { replace: true });
+  };
 
   return (
     <div className="flex h-screen bg-slate-50 text-slate-900">
@@ -142,6 +159,28 @@ export function LayoutShell({ children }) {
         </div>
       </aside>
       <main className="flex-1 overflow-y-auto bg-slate-50">
+        {isPreviewMode ? (
+          <div className="border-b border-amber-200 bg-amber-50 px-6 py-3">
+            <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-700">
+                  {t("nav.previewModeEyebrow")}
+                </div>
+                <div className="mt-1 text-sm text-amber-950">
+                  {t("nav.previewModeDescription", {
+                    name: user?.name || user?.email || t("nav.previewModeTargetFallback"),
+                  })}
+                </div>
+                <div className="mt-1 text-xs text-amber-800">
+                  {t("nav.previewModeReadOnly")}
+                </div>
+              </div>
+              <Button type="button" variant="secondary" onClick={exitPreviewMode}>
+                {t("nav.exitPreviewMode")}
+              </Button>
+            </div>
+          </div>
+        ) : null}
         {children}
       </main>
     </div>

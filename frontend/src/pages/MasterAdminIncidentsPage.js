@@ -59,6 +59,26 @@ export function MasterAdminIncidentsPage() {
             <MasterAdminMetricCard label="Danger" value={data?.summary?.danger ?? 0} tone="danger" />
             <MasterAdminMetricCard label="Warning" value={data?.summary?.warning ?? 0} tone="warning" />
           </MasterAdminMetricGrid>
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Repeat videos</div>
+              <div className="mt-2 text-2xl font-semibold text-slate-900">{data?.summary?.repeat_videos ?? 0}</div>
+              <div className="mt-1 text-xs text-slate-500">Videos with multiple active incidents right now.</div>
+            </div>
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Stale active</div>
+              <div className="mt-2 text-2xl font-semibold text-slate-900">{data?.summary?.stale_active ?? 0}</div>
+              <div className="mt-1 text-xs text-slate-500">Active incidents older than 12 hours.</div>
+            </div>
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Most common type</div>
+              <div className="mt-2 text-sm font-semibold text-slate-900">{data?.summary?.most_common_type || "—"}</div>
+            </div>
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Recommended focus</div>
+              <div className="mt-2 text-sm text-slate-700">{data?.summary?.recommended_focus || "No urgent cluster detected."}</div>
+            </div>
+          </div>
           <div className="md:col-span-4 flex flex-wrap gap-2">
             <button type="button" className="rounded-full border px-3 py-1 text-sm" onClick={() => setFilter("state", "")}>All states</button>
             <button type="button" className="rounded-full border px-3 py-1 text-sm" onClick={() => setFilter("state", "active")}>Active</button>

@@ -5,6 +5,7 @@ import { MonthlySummary } from "@/components/MonthlySummary";
 import { PageContextHeader, SectionHeader } from "@/components/ui";
 import { useAdminTeacherDeepDiveData } from "@/pages/teacher-deep-dive/useAdminTeacherDeepDiveData";
 import { useTranslation } from "react-i18next";
+import { buildInstitutionContextTags } from "@/lib/institutionContext";
 
 export function TeacherHistoryPage() {
   const { teacherId } = useParams();
@@ -21,6 +22,13 @@ export function TeacherHistoryPage() {
 
   const reflectionHistory = reflectionHistoryRes?.history || [];
   const actionPlanHistory = actionPlanHistoryRes?.history || [];
+  const institutionTags = buildInstitutionContextTags({
+    subject: teacherRes,
+    schoolLabel: t("teacherProfile.contextSchoolLabel"),
+    organizationLabel: t("teacherProfile.contextOrganizationLabel"),
+    managerLabel: t("teacherProfile.contextAdministratorLabel"),
+    unknownLabel: t("teacherProfile.contextUnknown"),
+  });
 
   return (
     <LayoutShell>
@@ -39,6 +47,7 @@ export function TeacherHistoryPage() {
           meta={t("teacherProfile.historyPageMeta", {
             name: teacherRes?.name || t("teacherProfile.fallbackTeacher"),
           })}
+          tags={institutionTags}
           stats={[
             {
               label: t("teacherProfile.lessonHistoryCount"),

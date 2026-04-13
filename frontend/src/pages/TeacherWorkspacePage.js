@@ -10,6 +10,7 @@ import { Button, EmptyState, PageContextHeader, Panel, SectionHeader } from "@/c
 import { useAuth } from "@/hooks/useAuth";
 import { useTeacherWorkspaceData } from "@/pages/teacher-workspace/useTeacherWorkspaceData";
 import { resolveCoachingLink } from "@/lib/coachingRoutes";
+import { buildInstitutionContextTags } from "@/lib/institutionContext";
 
 function WorkspacePanel({ title, description, eyebrow, children }) {
   return (
@@ -118,6 +119,13 @@ export function TeacherWorkspacePage() {
 
   const sectionTitle = section === "materials" ? t("teacherWorkspace.materialsTitle") : section === "history" ? t("teacherWorkspace.historyTitle") : t("teacherWorkspace.title");
   const sectionDescription = section === "materials" ? t("teacherWorkspace.materialsDescription") : section === "history" ? t("teacherWorkspace.historyDescription") : t("teacherWorkspace.description");
+  const institutionTags = buildInstitutionContextTags({
+    subject: user,
+    schoolLabel: t("teacherWorkspace.linkedSchoolLabel"),
+    organizationLabel: t("teacherWorkspace.linkedOrganizationLabel"),
+    managerLabel: t("teacherWorkspace.linkedAdminNameLabel"),
+    unknownLabel: t("teacherWorkspace.linkedAdminNotAssigned"),
+  });
 
   const renderEmpty = (title, description, ctaLabel, ctaTo) => (
     <EmptyState
@@ -395,6 +403,7 @@ export function TeacherWorkspacePage() {
           description={sectionDescription}
           meta={t("teacherWorkspace.roleMeta")}
           badge={t("teacherWorkspace.roleBadge")}
+          tags={institutionTags}
           stats={[
             { label: t("teacherProfile.coachingStatusLatestLesson"), value: latestReviewedAt ? formatDateTime(latestReviewedAt) : t("teacherProfile.noLessonReviewedYet") },
             { label: t("teacherProfile.coachingStatusGoals"), value: t("teacherProfile.goalsInMotionCount", { open: openGoals.length, completed: completedGoals.length }) },

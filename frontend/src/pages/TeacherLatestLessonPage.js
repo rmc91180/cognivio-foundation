@@ -5,6 +5,7 @@ import { ObservationFocusPanel } from "@/components/assessment/ObservationFocusP
 import { PageContextHeader, Panel, SectionHeader } from "@/components/ui";
 import { useAdminTeacherDeepDiveData } from "@/pages/teacher-deep-dive/useAdminTeacherDeepDiveData";
 import { useTranslation } from "react-i18next";
+import { buildInstitutionContextTags } from "@/lib/institutionContext";
 
 export function TeacherLatestLessonPage() {
   const { teacherId } = useParams();
@@ -28,6 +29,13 @@ export function TeacherLatestLessonPage() {
   const latestVideoLink = latestAssessment?.video_id
     ? `/videos/${latestAssessment.video_id}`
     : `/videos?teacher_id=${teacherId}`;
+  const institutionTags = buildInstitutionContextTags({
+    subject: teacherRes,
+    schoolLabel: t("teacherProfile.contextSchoolLabel"),
+    organizationLabel: t("teacherProfile.contextOrganizationLabel"),
+    managerLabel: t("teacherProfile.contextAdministratorLabel"),
+    unknownLabel: t("teacherProfile.contextUnknown"),
+  });
 
   return (
     <LayoutShell>
@@ -46,6 +54,7 @@ export function TeacherLatestLessonPage() {
           meta={t("teacherProfile.latestLessonPageMeta", {
             name: teacherRes?.name || t("teacherProfile.fallbackTeacher"),
           })}
+          tags={institutionTags}
           stats={[
             {
               label: t("teacherProfile.coachingStatusLatestLesson"),

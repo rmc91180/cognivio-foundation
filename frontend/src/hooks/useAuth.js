@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { authApi } from "@/lib/api";
+import { clearPreviewSession } from "@/lib/previewMode";
 
 const AuthContext = createContext(null);
 
@@ -56,6 +57,7 @@ export function AuthProvider({ children }) {
   const loginMutation = useMutation({
     mutationFn: authApi.login,
     onSuccess: (res) => {
+      clearPreviewSession();
       localStorage.setItem("cognivio_token", res.data.token);
       setUser(res.data.user);
       toast.success(t("auth.loggedInSuccessfully"));
@@ -69,6 +71,7 @@ export function AuthProvider({ children }) {
   const registerMutation = useMutation({
     mutationFn: authApi.register,
     onSuccess: (res) => {
+      clearPreviewSession();
       localStorage.setItem("cognivio_token", res.data.token);
       setUser(res.data.user);
       toast.success(t("auth.accountCreated"));
@@ -111,6 +114,7 @@ export function AuthProvider({ children }) {
 
   const logout = () => {
     localStorage.removeItem("cognivio_token");
+    clearPreviewSession();
     setUser(null);
     queryClient.clear();
   };

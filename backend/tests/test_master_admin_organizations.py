@@ -80,6 +80,9 @@ class _Collection:
                     if operator == "$ne":
                         if doc_value == expected:
                             return False
+                    elif operator == "$in":
+                        if doc_value not in expected:
+                            return False
                     else:
                         raise AssertionError(f"Unsupported operator: {operator}")
                 continue
@@ -276,9 +279,31 @@ def test_master_admin_organizations_and_seat_policy_update(monkeypatch):
                 {"id": "school-2", "organization_id": "org-1", "name": "Sunrise Middle"},
             ]
         ),
+        teachers=_Collection(
+            [
+                {"id": "teacher-record-1", "organization_id": "org-1"},
+                {"id": "teacher-record-2", "organization_id": "org-1"},
+            ]
+        ),
+        videos=_Collection(
+            [
+                {"id": "video-1", "organization_id": "org-1", "created_at": "2026-04-13T09:00:00+00:00"},
+            ]
+        ),
+        assessments=_Collection(
+            [
+                {"id": "assessment-1", "organization_id": "org-1", "created_at": "2026-04-13T09:15:00+00:00"},
+            ]
+        ),
+        teacher_face_profiles=_Collection(
+            [
+                {"id": "profile-1", "teacher_id": "teacher-record-1"},
+            ]
+        ),
         master_admin_audit_events=_Collection(),
     )
     monkeypatch.setattr(server, "db", fake_db)
+    monkeypatch.setattr(server, "_refresh_processing_incidents", lambda: asyncio.sleep(0, result=[]))
 
     listing = asyncio.run(
         server.get_master_admin_organizations(

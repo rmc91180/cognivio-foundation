@@ -12,11 +12,13 @@ export function PageContextHeader({
   badge,
   stats = [],
   quickLinks = [],
+  tags = [],
   className,
 }) {
   const visibleBreadcrumbs = breadcrumbs.filter(Boolean);
   const visibleStats = stats.filter((item) => item && (item.label || item.value));
   const visibleQuickLinks = quickLinks.filter(Boolean);
+  const visibleTags = tags.filter((item) => item && item.label && item.value);
 
   return (
     <div className={classNames("mb-6", className)}>
@@ -58,8 +60,24 @@ export function PageContextHeader({
           meta={meta}
           actions={actions}
           compact
-          className={visibleStats.length || visibleQuickLinks.length ? "mb-0" : ""}
+          className={visibleStats.length || visibleQuickLinks.length || visibleTags.length ? "mb-0" : ""}
         />
+
+        {visibleTags.length ? (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {visibleTags.map((item) => (
+              <div
+                key={`${item.label}-${item.value}`}
+                className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-[11px] text-slate-700"
+              >
+                <span className="font-semibold uppercase tracking-wide text-slate-500">
+                  {item.label}
+                </span>
+                <span className="font-medium text-slate-900">{item.value}</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
 
         {visibleStats.length ? (
           <div className="mt-4 grid gap-3 md:grid-cols-3">

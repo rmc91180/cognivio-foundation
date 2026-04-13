@@ -5,8 +5,11 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
 import { Badge, Button, Dialog, ErrorState, Field, Input, LoadingState, Panel, Textarea } from "@/components/ui";
+import { InstitutionSuggestionList } from "@/components/ui/InstitutionSuggestionList";
 import { MasterAdminPageScaffold } from "@/components/master-admin/MasterAdminPageScaffold";
-import { masterAdminApi } from "@/lib/api";
+import { authApi, masterAdminApi } from "@/lib/api";
+import { setPreviewSession } from "@/lib/previewMode";
+import { getDefaultHomeRoute } from "@/lib/userRoutes";
 
 function formatTimestamp(value, locale) {
   if (!value) return "—";
@@ -29,7 +32,7 @@ export function MasterAdminUserDetailPage() {
   const locale = i18n.language?.startsWith("he") ? "he-IL" : "en-US";
   const { userId } = useParams();
   const navigate = useNavigate();
-  const { user: currentUser } = useAuth();
+  const { user: currentUser, refreshUser } = useAuth();
   const queryClient = useQueryClient();
   const [dialogMode, setDialogMode] = useState(null);
   const [reason, setReason] = useState("");
@@ -46,6 +49,27 @@ export function MasterAdminUserDetailPage() {
 
   const user = data?.user;
   const isSelf = user?.id && currentUser?.id && user.id === currentUser.id;
+  const approvalInstitutionType =
+    user?.organization_type || (user?.tenant_role === "training_admin" ? "training" : "school");
+  const canPreviewUser =
+    Boolean(user?.id) &&
+    user?.approval_status === "approved" &&
+    user?.is_active !== false &&
+    !isSelf &&
+    (user?.tenant_role || user?.role) !== "super_admin";
+
+  const { data: institutionLookupRes } = useQuery({
+    queryKey: ["master-admin-institution-lookup", approvalInstitutionType, approvalOrganizationName],
+    queryFn: () =>
+      authApi
+        .institutionLookup({
+          organization_type: approvalInstitutionType,
+          q: approvalOrganizationName.trim(),
+          limit: 6,
+        })
+        .then((res) => res.data),
+    enabled: dialogMode === "approve" && approvalOrganizationName.trim().length >= 2,
+  });
 
   const closeDialog = () => {
     setDialogMode(null);
@@ -68,6 +92,33 @@ export function MasterAdminUserDetailPage() {
       user.manager_email || user.requested_manager_email || ""
     );
   }, [dialogMode, user]);
+
+  const startPreview = async () => {
+    if (!user?.id) return;
+    setPreviewSession({
+      userId: user.id,
+      name: user.name,
+      email: user.email,
+      tenantRole: user.tenant_role || user.role,
+    });
+    queryClient.clear();
+    try {
+      const previewUser = await refreshUser();
+      navigate(getDefaultHomeRoute(previewUser || user));
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || t("masterAdminUserDetail.previewFailed"));
+    }
+  };
+
+  const applyInstitutionSuggestion = (suggestion) => {
+    setApprovalOrganizationName(suggestion.organization_name || "");
+    if (suggestion.school_name) {
+      setApprovalSchoolName(suggestion.school_name);
+    }
+    if (suggestion.manager_email) {
+      setApprovalManagerEmail(suggestion.manager_email);
+    }
+  };
 
   const actionMutation = useMutation({
     mutationFn: async ({ mode, payload }) => {
@@ -201,6 +252,11 @@ export function MasterAdminUserDetailPage() {
                   ) : null}
                 </div>
                 <div className="mt-4 flex flex-wrap gap-3">
+                  {canPreviewUser ? (
+                    <Button type="button" variant="secondary" onClick={startPreview}>
+                      {t("masterAdminUserDetail.previewAccount")}
+                    </Button>
+                  ) : null}
                   {user.approval_status === "pending" ? (
                     <>
                       <Button type="button" onClick={() => setDialogMode("approve")}>
@@ -364,14 +420,25 @@ export function MasterAdminUserDetailPage() {
               <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-950">
                 {t("masterAdminUserDetail.approveAssignmentHint")}
               </div>
-              <Field label={isTrainingAdmin ? t("masterAdminUserDetail.trainingOrganizationLabel") : t("masterAdminUserDetail.organizationLabel")}>
-                <Input
-                  value={approvalOrganizationName}
-                  onChange={(event) => setApprovalOrganizationName(event.target.value)}
-                  placeholder={t("masterAdminUserDetail.organizationPlaceholder")}
+                <Field label={isTrainingAdmin ? t("masterAdminUserDetail.trainingOrganizationLabel") : t("masterAdminUserDetail.organizationLabel")}>
+                  <Input
+                    value={approvalOrganizationName}
+                    onChange={(event) => setApprovalOrganizationName(event.target.value)}
+                    placeholder={t("masterAdminUserDetail.organizationPlaceholder")}
+                  />
+                </Field>
+                <InstitutionSuggestionList
+                  suggestions={institutionLookupRes?.suggestions || []}
+                  title={t("masterAdminUserDetail.institutionMatchesTitle")}
+                  emptyLabel={
+                    approvalOrganizationName.trim().length >= 2
+                      ? t("masterAdminUserDetail.institutionMatchesEmpty")
+                      : null
+                  }
+                  selectLabel={t("masterAdminUserDetail.useInstitutionMatch")}
+                  onSelect={applyInstitutionSuggestion}
                 />
-              </Field>
-              {needsSchoolName ? (
+                {needsSchoolName ? (
                 <Field label={t("masterAdminUserDetail.schoolLabel")}>
                   <Input
                     value={approvalSchoolName}

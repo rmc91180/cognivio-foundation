@@ -27,6 +27,7 @@ export const authApi = {
   login: (payload) => api.post("/api/auth/login", payload),
   register: (payload) => api.post("/api/auth/register", payload),
   requestAccess: (payload) => api.post("/api/auth/request-access", payload),
+  institutionLookup: (params) => api.get("/api/institutions/lookup", { params }),
   requestPasswordReset: (payload) => api.post("/api/auth/password-reset/request", payload),
   confirmPasswordReset: (payload) => api.post("/api/auth/password-reset/confirm", payload),
   me: () => api.get("/api/auth/me"),

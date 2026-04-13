@@ -1,11 +1,14 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "@/hooks/useAuth";
 import { BrandMark } from "@/components/BrandMark";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { InstitutionSuggestionList } from "@/components/ui/InstitutionSuggestionList";
 import { Button, Field, Input, Panel } from "@/components/ui";
 import { runtimeConfig } from "@/lib/runtimeConfig";
+import { authApi } from "@/lib/api";
 import { getDefaultHomeRoute } from "@/lib/userRoutes";
 
 function SegmentButton({ active, onClick, children }) {
@@ -164,6 +167,31 @@ export function AuthPage() {
       value: form.requested_manager_email || "—",
     },
   ];
+
+  const { data: institutionLookupRes } = useQuery({
+    queryKey: ["signup-institution-lookup", institutionType, form.organization_name],
+    queryFn: () =>
+      authApi
+        .institutionLookup({
+          organization_type: institutionType,
+          q: form.organization_name.trim(),
+          limit: 6,
+        })
+        .then((res) => res.data),
+    enabled: mode === "signup" && !isDemo && form.organization_name.trim().length >= 2,
+  });
+
+  const applyInstitutionSuggestion = (suggestion) => {
+    setForm((current) => ({
+      ...current,
+      organization_name: suggestion.organization_name || current.organization_name,
+      school_name: suggestion.school_name || current.school_name,
+      requested_manager_email:
+        isTeacherRole && suggestion.manager_email
+          ? suggestion.manager_email
+          : current.requested_manager_email,
+    }));
+  };
 
   const onSubmit = async (e) => {
     e.preventDefault();
@@ -396,6 +424,17 @@ export function AuthPage() {
                     onChange={(e) => setForm((f) => ({ ...f, organization_name: e.target.value }))}
                   />
                   <p className="mt-2 text-xs text-slate-500">{organizationFieldHint}</p>
+                  <InstitutionSuggestionList
+                    suggestions={institutionLookupRes?.suggestions || []}
+                    title={t("auth.institutionMatchesTitle")}
+                    emptyLabel={
+                      form.organization_name.trim().length >= 2
+                        ? t("auth.institutionMatchesEmpty")
+                        : null
+                    }
+                    selectLabel={t("auth.useInstitutionMatch")}
+                    onSelect={applyInstitutionSuggestion}
+                  />
                 </Field>
 
                 {showsSubgroupField ? (

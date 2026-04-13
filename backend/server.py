@@ -1,4 +1,5 @@
 from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, Depends, Response, WebSocket, WebSocketDisconnect, Query, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
@@ -736,6 +737,79 @@ async def _build_master_admin_organization_record(organization_doc: dict) -> "Ma
     seat_snapshot = await _get_organization_seat_snapshot(organization_id=organization_doc["id"])
     seat_limit = _normalize_seat_limit(organization_doc.get("seat_limit"))
     seats_remaining = None if not seat_limit else max(seat_limit - seat_snapshot["active_user_count"], 0)
+    teacher_docs = await db.teachers.find(
+        {"organization_id": organization_doc["id"]},
+        {"_id": 0, "id": 1},
+    ).to_list(5000)
+    teacher_ids = [doc.get("id") for doc in teacher_docs if doc.get("id")]
+    active_incidents = [item for item in await _refresh_processing_incidents() if item.get("state") == "active"]
+    active_incident_count = sum(1 for item in active_incidents if item.get("teacher_id") in teacher_ids)
+    uploads_total = 0
+    assessments_total = 0
+    privacy_ready_teacher_count = 0
+    last_activity_candidates: List[str] = []
+    if teacher_ids:
+        uploads_total = await db.videos.count_documents({"teacher_id": {"$in": teacher_ids}})
+        assessments_total = await db.assessments.count_documents({"teacher_id": {"$in": teacher_ids}})
+        privacy_ready_teacher_count = await db.teacher_face_profiles.count_documents(
+            {"teacher_id": {"$in": teacher_ids}, "status": "active"}
+        )
+        recent_video_docs = await db.videos.find(
+            {"teacher_id": {"$in": teacher_ids}},
+            {"_id": 0, "created_at": 1, "status_updated_at": 1},
+        ).sort("status_updated_at", -1).to_list(20)
+        last_activity_candidates.extend(
+            [
+                value
+                for doc in recent_video_docs
+                for value in [doc.get("status_updated_at"), doc.get("created_at")]
+                if value
+            ]
+        )
+        recent_assessment_docs = await db.assessments.find(
+            {"teacher_id": {"$in": teacher_ids}},
+            {"_id": 0, "created_at": 1},
+        ).sort("created_at", -1).to_list(20)
+        last_activity_candidates.extend(
+            [doc.get("created_at") for doc in recent_assessment_docs if doc.get("created_at")]
+        )
+    active_users = await db.users.find(
+        {
+            "organization_id": organization_doc["id"],
+            "approval_status": "approved",
+            "is_active": {"$ne": False},
+        },
+        {"_id": 0, "last_login_at": 1, "updated_at": 1},
+    ).to_list(5000)
+    recent_logins_30d = 0
+    threshold_30d = datetime.now(timezone.utc) - timedelta(days=30)
+    for user_doc in active_users:
+        last_login_at = _parse_master_admin_iso(user_doc.get("last_login_at"))
+        if last_login_at and last_login_at.astimezone(timezone.utc) >= threshold_30d:
+            recent_logins_30d += 1
+        if user_doc.get("last_login_at"):
+            last_activity_candidates.append(user_doc.get("last_login_at"))
+        if user_doc.get("updated_at"):
+            last_activity_candidates.append(user_doc.get("updated_at"))
+
+    parsed_activities = [
+        _parse_master_admin_iso(value)
+        for value in last_activity_candidates
+        if _parse_master_admin_iso(value)
+    ]
+    last_activity_at = (
+        max(parsed_activities).astimezone(timezone.utc).isoformat() if parsed_activities else None
+    )
+    if active_incident_count:
+        health_summary = f"{active_incident_count} active incident(s) need attention."
+    elif uploads_total == 0 and seat_snapshot["active_user_count"] > 0:
+        health_summary = "Institution is configured but has no uploaded classroom evidence yet."
+    elif seat_limit and seats_remaining == 0:
+        health_summary = "Institution is at seat capacity."
+    elif seat_snapshot["pending_user_count"]:
+        health_summary = f"{seat_snapshot['pending_user_count']} approval request(s) are waiting."
+    else:
+        health_summary = "Institution is active and operating normally."
     return MasterAdminOrganizationRecord(
         id=organization_doc["id"],
         name=organization_doc.get("name") or "—",
@@ -754,7 +828,118 @@ async def _build_master_admin_organization_record(organization_doc: dict) -> "Ma
             seat_limit=seat_limit,
             active_user_count=seat_snapshot["active_user_count"],
         ),
+        uploads_total=uploads_total,
+        assessments_total=assessments_total,
+        privacy_ready_teacher_count=privacy_ready_teacher_count,
+        recent_logins_30d=recent_logins_30d,
+        active_incident_count=active_incident_count,
+        last_activity_at=last_activity_at,
+        health_summary=health_summary,
     )
+
+
+async def _build_institution_lookup_suggestions(
+    *,
+    organization_type: str,
+    query: Optional[str],
+    limit: int = 8,
+) -> List["InstitutionLookupSuggestion"]:
+    normalized_type = _normalize_organization_type(organization_type, None)
+    normalized_query = _normalized_name_key(query)
+    if not normalized_query:
+        return []
+
+    safe_limit = max(1, min(limit, 12))
+    organization_docs = await db.organizations.find(
+        {"organization_type": normalized_type},
+        {"_id": 0},
+    ).to_list(500)
+    matching_orgs = [
+        doc
+        for doc in organization_docs
+        if normalized_query in _normalized_name_key(doc.get("name"))
+    ]
+    suggestions: List[InstitutionLookupSuggestion] = []
+    seen_keys: set[str] = set()
+
+    async def append_suggestion(
+        *,
+        organization_doc: dict,
+        school_doc: Optional[dict] = None,
+        manager_doc: Optional[dict] = None,
+    ) -> None:
+        seat_record = await _build_master_admin_organization_record(organization_doc)
+        key = f"{organization_doc.get('id')}::{(school_doc or {}).get('id') or ''}"
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        suggestions.append(
+            InstitutionLookupSuggestion(
+                organization_id=organization_doc.get("id"),
+                organization_type=normalized_type,
+                organization_name=organization_doc.get("name") or "—",
+                school_id=(school_doc or {}).get("id"),
+                school_name=(school_doc or {}).get("name"),
+                manager_name=(manager_doc or {}).get("name"),
+                manager_email=(manager_doc or {}).get("email"),
+                seat_limit=seat_record.seat_limit,
+                seats_remaining=seat_record.seats_remaining,
+                capacity_state=seat_record.capacity_state,
+            )
+        )
+
+    if normalized_type == "school":
+        school_docs = await db.schools.find({}, {"_id": 0}).to_list(1000)
+        matching_schools = [
+            doc for doc in school_docs if normalized_query in _normalized_name_key(doc.get("name"))
+        ]
+        for school_doc in matching_schools:
+            organization_doc = next(
+                (item for item in organization_docs if item.get("id") == school_doc.get("organization_id")),
+                None,
+            )
+            if not organization_doc:
+                continue
+            manager_doc = await db.users.find_one(
+                {"school_id": school_doc.get("id"), "tenant_role": "school_admin", "approval_status": "approved"},
+                {"_id": 0, "name": 1, "email": 1},
+            )
+            await append_suggestion(
+                organization_doc=organization_doc,
+                school_doc=school_doc,
+                manager_doc=manager_doc,
+            )
+            if len(suggestions) >= safe_limit:
+                return suggestions[:safe_limit]
+
+    for organization_doc in matching_orgs:
+        manager_doc = await db.users.find_one(
+            {
+                "organization_id": organization_doc.get("id"),
+                "tenant_role": "training_admin" if normalized_type == "training" else "school_admin",
+                "approval_status": "approved",
+            },
+            {"_id": 0, "name": 1, "email": 1},
+        )
+        if normalized_type == "school":
+            school_doc = await db.schools.find_one(
+                {"organization_id": organization_doc.get("id")},
+                {"_id": 0, "id": 1, "name": 1},
+            )
+            await append_suggestion(
+                organization_doc=organization_doc,
+                school_doc=school_doc,
+                manager_doc=manager_doc,
+            )
+        else:
+            await append_suggestion(
+                organization_doc=organization_doc,
+                manager_doc=manager_doc,
+            )
+        if len(suggestions) >= safe_limit:
+            break
+
+    return suggestions[:safe_limit]
 
 
 def _to_access_user_record(user_doc: dict) -> "AccessUserRecord":
@@ -3924,6 +4109,21 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+@app.middleware("http")
+async def block_write_requests_in_preview_mode(request: Request, call_next):
+    preview_target_id = str(request.headers.get("X-Cognivio-Preview-User") or "").strip()
+    if (
+        preview_target_id
+        and request.url.path.startswith("/api")
+        and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+    ):
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "Preview mode is read-only. Exit preview mode before making changes."},
+        )
+    return await call_next(request)
+
 # Health check endpoint (at root level for Railway)
 @app.get("/health")
 async def health_check():
@@ -4617,6 +4817,11 @@ class UserResponse(BaseModel):
     requested_organization_name: Optional[str] = None
     requested_school_name: Optional[str] = None
     requested_manager_email: Optional[str] = None
+    is_preview_mode: bool = False
+    preview_source_user_id: Optional[str] = None
+    preview_source_email: Optional[str] = None
+    preview_source_name: Optional[str] = None
+    preview_source_tenant_role: Optional[str] = None
 
 class TokenResponse(BaseModel):
     token: str
@@ -4766,6 +4971,13 @@ class MasterAdminOrganizationRecord(BaseModel):
     seat_limit: Optional[int] = None
     seats_remaining: Optional[int] = None
     capacity_state: str = "unlimited"
+    uploads_total: int = 0
+    assessments_total: int = 0
+    privacy_ready_teacher_count: int = 0
+    recent_logins_30d: int = 0
+    active_incident_count: int = 0
+    last_activity_at: Optional[str] = None
+    health_summary: Optional[str] = None
 
 
 class MasterAdminOrganizationListResponse(BaseModel):
@@ -4781,6 +4993,26 @@ class MasterAdminOrganizationDetailResponse(BaseModel):
     generated_at: str
     organization: MasterAdminOrganizationRecord
     related: Dict[str, Any]
+
+
+class InstitutionLookupSuggestion(BaseModel):
+    organization_id: Optional[str] = None
+    organization_type: str
+    organization_name: str
+    school_id: Optional[str] = None
+    school_name: Optional[str] = None
+    manager_name: Optional[str] = None
+    manager_email: Optional[str] = None
+    seat_limit: Optional[int] = None
+    seats_remaining: Optional[int] = None
+    capacity_state: Optional[str] = None
+
+
+class InstitutionLookupResponse(BaseModel):
+    generated_at: str
+    query: Optional[str] = None
+    organization_type: str
+    suggestions: List[InstitutionLookupSuggestion]
 
 
 class MasterAdminOrganizationSeatPolicyPayload(BaseModel):
@@ -4852,7 +5084,7 @@ class ProcessingIncidentListResponse(BaseModel):
     limit: int
     offset: int
     items: List[ProcessingIncidentRecord]
-    summary: Dict[str, int]
+    summary: Dict[str, Any]
 
 
 class MasterAdminVideoRecord(BaseModel):
@@ -5970,7 +6202,7 @@ def _requested_role_matches_user(requested_role: Optional[str], user_doc: dict) 
         return True
     return requested_role == _get_user_tenant_role(user_doc)
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
         token = credentials.credentials
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
@@ -5989,8 +6221,29 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             raise HTTPException(status_code=403, detail="Account pending approval")
         if _get_user_approval_status(user) == "revoked" or not _is_user_access_active(user):
             raise HTTPException(status_code=403, detail="Account access removed")
+        preview_target_id = str(request.headers.get("X-Cognivio-Preview-User") or "").strip()
+        if preview_target_id and _get_user_tenant_role(user) == "super_admin":
+            preview_target = await db.users.find_one(
+                {"id": preview_target_id},
+                {"_id": 0, "password": 0},
+            )
+            if preview_target and _get_user_approval_status(preview_target) == "approved" and _is_user_access_active(preview_target):
+                preview_payload = _build_user_response_payload(preview_target)
+                preview_payload["is_preview_mode"] = True
+                preview_payload["preview_source_user_id"] = user.get("id")
+                preview_payload["preview_source_email"] = user.get("email")
+                preview_payload["preview_source_name"] = user.get("name")
+                preview_payload["preview_source_tenant_role"] = _get_user_tenant_role(user)
+                if session_id:
+                    preview_payload["session_id"] = session_id
+                return preview_payload
         user["role"] = _get_user_role(user)
         user["approval_status"] = _get_user_approval_status(user)
+        user["is_preview_mode"] = False
+        user["preview_source_user_id"] = None
+        user["preview_source_email"] = None
+        user["preview_source_name"] = None
+        user["preview_source_tenant_role"] = None
         if session_id:
             user["session_id"] = session_id
         return user
@@ -6210,6 +6463,26 @@ async def request_access(user: UserCreate, request: Request):
         organization_type=tenancy_fields.get("organization_type"),
         organization_name=tenancy_fields.get("requested_organization_name"),
         school_name=tenancy_fields.get("requested_school_name"),
+    )
+
+
+@api_router.get("/institutions/lookup", response_model=InstitutionLookupResponse)
+async def lookup_institutions(
+    organization_type: str,
+    q: Optional[str] = None,
+    limit: int = 8,
+):
+    normalized_type = _normalize_organization_type(organization_type, None)
+    suggestions = await _build_institution_lookup_suggestions(
+        organization_type=normalized_type,
+        query=q,
+        limit=limit,
+    )
+    return InstitutionLookupResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        query=q,
+        organization_type=normalized_type,
+        suggestions=suggestions,
     )
 
 @api_router.post("/auth/login", response_model=TokenResponse)
@@ -14617,6 +14890,10 @@ async def get_master_admin_organizations(
         "capped": sum(1 for item in filtered if item.seat_limit),
         "at_limit": sum(1 for item in filtered if item.capacity_state == "at_limit"),
         "near_limit": sum(1 for item in filtered if item.capacity_state == "near_limit"),
+        "uploads_total": sum(item.uploads_total for item in filtered),
+        "assessments_total": sum(item.assessments_total for item in filtered),
+        "active_incidents": sum(item.active_incident_count for item in filtered),
+        "recent_logins_30d": sum(item.recent_logins_30d for item in filtered),
     }
     return MasterAdminOrganizationListResponse(
         generated_at=datetime.now(timezone.utc).isoformat(),
@@ -15054,6 +15331,30 @@ async def get_master_admin_processing_incidents(
     safe_limit = max(1, min(limit, 200))
     safe_offset = max(0, offset)
     sliced = filtered[safe_offset : safe_offset + safe_limit]
+    active_items = [item for item in filtered if item.state == "active"]
+    repeat_video_ids = {
+        item.video_id
+        for item in active_items
+        if sum(1 for other in active_items if other.video_id == item.video_id) > 1
+    }
+    stale_threshold = datetime.now(timezone.utc) - timedelta(hours=12)
+    stale_active_count = sum(
+        1
+        for item in active_items
+        if (_parse_master_admin_iso(item.last_seen_at) or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        <= stale_threshold
+    )
+    type_counts: Dict[str, int] = {}
+    for item in active_items:
+        type_counts[item.incident_type] = type_counts.get(item.incident_type, 0) + 1
+    most_common_type = max(type_counts, key=type_counts.get) if type_counts else None
+    recommended_focus = None
+    if stale_active_count:
+        recommended_focus = "Review stale incidents first; they may be blocked retries rather than fresh failures."
+    elif repeat_video_ids:
+        recommended_focus = "Multiple active incidents are clustering on the same videos. Open the affected video details first."
+    elif most_common_type:
+        recommended_focus = f"Most active incidents are {most_common_type.replace('_', ' ')} issues."
     return ProcessingIncidentListResponse(
         generated_at=datetime.now(timezone.utc).isoformat(),
         total=len(filtered),
@@ -15065,6 +15366,10 @@ async def get_master_admin_processing_incidents(
             "resolved": sum(1 for item in filtered if item.state == "resolved"),
             "danger": sum(1 for item in filtered if item.severity == "danger"),
             "warning": sum(1 for item in filtered if item.severity == "warning"),
+            "repeat_videos": len(repeat_video_ids),
+            "stale_active": stale_active_count,
+            "most_common_type": most_common_type or "none",
+            "recommended_focus": recommended_focus or "No urgent incident cluster is currently dominating the queue.",
         },
     )
 

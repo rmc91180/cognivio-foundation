@@ -84,7 +84,7 @@ test.describe('Authentication', () => {
     await expect(
       page.getByRole('heading', { name: /your linked administrator/i })
     ).toBeVisible();
-    await expect(page.getByText(/demo principal/i)).toBeVisible();
+    await expect(page.getByText(/demo principal/i).first()).toBeVisible();
   });
 
   test('school admin is redirected away from teacher-only routes', async ({ page }) => {

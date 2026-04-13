@@ -10,6 +10,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { actionPlanApi, assessmentApi, teacherApi } from "@/lib/api";
 import { getCoachingHubRoute } from "@/lib/coachingRoutes";
 import { isAdminUser } from "@/lib/userRoutes";
+import { buildInstitutionContextTags } from "@/lib/institutionContext";
 
 const HUB_TABS = ["goals", "reflections", "timeline", "conference"];
 
@@ -162,6 +163,13 @@ export function CoachingHubPage() {
   const publishedAgendaItems = conferenceAgendaRes?.agenda_items || [];
   const adminAgendaItems = conferencePrepRes?.agenda || [];
   const nextConferenceAt = conferencePrepRes?.next_conference || teacherRes?.next_coaching_conference;
+  const institutionTags = buildInstitutionContextTags({
+    subject: teacherRes,
+    schoolLabel: t("teacherProfile.contextSchoolLabel"),
+    organizationLabel: t("teacherProfile.contextOrganizationLabel"),
+    managerLabel: t("teacherProfile.contextAdministratorLabel"),
+    unknownLabel: t("teacherProfile.contextUnknown"),
+  });
 
   const renderGoalsTab = () => (
     <div className="space-y-6">
@@ -478,6 +486,7 @@ export function CoachingHubPage() {
           title={headerTitle}
           description={headerDescription}
           meta={headerMeta}
+          tags={institutionTags}
           stats={[
             {
               label: t("teacherProfile.coachingStatusGoals"),

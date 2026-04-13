@@ -156,6 +156,12 @@ export function MasterAdminOrganizationsPage() {
             <MasterAdminMetricCard label={t("masterAdminOrganizations.capped")} value={data?.summary?.capped ?? 0} tone="warning" />
             <MasterAdminMetricCard label={t("masterAdminOrganizations.atLimit")} value={data?.summary?.at_limit ?? 0} tone="danger" />
           </MasterAdminMetricGrid>
+          <MasterAdminMetricGrid className="xl:grid-cols-4">
+            <MasterAdminMetricCard label={t("masterAdminOrganizations.totalUploads")} value={data?.summary?.uploads_total ?? 0} />
+            <MasterAdminMetricCard label={t("masterAdminOrganizations.totalAssessments")} value={data?.summary?.assessments_total ?? 0} />
+            <MasterAdminMetricCard label={t("masterAdminOrganizations.recentLogins30d")} value={data?.summary?.recent_logins_30d ?? 0} />
+            <MasterAdminMetricCard label={t("masterAdminOrganizations.activeIncidents")} value={data?.summary?.active_incidents ?? 0} tone="danger" />
+          </MasterAdminMetricGrid>
         </Panel>
 
         {isLoading ? <LoadingState message={t("masterAdminOrganizations.loading")} /> : null}
@@ -231,15 +237,58 @@ export function MasterAdminOrganizationsPage() {
                         </div>
                       </div>
                     </div>
+                    <div className="mt-3 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+                      <div className="rounded-xl bg-white p-3">
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                          {t("masterAdminOrganizations.uploadsTotal")}
+                        </div>
+                        <div className="mt-1 text-sm text-slate-700">{organization.uploads_total}</div>
+                      </div>
+                      <div className="rounded-xl bg-white p-3">
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                          {t("masterAdminOrganizations.assessmentsTotal")}
+                        </div>
+                        <div className="mt-1 text-sm text-slate-700">{organization.assessments_total}</div>
+                      </div>
+                      <div className="rounded-xl bg-white p-3">
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                          {t("masterAdminOrganizations.privacyReadyTeachers")}
+                        </div>
+                        <div className="mt-1 text-sm text-slate-700">{organization.privacy_ready_teacher_count}</div>
+                      </div>
+                      <div className="rounded-xl bg-white p-3">
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                          {t("masterAdminOrganizations.recentLogins30d")}
+                        </div>
+                        <div className="mt-1 text-sm text-slate-700">{organization.recent_logins_30d}</div>
+                      </div>
+                      <div className="rounded-xl bg-white p-3">
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                          {t("masterAdminOrganizations.activeIncidents")}
+                        </div>
+                        <div className="mt-1 text-sm text-slate-700">{organization.active_incident_count}</div>
+                      </div>
+                      <div className="rounded-xl bg-white p-3">
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                          {t("masterAdminOrganizations.lastActivity")}
+                        </div>
+                        <div className="mt-1 text-sm text-slate-700">{organization.last_activity_at || "—"}</div>
+                      </div>
+                    </div>
 
                     <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                      <div className="text-sm text-slate-600">
-                        {organization.seat_limit
-                          ? t("masterAdminOrganizations.seatStatus", {
-                              remaining: organization.seats_remaining ?? 0,
-                              limit: organization.seat_limit,
-                            })
-                          : t("masterAdminOrganizations.unlimitedStatus")}
+                      <div className="space-y-1">
+                        <div className="text-sm text-slate-600">
+                          {organization.seat_limit
+                            ? t("masterAdminOrganizations.seatStatus", {
+                                remaining: organization.seats_remaining ?? 0,
+                                limit: organization.seat_limit,
+                              })
+                            : t("masterAdminOrganizations.unlimitedStatus")}
+                        </div>
+                        {organization.health_summary ? (
+                          <div className="text-xs text-slate-500">{organization.health_summary}</div>
+                        ) : null}
                       </div>
                       <div className="flex flex-wrap gap-3">
                         <Link

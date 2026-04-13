@@ -190,3 +190,53 @@ def test_master_admin_users_filters_by_approval_status(monkeypatch):
     assert result.items[0].id == "u2"
     assert result.summary["pending"] == 1
 
+
+def test_institution_lookup_returns_existing_school_matches(monkeypatch):
+    fake_db = types.SimpleNamespace(
+        organizations=_Collection(
+            [
+                {
+                    "id": "org-1",
+                    "name": "Sunrise Network",
+                    "organization_type": "school",
+                    "seat_limit": 10,
+                }
+            ]
+        ),
+        schools=_Collection(
+            [
+                {
+                    "id": "school-1",
+                    "name": "Sunrise Elementary",
+                    "organization_id": "org-1",
+                }
+            ]
+        ),
+        users=_Collection(
+            [
+                {
+                    "id": "admin-1",
+                    "email": "principal@sunrise.edu",
+                    "name": "Principal One",
+                    "tenant_role": "school_admin",
+                    "organization_id": "org-1",
+                    "school_id": "school-1",
+                    "approval_status": "approved",
+                    "is_active": True,
+                    "last_login_at": "2026-04-12T10:00:00+00:00",
+                }
+            ]
+        ),
+        teachers=_Collection([]),
+        videos=_Collection([]),
+        assessments=_Collection([]),
+    )
+    monkeypatch.setattr(server, "db", fake_db)
+    monkeypatch.setattr(server, "_refresh_processing_incidents", lambda: asyncio.sleep(0, result=[]))
+
+    result = asyncio.run(server.lookup_institutions("school", q="sunrise"))
+
+    assert len(result.suggestions) == 1
+    assert result.suggestions[0].organization_name == "Sunrise Network"
+    assert result.suggestions[0].school_name == "Sunrise Elementary"
+    assert result.suggestions[0].manager_email == "principal@sunrise.edu"

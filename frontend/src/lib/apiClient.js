@@ -1,5 +1,6 @@
 import axios from "axios";
 import { runtimeConfig } from "@/lib/runtimeConfig";
+import { getPreviewTargetUserId } from "@/lib/previewMode";
 
 const API_BASE_URL = runtimeConfig.backendUrl;
 
@@ -18,6 +19,11 @@ api.interceptors.request.use((config) => {
   if (token) {
     // eslint-disable-next-line no-param-reassign
     config.headers.Authorization = `Bearer ${token}`;
+  }
+  const previewTargetUserId = getPreviewTargetUserId();
+  if (previewTargetUserId) {
+    // eslint-disable-next-line no-param-reassign
+    config.headers["X-Cognivio-Preview-User"] = previewTargetUserId;
   }
   // eslint-disable-next-line no-param-reassign
   config.headers["Accept-Language"] = language;

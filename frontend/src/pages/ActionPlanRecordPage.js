@@ -11,6 +11,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { actionPlanApi, teacherApi } from "@/lib/api";
 import { getCoachingHubRoute } from "@/lib/coachingRoutes";
 import { isAdminUser } from "@/lib/userRoutes";
+import { buildInstitutionContextTags } from "@/lib/institutionContext";
 
 function makeGoalId() {
   if (typeof crypto !== "undefined" && crypto.randomUUID) {
@@ -108,6 +109,13 @@ export function ActionPlanRecordPage() {
       }),
     [i18n.language]
   );
+  const institutionTags = buildInstitutionContextTags({
+    subject: teacherRes,
+    schoolLabel: t("teacherProfile.contextSchoolLabel"),
+    organizationLabel: t("teacherProfile.contextOrganizationLabel"),
+    managerLabel: t("teacherProfile.contextAdministratorLabel"),
+    unknownLabel: t("teacherProfile.contextUnknown"),
+  });
 
   const updateGoal = (goalId, patch) =>
     setActionPlanGoals((prev) =>
@@ -192,6 +200,7 @@ export function ActionPlanRecordPage() {
                 })
               : t("teacherWorkspace.sharedPlanTitle")
           }
+          tags={institutionTags}
           stats={[
             {
               label: t("teacherProfile.coachingStatusGoals"),

@@ -11,6 +11,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { actionPlanApi, assessmentApi, teacherApi } from "@/lib/api";
 import { getCoachingHubRoute } from "@/lib/coachingRoutes";
 import { isAdminUser } from "@/lib/userRoutes";
+import { buildInstitutionContextTags } from "@/lib/institutionContext";
 
 export function ReflectionRecordPage() {
   const { t, i18n } = useTranslation();
@@ -154,6 +155,13 @@ export function ReflectionRecordPage() {
       }),
     [i18n.language]
   );
+  const institutionTags = buildInstitutionContextTags({
+    subject: teacherRes,
+    schoolLabel: t("teacherProfile.contextSchoolLabel"),
+    organizationLabel: t("teacherProfile.contextOrganizationLabel"),
+    managerLabel: t("teacherProfile.contextAdministratorLabel"),
+    unknownLabel: t("teacherProfile.contextUnknown"),
+  });
 
   if (!teacherId) {
     return (
@@ -195,6 +203,7 @@ export function ReflectionRecordPage() {
                 })
               : t("teacherProfile.sharedReflectionRecordMeta")
           }
+          tags={institutionTags}
           stats={[
             {
               label: t("teacherProfile.latestTeacherReflectionTitle"),
