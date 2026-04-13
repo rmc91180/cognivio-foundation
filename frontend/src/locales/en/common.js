@@ -55,7 +55,9 @@ const en = {
     platformBackend: "Platform backend",
     masterAdmin: "Master Admin",
     dashboard: "Dashboard",
+    trainingDashboard: "Training Dashboard",
     teachers: "Teachers",
+    trainingParticipants: "Participants",
     videos: "Videos & Assessments",
     accessManagement: "Access Approvals",
     myWorkspace: "My Workspace",
@@ -73,6 +75,14 @@ const en = {
     workspaceModeTraining: "Training mode",
     workspaceModeUpdated: "Workspace mode updated",
     workspaceModeUpdateFailed: "Failed to update workspace mode",
+    schoolAdminScope: "School administrator scope",
+    schoolAdminScopeDescription:
+      "This workspace stays inside your school boundary so teachers, videos, and coaching records remain school-scoped.",
+    trainingAdminScope: "Training administrator scope",
+    trainingAdminScopeDescription:
+      "This workspace is fixed to the training tenant so participants and analytics stay inside the program boundary.",
+    teacherScope: "Teacher scope",
+    masterAdminScope: "Master Admin scope",
     logout: "Logout",
     notAuthenticated: "Not authenticated",
   },
@@ -709,6 +719,8 @@ const en = {
     emptyStateSetupDescription:
       "Set focus domains, recording expectations, and program priorities so the first reports feel intentional.",
     workspaceRoleAdmin: "Admin workspace",
+    workspaceRoleSchoolAdmin: "School administrator workspace",
+    workspaceRoleTrainingAdmin: "Training administrator workspace",
     workspaceRoleTeacher: "Teacher workspace",
     workspaceModeSchool: "School mode",
     workspaceModeProgram: "Training program mode",
@@ -717,6 +729,16 @@ const en = {
     workspaceStatusReady: "Ready to coach",
     workspaceModeMetaLabel: "Current mode",
     workspaceStatusMetaLabel: "Status",
+    schoolScopeTitle: "Your school scope",
+    schoolScopeDescription:
+      "This dashboard is limited to the teachers, videos, and coaching signals connected to your school.",
+    schoolScopeEyebrow: "School administrator scope",
+    schoolScopeSchoolLabel: "School",
+    schoolScopeOrganizationLabel: "Organization",
+    schoolScopeTeachersLabel: "Teachers in scope",
+    schoolScopeSupportLabel: "Needs support",
+    scopeSchoolUnset: "School not linked yet",
+    scopeOrganizationUnset: "Organization not linked yet",
     modeSwitchTitle: "Choose your dashboard view",
     modeSwitchDescription:
       "Use operations for immediate follow-up and insights for evidence, patterns, and trends.",
@@ -1940,6 +1962,15 @@ const en = {
       "See anything that still needs your response or follow-up.",
     currentItemNext:
       "Use this area for what matters now, not for year-long goals.",
+    linkedAdminTitle: "Your linked administrator",
+    linkedAdminDescription:
+      "This is the administrator connection currently attached to your approved school account.",
+    linkedAdminEyebrow: "School linkage",
+    linkedAdminNameLabel: "Administrator",
+    linkedAdminEmailLabel: "Administrator email",
+    linkedSchoolLabel: "School",
+    linkedOrganizationLabel: "Organization",
+    linkedAdminNotAssigned: "Not linked yet",
     goalsTitle: "My growth goals",
     goalsDescription:
       "Review the shared action plan your coach or admin is tracking, and add implementation notes that stay synchronized.",

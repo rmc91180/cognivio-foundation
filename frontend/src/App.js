@@ -172,15 +172,23 @@ function App() {
         <Route
           path="/dashboard"
           element={
-            <ProtectedRoute adminOnly>
-              <DashboardPage />
+            <ProtectedRoute allowedTenantRoles={["school_admin"]}>
+              <DashboardPage forcedWorkspaceMode="school" />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/dashboard/training"
+          element={
+            <ProtectedRoute allowedTenantRoles={["training_admin"]}>
+              <DashboardPage forcedWorkspaceMode="training" />
             </ProtectedRoute>
           }
         />
         <Route
           path="/teachers"
           element={
-            <ProtectedRoute adminOnly>
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
               <TeachersPage />
             </ProtectedRoute>
           }
@@ -188,7 +196,7 @@ function App() {
         <Route
           path="/teachers/:teacherId"
           element={
-            <ProtectedRoute adminOnly>
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
               <TeacherProfilePage />
             </ProtectedRoute>
           }
@@ -196,7 +204,7 @@ function App() {
         <Route
           path="/teachers/:teacherId/latest-lesson"
           element={
-            <ProtectedRoute adminOnly>
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
               <TeacherLatestLessonPage />
             </ProtectedRoute>
           }
@@ -204,7 +212,7 @@ function App() {
         <Route
           path="/teachers/:teacherId/coaching"
           element={
-            <ProtectedRoute adminOnly>
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
               <CoachingHubPage />
             </ProtectedRoute>
           }
@@ -212,7 +220,7 @@ function App() {
         <Route
           path="/teachers/:teacherId/history"
           element={
-            <ProtectedRoute adminOnly>
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
               <TeacherHistoryPage />
             </ProtectedRoute>
           }
@@ -220,7 +228,7 @@ function App() {
         <Route
           path="/teachers/:teacherId/action-plan"
           element={
-            <ProtectedRoute adminOnly>
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
               <ActionPlanRecordPage />
             </ProtectedRoute>
           }
@@ -228,7 +236,7 @@ function App() {
         <Route
           path="/teachers/:teacherId/reflections"
           element={
-            <ProtectedRoute adminOnly>
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
               <ReflectionRecordPage />
             </ProtectedRoute>
           }
@@ -236,7 +244,7 @@ function App() {
         <Route
           path="/my-workspace"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute allowedTenantRoles={["teacher"]}>
               <TeacherWorkspacePage />
             </ProtectedRoute>
           }
@@ -244,7 +252,7 @@ function App() {
         <Route
           path="/my-workspace/goals"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute allowedTenantRoles={["teacher"]}>
               <ActionPlanRecordPage />
             </ProtectedRoute>
           }
@@ -252,7 +260,7 @@ function App() {
         <Route
           path="/my-workspace/coaching"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute allowedTenantRoles={["teacher"]}>
               <CoachingHubPage />
             </ProtectedRoute>
           }
@@ -260,7 +268,7 @@ function App() {
         <Route
           path="/my-workspace/reflections"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute allowedTenantRoles={["teacher"]}>
               <ReflectionRecordPage />
             </ProtectedRoute>
           }
@@ -268,7 +276,7 @@ function App() {
         <Route
           path="/my-workspace/:section"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute allowedTenantRoles={["teacher"]}>
               <TeacherWorkspacePage />
             </ProtectedRoute>
           }
@@ -276,7 +284,7 @@ function App() {
         <Route
           path="/videos"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute allowedTenantRoles={["teacher", "school_admin", "training_admin"]}>
               <VideosPage />
             </ProtectedRoute>
           }
@@ -284,7 +292,7 @@ function App() {
         <Route
           path="/access-management"
           element={
-            <ProtectedRoute adminOnly>
+            <ProtectedRoute allowedTenantRoles={["school_admin"]}>
               <AccessManagementPage />
             </ProtectedRoute>
           }
@@ -292,7 +300,7 @@ function App() {
         <Route
           path="/videos/:videoId"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute allowedTenantRoles={["teacher", "school_admin", "training_admin"]}>
               <VideoPlayerPage />
             </ProtectedRoute>
           }
@@ -300,7 +308,7 @@ function App() {
         <Route
           path="/privacy-review"
           element={
-            <ProtectedRoute adminOnly>
+            <ProtectedRoute allowedTenantRoles={["school_admin"]}>
               <PrivacyReviewQueuePage />
             </ProtectedRoute>
           }
@@ -308,7 +316,7 @@ function App() {
         <Route
           path="/recognition-review"
           element={
-            <ProtectedRoute adminOnly>
+            <ProtectedRoute allowedTenantRoles={["school_admin"]}>
               <RecognitionReviewPage />
             </ProtectedRoute>
           }
@@ -316,7 +324,7 @@ function App() {
         <Route
           path="/ops/metrics"
           element={
-            <ProtectedRoute adminOnly>
+            <ProtectedRoute allowedTenantRoles={["school_admin"]}>
               <OpsMetricsPage />
             </ProtectedRoute>
           }
@@ -324,7 +332,7 @@ function App() {
         <Route
           path="/all-star-library"
           element={
-            <ProtectedRoute>
+            <ProtectedRoute allowedTenantRoles={["teacher", "school_admin", "training_admin"]}>
               <ExemplarLibraryPage />
             </ProtectedRoute>
           }
@@ -332,7 +340,7 @@ function App() {
         <Route
           path="/school-setup"
           element={
-            <ProtectedRoute adminOnly>
+            <ProtectedRoute allowedTenantRoles={["school_admin"]}>
               <FrameworksPage />
             </ProtectedRoute>
           }
@@ -341,7 +349,7 @@ function App() {
         <Route
           path="/master-schedule"
           element={
-            <ProtectedRoute adminOnly>
+            <ProtectedRoute allowedTenantRoles={["school_admin"]}>
               <MasterSchedulePage />
             </ProtectedRoute>
           }

@@ -32,6 +32,7 @@ import { Button, EmptyState, LoadingState, PageHeader, Panel, SectionHeader } fr
 import { Link } from "react-router-dom";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 import { resolveCoachingLink } from "@/lib/coachingRoutes";
+import { getDefaultHomeRoute, getUserTenantRole } from "@/lib/userRoutes";
 
 const DASHBOARD_SIGNAL_WINDOW_DAYS = 14;
 
@@ -71,11 +72,17 @@ function buildGroupedTeacherLabel(tasks, t) {
   });
 }
 
-export function DashboardPage() {
+export function DashboardPage({ forcedWorkspaceMode = null }) {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const { user } = useAuth();
-  const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
+  const tenantRole = getUserTenantRole(user);
+  const isSchoolAdmin = tenantRole === "school_admin";
+  const isTrainingAdmin = tenantRole === "training_admin";
+  const isAdmin = isSchoolAdmin || isTrainingAdmin;
+  const effectiveWorkspaceMode =
+    forcedWorkspaceMode || (isTrainingAdmin ? "training" : user?.workspace_mode || "school");
+  const dashboardHomeRoute = getDefaultHomeRoute(user);
   const buildSha = runtimeConfig.buildSha;
   const buildTime = runtimeConfig.buildTime;
   const buildStamp = buildSha
@@ -207,12 +214,12 @@ export function DashboardPage() {
   });
   const { data: cohortAnalyticsRes } = useQuery({
     queryKey: ["dashboard-cohort-analytics"],
-    enabled: isAdmin && (user?.workspace_mode === "training" || runtimeConfig.trainingModeFoundationEnabled),
+    enabled: isTrainingAdmin,
     queryFn: () => assessmentApi.cohortAnalytics().then((res) => res.data),
   });
   const { data: supervisorCalibrationRes } = useQuery({
     queryKey: ["dashboard-supervisor-calibration"],
-    enabled: isAdmin && (user?.workspace_mode === "training" || runtimeConfig.trainingModeFoundationEnabled),
+    enabled: isTrainingAdmin,
     queryFn: () => assessmentApi.supervisorCalibration().then((res) => res.data),
   });
   const { data: feedbackDigestRes } = useQuery({
@@ -657,11 +664,11 @@ export function DashboardPage() {
   const guidedOnboardingEnabled = runtimeConfig.guidedOnboardingEnabled;
   const improvedEmptyStatesEnabled = runtimeConfig.improvedEmptyStatesEnabled;
   const trainingModeFoundationEnabled =
-    user?.workspace_mode === "training" || runtimeConfig.trainingModeFoundationEnabled;
-  const pageTitle = trainingModeFoundationEnabled
+    effectiveWorkspaceMode === "training" || runtimeConfig.trainingModeFoundationEnabled;
+  const pageTitle = effectiveWorkspaceMode === "training"
     ? t("dashboard.trainingTitle")
     : t("dashboard.title");
-  const pageDescription = trainingModeFoundationEnabled
+  const pageDescription = effectiveWorkspaceMode === "training"
     ? t("dashboard.trainingDescription")
     : t("dashboard.description");
   const hasTeachers = teacherOptions.length > 0;
@@ -673,7 +680,7 @@ export function DashboardPage() {
   const teachersMissingPrivacyProfiles =
     opsReadinessRes?.metrics?.teachers_missing_privacy_profiles ?? 0;
   const privacyReviewsPending = opsHealthRes?.metrics?.privacy_reviews_pending ?? 0;
-  const workspaceModeLabel = trainingModeFoundationEnabled
+  const workspaceModeLabel = effectiveWorkspaceMode === "training"
     ? t("dashboard.workspaceModeProgram")
     : t("dashboard.workspaceModeSchool");
   const workspaceStatusLabel = !hasTeachers
@@ -683,9 +690,20 @@ export function DashboardPage() {
         privacyReviewsPending > 0
       ? t("dashboard.workspaceStatusAttention")
       : t("dashboard.workspaceStatusReady");
-  const workspaceRoleLabel = isAdmin
-    ? t("dashboard.workspaceRoleAdmin")
-    : t("dashboard.workspaceRoleTeacher");
+  const workspaceRoleLabel = isTrainingAdmin
+    ? t("dashboard.workspaceRoleTrainingAdmin")
+    : isSchoolAdmin
+      ? t("dashboard.workspaceRoleSchoolAdmin")
+      : t("dashboard.workspaceRoleTeacher");
+  const schoolScopeSummary = useMemo(
+    () => ({
+      schoolName: user?.school_name || t("dashboard.scopeSchoolUnset"),
+      organizationName: user?.organization_name || t("dashboard.scopeOrganizationUnset"),
+      teacherCount: roster.length,
+      supportCount: prioritySupportCount,
+    }),
+    [prioritySupportCount, roster.length, t, user?.organization_name, user?.school_name]
+  );
   const useDashboardModes = isAdmin && dashboardDualModeEnabled;
   const showOperationsMode =
     !useDashboardModes || dashboardMode === "operations" || !dashboardOperationsLaneEnabled;
@@ -1005,7 +1023,7 @@ export function DashboardPage() {
         title: t("dashboard.smartQueueTeacherDashboardTitle"),
         description: t("dashboard.smartQueueTeacherDashboardDescription"),
         actionLabel: t("dashboard.smartQueueRefreshDashboard"),
-        to: "/dashboard",
+        to: dashboardHomeRoute,
         tone: "emerald",
       },
     ];
@@ -1015,6 +1033,7 @@ export function DashboardPage() {
     isAdmin,
     coachingTasksRes,
     t,
+    dashboardHomeRoute,
     user,
   ]);
   const queueToneClasses = {
@@ -1032,14 +1051,16 @@ export function DashboardPage() {
           description={pageDescription}
           meta={buildStamp ? t("dashboard.buildMeta", { build: buildStamp }) : null}
           actions={
-            <Button
-              variant="success"
-              size="sm"
-              onClick={() => seedDemoMutation.mutate()}
-              disabled={seedDemoMutation.isPending}
-            >
-              {seedDemoMutation.isPending ? t("dashboard.seedingData") : t("dashboard.seedDemoData")}
-            </Button>
+            isSchoolAdmin ? (
+              <Button
+                variant="success"
+                size="sm"
+                onClick={() => seedDemoMutation.mutate()}
+                disabled={seedDemoMutation.isPending}
+              >
+                {seedDemoMutation.isPending ? t("dashboard.seedingData") : t("dashboard.seedDemoData")}
+              </Button>
+            ) : null
           }
         />
 
@@ -1092,6 +1113,50 @@ export function DashboardPage() {
                   </div>
                 </Link>
               ))}
+            </div>
+          </Panel>
+        )}
+
+        {isSchoolAdmin && (
+          <Panel className="mb-6 border border-sky-200 bg-sky-50/40">
+            <SectionHeader
+              title={t("dashboard.schoolScopeTitle")}
+              description={t("dashboard.schoolScopeDescription")}
+              eyebrow={t("dashboard.schoolScopeEyebrow")}
+            />
+            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <div className="rounded-xl border border-slate-200 bg-white px-4 py-4">
+                <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                  {t("dashboard.schoolScopeSchoolLabel")}
+                </div>
+                <div className="mt-2 text-sm font-semibold text-slate-900">
+                  {schoolScopeSummary.schoolName}
+                </div>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white px-4 py-4">
+                <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                  {t("dashboard.schoolScopeOrganizationLabel")}
+                </div>
+                <div className="mt-2 text-sm font-semibold text-slate-900">
+                  {schoolScopeSummary.organizationName}
+                </div>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white px-4 py-4">
+                <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                  {t("dashboard.schoolScopeTeachersLabel")}
+                </div>
+                <div className="mt-2 text-2xl font-semibold text-slate-900">
+                  {schoolScopeSummary.teacherCount}
+                </div>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white px-4 py-4">
+                <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                  {t("dashboard.schoolScopeSupportLabel")}
+                </div>
+                <div className="mt-2 text-2xl font-semibold text-rose-700">
+                  {schoolScopeSummary.supportCount}
+                </div>
+              </div>
             </div>
           </Panel>
         )}
@@ -1270,7 +1335,7 @@ export function DashboardPage() {
           </Panel>
         )}
 
-        {showInsightsMode && isAdmin && trainingModeFoundationEnabled && (
+        {showInsightsMode && isTrainingAdmin && trainingModeFoundationEnabled && (
           <div className="mb-6 grid gap-4 xl:grid-cols-2">
             <Panel>
               <div>

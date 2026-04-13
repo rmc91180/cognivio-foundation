@@ -70,6 +70,13 @@ export function TeacherWorkspacePage() {
   const latestReviewedAt = latestAssessment?.analyzed_at || latestAssessment?.recorded_at || latestAssessment?.created_at || null;
   const nextConferenceAt = teacherRes?.next_coaching_conference || null;
   const privacyReady = privacyProfileRes?.status === "active";
+  const linkedAdminName = user?.manager_name || null;
+  const linkedAdminEmail = user?.manager_email || null;
+  const linkedSchoolName = user?.school_name || null;
+  const linkedOrganizationName = user?.organization_name || null;
+  const hasLinkedAdminContext = Boolean(
+    linkedAdminName || linkedAdminEmail || linkedSchoolName || linkedOrganizationName
+  );
   const openGoals = state.actionPlanGoals.filter((goal) => goal?.status !== "complete" && goal?.status !== "implemented");
   const completedGoals = state.actionPlanGoals.filter((goal) => goal?.status === "complete" || goal?.status === "implemented");
   const recurringChallenges = summaryInsightsRes?.recommendations || [];
@@ -122,6 +129,49 @@ export function TeacherWorkspacePage() {
 
   const renderOverview = () => (
     <div className="space-y-6">
+      {hasLinkedAdminContext ? (
+        <WorkspacePanel
+          title={t("teacherWorkspace.linkedAdminTitle")}
+          description={t("teacherWorkspace.linkedAdminDescription")}
+          eyebrow={t("teacherWorkspace.linkedAdminEyebrow")}
+        >
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                {t("teacherWorkspace.linkedAdminNameLabel")}
+              </div>
+              <div className="mt-2 text-sm font-semibold text-slate-900">
+                {linkedAdminName || t("teacherWorkspace.linkedAdminNotAssigned")}
+              </div>
+            </div>
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                {t("teacherWorkspace.linkedAdminEmailLabel")}
+              </div>
+              <div className="mt-2 text-sm font-semibold text-slate-900">
+                {linkedAdminEmail || t("teacherWorkspace.linkedAdminNotAssigned")}
+              </div>
+            </div>
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                {t("teacherWorkspace.linkedSchoolLabel")}
+              </div>
+              <div className="mt-2 text-sm font-semibold text-slate-900">
+                {linkedSchoolName || t("teacherWorkspace.linkedAdminNotAssigned")}
+              </div>
+            </div>
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                {t("teacherWorkspace.linkedOrganizationLabel")}
+              </div>
+              <div className="mt-2 text-sm font-semibold text-slate-900">
+                {linkedOrganizationName || t("teacherWorkspace.linkedAdminNotAssigned")}
+              </div>
+            </div>
+          </div>
+        </WorkspacePanel>
+      ) : null}
+
       <div className="grid gap-4 md:grid-cols-2">
         <WorkspacePanel title={t("teacherWorkspace.currentSummaryTitle")} description={t("teacherWorkspace.currentDescription")} eyebrow={t("timeScope.latestClass")}>
           <div className="text-sm text-slate-700">{summaryInsightsRes?.summary || t("teacherProfile.noSummaryData")}</div>

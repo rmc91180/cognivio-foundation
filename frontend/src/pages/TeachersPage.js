@@ -8,6 +8,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { Button, Dialog, EmptyState, LoadingState, PageHeader, Panel } from "@/components/ui";
 import { useTranslation } from "react-i18next";
 import { runtimeConfig } from "@/lib/runtimeConfig";
+import { getUserTenantRole } from "@/lib/userRoutes";
 
 const DEFAULT_FORM = {
   name: "",
@@ -24,6 +25,8 @@ export function TeachersPage() {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const tenantRole = getUserTenantRole(user);
+  const isSchoolAdmin = tenantRole === "school_admin";
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
   const isRtl = i18n.dir() === "rtl";
   const locale = i18n.language?.startsWith("he") ? "he-IL" : "en-US";
@@ -32,7 +35,7 @@ export function TeachersPage() {
   const teacherRowQuickActionsEnabled = runtimeConfig.teacherRowQuickActionsEnabled;
   const rosterHierarchyCleanupEnabled = runtimeConfig.rosterHierarchyCleanupEnabled;
   const trainingModeFoundationEnabled =
-    user?.workspace_mode === "training" || runtimeConfig.trainingModeFoundationEnabled;
+    tenantRole === "training_admin" || user?.workspace_mode === "training";
 
   const { data: teachersData, isLoading } = useQuery({
     queryKey: ["teachers"],
@@ -342,7 +345,7 @@ export function TeachersPage() {
           description={pageDescription}
           actions={
             <div className="flex flex-wrap items-center gap-2">
-              {schoolManagementSubflowEnabled && isAdmin ? (
+              {schoolManagementSubflowEnabled && isSchoolAdmin ? (
                 <Link
                   to="/school-setup"
                   className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100"
@@ -379,7 +382,7 @@ export function TeachersPage() {
               onSubmit={onSubmit}
               isSaving={createMutation.isPending}
             />
-            {schoolManagementSubflowEnabled ? (
+            {schoolManagementSubflowEnabled && isSchoolAdmin ? (
               <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
                 <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                   {t("teachersPage.schoolManagementTitle")}

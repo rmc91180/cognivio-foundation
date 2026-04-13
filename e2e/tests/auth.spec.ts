@@ -74,6 +74,36 @@ test.describe('Authentication', () => {
     ).toBeVisible();
   });
 
+  test('school admin is redirected away from teacher-only routes', async ({ page }) => {
+    await selectRole(page, 'admin');
+    await emailInput(page).fill(ADMIN_EMAIL);
+    await passwordInput(page).fill(DEMO_PASSWORD);
+    await page.getByRole('button', { name: /sign in/i }).click();
+
+    await expect(page).toHaveURL(/.*dashboard$/);
+
+    await page.goto('/my-workspace');
+    await expect(page).toHaveURL(/.*dashboard$/);
+
+    await page.goto('/dashboard/training');
+    await expect(page).toHaveURL(/.*dashboard$/);
+  });
+
+  test('teacher is redirected away from admin-only routes', async ({ page }) => {
+    await selectRole(page, 'teacher');
+    await emailInput(page).fill(TEACHER_EMAIL);
+    await passwordInput(page).fill(DEMO_PASSWORD);
+    await page.getByRole('button', { name: /sign in/i }).click();
+
+    await expect(page).toHaveURL(/.*my-workspace/);
+
+    await page.goto('/dashboard');
+    await expect(page).toHaveURL(/.*my-workspace/);
+
+    await page.goto('/teachers');
+    await expect(page).toHaveURL(/.*my-workspace/);
+  });
+
   test('redirects to login when not authenticated', async ({ page }) => {
     await page.goto('/dashboard');
     await expect(page).toHaveURL(/.*login/);
