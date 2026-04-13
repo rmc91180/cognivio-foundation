@@ -24,6 +24,7 @@ import shutil
 import sys
 import time
 import html
+from urllib.parse import quote
 import requests
 import smtplib
 import ssl
