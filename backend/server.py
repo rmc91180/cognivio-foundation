@@ -109,6 +109,11 @@ def _clean_optional_string(value: Optional[str]) -> Optional[str]:
     return cleaned or None
 
 
+def _normalized_name_key(value: Optional[str]) -> Optional[str]:
+    cleaned = _clean_optional_string(value)
+    return cleaned.lower() if cleaned else None
+
+
 def _legacy_role_for_tenant_role(tenant_role: Optional[str]) -> str:
     normalized = str(tenant_role or "").strip().lower()
     if normalized == "super_admin":
@@ -132,12 +137,12 @@ def _normalize_requested_role(role: Optional[str]) -> str:
 def _format_tenant_role_label(tenant_role: Optional[str]) -> str:
     normalized = str(tenant_role or "").strip().lower()
     labels = {
-        "teacher": "teacher",
-        "school_admin": "school administrator",
-        "training_admin": "teacher training administrator",
-        "super_admin": "master administrator",
+        "teacher": "Teacher",
+        "school_admin": "School administrator",
+        "training_admin": "Teacher training administrator",
+        "super_admin": "Master administrator",
     }
-    return labels.get(normalized, "teacher")
+    return labels.get(normalized, "Teacher")
 
 
 def _normalize_organization_type(
@@ -334,6 +339,63 @@ async def _build_user_tenancy_migration_preview(user_doc: Optional[dict]) -> Dic
     }
 
 
+def _build_tenant_request_summary(user_doc: Optional[dict]) -> Dict[str, Optional[str]]:
+    payload = _build_user_response_payload(user_doc or {})
+    tenant_role = _get_user_tenant_role(payload)
+    organization_name = _clean_optional_string(payload.get("organization_name")) or _clean_optional_string(
+        payload.get("requested_organization_name")
+    )
+    school_name = _clean_optional_string(payload.get("school_name")) or _clean_optional_string(
+        payload.get("requested_school_name")
+    )
+    manager_email = _clean_optional_string(payload.get("manager_email")) or _clean_optional_string(
+        payload.get("requested_manager_email")
+    )
+    return {
+        "tenant_role": tenant_role,
+        "tenant_role_label": _format_tenant_role_label(tenant_role),
+        "organization_type": _normalize_organization_type(payload.get("organization_type"), tenant_role),
+        "organization_name": organization_name,
+        "school_name": school_name,
+        "manager_email": manager_email,
+    }
+
+
+async def _find_organization_by_name(*, organization_type: str, name: Optional[str]) -> Optional[dict]:
+    normalized_name = _normalized_name_key(name)
+    if not normalized_name:
+        return None
+    docs = await db.organizations.find(
+        {"organization_type": organization_type},
+        {"_id": 0},
+    ).to_list(500)
+    for doc in docs:
+        if _normalized_name_key(doc.get("name")) == normalized_name:
+            return doc
+    return None
+
+
+async def _find_school_by_name(*, organization_id: str, school_name: Optional[str]) -> Optional[dict]:
+    normalized_name = _normalized_name_key(school_name)
+    if not organization_id or not normalized_name:
+        return None
+    docs = await db.schools.find(
+        {"organization_id": organization_id},
+        {"_id": 0},
+    ).to_list(500)
+    for doc in docs:
+        if _normalized_name_key(doc.get("name")) == normalized_name:
+            return doc
+    return None
+
+
+async def _find_user_by_email(email: Optional[str]) -> Optional[dict]:
+    normalized_email = _clean_optional_string(email)
+    if not normalized_email:
+        return None
+    return await db.users.find_one({"email": normalized_email.lower()}, {"_id": 0, "password": 0})
+
+
 def _normalize_access_request_tenancy_fields(user: "UserCreate", desired_tenant_role: str) -> Dict[str, Any]:
     organization_name = _clean_optional_string(user.organization_name)
     school_name = _clean_optional_string(user.school_name)
@@ -353,6 +415,148 @@ def _normalize_access_request_tenancy_fields(user: "UserCreate", desired_tenant_
         "requested_school_name": school_name,
         "requested_manager_email": requested_manager_email,
     }
+
+
+async def _assign_user_to_tenant_on_approval(
+    *,
+    target: dict,
+    organization_name: Optional[str] = None,
+    organization_type: Optional[str] = None,
+    school_name: Optional[str] = None,
+    manager_email: Optional[str] = None,
+    actor_label: Optional[str] = None,
+) -> Dict[str, Any]:
+    tenant_summary = _build_tenant_request_summary(target)
+    tenant_role = tenant_summary["tenant_role"] or "teacher"
+    resolved_organization_type = _normalize_organization_type(
+        organization_type or target.get("organization_type") or tenant_summary.get("organization_type"),
+        tenant_role,
+    )
+    resolved_organization_name = (
+        _clean_optional_string(organization_name)
+        or tenant_summary.get("organization_name")
+    )
+    resolved_school_name = _clean_optional_string(school_name) or tenant_summary.get("school_name")
+    resolved_manager_email = _clean_optional_string(manager_email) or tenant_summary.get("manager_email")
+    if resolved_manager_email:
+        resolved_manager_email = resolved_manager_email.lower()
+
+    updates: Dict[str, Any] = {
+        "tenant_role": tenant_role,
+        "tenant_status": "approved",
+        "organization_type": resolved_organization_type,
+    }
+
+    if tenant_role == "super_admin":
+        updates.update(
+            {
+                "organization_id": None,
+                "organization_name": None,
+                "school_id": None,
+                "school_name": None,
+                "manager_user_id": None,
+                "manager_email": None,
+                "manager_name": None,
+            }
+        )
+        return updates
+
+    if not resolved_organization_name:
+        updates.update(
+            {
+                "organization_id": None,
+                "organization_name": None,
+                "school_id": None,
+                "school_name": None,
+                "manager_user_id": None,
+                "manager_email": resolved_manager_email,
+                "manager_name": None,
+            }
+        )
+        return updates
+
+    organization_doc = await _find_organization_by_name(
+        organization_type=resolved_organization_type,
+        name=resolved_organization_name,
+    )
+    if not organization_doc:
+        organization_doc = {
+            "id": str(uuid.uuid4()),
+            "name": resolved_organization_name,
+            "organization_type": resolved_organization_type,
+            "status": "active",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_by": actor_label or "approval_flow",
+        }
+        await db.organizations.insert_one(organization_doc)
+
+    updates["organization_id"] = organization_doc["id"]
+    updates["organization_name"] = organization_doc["name"]
+
+    school_doc = None
+    if tenant_role in {"teacher", "school_admin"}:
+        if not resolved_school_name:
+            raise HTTPException(status_code=400, detail="School name is required before approval")
+        school_doc = await _find_school_by_name(
+            organization_id=organization_doc["id"],
+            school_name=resolved_school_name,
+        )
+        if not school_doc:
+            school_doc = {
+                "id": str(uuid.uuid4()),
+                "name": resolved_school_name,
+                "user_id": target["id"] if tenant_role == "school_admin" else None,
+                "organization_id": organization_doc["id"],
+                "district_name": organization_doc["name"],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await db.schools.insert_one(school_doc)
+        elif tenant_role == "school_admin":
+            existing_owner = school_doc.get("user_id")
+            if existing_owner and existing_owner != target["id"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This school is already linked to another school administrator",
+                )
+            await db.schools.update_one(
+                {"id": school_doc["id"]},
+                {
+                    "$set": {
+                        "user_id": target["id"],
+                        "organization_id": organization_doc["id"],
+                        "district_name": organization_doc["name"],
+                    }
+                },
+            )
+            school_doc["user_id"] = target["id"]
+        updates["school_id"] = school_doc["id"]
+        updates["school_name"] = school_doc["name"]
+    else:
+        updates["school_id"] = None
+        updates["school_name"] = None
+
+    manager_doc = None
+    if tenant_role == "teacher":
+        if resolved_manager_email:
+            manager_doc = await _find_user_by_email(resolved_manager_email)
+            if manager_doc and _get_user_tenant_role(manager_doc) != "school_admin":
+                manager_doc = None
+        if not manager_doc and school_doc and school_doc.get("user_id"):
+            manager_doc = await db.users.find_one(
+                {"id": school_doc.get("user_id")},
+                {"_id": 0, "password": 0},
+            )
+        if manager_doc and manager_doc.get("organization_id") and manager_doc.get("organization_id") != organization_doc["id"]:
+            manager_doc = None
+        updates["manager_user_id"] = (manager_doc or {}).get("id")
+        updates["manager_email"] = (manager_doc or {}).get("email") or resolved_manager_email
+        updates["manager_name"] = (manager_doc or {}).get("name")
+    else:
+        updates["manager_user_id"] = None
+        updates["manager_email"] = None
+        updates["manager_name"] = None
+
+    return updates
 
 
 async def _ensure_school_organization_for_user(
@@ -422,6 +626,9 @@ async def _build_master_admin_user_record(user_doc: dict) -> "MasterAdminUserRec
         manager_user_id=tenancy.get("manager_user_id"),
         manager_name=tenancy.get("manager_name"),
         manager_email=tenancy.get("manager_email") or tenancy.get("requested_manager_email"),
+        requested_organization_name=tenancy.get("requested_organization_name"),
+        requested_school_name=tenancy.get("requested_school_name"),
+        requested_manager_email=tenancy.get("requested_manager_email"),
         linked_teacher_id=(linked_teacher or {}).get("id"),
         linked_teacher_name=(linked_teacher or {}).get("name"),
         uploads_total=uploads_total,
@@ -991,9 +1198,21 @@ async def _approve_user_access(
     *,
     actor_label: str,
     reason: Optional[str] = None,
+    organization_name: Optional[str] = None,
+    organization_type: Optional[str] = None,
+    school_name: Optional[str] = None,
+    manager_email: Optional[str] = None,
 ) -> dict:
     user_id = target["id"]
     now = datetime.now(timezone.utc).isoformat()
+    tenancy_updates = await _assign_user_to_tenant_on_approval(
+        target=target,
+        organization_name=organization_name,
+        organization_type=organization_type,
+        school_name=school_name,
+        manager_email=manager_email,
+        actor_label=actor_label,
+    )
     updates = {
         "approval_status": "approved",
         "approved_at": now,
@@ -1001,6 +1220,7 @@ async def _approve_user_access(
         "revoked_at": None,
         "revoked_by": None,
         "is_active": True,
+        **tenancy_updates,
     }
     if reason:
         updates["approval_note"] = reason
@@ -1090,13 +1310,22 @@ def _build_access_request_notification_message(user_doc: dict) -> EmailMessage:
 def _build_access_request_notification_text(user_doc: dict) -> str:
     approve_url = _build_access_request_action_url(user_doc, "approve")
     deny_url = _build_access_request_action_url(user_doc, "deny")
+    tenant_summary = _build_tenant_request_summary(user_doc)
+    tenant_lines = [
+        f"Requested role: {tenant_summary.get('tenant_role_label')}",
+        f"Organization: {tenant_summary.get('organization_name') or '—'}",
+    ]
+    if tenant_summary.get("school_name"):
+        tenant_lines.append(f"School: {tenant_summary.get('school_name')}")
+    if tenant_summary.get("manager_email"):
+        tenant_lines.append(f"Requested school administrator: {tenant_summary.get('manager_email')}")
     return "\n".join(
         [
             "A new Cognivio pilot sign-up is waiting for approval.",
             "",
             f"Name: {user_doc.get('name')}",
             f"Email: {user_doc.get('email')}",
-            f"Requested role: {_get_user_role(user_doc)}",
+            *tenant_lines,
             f"Requested at: {user_doc.get('approval_requested_at') or user_doc.get('created_at')}",
             "",
             f"Approve now: {approve_url}",
@@ -1110,7 +1339,11 @@ def _build_access_request_notification_text(user_doc: dict) -> str:
 def _build_access_request_notification_html(user_doc: dict) -> str:
     name = html.escape(str(user_doc.get("name") or ""))
     email_value = html.escape(str(user_doc.get("email") or ""))
-    role = html.escape(_get_user_role(user_doc))
+    tenant_summary = _build_tenant_request_summary(user_doc)
+    role = html.escape(str(tenant_summary.get("tenant_role_label") or ""))
+    organization_name = html.escape(str(tenant_summary.get("organization_name") or "—"))
+    school_name = html.escape(str(tenant_summary.get("school_name") or ""))
+    manager_email = html.escape(str(tenant_summary.get("manager_email") or ""))
     requested_at = html.escape(str(user_doc.get("approval_requested_at") or user_doc.get("created_at") or ""))
     approve_url = html.escape(_build_access_request_action_url(user_doc, "approve"))
     deny_url = html.escape(_build_access_request_action_url(user_doc, "deny"))
@@ -1120,6 +1353,9 @@ def _build_access_request_notification_html(user_doc: dict) -> str:
   <p style="margin: 0 0 8px;"><strong>Name:</strong> {name}</p>
   <p style="margin: 0 0 8px;"><strong>Email:</strong> {email_value}</p>
   <p style="margin: 0 0 8px;"><strong>Requested role:</strong> {role}</p>
+  <p style="margin: 0 0 8px;"><strong>Organization:</strong> {organization_name}</p>
+  {f'<p style="margin: 0 0 8px;"><strong>School:</strong> {school_name}</p>' if school_name else ''}
+  {f'<p style="margin: 0 0 8px;"><strong>Requested school administrator:</strong> {manager_email}</p>' if manager_email else ''}
   <p style="margin: 0 0 20px;"><strong>Requested at:</strong> {requested_at}</p>
   <p style="margin: 0 0 18px;">
     <a href="{approve_url}" style="display:inline-block;padding:12px 20px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:600;margin-right:12px;">Approve</a>
@@ -1131,11 +1367,15 @@ def _build_access_request_notification_html(user_doc: dict) -> str:
 
 
 def _build_access_request_received_text(user_doc: dict) -> str:
+    tenant_summary = _build_tenant_request_summary(user_doc)
     return "\n".join(
         [
             "Your Cognivio sign-up request has been received.",
             "",
             f"Email: {user_doc.get('email')}",
+            f"Requested role: {tenant_summary.get('tenant_role_label')}",
+            f"Organization: {tenant_summary.get('organization_name') or '—'}",
+            *([f"School: {tenant_summary.get('school_name')}"] if tenant_summary.get("school_name") else []),
             f"Submitted at: {user_doc.get('approval_requested_at') or user_doc.get('created_at')}",
             "",
             "Your account is pending approval.",
@@ -1146,11 +1386,18 @@ def _build_access_request_received_text(user_doc: dict) -> str:
 
 def _build_access_request_received_html(user_doc: dict) -> str:
     email_value = html.escape(str(user_doc.get("email") or ""))
+    tenant_summary = _build_tenant_request_summary(user_doc)
+    role = html.escape(str(tenant_summary.get("tenant_role_label") or ""))
+    organization_name = html.escape(str(tenant_summary.get("organization_name") or "—"))
+    school_name = html.escape(str(tenant_summary.get("school_name") or ""))
     submitted_at = html.escape(str(user_doc.get("approval_requested_at") or user_doc.get("created_at") or ""))
     return f"""
 <div style="font-family: Arial, sans-serif; color: #0f172a; line-height: 1.5;">
   <h2 style="margin: 0 0 16px;">Your Cognivio sign-up request has been received</h2>
   <p style="margin: 0 0 8px;"><strong>Email:</strong> {email_value}</p>
+  <p style="margin: 0 0 8px;"><strong>Requested role:</strong> {role}</p>
+  <p style="margin: 0 0 8px;"><strong>Organization:</strong> {organization_name}</p>
+  {f'<p style="margin: 0 0 8px;"><strong>School:</strong> {school_name}</p>' if school_name else ''}
   <p style="margin: 0 0 16px;"><strong>Submitted at:</strong> {submitted_at}</p>
   <p style="margin: 0 0 8px;">Your account is pending approval.</p>
   <p style="margin: 0;">Once approved, you can sign in with the same email and password you created during sign-up.</p>
@@ -1159,11 +1406,15 @@ def _build_access_request_received_html(user_doc: dict) -> str:
 
 
 def _build_access_approved_text(user_doc: dict) -> str:
+    tenant_summary = _build_tenant_request_summary(user_doc)
     return "\n".join(
         [
             "Your Cognivio access has been approved.",
             "",
             f"Email: {user_doc.get('email')}",
+            f"Approved role: {tenant_summary.get('tenant_role_label')}",
+            f"Organization: {tenant_summary.get('organization_name') or '—'}",
+            *([f"School: {tenant_summary.get('school_name')}"] if tenant_summary.get("school_name") else []),
             f"Approved at: {user_doc.get('approved_at') or datetime.now(timezone.utc).isoformat()}",
             "",
             "You can now sign in with the same email and password you created during sign-up.",
@@ -1174,12 +1425,19 @@ def _build_access_approved_text(user_doc: dict) -> str:
 
 def _build_access_approved_html(user_doc: dict) -> str:
     email_value = html.escape(str(user_doc.get("email") or ""))
+    tenant_summary = _build_tenant_request_summary(user_doc)
+    role = html.escape(str(tenant_summary.get("tenant_role_label") or ""))
+    organization_name = html.escape(str(tenant_summary.get("organization_name") or "—"))
+    school_name = html.escape(str(tenant_summary.get("school_name") or ""))
     approved_at = html.escape(str(user_doc.get("approved_at") or datetime.now(timezone.utc).isoformat()))
     sign_in_url = html.escape(FRONTEND_URL or BACKEND_PUBLIC_BASE_URL or "https://www.cognivio.live")
     return f"""
 <div style="font-family: Arial, sans-serif; color: #0f172a; line-height: 1.5;">
   <h2 style="margin: 0 0 16px;">Your Cognivio access is approved</h2>
   <p style="margin: 0 0 8px;"><strong>Email:</strong> {email_value}</p>
+  <p style="margin: 0 0 8px;"><strong>Approved role:</strong> {role}</p>
+  <p style="margin: 0 0 8px;"><strong>Organization:</strong> {organization_name}</p>
+  {f'<p style="margin: 0 0 8px;"><strong>School:</strong> {school_name}</p>' if school_name else ''}
   <p style="margin: 0 0 16px;"><strong>Approved at:</strong> {approved_at}</p>
   <p style="margin: 0 0 18px;">You can now sign in with the same email and password you created during sign-up.</p>
   <p style="margin: 0;"><a href="{sign_in_url}" style="display:inline-block;padding:12px 20px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:600;">Open Cognivio</a></p>
@@ -3696,6 +3954,9 @@ class MasterAdminUserRecord(BaseModel):
     manager_user_id: Optional[str] = None
     manager_name: Optional[str] = None
     manager_email: Optional[str] = None
+    requested_organization_name: Optional[str] = None
+    requested_school_name: Optional[str] = None
+    requested_manager_email: Optional[str] = None
     linked_teacher_id: Optional[str] = None
     linked_teacher_name: Optional[str] = None
     uploads_total: int = 0
@@ -3942,6 +4203,10 @@ class MasterAdminAuditEventListResponse(BaseModel):
 class MasterAdminUserActionPayload(BaseModel):
     reason: Optional[str] = None
     confirmation_text: Optional[str] = None
+    organization_name: Optional[str] = None
+    organization_type: Optional[str] = None
+    school_name: Optional[str] = None
+    manager_email: Optional[EmailStr] = None
 
 class TeacherCreate(BaseModel):
     name: str
@@ -8380,6 +8645,10 @@ async def approve_access_user(
         target,
         actor_label=current_user.get("email") or current_user["id"],
         reason=payload.reason,
+        organization_name=payload.organization_name,
+        organization_type=payload.organization_type,
+        school_name=payload.school_name,
+        manager_email=payload.manager_email,
     )
     return _to_access_user_record(updated)
 
@@ -8484,24 +8753,11 @@ async def process_access_request_action(action: str, token: str):
                 ),
                 media_type="text/html",
             )
-        updates = {
-            "approval_status": "approved",
-            "approved_at": now,
-            "approved_by": f"email_link:{ACCESS_APPROVAL_NOTIFY_EMAIL or 'admin'}",
-            "revoked_at": None,
-            "revoked_by": None,
-            "is_active": True,
-        }
-        await db.users.update_one({"id": user_id}, {"$set": updates})
-        updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
-        await _log_auth_event(
-            "approval_granted",
-            email=updated.get("email"),
-            user_id=updated.get("id"),
-            result="success",
+        updated = await _approve_user_access(
+            target,
+            actor_label=f"email_link:{ACCESS_APPROVAL_NOTIFY_EMAIL or 'admin'}",
             reason="email_link_approval",
         )
-        _send_access_approved_confirmation(updated)
         return Response(
             _render_access_request_action_result_page(
                 "Applicant approved",
@@ -13376,7 +13632,14 @@ async def master_admin_approve_user(
         target_type="user",
         target_id=user_id,
         reason=payload.reason,
-        metadata={"email": updated.get("email"), "approval_status": updated.get("approval_status")},
+        metadata={
+            "email": updated.get("email"),
+            "approval_status": updated.get("approval_status"),
+            "tenant_role": updated.get("tenant_role"),
+            "organization_name": updated.get("organization_name") or updated.get("requested_organization_name"),
+            "school_name": updated.get("school_name") or updated.get("requested_school_name"),
+            "manager_email": updated.get("manager_email") or updated.get("requested_manager_email"),
+        },
     )
     return _to_access_user_record(updated)
 

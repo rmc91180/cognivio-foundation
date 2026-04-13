@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -33,6 +33,9 @@ export function MasterAdminUserDetailPage() {
   const [dialogMode, setDialogMode] = useState(null);
   const [reason, setReason] = useState("");
   const [confirmationText, setConfirmationText] = useState("");
+  const [approvalOrganizationName, setApprovalOrganizationName] = useState("");
+  const [approvalSchoolName, setApprovalSchoolName] = useState("");
+  const [approvalManagerEmail, setApprovalManagerEmail] = useState("");
 
   const { data, isLoading, isError, refetch, isFetching } = useQuery({
     queryKey: ["master-admin-user-detail", userId],
@@ -47,7 +50,23 @@ export function MasterAdminUserDetailPage() {
     setDialogMode(null);
     setReason("");
     setConfirmationText("");
+    setApprovalOrganizationName("");
+    setApprovalSchoolName("");
+    setApprovalManagerEmail("");
   };
+
+  useEffect(() => {
+    if (dialogMode !== "approve" || !user) {
+      return;
+    }
+    setApprovalOrganizationName(
+      user.organization_name || user.requested_organization_name || ""
+    );
+    setApprovalSchoolName(user.school_name || user.requested_school_name || "");
+    setApprovalManagerEmail(
+      user.manager_email || user.requested_manager_email || ""
+    );
+  }, [dialogMode, user]);
 
   const actionMutation = useMutation({
     mutationFn: async ({ mode, payload }) => {
@@ -108,9 +127,21 @@ export function MasterAdminUserDetailPage() {
       payload: {
         reason: reason.trim() || undefined,
         confirmation_text: confirmationText.trim() || undefined,
+        ...(dialogMode === "approve"
+          ? {
+              organization_name: approvalOrganizationName.trim() || undefined,
+              school_name: approvalSchoolName.trim() || undefined,
+              manager_email: approvalManagerEmail.trim() || undefined,
+            }
+          : {}),
       },
     });
   };
+
+  const tenantRole = user?.tenant_role || user?.role;
+  const needsSchoolName =
+    tenantRole === "teacher" || tenantRole === "school_admin";
+  const isTrainingAdmin = tenantRole === "training_admin";
 
   return (
     <>
@@ -212,6 +243,41 @@ export function MasterAdminUserDetailPage() {
                   <div className="mt-1 text-sm text-slate-700">{user.workspace_mode || "—"}</div>
                 </div>
               </div>
+
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-xl bg-slate-50 p-4">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("masterAdminUserDetail.tenantRole")}
+                  </div>
+                  <div className="mt-1 text-sm text-slate-700">
+                    {user.tenant_role ? t(`masterAdminUserDetail.tenantRoleMap.${user.tenant_role}`) : "—"}
+                  </div>
+                </div>
+                <div className="rounded-xl bg-slate-50 p-4">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("masterAdminUserDetail.organization")}
+                  </div>
+                  <div className="mt-1 text-sm text-slate-700">
+                    {user.organization_name || user.requested_organization_name || "—"}
+                  </div>
+                </div>
+                <div className="rounded-xl bg-slate-50 p-4">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("masterAdminUserDetail.school")}
+                  </div>
+                  <div className="mt-1 text-sm text-slate-700">
+                    {user.school_name || user.requested_school_name || "—"}
+                  </div>
+                </div>
+                <div className="rounded-xl bg-slate-50 p-4">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("masterAdminUserDetail.linkedAdministrator")}
+                  </div>
+                  <div className="mt-1 text-sm text-slate-700">
+                    {user.manager_email || user.requested_manager_email || "—"}
+                  </div>
+                </div>
+              </div>
             </Panel>
 
             <div className="grid gap-6 xl:grid-cols-2">
@@ -281,6 +347,39 @@ export function MasterAdminUserDetailPage() {
         }
       >
         <div className="space-y-4">
+          {dialogMode === "approve" ? (
+            <>
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-950">
+                {t("masterAdminUserDetail.approveAssignmentHint")}
+              </div>
+              <Field label={isTrainingAdmin ? t("masterAdminUserDetail.trainingOrganizationLabel") : t("masterAdminUserDetail.organizationLabel")}>
+                <Input
+                  value={approvalOrganizationName}
+                  onChange={(event) => setApprovalOrganizationName(event.target.value)}
+                  placeholder={t("masterAdminUserDetail.organizationPlaceholder")}
+                />
+              </Field>
+              {needsSchoolName ? (
+                <Field label={t("masterAdminUserDetail.schoolLabel")}>
+                  <Input
+                    value={approvalSchoolName}
+                    onChange={(event) => setApprovalSchoolName(event.target.value)}
+                    placeholder={t("masterAdminUserDetail.schoolPlaceholder")}
+                  />
+                </Field>
+              ) : null}
+              {tenantRole === "teacher" ? (
+                <Field label={t("masterAdminUserDetail.managerEmailLabel")}>
+                  <Input
+                    type="email"
+                    value={approvalManagerEmail}
+                    onChange={(event) => setApprovalManagerEmail(event.target.value)}
+                    placeholder={t("masterAdminUserDetail.managerEmailPlaceholder")}
+                  />
+                </Field>
+              ) : null}
+            </>
+          ) : null}
           <Field label={t("masterAdminUserDetail.reasonLabel")}>
             <Textarea
               rows={4}
