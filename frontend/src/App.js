@@ -8,6 +8,7 @@ import { DashboardPage } from "@/pages/DashboardPage";
 import { MasterAdminPage } from "@/pages/MasterAdminPage";
 import { MasterAdminUsersPage } from "@/pages/MasterAdminUsersPage";
 import { MasterAdminUserDetailPage } from "@/pages/MasterAdminUserDetailPage";
+import { MasterAdminOrganizationsPage } from "@/pages/MasterAdminOrganizationsPage";
 import { MasterAdminAuthActivityPage } from "@/pages/MasterAdminAuthActivityPage";
 import { MasterAdminAuditPage } from "@/pages/MasterAdminAuditPage";
 import { MasterAdminWorkspacesPage } from "@/pages/MasterAdminWorkspacesPage";
@@ -78,6 +79,14 @@ function App() {
           element={
             <ProtectedRoute superAdminOnly>
               <MasterAdminUserDetailPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/master-admin/organizations"
+          element={
+            <ProtectedRoute superAdminOnly>
+              <MasterAdminOrganizationsPage />
             </ProtectedRoute>
           }
         />

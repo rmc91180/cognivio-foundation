@@ -94,6 +94,10 @@ export const masterAdminApi = {
   overview: () => api.get("/api/master-admin/overview"),
   users: (params = {}) => api.get("/api/master-admin/users", { params }),
   userDetail: (userId) => api.get(`/api/master-admin/users/${userId}`),
+  organizations: (params = {}) => api.get("/api/master-admin/organizations", { params }),
+  organizationDetail: (organizationId) => api.get(`/api/master-admin/organizations/${organizationId}`),
+  updateOrganizationSeatPolicy: (organizationId, payload) =>
+    api.post(`/api/master-admin/organizations/${organizationId}/seat-policy`, payload),
   workspaces: (params = {}) => api.get("/api/master-admin/workspaces", { params }),
   workspaceDetail: (ownerUserId) => api.get(`/api/master-admin/workspaces/${ownerUserId}`),
   authEvents: (params = {}) => api.get("/api/master-admin/auth-events", { params }),

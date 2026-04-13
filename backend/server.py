@@ -375,6 +375,73 @@ async def _find_organization_by_name(*, organization_type: str, name: Optional[s
     return None
 
 
+def _normalize_seat_limit(value: Any) -> Optional[int]:
+    if value in {None, ""}:
+        return None
+    try:
+        normalized = int(value)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Seat limit must be a whole number")
+    if normalized <= 0:
+        return None
+    return normalized
+
+
+async def _get_organization_seat_snapshot(*, organization_id: str, exclude_user_id: Optional[str] = None) -> Dict[str, int]:
+    user_docs = await db.users.find(
+        {"organization_id": organization_id},
+        {"_id": 0, "id": 1, "tenant_role": 1, "approval_status": 1, "is_active": 1},
+    ).to_list(5000)
+    active_docs = [
+        doc
+        for doc in user_docs
+        if (doc.get("id") != exclude_user_id)
+        and doc.get("approval_status") == "approved"
+        and doc.get("is_active", True) is not False
+    ]
+    pending_docs = [
+        doc
+        for doc in user_docs
+        if (doc.get("id") != exclude_user_id) and doc.get("approval_status") == "pending"
+    ]
+    return {
+        "active_user_count": len(active_docs),
+        "active_teacher_count": sum(1 for doc in active_docs if _get_user_tenant_role(doc) == "teacher"),
+        "active_admin_count": sum(
+            1 for doc in active_docs if _get_user_tenant_role(doc) in {"school_admin", "training_admin"}
+        ),
+        "pending_user_count": len(pending_docs),
+    }
+
+
+def _organization_capacity_state(*, seat_limit: Optional[int], active_user_count: int) -> str:
+    if not seat_limit:
+        return "unlimited"
+    seats_remaining = max(seat_limit - active_user_count, 0)
+    if seats_remaining <= 0:
+        return "at_limit"
+    if active_user_count >= max(1, math.floor(seat_limit * 0.8)):
+        return "near_limit"
+    return "available"
+
+
+async def _enforce_organization_seat_limit(*, organization_doc: Optional[dict], exclude_user_id: Optional[str] = None) -> None:
+    if not organization_doc:
+        return
+    seat_limit = _normalize_seat_limit(organization_doc.get("seat_limit"))
+    if not seat_limit:
+        return
+    snapshot = await _get_organization_seat_snapshot(
+        organization_id=organization_doc["id"],
+        exclude_user_id=exclude_user_id,
+    )
+    if snapshot["active_user_count"] >= seat_limit:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Seat limit reached for {organization_doc.get('name') or 'this institution'}",
+        )
+
+
 async def _find_school_by_name(*, organization_id: str, school_name: Optional[str]) -> Optional[dict]:
     normalized_name = _normalized_name_key(school_name)
     if not organization_id or not normalized_name:
@@ -488,10 +555,16 @@ async def _assign_user_to_tenant_on_approval(
             "name": resolved_organization_name,
             "organization_type": resolved_organization_type,
             "status": "active",
+            "seat_limit": None,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "created_by": actor_label or "approval_flow",
         }
         await db.organizations.insert_one(organization_doc)
+
+    await _enforce_organization_seat_limit(
+        organization_doc=organization_doc,
+        exclude_user_id=target.get("id"),
+    )
 
     updates["organization_id"] = organization_doc["id"]
     updates["organization_name"] = organization_doc["name"]
@@ -652,6 +725,32 @@ async def _build_master_admin_user_record(user_doc: dict) -> "MasterAdminUserRec
         linked_teacher_name=(linked_teacher or {}).get("name"),
         uploads_total=uploads_total,
         assessments_total=assessments_total,
+    )
+
+
+async def _build_master_admin_organization_record(organization_doc: dict) -> "MasterAdminOrganizationRecord":
+    school_count = await db.schools.count_documents({"organization_id": organization_doc["id"]})
+    seat_snapshot = await _get_organization_seat_snapshot(organization_id=organization_doc["id"])
+    seat_limit = _normalize_seat_limit(organization_doc.get("seat_limit"))
+    seats_remaining = None if not seat_limit else max(seat_limit - seat_snapshot["active_user_count"], 0)
+    return MasterAdminOrganizationRecord(
+        id=organization_doc["id"],
+        name=organization_doc.get("name") or "—",
+        organization_type=organization_doc.get("organization_type") or "school",
+        status=organization_doc.get("status") or "active",
+        created_at=organization_doc.get("created_at"),
+        created_by=organization_doc.get("created_by"),
+        school_count=school_count,
+        active_user_count=seat_snapshot["active_user_count"],
+        active_teacher_count=seat_snapshot["active_teacher_count"],
+        active_admin_count=seat_snapshot["active_admin_count"],
+        pending_user_count=seat_snapshot["pending_user_count"],
+        seat_limit=seat_limit,
+        seats_remaining=seats_remaining,
+        capacity_state=_organization_capacity_state(
+            seat_limit=seat_limit,
+            active_user_count=seat_snapshot["active_user_count"],
+        ),
     )
 
 
@@ -1295,6 +1394,13 @@ async def _reactivate_user_access(
 ) -> dict:
     user_id = target["id"]
     now = datetime.now(timezone.utc).isoformat()
+    organization_doc = None
+    if target.get("organization_id"):
+        organization_doc = await db.organizations.find_one({"id": target["organization_id"]}, {"_id": 0})
+    await _enforce_organization_seat_limit(
+        organization_doc=organization_doc,
+        exclude_user_id=user_id,
+    )
     updates = {
         "approval_status": "approved",
         "approved_at": target.get("approved_at") or now,
@@ -4367,6 +4473,43 @@ class MasterAdminUserDetailResponse(BaseModel):
     related: Dict[str, Any]
 
 
+class MasterAdminOrganizationRecord(BaseModel):
+    id: str
+    name: str
+    organization_type: str
+    status: str
+    created_at: Optional[str] = None
+    created_by: Optional[str] = None
+    school_count: int = 0
+    active_user_count: int = 0
+    active_teacher_count: int = 0
+    active_admin_count: int = 0
+    pending_user_count: int = 0
+    seat_limit: Optional[int] = None
+    seats_remaining: Optional[int] = None
+    capacity_state: str = "unlimited"
+
+
+class MasterAdminOrganizationListResponse(BaseModel):
+    generated_at: str
+    total: int
+    limit: int
+    offset: int
+    items: List[MasterAdminOrganizationRecord]
+    summary: Dict[str, int]
+
+
+class MasterAdminOrganizationDetailResponse(BaseModel):
+    generated_at: str
+    organization: MasterAdminOrganizationRecord
+    related: Dict[str, Any]
+
+
+class MasterAdminOrganizationSeatPolicyPayload(BaseModel):
+    seat_limit: Optional[int] = None
+    reason: Optional[str] = None
+
+
 class MasterAdminWorkspaceRecord(BaseModel):
     id: str
     owner_user_id: str
@@ -4651,6 +4794,7 @@ class OrganizationResponse(BaseModel):
     name: str
     organization_type: str
     status: str
+    seat_limit: Optional[int] = None
     created_at: str
 
 class FrameworkSelection(BaseModel):
@@ -13691,6 +13835,12 @@ async def get_master_admin_bootstrap(current_user: dict = Depends(get_current_us
                 "status": "active",
             },
             {
+                "id": "institutions",
+                "title": "Institutions and Seat Policy",
+                "description": "Institution identifiers, tenant boundaries, seat caps, and approval capacity controls.",
+                "status": "active",
+            },
+            {
                 "id": "workspaces",
                 "title": "Organizations and Workspaces",
                 "description": "Cross-workspace visibility into adoption, blockages, and support needs.",
@@ -13753,6 +13903,15 @@ async def get_master_admin_overview(current_user: dict = Depends(get_current_use
     admin_users = await db.users.count_documents({"role": {"$in": ["admin", "principal"]}})
     super_admin_users = await db.users.count_documents({"role": "super_admin"})
     recent_logins = await db.users.count_documents({"last_login_at": {"$gte": cutoff_7d}})
+    organizations_collection = getattr(db, "organizations", None)
+    organization_docs = []
+    if organizations_collection is not None:
+        organization_docs = await organizations_collection.find({}, {"_id": 0}).to_list(1000)
+    organizations_at_limit = 0
+    for organization_doc in organization_docs:
+        record = await _build_master_admin_organization_record(organization_doc)
+        if record.capacity_state == "at_limit":
+            organizations_at_limit += 1
 
     uploads_24h = await db.videos.count_documents({"created_at": {"$gte": cutoff_24h}})
     videos_total = await db.videos.count_documents({})
@@ -13823,6 +13982,17 @@ async def get_master_admin_overview(current_user: dict = Depends(get_current_use
                 action_path="/master-admin",
             )
         )
+    if organizations_at_limit:
+        alerts.append(
+            MasterAdminAlert(
+                id="seat-capacity",
+                severity="warning",
+                title="Institution seat caps reached",
+                message=f"{organizations_at_limit} institution(s) have reached their current seat limit.",
+                action_label="Open institutions",
+                action_path="/master-admin/organizations?capacity_state=at_limit",
+            )
+        )
     if not alerts:
         alerts.append(
             MasterAdminAlert(
@@ -13884,6 +14054,13 @@ async def get_master_admin_overview(current_user: dict = Depends(get_current_use
             tone="warning" if pending_users else "neutral",
         ),
         MasterAdminOverviewCard(
+            id="institutions-at-limit",
+            title="Institutions at limit",
+            value=organizations_at_limit,
+            hint="Organizations currently blocked by seat policy.",
+            tone="danger" if organizations_at_limit else "neutral",
+        ),
+        MasterAdminOverviewCard(
             id="recent-logins",
             title="Recent logins (7d)",
             value=recent_logins,
@@ -13942,6 +14119,7 @@ async def get_master_admin_users(
     q: Optional[str] = None,
     role: Optional[str] = None,
     approval_status: Optional[str] = None,
+    organization_id: Optional[str] = None,
     is_active: Optional[bool] = None,
     has_teacher_link: Optional[bool] = None,
     limit: int = 50,
@@ -13957,6 +14135,7 @@ async def get_master_admin_users(
     normalized_q = str(q or "").strip().lower()
     normalized_role = str(role or "").strip().lower()
     normalized_approval = str(approval_status or "").strip().lower()
+    normalized_organization_id = str(organization_id or "").strip()
 
     filtered = []
     for item in records:
@@ -13974,6 +14153,8 @@ async def get_master_admin_users(
         if normalized_role and item.role != normalized_role:
             continue
         if normalized_approval and item.approval_status != normalized_approval:
+            continue
+        if normalized_organization_id and item.organization_id != normalized_organization_id:
             continue
         if is_active is not None and item.is_active != is_active:
             continue
@@ -14020,6 +14201,118 @@ async def get_master_admin_user_detail(user_id: str, current_user: dict = Depend
     )
 
 
+@api_router.get("/master-admin/organizations", response_model=MasterAdminOrganizationListResponse)
+async def get_master_admin_organizations(
+    q: Optional[str] = None,
+    organization_type: Optional[str] = None,
+    capacity_state: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_master_admin_user(current_user)
+    safe_limit = max(1, min(limit, 200))
+    safe_offset = max(0, offset)
+    docs = await db.organizations.find({}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    records = [await _build_master_admin_organization_record(doc) for doc in docs]
+    normalized_q = str(q or "").strip().lower()
+    normalized_type = str(organization_type or "").strip().lower()
+    normalized_capacity = str(capacity_state or "").strip().lower()
+
+    filtered: List[MasterAdminOrganizationRecord] = []
+    for item in records:
+        if normalized_q:
+            haystack = " ".join([str(item.id).lower(), str(item.name).lower(), str(item.created_by or "").lower()])
+            if normalized_q not in haystack:
+                continue
+        if normalized_type and item.organization_type != normalized_type:
+            continue
+        if normalized_capacity and item.capacity_state != normalized_capacity:
+            continue
+        filtered.append(item)
+
+    sliced = filtered[safe_offset : safe_offset + safe_limit]
+    summary = {
+        "school": sum(1 for item in filtered if item.organization_type == "school"),
+        "training": sum(1 for item in filtered if item.organization_type == "training"),
+        "capped": sum(1 for item in filtered if item.seat_limit),
+        "at_limit": sum(1 for item in filtered if item.capacity_state == "at_limit"),
+        "near_limit": sum(1 for item in filtered if item.capacity_state == "near_limit"),
+    }
+    return MasterAdminOrganizationListResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        total=len(filtered),
+        limit=safe_limit,
+        offset=safe_offset,
+        items=sliced,
+        summary=summary,
+    )
+
+
+@api_router.get("/master-admin/organizations/{organization_id}", response_model=MasterAdminOrganizationDetailResponse)
+async def get_master_admin_organization_detail(
+    organization_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_master_admin_user(current_user)
+    organization_doc = await db.organizations.find_one({"id": organization_id}, {"_id": 0})
+    if not organization_doc:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    record = await _build_master_admin_organization_record(organization_doc)
+    active_users = await db.users.find(
+        {
+            "organization_id": organization_id,
+            "approval_status": "approved",
+            "is_active": {"$ne": False},
+        },
+        {"_id": 0, "id": 1, "email": 1, "name": 1, "tenant_role": 1, "school_name": 1},
+    ).sort("name", 1).to_list(500)
+    pending_users = await db.users.find(
+        {"organization_id": organization_id, "approval_status": "pending"},
+        {"_id": 0, "id": 1, "email": 1, "name": 1, "tenant_role": 1, "requested_school_name": 1},
+    ).sort("created_at", -1).to_list(200)
+    schools = await db.schools.find(
+        {"organization_id": organization_id},
+        {"_id": 0, "id": 1, "name": 1, "user_id": 1, "district_name": 1},
+    ).sort("name", 1).to_list(500)
+    return MasterAdminOrganizationDetailResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        organization=record,
+        related={
+            "active_users": active_users,
+            "pending_users": pending_users,
+            "schools": schools,
+        },
+    )
+
+
+@api_router.post("/master-admin/organizations/{organization_id}/seat-policy", response_model=MasterAdminOrganizationRecord)
+async def update_master_admin_organization_seat_policy(
+    organization_id: str,
+    payload: MasterAdminOrganizationSeatPolicyPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_master_admin_user(current_user)
+    organization_doc = await db.organizations.find_one({"id": organization_id}, {"_id": 0})
+    if not organization_doc:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    seat_limit = _normalize_seat_limit(payload.seat_limit)
+    await db.organizations.update_one(
+        {"id": organization_id},
+        {"$set": {"seat_limit": seat_limit, "seat_policy_updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    updated = await db.organizations.find_one({"id": organization_id}, {"_id": 0})
+    await _log_master_admin_audit_event(
+        actor=current_user,
+        action="update_organization_seat_policy",
+        target_type="organization",
+        target_id=organization_id,
+        reason=payload.reason,
+        metadata={"name": updated.get("name"), "seat_limit": seat_limit},
+    )
+    return await _build_master_admin_organization_record(updated)
+
+
 @api_router.post("/master-admin/users/{user_id}/approve", response_model=AccessUserRecord)
 async def master_admin_approve_user(
     user_id: str,
@@ -14034,6 +14327,10 @@ async def master_admin_approve_user(
         target,
         actor_label=current_user.get("email") or current_user["id"],
         reason=payload.reason,
+        organization_name=payload.organization_name,
+        organization_type=payload.organization_type,
+        school_name=payload.school_name,
+        manager_email=payload.manager_email,
     )
     await _log_master_admin_audit_event(
         actor=current_user,

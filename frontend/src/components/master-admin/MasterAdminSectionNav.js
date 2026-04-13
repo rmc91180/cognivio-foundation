@@ -9,6 +9,7 @@ const GROUPS = [
     items: [
       { to: "/master-admin", key: "overview", caption: "Platform pulse and active risk." },
       { to: "/master-admin/users", key: "users", caption: "Global user lifecycle and access." },
+      { to: "/master-admin/organizations", key: "institutions", caption: "Institution identity, seat caps, and usage." },
       { to: "/master-admin/workspaces", key: "workspaces", caption: "Workspace health and linkage." },
       { to: "/master-admin/videos", key: "videos", caption: "Uploads, processing, and playback." },
       { to: "/master-admin/incidents", key: "incidents", caption: "Current failures and investigations." },
