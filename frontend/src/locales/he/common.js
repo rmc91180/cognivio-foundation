@@ -612,39 +612,77 @@ const he = {
     signUpTab: "הרשמה",
     loginRoleLabel: "אני מתחבר/ת בתור",
     signUpRoleLabel: "אני מבקש/ת גישה בתור",
+    loginInstitutionTypeLabel: "סוג מוסד",
+    signUpInstitutionTypeLabel: "המוסד שלי הוא",
     teacherRole: "מורה",
     adminRole: "אדמין",
     schoolAdminRole: "מנהל/ת בית ספר",
     trainingAdminRole: "מנהל/ת הכשרה",
-    loginTeacherHint: "בחרו מורה אם החשבון הזה אושר לעבודה אישית, העלאות, רפלקציה ובדיקת שיעורים.",
-    loginAdminHint: "בחרו אדמין אם החשבון הזה אושר לפיקוח, סקירה, אישורים וניהול ליווי.",
-    loginSchoolAdminHint:
-      "בחרו מנהל/ת בית ספר אם החשבון הזה אושר לפיקוח על מורי בית ספר אחד, סקירה, ליווי ואישורים.",
-    loginTrainingAdminHint:
-      "בחרו מנהל/ת הכשרה אם החשבון הזה אושר לפיקוח על תוכנית הכשרה, מחזור או תהליך פיתוח מורים.",
-    signUpTeacherHint: "בקשו גישת מורה אם אתם צריכים מרחב אישי להעלאות, רפלקציות, תכנית לימודים ובדיקת שיעורים.",
-    signUpAdminHint: "בקשו גישת אדמין אם אתם צריכים כלי פיקוח, אישורים, סקירת רוסטר וניהול ליווי.",
-    signUpSchoolAdminHint:
-      "בקשו גישת מנהל/ת בית ספר אם אתם צריכים לנהל רוסטר של בית ספר אחד, לסקור ראיות של מורים ולאשר משתמשים לבית הספר הזה.",
-    signUpTrainingAdminHint:
-      "בקשו גישת מנהל/ת הכשרה אם אתם צריכים לנהל מחזור הכשרה, רזידנסי או תהליך סקירה ברמת תוכנית.",
+    institutionTypeSchool: "מוסד K-12",
+    institutionTypeTraining: "הכשרת מורים",
+    institutionTypeHint:
+      "כך Cognivio יודעת לאיזה ארגון-אם ולאיזו משפחת דשבורדים החשבון הזה שייך.",
+    institutionTypeMap: {
+      school: "מוסד K-12",
+      training: "הכשרת מורים",
+    },
+    signupAccessMap: {
+      teacher: "מורה",
+      administrator: "אדמין",
+    },
+    derivedRoleMap: {
+      teacher: "דשבורד מורה",
+      school_admin: "דשבורד מנהל/ת בית ספר",
+      training_admin: "דשבורד מנהל/ת הכשרה",
+    },
+    loginTeacherHint:
+      "בחרו מורה אם החשבון הזה אושר למרחב ההוראה האישי שלכם, להעלאות ולרפלקציה.",
+    loginAdministratorHint:
+      "בחרו אדמין, ואז ציינו אם המוסד שלכם הוא K-12 או הכשרת מורים כדי ש-Cognivio תנתב אתכם לדשבורד הפיקוח הנכון.",
+    signUpTeacherSchoolHint:
+      "בקשו גישת מורה למוסד K-12 אם אתם צריכים מרחב אישי להעלאות, רפלקציות, תכנית לימודים ובדיקת שיעורים.",
+    signUpTeacherTrainingHint:
+      "בקשו גישת מורה למוסד להכשרת מורים אם אתם מצטרפים לרזידנסי, מחזור או תוכנית הכשרה וזקוקים למרחב אישי.",
+    signUpAdministratorSchoolHint:
+      "בקשו גישת אדמין למוסד K-12 אם אתם צריכים לפקח על רוסטר של בית ספר, לסקור ראיות מורים ולנהל אישורים לבית הספר הזה.",
+    signUpAdministratorTrainingHint:
+      "בקשו גישת אדמין למוסד להכשרת מורים אם אתם צריכים לפקח על מחזור, רזידנסי או תהליך סקירה ברמת תוכנית.",
     demoLogins: "כניסות דמו",
     principalDemo: "מנהל: principal@demo.cognivio.app / DemoAccess2026!",
     teacherDemo: "מורה: teacher@demo.cognivio.app / DemoAccess2026!",
     trainingAdminDemo: "מנהל/ת הכשרה: coach@demo.cognivio.app / DemoAccess2026!",
     name: "שם",
-    schoolOrOrganizationName: "שם בית הספר או הארגון",
-    trainingOrganizationName: "שם ארגון ההכשרה",
+    institutionDetailsTitle: "פרטי המוסד",
+    institutionDetailsDescription:
+      "זהו את המוסד כבר עכשיו כדי ש-Cognivio תוכל לשייך את הבקשה לארגון-האם ולמסלול האישור הנכונים.",
+    schoolOrganizationName: "מחוז, רשת או ארגון-אם",
+    trainingOrganizationName: "מכללה, ספק או ארגון-אם",
     schoolName: "שם בית הספר",
-    requestedManagerEmail: "אימייל של מנהל/ת בית הספר",
+    programOrCohortName: "שם תוכנית, מחזור או קמפוס",
+    requestedSchoolManagerEmail: "אימייל של מנהל/ת בית הספר",
+    requestedTrainingManagerEmail: "אימייל של מנהל/ת ההכשרה",
     schoolOrganizationHint:
-      "הזינו את בית הספר או רשת בתי הספר שאליהם הבקשה שייכת כדי ש-Cognivio תוכל לשייך אתכם לדשבורד הנכון.",
+      "הזינו את המחוז, רשת בתי הספר או מוסד-האם שאליהם הבקשה שייכת כדי ש-Cognivio תוכל לשייך אותה לארגון K-12 הנכון.",
     trainingOrganizationHint:
-      "הזינו את ארגון ההכשרה, הרזידנסי או התוכנית שאליהם הבקשה שייכת כדי ש-Cognivio תוכל לנתב אותה למסלול ההכשרה הנכון.",
+      "הזינו את המכללה, הספק או ארגון ההכשרה שאליהם הבקשה שייכת כדי ש-Cognivio תוכל לנתב אותה למסלול ההכשרה הנכון.",
     schoolNameHint:
       "השתמשו בשם היומיומי של בית הספר כדי שתהליך האישור יוכל לקבץ יחד מורים ומנהלי בית ספר.",
-    requestedManagerEmailHint:
+    programOrCohortHint:
+      "אופציונלי אך מועיל. השתמשו בזה עבור רזידנסי, מחזור, קמפוס או שם תוכנית תחת מוסד ההכשרה הראשי.",
+    requestedSchoolManagerEmailHint:
       "אם אתם כבר יודעים את כתובת האימייל של מנהל/ת בית הספר, אפשר להוסיף אותה כאן כדי ש-Cognivio תקשר אתכם לסוקר הנכון לאחר האישור.",
+    requestedTrainingManagerEmailHint:
+      "אם אתם כבר יודעים את כתובת האימייל של מנהל/ת ההכשרה, אפשר להוסיף אותה כאן כדי ש-Cognivio תקשר אתכם לסוקר הנכון לאחר האישור.",
+    signupSummaryTitle: "סיכום הבקשה",
+    signupSummaryDescription:
+      "עברו על הבקשה לפני השליחה. זהו המידע ש-Cognivio תשתמש בו בזמן האישור והניתוב.",
+    signupSummaryAccess: "גישה מבוקשת",
+    signupSummaryInstitutionType: "סוג מוסד",
+    signupSummaryDashboard: "דשבורד לאחר אישור",
+    signupSummaryOrganization: "ארגון-אם",
+    signupSummarySchool: "בית ספר",
+    signupSummaryProgram: "תוכנית / מחזור",
+    signupSummaryLinkedAdministrator: "מנהל/ת מקושר/ת",
     email: "אימייל",
     password: "סיסמה",
     loggedInSuccessfully: "ההתחברות הצליחה",
@@ -655,9 +693,9 @@ const he = {
     requestAccessFailed: "שליחת בקשת הגישה נכשלה",
     approvalRequiredTitle: "נדרש אישור לפני שניתן להיכנס",
     approvalRequiredTeacherDescription:
-      "הירשמו עם אימייל וסיסמה שתרצו לשמור למשתמש מורה. הבקשה תישאר במצב ממתין עד ש-Cognivio תאשר גישת מורה לכתובת הזו. לאחר האישור תוכלו להתחבר עם אותו תפקיד, אותו אימייל ואותה סיסמה.",
-    approvalRequiredAdminDescription:
-      "הירשמו עם אימייל וסיסמה שתרצו לשמור למשתמש אדמין. הבקשה תישאר במצב ממתין עד ש-Cognivio תאשר גישת אדמין לכתובת הזו. לאחר האישור תוכלו להתחבר עם אותו תפקיד, אותו אימייל ואותה סיסמה.",
+      "הירשמו עם אימייל וסיסמה שתרצו לשמור למשתמש מורה. הבקשה תישאר במצב ממתין עד ש-Cognivio תאשר גישת מורה לכתובת הזו ולמוסד K-12. לאחר האישור תוכלו להתחבר עם אותו אימייל ואותה סיסמה.",
+    approvalRequiredTrainingTeacherDescription:
+      "הירשמו עם אימייל וסיסמה שתרצו לשמור למשתמש מורה. הבקשה תישאר במצב ממתין עד ש-Cognivio תאשר גישת מורה לכתובת הזו ולמוסד ההכשרה. לאחר האישור תוכלו להתחבר עם אותו אימייל ואותה סיסמה.",
     approvalRequiredSchoolAdminDescription:
       "הירשמו עם אימייל וסיסמה שתרצו לשמור למשתמש מנהל/ת בית ספר. הבקשה תישאר במצב ממתין עד ש-Cognivio תאשר גישת מנהל/ת בית ספר לכתובת ולבית הספר האלה. לאחר האישור תוכלו להתחבר עם אותו תפקיד, אותו אימייל ואותה סיסמה.",
     approvalRequiredTrainingAdminDescription:

@@ -12,14 +12,17 @@ test.describe('Authentication', () => {
 
   const emailInput = (page) => page.locator('input[type="email"]');
   const passwordInput = (page) => page.locator('input[type="password"]');
-  const selectRole = async (page, role: 'teacher' | 'school_admin' | 'training_admin') => {
-    const roleMatcher =
-      role === 'school_admin'
-        ? /school administrator/i
-        : role === 'training_admin'
-          ? /training administrator/i
-          : /teacher/i;
-    const button = page.getByRole('button', { name: roleMatcher });
+  const selectAccessType = async (page, accessType: 'teacher' | 'administrator') => {
+    const matcher = accessType === 'administrator' ? /administrator/i : /teacher/i;
+    const button = page.getByRole('button', { name: matcher }).first();
+    if (await button.count()) {
+      await button.click();
+    }
+  };
+
+  const selectInstitutionType = async (page, institutionType: 'school' | 'training') => {
+    const matcher = institutionType === 'training' ? /teacher training/i : /k-12 school/i;
+    const button = page.getByRole('button', { name: matcher }).first();
     if (await button.count()) {
       await button.click();
     }
@@ -42,7 +45,8 @@ test.describe('Authentication', () => {
   });
 
   test('successfully logs in as admin and reaches the dashboard', async ({ page }) => {
-    await selectRole(page, 'school_admin');
+    await selectAccessType(page, 'administrator');
+    await selectInstitutionType(page, 'school');
     await emailInput(page).fill(ADMIN_EMAIL);
     await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
@@ -54,7 +58,8 @@ test.describe('Authentication', () => {
   });
 
   test('persists authentication across page reload', async ({ page }) => {
-    await selectRole(page, 'school_admin');
+    await selectAccessType(page, 'administrator');
+    await selectInstitutionType(page, 'school');
     await emailInput(page).fill(ADMIN_EMAIL);
     await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
@@ -67,7 +72,7 @@ test.describe('Authentication', () => {
   });
 
   test('successfully logs in as teacher and reaches the teacher workspace', async ({ page }) => {
-    await selectRole(page, 'teacher');
+    await selectAccessType(page, 'teacher');
     await emailInput(page).fill(TEACHER_EMAIL);
     await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
@@ -83,7 +88,8 @@ test.describe('Authentication', () => {
   });
 
   test('school admin is redirected away from teacher-only routes', async ({ page }) => {
-    await selectRole(page, 'school_admin');
+    await selectAccessType(page, 'administrator');
+    await selectInstitutionType(page, 'school');
     await emailInput(page).fill(ADMIN_EMAIL);
     await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
@@ -98,7 +104,8 @@ test.describe('Authentication', () => {
   });
 
   test('training admin reaches the training dashboard and is redirected away from school-admin routes', async ({ page }) => {
-    await selectRole(page, 'training_admin');
+    await selectAccessType(page, 'administrator');
+    await selectInstitutionType(page, 'training');
     await emailInput(page).fill(TRAINING_ADMIN_EMAIL);
     await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
@@ -116,7 +123,7 @@ test.describe('Authentication', () => {
   });
 
   test('teacher is redirected away from admin-only routes', async ({ page }) => {
-    await selectRole(page, 'teacher');
+    await selectAccessType(page, 'teacher');
     await emailInput(page).fill(TEACHER_EMAIL);
     await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
@@ -136,7 +143,8 @@ test.describe('Authentication', () => {
   });
 
   test('logout clears session', async ({ page }) => {
-    await selectRole(page, 'school_admin');
+    await selectAccessType(page, 'administrator');
+    await selectInstitutionType(page, 'school');
     await emailInput(page).fill(ADMIN_EMAIL);
     await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
@@ -153,7 +161,7 @@ test.describe('Authentication', () => {
       'base64'
     );
 
-    await selectRole(page, 'teacher');
+    await selectAccessType(page, 'teacher');
     await emailInput(page).fill(TEACHER_EMAIL);
     await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
@@ -176,5 +184,32 @@ test.describe('Authentication', () => {
     await page.locator('form').last().locator('select').selectOption({ index: 1 });
     await expect(page.getByText(/privacy profile complete/i)).toBeVisible();
     await expect(page.getByRole('button', { name: /upload and analyze/i })).toBeEnabled();
+  });
+
+  test('signup rubric switches correctly between k-12 and training flows', async ({ page }) => {
+    const signUpButton = page.getByRole('button', { name: /sign up/i });
+    if (!(await signUpButton.count())) {
+      test.skip(true, 'Signup is hidden in demo-mode smoke environments.');
+    }
+
+    await signUpButton.click();
+
+    await selectAccessType(page, 'teacher');
+    await selectInstitutionType(page, 'school');
+    await expect(page.getByLabel(/district, network, or parent organization/i)).toBeVisible();
+    await expect(page.getByLabel(/^school name$/i)).toBeVisible();
+    await expect(page.getByLabel(/school administrator email/i)).toBeVisible();
+
+    await selectInstitutionType(page, 'training');
+    await expect(page.getByLabel(/college, provider, or parent organization/i)).toBeVisible();
+    await expect(page.getByLabel(/program, cohort, or campus name/i)).toBeVisible();
+    await expect(page.getByLabel(/training administrator email/i)).toBeVisible();
+
+    await selectAccessType(page, 'administrator');
+    await expect(page.getByLabel(/training administrator email/i)).toHaveCount(0);
+    await expect(page.getByText(/teacher training administrator dashboard/i)).toBeVisible();
+
+    await selectInstitutionType(page, 'school');
+    await expect(page.getByText(/school administrator dashboard/i)).toBeVisible();
   });
 });

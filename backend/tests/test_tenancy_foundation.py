@@ -116,6 +116,25 @@ def test_normalize_access_request_for_training_admin_uses_training_org_type():
     assert normalized["requested_school_name"] is None
 
 
+def test_normalize_access_request_for_training_teacher_does_not_require_school():
+    payload = server.UserCreate(
+        email="candidate@example.com",
+        password="secret",
+        name="Candidate",
+        role="teacher",
+        organization_type="training",
+        organization_name="Residency Cohort 2026",
+        requested_manager_email="coach@example.com",
+    )
+
+    normalized = server._normalize_access_request_tenancy_fields(payload, "teacher")
+
+    assert normalized["organization_type"] == "training"
+    assert normalized["requested_organization_name"] == "Residency Cohort 2026"
+    assert normalized["requested_school_name"] is None
+    assert normalized["requested_manager_email"] == "coach@example.com"
+
+
 @pytest.mark.asyncio
 async def test_build_user_tenancy_migration_preview_marks_teacher_incomplete(monkeypatch):
     fake_db = _FakeDb()

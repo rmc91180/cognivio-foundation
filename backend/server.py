@@ -351,13 +351,15 @@ def _build_tenant_request_summary(user_doc: Optional[dict]) -> Dict[str, Optiona
     manager_email = _clean_optional_string(payload.get("manager_email")) or _clean_optional_string(
         payload.get("requested_manager_email")
     )
+    organization_type = _normalize_organization_type(payload.get("organization_type"), tenant_role)
     return {
         "tenant_role": tenant_role,
         "tenant_role_label": _format_tenant_role_label(tenant_role),
-        "organization_type": _normalize_organization_type(payload.get("organization_type"), tenant_role),
+        "organization_type": organization_type,
         "organization_name": organization_name,
         "school_name": school_name,
         "manager_email": manager_email,
+        "manager_label": "Training administrator" if organization_type == "training" else "School administrator",
     }
 
 
@@ -1438,12 +1440,13 @@ def _build_access_request_notification_text(user_doc: dict) -> str:
     tenant_summary = _build_tenant_request_summary(user_doc)
     tenant_lines = [
         f"Requested role: {tenant_summary.get('tenant_role_label')}",
+        f"Institution type: {str(tenant_summary.get('organization_type') or '—').title()}",
         f"Organization: {tenant_summary.get('organization_name') or '—'}",
     ]
     if tenant_summary.get("school_name"):
         tenant_lines.append(f"School: {tenant_summary.get('school_name')}")
     if tenant_summary.get("manager_email"):
-        tenant_lines.append(f"Requested school administrator: {tenant_summary.get('manager_email')}")
+        tenant_lines.append(f"Requested {tenant_summary.get('manager_label')}: {tenant_summary.get('manager_email')}")
     return "\n".join(
         [
             "A new Cognivio pilot sign-up is waiting for approval.",
@@ -1466,6 +1469,7 @@ def _build_access_request_notification_html(user_doc: dict) -> str:
     email_value = html.escape(str(user_doc.get("email") or ""))
     tenant_summary = _build_tenant_request_summary(user_doc)
     role = html.escape(str(tenant_summary.get("tenant_role_label") or ""))
+    organization_type = html.escape(str(tenant_summary.get("organization_type") or "—").title())
     organization_name = html.escape(str(tenant_summary.get("organization_name") or "—"))
     school_name = html.escape(str(tenant_summary.get("school_name") or ""))
     manager_email = html.escape(str(tenant_summary.get("manager_email") or ""))
@@ -1478,9 +1482,10 @@ def _build_access_request_notification_html(user_doc: dict) -> str:
   <p style="margin: 0 0 8px;"><strong>Name:</strong> {name}</p>
   <p style="margin: 0 0 8px;"><strong>Email:</strong> {email_value}</p>
   <p style="margin: 0 0 8px;"><strong>Requested role:</strong> {role}</p>
+  <p style="margin: 0 0 8px;"><strong>Institution type:</strong> {organization_type}</p>
   <p style="margin: 0 0 8px;"><strong>Organization:</strong> {organization_name}</p>
   {f'<p style="margin: 0 0 8px;"><strong>School:</strong> {school_name}</p>' if school_name else ''}
-  {f'<p style="margin: 0 0 8px;"><strong>Requested school administrator:</strong> {manager_email}</p>' if manager_email else ''}
+  {f'<p style="margin: 0 0 8px;"><strong>Requested {html.escape(str(tenant_summary.get("manager_label") or "administrator")).lower()}:</strong> {manager_email}</p>' if manager_email else ''}
   <p style="margin: 0 0 20px;"><strong>Requested at:</strong> {requested_at}</p>
   <p style="margin: 0 0 18px;">
     <a href="{approve_url}" style="display:inline-block;padding:12px 20px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:600;margin-right:12px;">Approve</a>
@@ -1499,6 +1504,7 @@ def _build_access_request_received_text(user_doc: dict) -> str:
             "",
             f"Email: {user_doc.get('email')}",
             f"Requested role: {tenant_summary.get('tenant_role_label')}",
+            f"Institution type: {str(tenant_summary.get('organization_type') or '—').title()}",
             f"Organization: {tenant_summary.get('organization_name') or '—'}",
             *([f"School: {tenant_summary.get('school_name')}"] if tenant_summary.get("school_name") else []),
             f"Submitted at: {user_doc.get('approval_requested_at') or user_doc.get('created_at')}",
@@ -1513,6 +1519,7 @@ def _build_access_request_received_html(user_doc: dict) -> str:
     email_value = html.escape(str(user_doc.get("email") or ""))
     tenant_summary = _build_tenant_request_summary(user_doc)
     role = html.escape(str(tenant_summary.get("tenant_role_label") or ""))
+    organization_type = html.escape(str(tenant_summary.get("organization_type") or "—").title())
     organization_name = html.escape(str(tenant_summary.get("organization_name") or "—"))
     school_name = html.escape(str(tenant_summary.get("school_name") or ""))
     submitted_at = html.escape(str(user_doc.get("approval_requested_at") or user_doc.get("created_at") or ""))
@@ -1521,6 +1528,7 @@ def _build_access_request_received_html(user_doc: dict) -> str:
   <h2 style="margin: 0 0 16px;">Your Cognivio sign-up request has been received</h2>
   <p style="margin: 0 0 8px;"><strong>Email:</strong> {email_value}</p>
   <p style="margin: 0 0 8px;"><strong>Requested role:</strong> {role}</p>
+  <p style="margin: 0 0 8px;"><strong>Institution type:</strong> {organization_type}</p>
   <p style="margin: 0 0 8px;"><strong>Organization:</strong> {organization_name}</p>
   {f'<p style="margin: 0 0 8px;"><strong>School:</strong> {school_name}</p>' if school_name else ''}
   <p style="margin: 0 0 16px;"><strong>Submitted at:</strong> {submitted_at}</p>
@@ -1538,6 +1546,7 @@ def _build_access_approved_text(user_doc: dict) -> str:
             "",
             f"Email: {user_doc.get('email')}",
             f"Approved role: {tenant_summary.get('tenant_role_label')}",
+            f"Institution type: {str(tenant_summary.get('organization_type') or '—').title()}",
             f"Organization: {tenant_summary.get('organization_name') or '—'}",
             *([f"School: {tenant_summary.get('school_name')}"] if tenant_summary.get("school_name") else []),
             f"Approved at: {user_doc.get('approved_at') or datetime.now(timezone.utc).isoformat()}",
@@ -1552,6 +1561,7 @@ def _build_access_approved_html(user_doc: dict) -> str:
     email_value = html.escape(str(user_doc.get("email") or ""))
     tenant_summary = _build_tenant_request_summary(user_doc)
     role = html.escape(str(tenant_summary.get("tenant_role_label") or ""))
+    organization_type = html.escape(str(tenant_summary.get("organization_type") or "—").title())
     organization_name = html.escape(str(tenant_summary.get("organization_name") or "—"))
     school_name = html.escape(str(tenant_summary.get("school_name") or ""))
     approved_at = html.escape(str(user_doc.get("approved_at") or datetime.now(timezone.utc).isoformat()))
@@ -1561,6 +1571,7 @@ def _build_access_approved_html(user_doc: dict) -> str:
   <h2 style="margin: 0 0 16px;">Your Cognivio access is approved</h2>
   <p style="margin: 0 0 8px;"><strong>Email:</strong> {email_value}</p>
   <p style="margin: 0 0 8px;"><strong>Approved role:</strong> {role}</p>
+  <p style="margin: 0 0 8px;"><strong>Institution type:</strong> {organization_type}</p>
   <p style="margin: 0 0 8px;"><strong>Organization:</strong> {organization_name}</p>
   {f'<p style="margin: 0 0 8px;"><strong>School:</strong> {school_name}</p>' if school_name else ''}
   <p style="margin: 0 0 16px;"><strong>Approved at:</strong> {approved_at}</p>
@@ -5738,8 +5749,8 @@ async def register(user: UserCreate, request: Request):
         "name": user.name,
         "password": hash_password(user.password),
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "role": "admin" if user.email.lower() in ADMIN_EMAILS else _legacy_role_for_tenant_role(desired_role),
-        "tenant_role": "school_admin" if user.email.lower() in ADMIN_EMAILS else desired_role,
+        "role": _legacy_role_for_tenant_role(desired_role),
+        "tenant_role": desired_role,
         "tenant_status": "approved",
         "approval_status": "approved",
         "approved_at": datetime.now(timezone.utc).isoformat(),
@@ -5795,8 +5806,8 @@ async def request_access(user: UserCreate, request: Request):
                     "revoked_at": None,
                     "revoked_by": None,
                     "is_active": True,
-                    "role": "admin",
-                    "tenant_role": "school_admin",
+                    "role": _legacy_role_for_tenant_role(desired_role),
+                    "tenant_role": desired_role,
                     "tenant_status": "approved",
                 }
             )
@@ -5854,7 +5865,11 @@ async def request_access(user: UserCreate, request: Request):
         return AccessRequestResponse(
             status="pending",
             email=email,
-            message="Access request submitted. Approval is required before login.",
+            message=(
+                "Access request updated. Approval is still required before login."
+                if existing_status == "pending"
+                else "Access request submitted. Approval is required before login."
+            ),
             approval_status="pending",
             tenant_role=desired_role,
             organization_type=tenancy_fields.get("organization_type"),
@@ -5869,8 +5884,8 @@ async def request_access(user: UserCreate, request: Request):
         "name": user.name,
         "password": hash_password(user.password),
         "created_at": now,
-        "role": "admin" if auto_approved else _legacy_role_for_tenant_role(desired_role),
-        "tenant_role": "school_admin" if auto_approved else desired_role,
+        "role": _legacy_role_for_tenant_role(desired_role),
+        "tenant_role": desired_role,
         "tenant_status": "approved" if auto_approved else "pending",
         "approval_status": "approved" if auto_approved else "pending",
         "approval_requested_at": now,

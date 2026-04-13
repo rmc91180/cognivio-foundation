@@ -612,39 +612,77 @@ const en = {
     signUpTab: "Sign up",
     loginRoleLabel: "I am logging in as",
     signUpRoleLabel: "I am requesting access as",
+    loginInstitutionTypeLabel: "Institution type",
+    signUpInstitutionTypeLabel: "My institution is",
     teacherRole: "Teacher",
     adminRole: "Administrator",
     schoolAdminRole: "School administrator",
     trainingAdminRole: "Training administrator",
-    loginTeacherHint: "Choose Teacher if this account was approved for classroom practice, uploads, and reflection work.",
-    loginAdminHint: "Choose Administrator if this account was approved for roster oversight, review, and approvals.",
-    loginSchoolAdminHint:
-      "Choose School administrator if this account was approved to oversee one school's teachers, coaching, and approvals.",
-    loginTrainingAdminHint:
-      "Choose Training administrator if this account was approved to oversee a training cohort or teacher-development program.",
-    signUpTeacherHint: "Request teacher access if you need your own workspace for uploads, reflections, curriculum, and classroom review.",
-    signUpAdminHint: "Request administrator access if you need oversight tools, approvals, roster review, and coaching management.",
-    signUpSchoolAdminHint:
-      "Request school administrator access if you need to manage one school's roster, review teacher evidence, and approve users for that school.",
-    signUpTrainingAdminHint:
-      "Request training administrator access if you need to manage a teacher-training cohort, residency, or program-wide review workflow.",
+    institutionTypeSchool: "K-12 school",
+    institutionTypeTraining: "Teacher training",
+    institutionTypeHint:
+      "This tells Cognivio which parent organization and dashboard family this account belongs under.",
+    institutionTypeMap: {
+      school: "K-12 school",
+      training: "Teacher training",
+    },
+    signupAccessMap: {
+      teacher: "Teacher",
+      administrator: "Administrator",
+    },
+    derivedRoleMap: {
+      teacher: "Teacher dashboard",
+      school_admin: "School administrator dashboard",
+      training_admin: "Teacher training administrator dashboard",
+    },
+    loginTeacherHint:
+      "Choose Teacher if this account was approved for your personal teaching workspace, uploads, and reflection work.",
+    loginAdministratorHint:
+      "Choose Administrator, then identify whether your institution is K-12 or teacher training so Cognivio can route you to the correct oversight dashboard.",
+    signUpTeacherSchoolHint:
+      "Request teacher access for a K-12 institution if you need your own workspace for uploads, reflections, curriculum, and classroom review.",
+    signUpTeacherTrainingHint:
+      "Request teacher access for a teacher-training institution if you are joining a residency, cohort, or preparation program and need your own workspace.",
+    signUpAdministratorSchoolHint:
+      "Request administrator access for a K-12 institution if you need to oversee one school's roster, review teacher evidence, and manage approvals for that school.",
+    signUpAdministratorTrainingHint:
+      "Request administrator access for a teacher-training institution if you need to oversee a cohort, residency, or program-wide review workflow.",
     demoLogins: "Demo logins",
     principalDemo: "Principal: principal@demo.cognivio.app / DemoAccess2026!",
     teacherDemo: "Teacher: teacher@demo.cognivio.app / DemoAccess2026!",
     trainingAdminDemo: "Training administrator: coach@demo.cognivio.app / DemoAccess2026!",
     name: "Name",
-    schoolOrOrganizationName: "School or organization name",
-    trainingOrganizationName: "Training organization name",
+    institutionDetailsTitle: "Institution details",
+    institutionDetailsDescription:
+      "Identify the institution now so Cognivio can attach your request to the correct parent organization and approval path.",
+    schoolOrganizationName: "District, network, or parent organization",
+    trainingOrganizationName: "College, provider, or parent organization",
     schoolName: "School name",
-    requestedManagerEmail: "School administrator email",
+    programOrCohortName: "Program, cohort, or campus name",
+    requestedSchoolManagerEmail: "School administrator email",
+    requestedTrainingManagerEmail: "Training administrator email",
     schoolOrganizationHint:
-      "Enter the school or school network this request belongs to so Cognivio can place you under the right school dashboard.",
+      "Enter the parent district, school network, or institution this request belongs to so Cognivio can attach it to the correct K-12 organization.",
     trainingOrganizationHint:
-      "Enter the training organization, residency, or program this request belongs to so Cognivio can route it to the right training dashboard.",
+      "Enter the parent college, provider, or training organization this request belongs to so Cognivio can route it to the right training dashboard.",
     schoolNameHint:
       "Use the school's everyday name so the approval flow can group teachers and school administrators together.",
-    requestedManagerEmailHint:
+    programOrCohortHint:
+      "Optional, but helpful. Use this for a residency, cohort, campus, or program name under the parent training institution.",
+    requestedSchoolManagerEmailHint:
       "If you already know your school administrator's email, add it here so Cognivio can link you to the right reviewer after approval.",
+    requestedTrainingManagerEmailHint:
+      "If you already know your training administrator's email, add it here so Cognivio can link you to the right reviewer after approval.",
+    signupSummaryTitle: "Request summary",
+    signupSummaryDescription:
+      "Review the request before you submit it. This is the information Cognivio will use during approval and routing.",
+    signupSummaryAccess: "Access requested",
+    signupSummaryInstitutionType: "Institution type",
+    signupSummaryDashboard: "Dashboard after approval",
+    signupSummaryOrganization: "Parent organization",
+    signupSummarySchool: "School",
+    signupSummaryProgram: "Program / cohort",
+    signupSummaryLinkedAdministrator: "Linked administrator",
     email: "Email",
     password: "Password",
     loggedInSuccessfully: "Logged in successfully",
@@ -655,9 +693,9 @@ const en = {
     requestAccessFailed: "Failed to submit access request",
     approvalRequiredTitle: "Approval is required before login is enabled",
     approvalRequiredTeacherDescription:
-      "Sign up with the teacher email and password you want to keep. Your request will stay pending until Cognivio approves teacher access for that email. Once approved, you will log in with the same teacher role, email, and password.",
-    approvalRequiredAdminDescription:
-      "Sign up with the administrator email and password you want to keep. Your request will stay pending until Cognivio approves administrator access for that email. Once approved, you will log in with the same administrator role, email, and password.",
+      "Sign up with the teacher email and password you want to keep. Your request will stay pending until Cognivio approves teacher access for that email and K-12 institution. Once approved, you will log in with the same email and password.",
+    approvalRequiredTrainingTeacherDescription:
+      "Sign up with the teacher email and password you want to keep. Your request will stay pending until Cognivio approves teacher access for that email and training institution. Once approved, you will log in with the same email and password.",
     approvalRequiredSchoolAdminDescription:
       "Sign up with the school administrator email and password you want to keep. Your request will stay pending until Cognivio approves school administrator access for that email and school. Once approved, you will log in with the same role, email, and password.",
     approvalRequiredTrainingAdminDescription:

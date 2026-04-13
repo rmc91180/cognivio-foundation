@@ -50,6 +50,9 @@ def _sample_user_doc():
         "name": "Pilot Teacher",
         "email": "pilot.teacher@example.com",
         "role": "teacher",
+        "organization_type": "school",
+        "requested_organization_name": "Sunrise Network",
+        "requested_school_name": "Sunrise Elementary",
         "created_at": "2026-03-31T10:00:00+00:00",
         "approval_requested_at": "2026-03-31T10:00:00+00:00",
     }
@@ -85,6 +88,7 @@ def test_send_access_request_notification_prefers_resend(monkeypatch):
     assert captured["json"]["to"] == ["rmc91180@gmail.com"]
     assert captured["json"]["subject"] == "Cognivio approval needed: pilot.teacher@example.com"
     assert "Pilot Teacher" in captured["json"]["text"]
+    assert "Institution type: School" in captured["json"]["text"]
     assert "Approve now:" in captured["json"]["text"]
     assert "Deny now:" in captured["json"]["text"]
     assert "/api/admin/access-request-actions/approve?token=" in captured["json"]["html"]
@@ -175,6 +179,7 @@ def test_send_access_request_received_confirmation_prefers_resend(monkeypatch):
     assert captured["json"]["to"] == ["pilot.teacher@example.com"]
     assert captured["json"]["subject"] == "Cognivio sign-up received"
     assert "pending approval" in captured["json"]["text"]
+    assert "Institution type: School" in captured["json"]["text"]
 
 
 def test_send_access_approved_confirmation_prefers_resend(monkeypatch):
@@ -205,6 +210,7 @@ def test_send_access_approved_confirmation_prefers_resend(monkeypatch):
     assert result is True
     assert captured["json"]["to"] == ["pilot.teacher@example.com"]
     assert captured["json"]["subject"] == "Your Cognivio access is approved"
+    assert "Institution type: School" in captured["json"]["text"]
     assert "https://www.cognivio.live" in captured["json"]["text"]
     assert "Open Cognivio" in captured["json"]["html"]
 

@@ -200,7 +200,7 @@ def test_access_request_notification_text_includes_tenant_context():
     assert "Requested role: Teacher" in text
     assert "Organization: Sunrise Network" in text
     assert "School: Sunrise Elementary" in text
-    assert "Requested school administrator: principal@example.com" in text
+    assert "Requested School administrator: principal@example.com" in text
 
 
 def test_approve_user_access_links_teacher_into_training_tenant(monkeypatch):

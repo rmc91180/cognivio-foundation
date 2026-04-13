@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "@/hooks/useAuth";
@@ -7,6 +7,23 @@ import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { Button, Field, Input, Panel } from "@/components/ui";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 import { getDefaultHomeRoute } from "@/lib/userRoutes";
+
+function SegmentButton({ active, onClick, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={[
+        "rounded-lg px-3 py-2 transition-colors",
+        active
+          ? "bg-white text-slate-900 shadow-sm font-semibold"
+          : "text-slate-500 hover:text-slate-700",
+      ].join(" ")}
+    >
+      {children}
+    </button>
+  );
+}
 
 export function AuthPage() {
   const { t } = useTranslation();
@@ -23,7 +40,8 @@ export function AuthPage() {
   const isDemo = runtimeConfig.demoMode;
   const approvalRequired = runtimeConfig.registrationApprovalRequired;
   const [mode, setMode] = useState("login");
-  const [role, setRole] = useState("teacher");
+  const [accessType, setAccessType] = useState("teacher");
+  const [institutionType, setInstitutionType] = useState("school");
   const [form, setForm] = useState({
     email: "",
     password: "",
@@ -32,11 +50,12 @@ export function AuthPage() {
     school_name: "",
     requested_manager_email: "",
   });
+
   const nameInputId = "auth-name";
   const emailInputId = "auth-email";
   const passwordInputId = "auth-password";
   const organizationInputId = "auth-organization";
-  const schoolInputId = "auth-school";
+  const subgroupInputId = "auth-subgroup";
   const managerEmailInputId = "auth-manager-email";
 
   useEffect(() => {
@@ -45,20 +64,99 @@ export function AuthPage() {
     }
   }, [navigate, user]);
 
+  const derivedRole = useMemo(() => {
+    if (accessType === "administrator") {
+      return institutionType === "training" ? "training_admin" : "school_admin";
+    }
+    return "teacher";
+  }, [accessType, institutionType]);
+
+  const isTeacherRole = derivedRole === "teacher";
+  const isSchoolAdminRole = derivedRole === "school_admin";
+  const isTrainingAdminRole = derivedRole === "training_admin";
+  const requiresOrganizationFields = mode === "signup" && !isDemo;
+  const showInstitutionTypeRubric = !isDemo && (mode === "signup" || accessType === "administrator");
+  const requiresSubgroupName = requiresOrganizationFields && institutionType === "school";
+  const showsSubgroupField = requiresOrganizationFields;
+  const requiresManagerEmail = requiresOrganizationFields && isTeacherRole;
+
+  const roleLabel = mode === "login" ? t("auth.loginRoleLabel") : t("auth.signUpRoleLabel");
+  const institutionTypeLabel = mode === "login" ? t("auth.loginInstitutionTypeLabel") : t("auth.signUpInstitutionTypeLabel");
+
+  const roleHint = useMemo(() => {
+    if (mode === "login") {
+      return accessType === "administrator"
+        ? t("auth.loginAdministratorHint")
+        : t("auth.loginTeacherHint");
+    }
+    if (accessType === "administrator") {
+      return institutionType === "training"
+        ? t("auth.signUpAdministratorTrainingHint")
+        : t("auth.signUpAdministratorSchoolHint");
+    }
+    return institutionType === "training"
+      ? t("auth.signUpTeacherTrainingHint")
+      : t("auth.signUpTeacherSchoolHint");
+  }, [accessType, institutionType, mode, t]);
+
+  const approvalDescription = useMemo(() => {
+    if (accessType === "administrator") {
+      return institutionType === "training"
+        ? t("auth.approvalRequiredTrainingAdminDescription")
+        : t("auth.approvalRequiredSchoolAdminDescription");
+    }
+    return institutionType === "training"
+      ? t("auth.approvalRequiredTrainingTeacherDescription")
+      : t("auth.approvalRequiredTeacherDescription");
+  }, [accessType, institutionType, t]);
+
+  const organizationFieldLabel = institutionType === "training"
+    ? t("auth.trainingOrganizationName")
+    : t("auth.schoolOrganizationName");
+  const organizationFieldHint = institutionType === "training"
+    ? t("auth.trainingOrganizationHint")
+    : t("auth.schoolOrganizationHint");
+  const subgroupFieldLabel = institutionType === "training"
+    ? t("auth.programOrCohortName")
+    : t("auth.schoolName");
+  const subgroupFieldHint = institutionType === "training"
+    ? t("auth.programOrCohortHint")
+    : t("auth.schoolNameHint");
+  const managerFieldLabel = institutionType === "training"
+    ? t("auth.requestedTrainingManagerEmail")
+    : t("auth.requestedSchoolManagerEmail");
+  const managerFieldHint = institutionType === "training"
+    ? t("auth.requestedTrainingManagerEmailHint")
+    : t("auth.requestedSchoolManagerEmailHint");
+
+  const summaryItems = [
+    { label: t("auth.signupSummaryAccess"), value: t(`auth.signupAccessMap.${accessType}`) },
+    { label: t("auth.signupSummaryInstitutionType"), value: t(`auth.institutionTypeMap.${institutionType}`) },
+    { label: t("auth.signupSummaryDashboard"), value: t(`auth.derivedRoleMap.${derivedRole}`) },
+    { label: t("auth.signupSummaryOrganization"), value: form.organization_name || "—" },
+    {
+      label: institutionType === "training" ? t("auth.signupSummaryProgram") : t("auth.signupSummarySchool"),
+      value: form.school_name || "—",
+    },
+    {
+      label: t("auth.signupSummaryLinkedAdministrator"),
+      value: form.requested_manager_email || "—",
+    },
+  ];
+
   const onSubmit = async (e) => {
     e.preventDefault();
-    const isTeacherRole = role === "teacher";
-    const needsSchoolName = role === "teacher" || role === "school_admin";
     const signupPayload = {
       email: form.email,
       password: form.password,
       name: form.name || form.email,
+      organization_type: institutionType,
       organization_name: form.organization_name,
-      ...(needsSchoolName ? { school_name: form.school_name } : {}),
-      ...(isTeacherRole && form.requested_manager_email
-        ? { requested_manager_email: form.requested_manager_email }
-        : {}),
-      ...(!isDemo ? { role } : {}),
+      school_name: form.school_name || undefined,
+      requested_manager_email: isTeacherRole && form.requested_manager_email
+        ? form.requested_manager_email
+        : undefined,
+      ...(!isDemo ? { role: derivedRole } : {}),
     };
 
     if (mode === "signup" && approvalRequired) {
@@ -67,12 +165,11 @@ export function AuthPage() {
         setForm((current) => ({
           ...current,
           password: "",
-          requested_manager_email: "",
         }));
         if (res?.data?.status === "approved") {
           setMode("login");
         }
-      } catch (error) {
+      } catch {
         return;
       }
       return;
@@ -84,7 +181,7 @@ export function AuthPage() {
         : {
             email: form.email,
             password: form.password,
-            ...(!isDemo ? { role } : {}),
+            ...(!isDemo ? { role: derivedRole } : {}),
           };
 
     const fn = mode === "signup" ? register : login;
@@ -92,46 +189,10 @@ export function AuthPage() {
   };
 
   const busy = loggingIn || registering || requestingAccess;
-  const isTeacherRole = role === "teacher";
-  const isSchoolAdminRole = role === "school_admin";
-  const isTrainingAdminRole = role === "training_admin";
-  const requiresOrganizationFields = mode === "signup" && !isDemo;
-  const requiresSchoolName = requiresOrganizationFields && !isTrainingAdminRole;
-  const requiresManagerEmail = requiresOrganizationFields && isTeacherRole;
-  const roleLabel =
-    mode === "login" ? t("auth.loginRoleLabel") : t("auth.signUpRoleLabel");
-  const roleHint =
-    mode === "login"
-      ? t(
-          isSchoolAdminRole
-            ? "auth.loginSchoolAdminHint"
-            : isTrainingAdminRole
-            ? "auth.loginTrainingAdminHint"
-            : "auth.loginTeacherHint"
-        )
-      : t(
-          isSchoolAdminRole
-            ? "auth.signUpSchoolAdminHint"
-            : isTrainingAdminRole
-            ? "auth.signUpTrainingAdminHint"
-            : "auth.signUpTeacherHint"
-        );
-  const approvalDescription =
-    isSchoolAdminRole
-      ? t("auth.approvalRequiredSchoolAdminDescription")
-      : isTrainingAdminRole
-      ? t("auth.approvalRequiredTrainingAdminDescription")
-      : t("auth.approvalRequiredTeacherDescription");
-  const organizationFieldLabel = isTrainingAdminRole
-    ? t("auth.trainingOrganizationName")
-    : t("auth.schoolOrOrganizationName");
-  const organizationFieldHint = isTrainingAdminRole
-    ? t("auth.trainingOrganizationHint")
-    : t("auth.schoolOrganizationHint");
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-8">
-      <Panel as="div" className="w-full max-w-md p-8">
+      <Panel as="div" className="w-full max-w-xl p-8">
         <div className="mb-6 text-center">
           <div className="mb-4 flex justify-center">
             <LanguageSwitcher />
@@ -142,9 +203,7 @@ export function AuthPage() {
           <h1 className="font-heading text-2xl font-semibold tracking-tight text-slate-900">
             {t("auth.title")}
           </h1>
-          <p className="mt-1 text-sm text-slate-500">
-            {t("auth.subtitle")}
-          </p>
+          <p className="mt-1 text-sm text-slate-500">{t("auth.subtitle")}</p>
         </div>
 
         <div className="mb-4 flex gap-2 rounded-xl bg-slate-100 p-1 text-xs">
@@ -175,55 +234,46 @@ export function AuthPage() {
         </div>
 
         {!isDemo && (
-          <div className="mb-4">
-            <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-              {roleLabel}
+          <div className="mb-4 space-y-4">
+            <div>
+              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                {roleLabel}
+              </div>
+              <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1 text-sm">
+                <SegmentButton active={accessType === "teacher"} onClick={() => setAccessType("teacher")}>
+                  {t("auth.teacherRole")}
+                </SegmentButton>
+                <SegmentButton active={accessType === "administrator"} onClick={() => setAccessType("administrator")}>
+                  {t("auth.adminRole")}
+                </SegmentButton>
+              </div>
             </div>
-            <div className="grid grid-cols-1 gap-2 rounded-xl bg-slate-100 p-1 text-sm sm:grid-cols-3">
-              <button
-                type="button"
-                onClick={() => setRole("teacher")}
-                className={`rounded-lg px-3 py-2 ${
-                  role === "teacher"
-                    ? "bg-white text-slate-900 shadow-sm font-semibold"
-                    : "text-slate-500 hover:text-slate-700"
-                }`}
-              >
-                {t("auth.teacherRole")}
-              </button>
-              <button
-                type="button"
-                onClick={() => setRole("school_admin")}
-                className={`rounded-lg px-3 py-2 ${
-                  isSchoolAdminRole
-                    ? "bg-white text-slate-900 shadow-sm font-semibold"
-                    : "text-slate-500 hover:text-slate-700"
-                }`}
-              >
-                {t("auth.schoolAdminRole")}
-              </button>
-              <button
-                type="button"
-                onClick={() => setRole("training_admin")}
-                className={`rounded-lg px-3 py-2 ${
-                  isTrainingAdminRole
-                    ? "bg-white text-slate-900 shadow-sm font-semibold"
-                    : "text-slate-500 hover:text-slate-700"
-                }`}
-              >
-                {t("auth.trainingAdminRole")}
-              </button>
-            </div>
-            <p className="mt-2 text-xs text-slate-500">{roleHint}</p>
+
+            {showInstitutionTypeRubric ? (
+              <div>
+                <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                  {institutionTypeLabel}
+                </div>
+                <div className="grid grid-cols-1 gap-2 rounded-xl bg-slate-100 p-1 text-sm sm:grid-cols-2">
+                  <SegmentButton active={institutionType === "school"} onClick={() => setInstitutionType("school")}>
+                    {t("auth.institutionTypeSchool")}
+                  </SegmentButton>
+                  <SegmentButton active={institutionType === "training"} onClick={() => setInstitutionType("training")}>
+                    {t("auth.institutionTypeTraining")}
+                  </SegmentButton>
+                </div>
+                <p className="mt-2 text-xs text-slate-500">{t("auth.institutionTypeHint")}</p>
+              </div>
+            ) : null}
+
+            <p className="text-xs text-slate-500">{roleHint}</p>
           </div>
         )}
 
         {isDemo && (
           <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
             <div className="font-semibold text-slate-700">{t("auth.demoLogins")}</div>
-            <div className="mt-1">
-              {t("auth.principalDemo")}
-            </div>
+            <div className="mt-1">{t("auth.principalDemo")}</div>
             <div>{t("auth.teacherDemo")}</div>
             <div>{t("auth.trainingAdminDemo")}</div>
           </div>
@@ -238,90 +288,105 @@ export function AuthPage() {
 
         <form onSubmit={onSubmit} className="space-y-4">
           {mode === "signup" && !isDemo && (
+            <>
+              <Panel className="space-y-4 border-slate-200 bg-slate-50">
+                <div>
+                  <div className="text-sm font-semibold text-slate-900">{t("auth.institutionDetailsTitle")}</div>
+                  <p className="mt-1 text-xs text-slate-500">{t("auth.institutionDetailsDescription")}</p>
+                </div>
+
+                <Field label={organizationFieldLabel} htmlFor={organizationInputId}>
+                  <Input
+                    id={organizationInputId}
+                    type="text"
+                    required
+                    value={form.organization_name}
+                    onChange={(e) => setForm((f) => ({ ...f, organization_name: e.target.value }))}
+                  />
+                  <p className="mt-2 text-xs text-slate-500">{organizationFieldHint}</p>
+                </Field>
+
+                {showsSubgroupField ? (
+                  <Field label={subgroupFieldLabel} htmlFor={subgroupInputId}>
+                    <Input
+                      id={subgroupInputId}
+                      type="text"
+                      required={requiresSubgroupName}
+                      value={form.school_name}
+                      onChange={(e) => setForm((f) => ({ ...f, school_name: e.target.value }))}
+                    />
+                    <p className="mt-2 text-xs text-slate-500">{subgroupFieldHint}</p>
+                  </Field>
+                ) : null}
+
+                {requiresManagerEmail ? (
+                  <Field label={managerFieldLabel} htmlFor={managerEmailInputId}>
+                    <Input
+                      id={managerEmailInputId}
+                      type="email"
+                      value={form.requested_manager_email}
+                      onChange={(e) =>
+                        setForm((f) => ({
+                          ...f,
+                          requested_manager_email: e.target.value,
+                        }))
+                      }
+                    />
+                    <p className="mt-2 text-xs text-slate-500">{managerFieldHint}</p>
+                  </Field>
+                ) : null}
+              </Panel>
+
+              <Panel className="space-y-3 border-slate-200 bg-white">
+                <div>
+                  <div className="text-sm font-semibold text-slate-900">{t("auth.signupSummaryTitle")}</div>
+                  <p className="mt-1 text-xs text-slate-500">{t("auth.signupSummaryDescription")}</p>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {summaryItems.map((item) => (
+                    <div key={item.label} className="rounded-xl bg-slate-50 p-3">
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                        {item.label}
+                      </div>
+                      <div className="mt-1 text-sm text-slate-700">{item.value || "—"}</div>
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+            </>
+          )}
+
+          {mode === "signup" && !isDemo && (
             <Field label={t("auth.name")} htmlFor={nameInputId}>
               <Input
                 id={nameInputId}
                 type="text"
                 value={form.name}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, name: e.target.value }))
-                }
+                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
               />
             </Field>
           )}
-          {requiresOrganizationFields && (
-            <Field label={organizationFieldLabel} htmlFor={organizationInputId}>
-              <Input
-                id={organizationInputId}
-                type="text"
-                required
-                value={form.organization_name}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, organization_name: e.target.value }))
-                }
-              />
-              <p className="mt-2 text-xs text-slate-500">{organizationFieldHint}</p>
-            </Field>
-          )}
-          {requiresSchoolName && (
-            <Field label={t("auth.schoolName")} htmlFor={schoolInputId}>
-              <Input
-                id={schoolInputId}
-                type="text"
-                required
-                value={form.school_name}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, school_name: e.target.value }))
-                }
-              />
-              <p className="mt-2 text-xs text-slate-500">
-                {t("auth.schoolNameHint")}
-              </p>
-            </Field>
-          )}
+
           <Field label={t("auth.email")} htmlFor={emailInputId}>
             <Input
               id={emailInputId}
               type="email"
               required
               value={form.email}
-              onChange={(e) =>
-                setForm((f) => ({ ...f, email: e.target.value }))
-              }
+              onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
             />
           </Field>
-          {requiresManagerEmail && (
-            <Field
-              label={t("auth.requestedManagerEmail")}
-              htmlFor={managerEmailInputId}
-            >
-              <Input
-                id={managerEmailInputId}
-                type="email"
-                value={form.requested_manager_email}
-                onChange={(e) =>
-                  setForm((f) => ({
-                    ...f,
-                    requested_manager_email: e.target.value,
-                  }))
-                }
-              />
-              <p className="mt-2 text-xs text-slate-500">
-                {t("auth.requestedManagerEmailHint")}
-              </p>
-            </Field>
-          )}
+
           <Field label={t("auth.password")} htmlFor={passwordInputId}>
             <Input
               id={passwordInputId}
               type="password"
               required
               value={form.password}
-              onChange={(e) =>
-                setForm((f) => ({ ...f, password: e.target.value }))
-              }
+              onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
             />
           </Field>
+
           <Button type="submit" disabled={busy} fullWidth className="mt-2 shadow-brand">
             {busy
               ? mode === "signup"
@@ -330,8 +395,8 @@ export function AuthPage() {
                   : t("auth.creatingAccount")
                 : t("auth.signingIn")
               : mode === "login"
-              ? t("auth.signIn")
-              : t("auth.signUpCta")}
+                ? t("auth.signIn")
+                : t("auth.signUpCta")}
           </Button>
         </form>
 
@@ -344,4 +409,3 @@ export function AuthPage() {
     </div>
   );
 }
-
