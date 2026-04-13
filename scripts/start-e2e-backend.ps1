@@ -102,8 +102,20 @@ $env:SESSION_SECRET = if ($env:SESSION_SECRET) { $env:SESSION_SECRET } else { "e
 $env:JWT_SECRET = if ($env:JWT_SECRET) { $env:JWT_SECRET } else { "e2e-jwt-secret" }
 $env:DEMO_MODE = if ($env:DEMO_MODE) { $env:DEMO_MODE } else { "true" }
 $env:MONGO_URL = if ($env:MONGO_URL) { $env:MONGO_URL } else { "mongodb://127.0.0.1:27017" }
-$env:DB_NAME = if ($env:DB_NAME) { $env:DB_NAME } else { "cognivio" }
+$env:DB_NAME = if ($env:DB_NAME) { $env:DB_NAME } else { "cognivio_e2e" }
 $env:PYTHONUNBUFFERED = "1"
+$env:E2E_RESET_DB = if ($env:E2E_RESET_DB) { $env:E2E_RESET_DB } else { "true" }
+
+if ($env:E2E_RESET_DB -eq "true") {
+  $resetScript = @"
+from pymongo import MongoClient
+import os
+
+client = MongoClient(os.environ["MONGO_URL"])
+client.drop_database(os.environ["DB_NAME"])
+"@
+  $resetScript | python -
+}
 
 try {
   & python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --app-dir backend

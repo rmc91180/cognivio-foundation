@@ -5,7 +5,7 @@ export default defineConfig({
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
-  workers: process.env.CI ? 1 : 2,
+  workers: 1,
   reporter: 'html',
   use: {
     baseURL: 'http://127.0.0.1:3000',
@@ -39,7 +39,8 @@ export default defineConfig({
         JWT_SECRET: process.env.JWT_SECRET || 'e2e-jwt-secret',
         DEMO_MODE: 'true',
         MONGO_URL: 'mongodb://127.0.0.1:27017',
-        DB_NAME: 'cognivio',
+        DB_NAME: 'cognivio_e2e',
+        E2E_RESET_DB: 'true',
       },
     },
     {
