@@ -2035,17 +2035,118 @@ async def _get_teacher_or_404(teacher_id: str, current_user: dict) -> dict:
     teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
     if not teacher:
         raise HTTPException(status_code=404, detail="Teacher not found")
-    role = _get_user_role(current_user)
-    if role == "admin":
-        if teacher.get("created_by") != current_user["id"]:
-            raise HTTPException(status_code=403, detail="Not authorized for this teacher")
-        return teacher
-    # teacher role: allow only if teacher email matches user email or teacher created_by matches user id
-    if teacher.get("email") and teacher.get("email").lower() == current_user.get("email", "").lower():
-        return teacher
-    if teacher.get("created_by") == current_user["id"]:
+    if await _teacher_is_visible_to_user(teacher, current_user):
         return teacher
     raise HTTPException(status_code=403, detail="Not authorized for this teacher")
+
+
+async def _get_school_for_teacher(teacher: Optional[dict]) -> Optional[dict]:
+    school_id = (teacher or {}).get("school_id")
+    if not school_id or not hasattr(db, "schools"):
+        return None
+    return await db.schools.find_one({"id": school_id}, {"_id": 0})
+
+
+async def _get_visible_school_ids_for_user(current_user: dict) -> List[str]:
+    tenant_role = _get_user_tenant_role(current_user)
+    if not hasattr(db, "schools"):
+        return []
+    if tenant_role == "super_admin":
+        schools = await db.schools.find({}, {"_id": 0, "id": 1}).to_list(5000)
+        return [item["id"] for item in schools if item.get("id")]
+
+    clauses: List[Dict[str, Any]] = []
+    organization_id = current_user.get("organization_id")
+    if organization_id:
+        clauses.append({"organization_id": organization_id})
+    if tenant_role == "school_admin":
+        clauses.append({"user_id": current_user["id"]})
+    if not clauses:
+        return []
+    query: Dict[str, Any] = clauses[0] if len(clauses) == 1 else {"$or": clauses}
+    schools = await db.schools.find(query, {"_id": 0, "id": 1}).to_list(5000)
+    return [item["id"] for item in schools if item.get("id")]
+
+
+async def _list_teacher_ids_for_user(current_user: dict) -> List[str]:
+    tenant_role = _get_user_tenant_role(current_user)
+    teachers_collection = getattr(db, "teachers", None)
+    users_collection = getattr(db, "users", None)
+    if teachers_collection is None:
+        return []
+
+    if tenant_role == "super_admin":
+        teachers = await teachers_collection.find({}, {"_id": 0, "id": 1}).to_list(5000)
+        return [teacher["id"] for teacher in teachers if teacher.get("id")]
+
+    if tenant_role == "teacher":
+        email = (current_user.get("email") or "").strip()
+        clauses: List[Dict[str, Any]] = [{"created_by": current_user["id"]}]
+        if email:
+            clauses.insert(0, {"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
+        query = clauses[0] if len(clauses) == 1 else {"$or": clauses}
+        teachers = await teachers_collection.find(query, {"_id": 0, "id": 1}).to_list(200)
+        return [teacher["id"] for teacher in teachers if teacher.get("id")]
+
+    clauses: List[Dict[str, Any]] = [{"created_by": current_user["id"]}]
+    organization_id = current_user.get("organization_id")
+    if organization_id:
+        clauses.append({"organization_id": organization_id})
+        school_ids = await _get_visible_school_ids_for_user(current_user)
+        if school_ids:
+            clauses.append({"school_id": {"$in": school_ids}})
+    if tenant_role == "training_admin" and organization_id and users_collection is not None:
+        teacher_user_docs = await users_collection.find(
+            {"tenant_role": "teacher", "organization_id": organization_id},
+            {"_id": 0, "email": 1},
+        ).to_list(5000)
+        teacher_emails = [str(doc.get("email") or "").strip().lower() for doc in teacher_user_docs if doc.get("email")]
+        if teacher_emails:
+            clauses.append({"email": {"$in": teacher_emails}})
+
+    query = clauses[0] if len(clauses) == 1 else {"$or": clauses}
+    teachers = await teachers_collection.find(query, {"_id": 0, "id": 1}).to_list(5000)
+    return [teacher["id"] for teacher in teachers if teacher.get("id")]
+
+
+async def _teacher_is_visible_to_user(teacher: dict, current_user: dict) -> bool:
+    tenant_role = _get_user_tenant_role(current_user)
+    if tenant_role == "super_admin":
+        return True
+    if tenant_role == "teacher":
+        teacher_email = str(teacher.get("email") or "").strip().lower()
+        current_email = str(current_user.get("email") or "").strip().lower()
+        return (
+            (teacher_email and teacher_email == current_email)
+            or teacher.get("created_by") == current_user.get("id")
+        )
+
+    if teacher.get("created_by") == current_user.get("id"):
+        return True
+
+    organization_id = current_user.get("organization_id")
+    teacher_org_id = teacher.get("organization_id")
+    if organization_id and teacher_org_id and teacher_org_id == organization_id:
+        return True
+
+    school = await _get_school_for_teacher(teacher)
+    if organization_id and school and school.get("organization_id") == organization_id:
+        return True
+
+    if tenant_role == "school_admin" and school and school.get("user_id") == current_user.get("id"):
+        return True
+
+    if tenant_role == "training_admin" and organization_id and hasattr(db, "users"):
+        teacher_email = str(teacher.get("email") or "").strip().lower()
+        if teacher_email:
+            linked_user = await db.users.find_one(
+                {"email": teacher_email},
+                {"_id": 0, "organization_id": 1, "tenant_role": 1},
+            )
+            if linked_user and linked_user.get("organization_id") == organization_id:
+                return True
+
+    return False
 
 
 def _build_privacy_profile_summary(teacher_id: str, profile: Optional[dict]) -> "TeacherPrivacyProfileResponse":
@@ -2700,24 +2801,20 @@ def _build_video_visibility_query(
     current_user: dict,
     teacher_ids_for_user: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
+    tenant_role = _get_user_tenant_role(current_user)
+    if tenant_role == "super_admin":
+        return {}
     role = _get_user_role(current_user)
+    if role == "admin" and teacher_ids_for_user:
+        teacher_ids = [teacher_id for teacher_id in teacher_ids_for_user if teacher_id]
+        if teacher_ids:
+            return {"teacher_id": {"$in": teacher_ids}}
     if role == "admin":
         return {"uploaded_by": current_user["id"]}
     teacher_ids = [teacher_id for teacher_id in (teacher_ids_for_user or []) if teacher_id]
     if teacher_ids:
         return {"teacher_id": {"$in": teacher_ids}}
     return {"uploaded_by": current_user["id"]}
-
-
-async def _list_teacher_ids_for_user(current_user: dict) -> List[str]:
-    email = (current_user.get("email") or "").strip()
-    if not email:
-        return []
-    teachers = await db.teachers.find(
-        {"email": {"$regex": f"^{email}$", "$options": "i"}},
-        {"_id": 0, "id": 1},
-    ).to_list(100)
-    return [teacher["id"] for teacher in teachers if teacher.get("id")]
 
 
 def _parse_teacher_subjects(subject_value: Optional[Any]) -> List[str]:
@@ -2750,8 +2847,6 @@ async def _get_admin_owned_video_or_404(video_id: str, current_user: dict) -> di
     video = await db.videos.find_one({"id": video_id}, {"_id": 0})
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    if video.get("uploaded_by") != current_user["id"]:
-        raise HTTPException(status_code=403, detail="Not authorized for this video")
     await _get_teacher_or_404(video.get("teacher_id"), current_user)
     return video
     policy = await db.recording_policies.find_one(query, {"_id": 0})
@@ -5136,6 +5231,19 @@ def create_token(user_id: str, *, session_id: Optional[str] = None) -> str:
 def _is_admin_role(role: Optional[str]) -> bool:
     return role in {"admin", "principal", "super_admin"}
 
+
+def _require_school_admin_user(current_user: dict) -> dict:
+    if _get_user_tenant_role(current_user) != "school_admin":
+        raise HTTPException(status_code=403, detail="School administrator access required")
+    return current_user
+
+
+def _require_training_admin_user(current_user: dict) -> dict:
+    if _get_user_tenant_role(current_user) != "training_admin":
+        raise HTTPException(status_code=403, detail="Training administrator access required")
+    return current_user
+
+
 def _requested_role_matches_user(requested_role: Optional[str], user_doc: dict) -> bool:
     if not requested_role:
         return True
@@ -5710,12 +5818,14 @@ async def get_current_selection(current_user: dict = Depends(get_current_user)):
 @api_router.post("/teachers", response_model=TeacherResponse)
 async def create_teacher(teacher: TeacherCreate, current_user: dict = Depends(get_current_user)):
     teacher_id = str(uuid.uuid4())
+    school = None
     if teacher.school_id:
-        school = await db.schools.find_one(
-            {"id": teacher.school_id, "user_id": current_user["id"]}
-        )
+        school = await db.schools.find_one({"id": teacher.school_id}, {"_id": 0})
         if not school:
             raise HTTPException(status_code=404, detail="School not found")
+        visible_school_ids = await _get_visible_school_ids_for_user(current_user)
+        if teacher.school_id not in visible_school_ids:
+            raise HTTPException(status_code=403, detail="Not authorized for this school")
     teacher_doc = {
         "id": teacher_id,
         "name": teacher.name,
@@ -5724,6 +5834,7 @@ async def create_teacher(teacher: TeacherCreate, current_user: dict = Depends(ge
         "grade_level": teacher.grade_level,
         "department": teacher.department,
         "school_id": teacher.school_id,
+        "organization_id": (school or {}).get("organization_id") or current_user.get("organization_id"),
         "category": teacher.category,
         "category_custom": teacher.category_custom,
         "next_coaching_conference": teacher.next_coaching_conference,
@@ -5757,8 +5868,11 @@ async def update_teacher(
 
 @api_router.get("/teachers", response_model=List[TeacherResponse])
 async def get_teachers(request: Request, current_user: dict = Depends(get_current_user)):
+    teacher_ids = await _list_teacher_ids_for_user(current_user)
+    if not teacher_ids:
+        return []
     teachers = await db.teachers.find(
-        {"created_by": current_user["id"]},
+        {"id": {"$in": teacher_ids}},
         {"_id": 0, "created_by": 0}
     ).to_list(1000)
     language = _resolve_request_language(request, default="en")
@@ -7021,15 +7135,7 @@ async def upload_video(
         normalized_recorded_at = _parse_optional_iso_datetime(recorded_at, "recorded_at")
         upload_time = datetime.now(timezone.utc).isoformat()
 
-        teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
-        if not teacher:
-            raise HTTPException(status_code=404, detail="Teacher not found")
-        if upload_source == "admin":
-            if teacher.get("created_by") != current_user["id"]:
-                raise HTTPException(status_code=403, detail="Not authorized for this teacher")
-        else:
-            if teacher.get("email", "").lower() != current_user.get("email", "").lower():
-                raise HTTPException(status_code=403, detail="Not authorized for this teacher")
+        teacher = await _get_teacher_or_404(teacher_id, current_user)
         active_profile = await _get_active_privacy_profile(teacher_id)
         if PRIVACY_REQUIRE_PROFILE and not active_profile:
             raise HTTPException(
@@ -8477,9 +8583,13 @@ async def get_assessments(
     teacher_id: Optional[str] = None,
     current_user: dict = Depends(get_current_user)
 ):
-    query = {"user_id": current_user["id"]}
+    query: Dict[str, Any] = {}
     if teacher_id:
+        await _get_teacher_or_404(teacher_id, current_user)
         query["teacher_id"] = teacher_id
+    else:
+        teacher_ids = await _list_teacher_ids_for_user(current_user)
+        query["teacher_id"] = {"$in": teacher_ids or ["__none__"]}
     
     assessments = await db.assessments.find(query, {"_id": 0, "user_id": 0}).to_list(1000)
     response_language = _resolve_request_language(request, default="en")
@@ -8492,11 +8602,12 @@ async def get_assessment(
     current_user: dict = Depends(get_current_user),
 ):
     assessment = await db.assessments.find_one(
-        {"id": assessment_id, "user_id": current_user["id"]},
+        {"id": assessment_id},
         {"_id": 0, "user_id": 0}
     )
     if not assessment:
         raise HTTPException(status_code=404, detail="Assessment not found")
+    await _get_teacher_or_404(assessment.get("teacher_id"), current_user)
     response_language = _resolve_request_language(request, default="en")
     return AssessmentResult(**_enrich_assessment_for_response(assessment, response_language=response_language))
 
@@ -8507,11 +8618,12 @@ async def get_assessment_evidence(
     current_user: dict = Depends(get_current_user),
 ):
     assessment = await db.assessments.find_one(
-        {"id": assessment_id, "user_id": current_user["id"]},
+        {"id": assessment_id},
         {"_id": 0, "user_id": 0},
     )
     if not assessment:
         raise HTTPException(status_code=404, detail="Assessment not found")
+    await _get_teacher_or_404(assessment.get("teacher_id"), current_user)
     evidence = await _ensure_mock_evidence(assessment, current_user)
     return {"evidence": evidence}
 
@@ -9267,8 +9379,9 @@ async def get_teacher_summary_insights(
     Aggregate insights across multiple lessons for a teacher.
     Used for monthly/periodic 'Summary AI Insight' on the profile.
     """
+    await _get_teacher_or_404(teacher_id, current_user)
     assessments = await db.assessments.find(
-        {"teacher_id": teacher_id, "user_id": current_user["id"]},
+        {"teacher_id": teacher_id},
         {"_id": 0, "user_id": 0},
     ).sort("analyzed_at", -1).to_list(50)
 
@@ -10620,8 +10733,9 @@ async def _build_dashboard_domain_trend_data(
         if subject and subject.strip()
     }
 
+    visible_teacher_ids = await _list_teacher_ids_for_user(current_user)
     teachers = await db.teachers.find(
-        {"created_by": current_user["id"]},
+        {"id": {"$in": visible_teacher_ids or ["__none__"]}},
         {"_id": 0, "id": 1, "name": 1, "subject": 1},
     ).to_list(2000)
     teacher_by_id = {teacher["id"]: teacher for teacher in teachers}
@@ -10666,7 +10780,6 @@ async def _build_dashboard_domain_trend_data(
     if allowed_teacher_ids:
         assessments = await db.assessments.find(
             {
-                "user_id": current_user["id"],
                 "teacher_id": {"$in": allowed_teacher_ids},
                 "analyzed_at": {
                     "$gte": first_window_start.isoformat(),
@@ -10689,7 +10802,7 @@ async def _build_dashboard_domain_trend_data(
     adherence_by_assessment: Dict[str, Optional[float]] = {}
     if assessments:
         adherence_docs = await db.curriculum_adherence.find(
-            {"user_id": current_user["id"], "assessment_id": {"$in": [a["id"] for a in assessments]}},
+            {"assessment_id": {"$in": [a["id"] for a in assessments]}},
             {"_id": 0, "assessment_id": 1, "adherence_score": 1},
         ).to_list(10000)
         adherence_by_assessment = {
@@ -11415,13 +11528,14 @@ async def get_dashboard_cohort_analytics(
     window_months: int = Query(6, ge=1, le=12),
     current_user: dict = Depends(get_current_user),
 ):
+    teacher_ids = await _list_teacher_ids_for_user(current_user)
     teachers = await db.teachers.find(
-        {"created_by": current_user["id"]},
+        {"id": {"$in": teacher_ids or ["__none__"]}},
         {"_id": 0},
     ).to_list(1000)
     teacher_ids = [teacher["id"] for teacher in teachers]
     assessments = await db.assessments.find(
-        {"user_id": current_user["id"], "teacher_id": {"$in": teacher_ids or ["__none__"]}},
+        {"teacher_id": {"$in": teacher_ids or ["__none__"]}},
         {"_id": 0, "user_id": 0},
     ).sort("analyzed_at", -1).to_list(3000)
     roster_payload = await get_roster(current_user=current_user)
@@ -11537,15 +11651,16 @@ async def get_dashboard_cohort_analytics(
 async def get_dashboard_supervisor_calibration(
     current_user: dict = Depends(get_current_user),
 ):
+    teacher_ids = await _list_teacher_ids_for_user(current_user)
     teachers = await db.teachers.find(
-        {"created_by": current_user["id"]},
+        {"id": {"$in": teacher_ids or ["__none__"]}},
         {"_id": 0, "id": 1},
     ).to_list(1000)
     teacher_ids = [teacher["id"] for teacher in teachers]
     assessment_ids = [
         item["id"]
         for item in await db.assessments.find(
-            {"user_id": current_user["id"], "teacher_id": {"$in": teacher_ids or ["__none__"]}},
+            {"teacher_id": {"$in": teacher_ids or ["__none__"]}},
             {"_id": 0, "id": 1},
         ).to_list(3000)
     ]
@@ -11664,16 +11779,16 @@ async def get_teacher_roster(
     role = _get_user_role(current_user)
     scoring_mode = await _get_admin_scoring_mode(current_user["id"]) if role == "admin" else "ai"
 
-    # Get all teachers
+    visible_teacher_ids = await _list_teacher_ids_for_user(current_user)
     teachers = await db.teachers.find(
-        {"created_by": current_user["id"]},
+        {"id": {"$in": visible_teacher_ids or ["__none__"]}},
         {"_id": 0}
     ).to_list(1000)
     teacher_ids = [t["id"] for t in teachers]
     action_plan_map: Dict[str, dict] = {}
     if teacher_ids:
         action_plans = await db.action_plans.find(
-            {"user_id": current_user["id"], "teacher_id": {"$in": teacher_ids}},
+            {"teacher_id": {"$in": teacher_ids}},
             {"_id": 0},
         ).to_list(1000)
         for plan in action_plans:
@@ -11705,7 +11820,6 @@ async def get_teacher_roster(
         # Get assessments for this teacher within date range
         assessment_query = {
             "teacher_id": teacher["id"],
-            "user_id": current_user["id"]
         }
         
         if start_date and end_date:
@@ -11939,10 +12053,7 @@ async def get_teacher_dashboard(
     teacher.pop("created_by", None)
     
     # Get assessments
-    assessment_query = {
-        "teacher_id": teacher_id,
-        "user_id": current_user["id"]
-    }
+    assessment_query = {"teacher_id": teacher_id}
     
     if start_date and end_date:
         assessment_query["analyzed_at"] = {
@@ -12009,7 +12120,8 @@ async def get_teacher_dashboard(
             element_aggregates[es["element_id"]]["observations"].extend(es.get("observations", []))
 
     # Compute school averages for comparative analytics
-    school_query: Dict[str, Any] = {"user_id": current_user["id"]}
+    visible_teacher_ids = await _list_teacher_ids_for_user(current_user)
+    school_query: Dict[str, Any] = {"teacher_id": {"$in": visible_teacher_ids or ["__none__"]}}
     if start_date and end_date:
         school_query["analyzed_at"] = {
             "$gte": start_date.isoformat(),

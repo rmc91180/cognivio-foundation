@@ -62,7 +62,18 @@ async def test_get_admin_owned_video_or_404_rejects_foreign_admin(monkeypatch):
     monkeypatch.setattr(
         server,
         "db",
-        types.SimpleNamespace(videos=_FakeCollection({"id": "video_1", "teacher_id": "teacher_1", "uploaded_by": "other_admin"})),
+        types.SimpleNamespace(
+            videos=_FakeCollection({"id": "video_1", "teacher_id": "teacher_1", "uploaded_by": "other_admin"}),
+            teachers=_FakeCollection(
+                {
+                    "id": "teacher_1",
+                    "email": "teacher@example.com",
+                    "created_by": "other_admin",
+                    "organization_id": "org_other",
+                }
+            ),
+            schools=_FakeCollection(None),
+        ),
     )
 
     with pytest.raises(server.HTTPException) as exc:
