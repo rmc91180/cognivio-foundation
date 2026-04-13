@@ -403,10 +403,13 @@ def _normalize_access_request_tenancy_fields(user: "UserCreate", desired_tenant_
     if requested_manager_email:
         requested_manager_email = requested_manager_email.lower()
     organization_type = _normalize_organization_type(user.organization_type, desired_tenant_role)
+    requires_school_name = desired_tenant_role == "school_admin" or (
+        desired_tenant_role == "teacher" and organization_type != "training"
+    )
 
     if desired_tenant_role in {"teacher", "school_admin", "training_admin"} and not organization_name:
         raise HTTPException(status_code=400, detail="Organization name is required")
-    if desired_tenant_role in {"teacher", "school_admin"} and not school_name:
+    if requires_school_name and not school_name:
         raise HTTPException(status_code=400, detail="School name is required")
 
     return {
@@ -494,7 +497,9 @@ async def _assign_user_to_tenant_on_approval(
     updates["organization_name"] = organization_doc["name"]
 
     school_doc = None
-    if tenant_role in {"teacher", "school_admin"}:
+    if tenant_role == "school_admin" or (
+        tenant_role == "teacher" and resolved_organization_type != "training"
+    ):
         if not resolved_school_name:
             raise HTTPException(status_code=400, detail="School name is required before approval")
         school_doc = await _find_school_by_name(
@@ -537,13 +542,27 @@ async def _assign_user_to_tenant_on_approval(
 
     manager_doc = None
     if tenant_role == "teacher":
+        valid_manager_role = "training_admin" if resolved_organization_type == "training" else "school_admin"
         if resolved_manager_email:
             manager_doc = await _find_user_by_email(resolved_manager_email)
-            if manager_doc and _get_user_tenant_role(manager_doc) != "school_admin":
+            if manager_doc and _get_user_tenant_role(manager_doc) != valid_manager_role:
                 manager_doc = None
         if not manager_doc and school_doc and school_doc.get("user_id"):
             manager_doc = await db.users.find_one(
                 {"id": school_doc.get("user_id")},
+                {"_id": 0, "password": 0},
+            )
+        if (
+            not manager_doc
+            and resolved_organization_type == "training"
+            and getattr(db, "users", None) is not None
+        ):
+            manager_doc = await db.users.find_one(
+                {
+                    "tenant_role": "training_admin",
+                    "organization_id": organization_doc["id"],
+                    "approval_status": "approved",
+                },
                 {"_id": 0, "password": 0},
             )
         if manager_doc and manager_doc.get("organization_id") and manager_doc.get("organization_id") != organization_doc["id"]:
@@ -3038,14 +3057,289 @@ DEMO_USERS = [
         "name": "Demo Principal",
         "password": "DemoAccess2026!",
         "role": "admin",
+        "tenant_role": "school_admin",
+        "organization_name": "Cognivio Demo School Network",
+        "organization_type": "school",
+        "school_name": "Cognivio Demo School",
     },
     {
         "email": "teacher@demo.cognivio.app",
         "name": "Demo Teacher",
         "password": "DemoAccess2026!",
         "role": "teacher",
+        "tenant_role": "teacher",
+        "organization_name": "Cognivio Demo School Network",
+        "organization_type": "school",
+        "school_name": "Cognivio Demo School",
+        "manager_email": "principal@demo.cognivio.app",
+        "subject": "Mathematics",
+        "grade_level": "10th Grade",
+        "department": "STEM",
+    },
+    {
+        "email": "coach@demo.cognivio.app",
+        "name": "Demo Training Administrator",
+        "password": "DemoAccess2026!",
+        "role": "admin",
+        "tenant_role": "training_admin",
+        "organization_name": "Cognivio Demo Residency Cohort",
+        "organization_type": "training",
+    },
+    {
+        "email": "candidate@demo.cognivio.app",
+        "name": "Demo Candidate",
+        "password": "DemoAccess2026!",
+        "role": "teacher",
+        "tenant_role": "teacher",
+        "organization_name": "Cognivio Demo Residency Cohort",
+        "organization_type": "training",
+        "manager_email": "coach@demo.cognivio.app",
+        "subject": "Instructional Practice",
+        "grade_level": "Residency",
+        "department": "Teacher Training",
     },
 ]
+
+
+async def _ensure_demo_tenant_state() -> None:
+    users_collection = getattr(db, "users", None)
+    organizations_collection = getattr(db, "organizations", None)
+    schools_collection = getattr(db, "schools", None)
+    teachers_collection = getattr(db, "teachers", None)
+    if users_collection is None or organizations_collection is None or teachers_collection is None:
+        return
+
+    demo_by_email = {
+        str(doc.get("email") or "").strip().lower(): doc
+        for doc in await users_collection.find(
+            {"email": {"$in": [demo["email"] for demo in DEMO_USERS]}},
+            {"_id": 0, "password": 0},
+        ).to_list(20)
+    }
+
+    principal = demo_by_email.get("principal@demo.cognivio.app")
+    teacher_user = demo_by_email.get("teacher@demo.cognivio.app")
+    training_admin = demo_by_email.get("coach@demo.cognivio.app")
+    training_teacher = demo_by_email.get("candidate@demo.cognivio.app")
+
+    school_org = None
+    if principal or teacher_user:
+        school_org = await _find_organization_by_name(
+            organization_type="school",
+            name="Cognivio Demo School Network",
+        )
+        if not school_org:
+            school_org = {
+                "id": str(uuid.uuid4()),
+                "name": "Cognivio Demo School Network",
+                "organization_type": "school",
+                "status": "active",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_by": "system:demo_seed",
+            }
+            await organizations_collection.insert_one(school_org)
+
+    school_doc = None
+    if school_org and schools_collection is not None:
+        school_doc = await _find_school_by_name(
+            organization_id=school_org["id"],
+            school_name="Cognivio Demo School",
+        )
+        if not school_doc:
+            school_doc = {
+                "id": str(uuid.uuid4()),
+                "name": "Cognivio Demo School",
+                "user_id": (principal or {}).get("id"),
+                "organization_id": school_org["id"],
+                "district_name": school_org["name"],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await schools_collection.insert_one(school_doc)
+        elif principal and school_doc.get("user_id") != principal.get("id"):
+            await schools_collection.update_one(
+                {"id": school_doc["id"]},
+                {"$set": {"user_id": principal["id"], "organization_id": school_org["id"], "district_name": school_org["name"]}},
+            )
+            school_doc["user_id"] = principal["id"]
+
+    if principal and school_org and school_doc:
+        await users_collection.update_one(
+            {"id": principal["id"]},
+            {
+                "$set": {
+                    "role": "admin",
+                    "tenant_role": "school_admin",
+                    "tenant_status": "approved",
+                    "approval_status": "approved",
+                    "is_active": True,
+                    "organization_id": school_org["id"],
+                    "organization_name": school_org["name"],
+                    "organization_type": "school",
+                    "school_id": school_doc["id"],
+                    "school_name": school_doc["name"],
+                    "manager_user_id": None,
+                    "manager_email": None,
+                    "manager_name": None,
+                }
+            },
+        )
+
+    if teacher_user and principal and school_org and school_doc:
+        teacher_doc = await teachers_collection.find_one(
+            {"email": teacher_user["email"]},
+            {"_id": 0},
+        )
+        if not teacher_doc:
+            teacher_doc = {
+                "id": str(uuid.uuid4()),
+                "name": teacher_user.get("name") or "Demo Teacher",
+                "email": teacher_user["email"],
+                "subject": "Mathematics",
+                "grade_level": "10th Grade",
+                "department": "STEM",
+                "school_id": school_doc["id"],
+                "organization_id": school_org["id"],
+                "category": "first_year",
+                "category_custom": None,
+                "next_coaching_conference": None,
+                "created_by": principal["id"],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await teachers_collection.insert_one(teacher_doc)
+        else:
+            await teachers_collection.update_one(
+                {"id": teacher_doc["id"]},
+                {
+                    "$set": {
+                        "school_id": school_doc["id"],
+                        "organization_id": school_org["id"],
+                        "created_by": principal["id"],
+                    }
+                },
+            )
+            teacher_doc["school_id"] = school_doc["id"]
+            teacher_doc["organization_id"] = school_org["id"]
+            teacher_doc["created_by"] = principal["id"]
+
+        await users_collection.update_one(
+            {"id": teacher_user["id"]},
+            {
+                "$set": {
+                    "role": "teacher",
+                    "tenant_role": "teacher",
+                    "tenant_status": "approved",
+                    "approval_status": "approved",
+                    "is_active": True,
+                    "organization_id": school_org["id"],
+                    "organization_name": school_org["name"],
+                    "organization_type": "school",
+                    "school_id": school_doc["id"],
+                    "school_name": school_doc["name"],
+                    "manager_user_id": principal["id"],
+                    "manager_email": principal["email"],
+                    "manager_name": principal.get("name"),
+                    "teacher_id": teacher_doc["id"],
+                }
+            },
+        )
+
+    training_org = None
+    if training_admin or training_teacher:
+        training_org = await _find_organization_by_name(
+            organization_type="training",
+            name="Cognivio Demo Residency Cohort",
+        )
+        if not training_org:
+            training_org = {
+                "id": str(uuid.uuid4()),
+                "name": "Cognivio Demo Residency Cohort",
+                "organization_type": "training",
+                "status": "active",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_by": "system:demo_seed",
+            }
+            await organizations_collection.insert_one(training_org)
+
+    if training_admin and training_org:
+        await users_collection.update_one(
+            {"id": training_admin["id"]},
+            {
+                "$set": {
+                    "role": "admin",
+                    "tenant_role": "training_admin",
+                    "tenant_status": "approved",
+                    "approval_status": "approved",
+                    "is_active": True,
+                    "organization_id": training_org["id"],
+                    "organization_name": training_org["name"],
+                    "organization_type": "training",
+                    "school_id": None,
+                    "school_name": None,
+                    "manager_user_id": None,
+                    "manager_email": None,
+                    "manager_name": None,
+                }
+            },
+        )
+
+    if training_teacher and training_admin and training_org:
+        training_teacher_doc = await teachers_collection.find_one(
+            {"email": training_teacher["email"]},
+            {"_id": 0},
+        )
+        if not training_teacher_doc:
+            training_teacher_doc = {
+                "id": str(uuid.uuid4()),
+                "name": training_teacher.get("name") or "Demo Candidate",
+                "email": training_teacher["email"],
+                "subject": "Instructional Practice",
+                "grade_level": "Residency",
+                "department": "Teacher Training",
+                "school_id": None,
+                "organization_id": training_org["id"],
+                "category": "first_year",
+                "category_custom": None,
+                "next_coaching_conference": None,
+                "created_by": training_admin["id"],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await teachers_collection.insert_one(training_teacher_doc)
+        else:
+            await teachers_collection.update_one(
+                {"id": training_teacher_doc["id"]},
+                {
+                    "$set": {
+                        "school_id": None,
+                        "organization_id": training_org["id"],
+                        "created_by": training_admin["id"],
+                    }
+                },
+            )
+            training_teacher_doc["school_id"] = None
+            training_teacher_doc["organization_id"] = training_org["id"]
+            training_teacher_doc["created_by"] = training_admin["id"]
+
+        await users_collection.update_one(
+            {"id": training_teacher["id"]},
+            {
+                "$set": {
+                    "role": "teacher",
+                    "tenant_role": "teacher",
+                    "tenant_status": "approved",
+                    "approval_status": "approved",
+                    "is_active": True,
+                    "organization_id": training_org["id"],
+                    "organization_name": training_org["name"],
+                    "organization_type": "training",
+                    "school_id": None,
+                    "school_name": None,
+                    "manager_user_id": training_admin["id"],
+                    "manager_email": training_admin["email"],
+                    "manager_name": training_admin.get("name"),
+                    "teacher_id": training_teacher_doc["id"],
+                }
+            },
+        )
 
 # Upload constraints
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10MB
@@ -3161,13 +3455,12 @@ async def _app_startup() -> None:
         return
     for demo in DEMO_USERS:
         existing = await db.users.find_one({"email": demo["email"]})
+        desired_role = demo.get("role", "teacher")
+        desired_tenant_role = demo.get("tenant_role") or ("school_admin" if desired_role == "admin" else "teacher")
         if existing:
-            # Ensure demo roles are correct
-            desired_role = "admin" if demo["email"] == "principal@demo.cognivio.app" else "teacher"
             updates = {}
             if existing.get("role") != desired_role:
                 updates["role"] = desired_role
-            desired_tenant_role = "school_admin" if desired_role == "admin" else "teacher"
             if existing.get("tenant_role") != desired_tenant_role:
                 updates["tenant_role"] = desired_tenant_role
             if existing.get("tenant_status") != "approved":
@@ -3183,11 +3476,12 @@ async def _app_startup() -> None:
             "password": hash_password(demo["password"]),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "is_demo": True,
-            "role": demo.get("role", "teacher"),
-            "tenant_role": "school_admin" if demo.get("role") == "admin" else "teacher",
+            "role": desired_role,
+            "tenant_role": desired_tenant_role,
             "tenant_status": "approved",
         }
         await db.users.insert_one(user_doc)
+    await _ensure_demo_tenant_state()
 
 
 async def _ensure_master_admin_user() -> None:
@@ -11538,7 +11832,10 @@ async def get_dashboard_cohort_analytics(
         {"teacher_id": {"$in": teacher_ids or ["__none__"]}},
         {"_id": 0, "user_id": 0},
     ).sort("analyzed_at", -1).to_list(3000)
-    roster_payload = await get_roster(current_user=current_user)
+    roster_payload = await get_teacher_roster(
+        request=Request({"type": "http", "headers": []}),
+        current_user=current_user,
+    )
     roster_rows = roster_payload.get("roster", [])
 
     category_breakdown: Dict[str, Dict[str, Any]] = {}

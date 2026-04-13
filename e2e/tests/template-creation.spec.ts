@@ -26,7 +26,7 @@ test.describe('Teacher Workspace Smoke', () => {
       page.getByRole('heading', { name: /my teaching workspace/i })
     ).toBeVisible();
     await expect(
-      page.getByText(/teacher record not linked yet/i)
+      page.getByRole('heading', { name: /your linked administrator/i })
     ).toBeVisible();
   });
 
@@ -37,12 +37,12 @@ test.describe('Teacher Workspace Smoke', () => {
       page.getByRole('heading', { name: /my teaching workspace/i })
     ).toBeVisible();
     await expect(
-      page.getByText(/teacher record not linked yet/i)
+      page.getByRole('heading', { name: /your linked administrator/i })
     ).toBeVisible();
   });
 
   test('teacher demo can open the videos area from the shell', async ({ page }) => {
-    await page.getByRole('link', { name: /my videos/i }).click();
+    await page.getByRole('link', { name: /^my videos$/i }).click();
     await expect(page).toHaveURL(/.*videos/);
     await expect(
       page.getByRole('heading', { name: /lesson recordings & assessments/i })

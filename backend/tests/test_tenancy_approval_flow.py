@@ -201,3 +201,64 @@ def test_access_request_notification_text_includes_tenant_context():
     assert "Organization: Sunrise Network" in text
     assert "School: Sunrise Elementary" in text
     assert "Requested school administrator: principal@example.com" in text
+
+
+def test_approve_user_access_links_teacher_into_training_tenant(monkeypatch):
+    fake_db = types.SimpleNamespace(
+        users=_Collection(
+            [
+                {
+                    "id": "training-admin-1",
+                    "email": "coach@example.com",
+                    "name": "Coach One",
+                    "role": "admin",
+                    "tenant_role": "training_admin",
+                    "approval_status": "approved",
+                    "organization_id": "org-training-1",
+                    "organization_name": "Residency Cohort 2026",
+                    "organization_type": "training",
+                },
+                {
+                    "id": "teacher-user-2",
+                    "email": "candidate@example.com",
+                    "name": "Candidate One",
+                    "role": "teacher",
+                    "tenant_role": "teacher",
+                    "approval_status": "pending",
+                    "requested_organization_name": "Residency Cohort 2026",
+                    "organization_type": "training",
+                    "requested_manager_email": "coach@example.com",
+                },
+            ]
+        ),
+        organizations=_Collection(
+            [
+                {
+                    "id": "org-training-1",
+                    "name": "Residency Cohort 2026",
+                    "organization_type": "training",
+                    "status": "active",
+                }
+            ]
+        ),
+        schools=_Collection(),
+    )
+    monkeypatch.setattr(server, "db", fake_db)
+    monkeypatch.setattr(server, "_log_auth_event", lambda *args, **kwargs: asyncio.sleep(0))
+    monkeypatch.setattr(server, "_send_access_approved_confirmation", lambda *_args, **_kwargs: True)
+
+    updated = asyncio.run(
+        server._approve_user_access(
+            fake_db.users.docs[1],
+            actor_label="rmc91180@gmail.com",
+            reason="Approved into training tenant",
+        )
+    )
+
+    assert updated["approval_status"] == "approved"
+    assert updated["organization_id"] == "org-training-1"
+    assert updated["organization_type"] == "training"
+    assert updated["school_id"] is None
+    assert updated["manager_user_id"] == "training-admin-1"
+    assert updated["manager_email"] == "coach@example.com"
+    assert updated["manager_name"] == "Coach One"

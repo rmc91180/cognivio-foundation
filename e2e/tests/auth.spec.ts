@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 const ADMIN_EMAIL = 'principal@demo.cognivio.app';
+const TRAINING_ADMIN_EMAIL = 'coach@demo.cognivio.app';
 const TEACHER_EMAIL = 'teacher@demo.cognivio.app';
 const DEMO_PASSWORD = 'DemoAccess2026!';
 
@@ -11,8 +12,14 @@ test.describe('Authentication', () => {
 
   const emailInput = (page) => page.locator('input[type="email"]');
   const passwordInput = (page) => page.locator('input[type="password"]');
-  const selectRole = async (page, role: 'teacher' | 'admin') => {
-    const button = page.getByRole('button', { name: role === 'admin' ? /administrator/i : /teacher/i });
+  const selectRole = async (page, role: 'teacher' | 'school_admin' | 'training_admin') => {
+    const roleMatcher =
+      role === 'school_admin'
+        ? /school administrator/i
+        : role === 'training_admin'
+          ? /training administrator/i
+          : /teacher/i;
+    const button = page.getByRole('button', { name: roleMatcher });
     if (await button.count()) {
       await button.click();
     }
@@ -35,7 +42,7 @@ test.describe('Authentication', () => {
   });
 
   test('successfully logs in as admin and reaches the dashboard', async ({ page }) => {
-    await selectRole(page, 'admin');
+    await selectRole(page, 'school_admin');
     await emailInput(page).fill(ADMIN_EMAIL);
     await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
@@ -47,7 +54,7 @@ test.describe('Authentication', () => {
   });
 
   test('persists authentication across page reload', async ({ page }) => {
-    await selectRole(page, 'admin');
+    await selectRole(page, 'school_admin');
     await emailInput(page).fill(ADMIN_EMAIL);
     await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
@@ -70,12 +77,13 @@ test.describe('Authentication', () => {
       page.getByRole('heading', { name: /my teaching workspace/i })
     ).toBeVisible();
     await expect(
-      page.getByRole('heading', { name: /teacher record not linked yet/i })
+      page.getByRole('heading', { name: /your linked administrator/i })
     ).toBeVisible();
+    await expect(page.getByText(/demo principal/i)).toBeVisible();
   });
 
   test('school admin is redirected away from teacher-only routes', async ({ page }) => {
-    await selectRole(page, 'admin');
+    await selectRole(page, 'school_admin');
     await emailInput(page).fill(ADMIN_EMAIL);
     await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
@@ -87,6 +95,24 @@ test.describe('Authentication', () => {
 
     await page.goto('/dashboard/training');
     await expect(page).toHaveURL(/.*dashboard$/);
+  });
+
+  test('training admin reaches the training dashboard and is redirected away from school-admin routes', async ({ page }) => {
+    await selectRole(page, 'training_admin');
+    await emailInput(page).fill(TRAINING_ADMIN_EMAIL);
+    await passwordInput(page).fill(DEMO_PASSWORD);
+    await page.getByRole('button', { name: /sign in/i }).click();
+
+    await expect(page).toHaveURL(/.*dashboard\/training$/);
+    await expect(
+      page.getByRole('heading', { name: /training program overview/i })
+    ).toBeVisible();
+
+    await page.goto('/dashboard');
+    await expect(page).toHaveURL(/.*dashboard\/training$/);
+
+    await page.goto('/access-management');
+    await expect(page).toHaveURL(/.*dashboard\/training$/);
   });
 
   test('teacher is redirected away from admin-only routes', async ({ page }) => {
@@ -110,7 +136,7 @@ test.describe('Authentication', () => {
   });
 
   test('logout clears session', async ({ page }) => {
-    await selectRole(page, 'admin');
+    await selectRole(page, 'school_admin');
     await emailInput(page).fill(ADMIN_EMAIL);
     await passwordInput(page).fill(DEMO_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
@@ -119,5 +145,36 @@ test.describe('Authentication', () => {
 
     await page.getByRole('button', { name: /logout/i }).click();
     await expect(page).toHaveURL(/.*login/);
+  });
+
+  test('teacher can complete privacy setup and reach the upload surface inside tenant scope', async ({ page }) => {
+    const tinyPng = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mP8z8BQDwAFgwJ/l7uH3wAAAABJRU5ErkJggg==',
+      'base64'
+    );
+
+    await selectRole(page, 'teacher');
+    await emailInput(page).fill(TEACHER_EMAIL);
+    await passwordInput(page).fill(DEMO_PASSWORD);
+    await page.getByRole('button', { name: /sign in/i }).click();
+
+    await expect(page).toHaveURL(/.*my-workspace/);
+
+    await page.goto('/my-workspace/materials');
+    const privacyInput = page.locator('input[type="file"]').first();
+    await privacyInput.setInputFiles([
+      { name: 'ref-1.png', mimeType: 'image/png', buffer: tinyPng },
+      { name: 'ref-2.png', mimeType: 'image/png', buffer: tinyPng },
+      { name: 'ref-3.png', mimeType: 'image/png', buffer: tinyPng },
+    ]);
+    await expect(page.getByText(/3 reference files selected/i)).toBeVisible();
+    await page.getByRole('button', { name: /save privacy profile/i }).click();
+    await expect(page.getByText(/privacy profile saved/i)).toBeVisible();
+    await expect(page.getByText(/ready .*3 references/i)).toBeVisible();
+
+    await page.goto('/videos');
+    await page.locator('form').last().locator('select').selectOption({ index: 1 });
+    await expect(page.getByText(/privacy profile complete/i)).toBeVisible();
+    await expect(page.getByRole('button', { name: /upload and analyze/i })).toBeEnabled();
   });
 });

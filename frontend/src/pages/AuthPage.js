@@ -225,6 +225,7 @@ export function AuthPage() {
               {t("auth.principalDemo")}
             </div>
             <div>{t("auth.teacherDemo")}</div>
+            <div>{t("auth.trainingAdminDemo")}</div>
           </div>
         )}
 

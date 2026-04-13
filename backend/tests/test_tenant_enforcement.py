@@ -97,6 +97,24 @@ def _fake_db():
                     "tenant_role": "teacher",
                     "organization_id": "org-school-2",
                 },
+                {
+                    "id": "training-admin-1",
+                    "email": "coach@example.com",
+                    "tenant_role": "training_admin",
+                    "organization_id": "org-training-1",
+                },
+                {
+                    "id": "training-teacher-1",
+                    "email": "candidate1@example.com",
+                    "tenant_role": "teacher",
+                    "organization_id": "org-training-1",
+                },
+                {
+                    "id": "training-teacher-2",
+                    "email": "candidate2@example.com",
+                    "tenant_role": "teacher",
+                    "organization_id": "org-training-2",
+                },
             ]
         ),
         schools=_Collection(
@@ -120,6 +138,20 @@ def _fake_db():
                     "school_id": "school-2",
                     "organization_id": "org-school-2",
                     "created_by": "other-admin",
+                },
+                {
+                    "id": "teacher-3",
+                    "email": "candidate1@example.com",
+                    "school_id": None,
+                    "organization_id": "org-training-1",
+                    "created_by": "training-admin-1",
+                },
+                {
+                    "id": "teacher-4",
+                    "email": "candidate2@example.com",
+                    "school_id": None,
+                    "organization_id": "org-training-2",
+                    "created_by": "other-training-admin",
                 },
             ]
         ),
@@ -161,6 +193,42 @@ def test_get_teacher_or_404_rejects_cross_tenant_access(monkeypatch):
                     "email": "principal@example.com",
                     "tenant_role": "school_admin",
                     "organization_id": "org-school-1",
+                },
+            )
+        )
+
+    assert exc.value.status_code == 403
+
+
+def test_list_teacher_ids_for_training_admin_is_org_scoped(monkeypatch):
+    monkeypatch.setattr(server, "db", _fake_db())
+
+    teacher_ids = asyncio.run(
+        server._list_teacher_ids_for_user(
+            {
+                "id": "training-admin-1",
+                "email": "coach@example.com",
+                "tenant_role": "training_admin",
+                "organization_id": "org-training-1",
+            }
+        )
+    )
+
+    assert teacher_ids == ["teacher-3"]
+
+
+def test_get_teacher_or_404_rejects_cross_training_tenant_access(monkeypatch):
+    monkeypatch.setattr(server, "db", _fake_db())
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            server._get_teacher_or_404(
+                "teacher-4",
+                {
+                    "id": "training-admin-1",
+                    "email": "coach@example.com",
+                    "tenant_role": "training_admin",
+                    "organization_id": "org-training-1",
                 },
             )
         )

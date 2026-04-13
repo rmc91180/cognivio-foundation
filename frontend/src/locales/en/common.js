@@ -572,6 +572,7 @@ const en = {
     demoLogins: "Demo logins",
     principalDemo: "Principal: principal@demo.cognivio.app / DemoAccess2026!",
     teacherDemo: "Teacher: teacher@demo.cognivio.app / DemoAccess2026!",
+    trainingAdminDemo: "Training administrator: coach@demo.cognivio.app / DemoAccess2026!",
     name: "Name",
     schoolOrOrganizationName: "School or organization name",
     trainingOrganizationName: "Training organization name",
