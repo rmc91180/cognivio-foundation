@@ -9,6 +9,7 @@ import { MasterAdminPage } from "@/pages/MasterAdminPage";
 import { MasterAdminUsersPage } from "@/pages/MasterAdminUsersPage";
 import { MasterAdminUserDetailPage } from "@/pages/MasterAdminUserDetailPage";
 import { MasterAdminOrganizationsPage } from "@/pages/MasterAdminOrganizationsPage";
+import { MasterAdminOrganizationDetailPage } from "@/pages/MasterAdminOrganizationDetailPage";
 import { MasterAdminAuthActivityPage } from "@/pages/MasterAdminAuthActivityPage";
 import { MasterAdminAuditPage } from "@/pages/MasterAdminAuditPage";
 import { MasterAdminWorkspacesPage } from "@/pages/MasterAdminWorkspacesPage";
@@ -87,6 +88,14 @@ function App() {
           element={
             <ProtectedRoute superAdminOnly>
               <MasterAdminOrganizationsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/master-admin/organizations/:organizationId"
+          element={
+            <ProtectedRoute superAdminOnly>
+              <MasterAdminOrganizationDetailPage />
             </ProtectedRoute>
           }
         />

@@ -33,7 +33,7 @@ import { clearPreviewSession } from "@/lib/previewMode";
 const SUPER_ADMIN_NAV_ITEMS = [
   { to: "/master-admin", icon: ShieldCheck, labelKey: "masterAdmin" },
   { to: "/master-admin/users?approval_status=pending", icon: Users, labelKey: "accessManagement" },
-  { to: "/master-admin/users", icon: Users, labelKey: "teachers" },
+  { to: "/master-admin/users", icon: Users, labelKey: "users" },
   { to: "/master-admin/organizations", icon: Database, labelKey: "organizationDirectory" },
   { to: "/master-admin/workspaces", icon: LayoutDashboard, labelKey: "workspaces" },
   { to: "/master-admin/videos", icon: PlayCircle, labelKey: "videos" },
@@ -57,7 +57,7 @@ export function LayoutShell({ children }) {
 
   const organizationListQuery = useQuery({
     queryKey: ["layout-shell-master-admin-organizations"],
-    queryFn: () => masterAdminApi.organizations({ limit: 20, offset: 0 }).then((res) => res.data),
+    queryFn: () => masterAdminApi.organizations({ limit: 200, offset: 0 }).then((res) => res.data),
     enabled: isSuperAdmin,
     staleTime: 60_000,
   });
@@ -182,7 +182,7 @@ export function LayoutShell({ children }) {
               {organizationTree.map((entry) => (
                 <div key={entry.organization.id} className="rounded-xl border border-slate-200 bg-slate-50/70 p-2.5">
                   <NavLink
-                    to={`/master-admin/organizations?q=${encodeURIComponent(entry.organization.name)}`}
+                    to={`/master-admin/organizations/${entry.organization.id}`}
                     className="block rounded-lg px-2 py-1.5 text-sm font-semibold text-slate-800 hover:bg-white"
                   >
                     {entry.organization.name}
@@ -211,10 +211,10 @@ export function LayoutShell({ children }) {
                         emptyLabel={t("nav.organizationNoTeachers")}
                       />
                       <NavLink
-                        to={`/master-admin/users?organization_id=${entry.organization.id}`}
+                        to={`/master-admin/organizations/${entry.organization.id}`}
                         className="block pt-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-primary hover:text-primary/80"
                       >
-                        {t("nav.openOrganizationMembers")}
+                        {t("nav.openOrganization")}
                       </NavLink>
                     </div>
                   ) : null}
@@ -323,15 +323,12 @@ function NavItem({ to, icon: Icon, label }) {
 }
 
 function RoleMemberList({ title, members, emptyLabel }) {
-  const visibleMembers = members.slice(0, 5);
-  const hiddenCount = Math.max(0, members.length - visibleMembers.length);
-
   return (
     <div>
       <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">{title}</div>
-      {visibleMembers.length ? (
+      {members.length ? (
         <div className="mt-1 space-y-1">
-          {visibleMembers.map((member) => (
+          {members.map((member) => (
             <NavLink
               key={member.id}
               to={`/master-admin/users/${member.id}`}
@@ -340,9 +337,6 @@ function RoleMemberList({ title, members, emptyLabel }) {
               {member.name || member.email}
             </NavLink>
           ))}
-          {hiddenCount ? (
-            <div className="px-1.5 text-[11px] text-slate-500">+{hiddenCount} more</div>
-          ) : null}
         </div>
       ) : (
         <div className="mt-1 px-1.5 text-xs text-slate-500">{emptyLabel}</div>

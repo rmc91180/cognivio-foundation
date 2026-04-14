@@ -184,7 +184,12 @@ export function MasterAdminOrganizationsPage() {
                   <div key={organization.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
-                        <div className="text-base font-semibold text-slate-900">{organization.name}</div>
+                        <Link
+                          to={`/master-admin/organizations/${organization.id}`}
+                          className="text-base font-semibold text-slate-900 hover:text-primary"
+                        >
+                          {organization.name}
+                        </Link>
                         <div className="mt-1 text-xs uppercase tracking-[0.18em] text-slate-500">
                           {t("masterAdminOrganizations.identifier")}: {organization.id}
                         </div>
@@ -292,10 +297,10 @@ export function MasterAdminOrganizationsPage() {
                       </div>
                       <div className="flex flex-wrap gap-3">
                         <Link
-                          to={`/master-admin/users?organization_id=${organization.id}`}
+                          to={`/master-admin/organizations/${organization.id}`}
                           className="text-sm font-medium text-primary hover:text-primary/80"
                         >
-                          {t("masterAdminOrganizations.openMembers")}
+                          {t("masterAdminOrganizations.openOrganization")}
                         </Link>
                         <Button type="button" variant="secondary" onClick={() => openSeatDialog(organization)}>
                           {t("masterAdminOrganizations.editSeats")}
