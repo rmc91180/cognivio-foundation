@@ -1,9 +1,10 @@
 import React from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NavLink, useNavigate } from "react-router-dom";
 import {
   BookOpen,
   ClipboardList,
+  Database,
   History,
   Layers,
   LayoutDashboard,
@@ -18,6 +19,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { BrandMark } from "@/components/BrandMark";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { Button } from "@/components/ui";
+import { masterAdminApi } from "@/lib/api";
 import {
   getDashboardHomeRoute,
   getUserTenantRole,
@@ -27,6 +29,17 @@ import {
   isTrainingAdminUser,
 } from "@/lib/userRoutes";
 import { clearPreviewSession } from "@/lib/previewMode";
+
+const SUPER_ADMIN_NAV_ITEMS = [
+  { to: "/master-admin", icon: ShieldCheck, labelKey: "masterAdmin" },
+  { to: "/master-admin/users?approval_status=pending", icon: Users, labelKey: "accessManagement" },
+  { to: "/master-admin/users", icon: Users, labelKey: "teachers" },
+  { to: "/master-admin/organizations", icon: Database, labelKey: "organizationDirectory" },
+  { to: "/master-admin/workspaces", icon: LayoutDashboard, labelKey: "workspaces" },
+  { to: "/master-admin/videos", icon: PlayCircle, labelKey: "videos" },
+  { to: "/master-admin/incidents", icon: History, labelKey: "incidents" },
+  { to: "/master-admin/dependencies", icon: Layers, labelKey: "dependencies" },
+];
 
 export function LayoutShell({ children }) {
   const { t } = useTranslation();
@@ -40,6 +53,46 @@ export function LayoutShell({ children }) {
   const tenantRole = getUserTenantRole(user);
   const dashboardHomeRoute = getDashboardHomeRoute(user);
   const isPreviewMode = Boolean(user?.is_preview_mode);
+  const isGeneralAdmin = isAdmin && !isSuperAdmin;
+
+  const organizationListQuery = useQuery({
+    queryKey: ["layout-shell-master-admin-organizations"],
+    queryFn: () => masterAdminApi.organizations({ limit: 20, offset: 0 }).then((res) => res.data),
+    enabled: isSuperAdmin,
+    staleTime: 60_000,
+  });
+
+  const organizationItems = organizationListQuery.data?.items || [];
+
+  const organizationDetailQueries = useQueries({
+    queries: isSuperAdmin
+      ? organizationItems.map((organization) => ({
+          queryKey: ["layout-shell-master-admin-organization-detail", organization.id],
+          queryFn: () => masterAdminApi.organizationDetail(organization.id).then((res) => res.data),
+          staleTime: 60_000,
+        }))
+      : [],
+  });
+
+  const organizationTree = React.useMemo(
+    () =>
+      organizationItems.map((organization, index) => {
+        const detailQuery = organizationDetailQueries[index];
+        const activeUsers = detailQuery?.data?.related?.active_users || [];
+        const administrators = activeUsers.filter((member) =>
+          ["school_admin", "training_admin", "super_admin", "admin"].includes(member.tenant_role)
+        );
+        const teachers = activeUsers.filter((member) => member.tenant_role === "teacher");
+        return {
+          organization,
+          loading: Boolean(detailQuery?.isLoading || detailQuery?.isFetching),
+          error: Boolean(detailQuery?.isError),
+          administrators,
+          teachers,
+        };
+      }),
+    [organizationItems, organizationDetailQueries]
+  );
 
   const exitPreviewMode = async () => {
     clearPreviewSession();
@@ -59,54 +112,117 @@ export function LayoutShell({ children }) {
           <BrandMark to="/" />
           <LanguageSwitcher compact />
         </div>
-        <nav className="mt-5 space-y-1.5 px-3 text-sm">
+        <div className="mt-5 flex-1 overflow-y-auto px-3">
+          <nav className="space-y-1.5 text-sm">
+            {isSuperAdmin ? (
+              <div className="mb-3">
+                <div className="px-3 pb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  {t("nav.platformBackend")}
+                </div>
+                {SUPER_ADMIN_NAV_ITEMS.map((item) => (
+                  <NavItem key={item.to} to={item.to} icon={item.icon} label={t(`nav.${item.labelKey}`)} />
+                ))}
+              </div>
+            ) : null}
+            {isGeneralAdmin ? (
+              <>
+                <NavItem
+                  to={dashboardHomeRoute}
+                  icon={LayoutDashboard}
+                  label={isTrainingAdmin ? t("nav.trainingDashboard") : t("nav.dashboard")}
+                />
+                <NavItem
+                  to="/teachers"
+                  icon={Users}
+                  label={isTrainingAdmin ? t("nav.trainingParticipants") : t("nav.teachers")}
+                />
+                <NavItem to="/videos" icon={PlayCircle} label={t("nav.videos")} />
+                <NavItem to="/all-star-library" icon={BookOpen} label={t("nav.allStarLibrary")} />
+                {isSchoolAdmin ? (
+                  <>
+                    <NavItem to="/privacy-review" icon={ShieldCheck} label={t("nav.privacyReview")} />
+                    <NavItem to="/recognition-review" icon={Trophy} label={t("nav.recognitionReview")} />
+                    <NavItem to="/school-setup" icon={Layers} label={t("nav.schoolSetup")} />
+                  </>
+                ) : null}
+              </>
+            ) : null}
+            {!isAdmin ? (
+              <>
+                <NavItem to="/my-workspace" icon={LayoutDashboard} label={t("nav.myWorkspace")} />
+                <NavItem to="/videos" icon={PlayCircle} label={t("nav.myVideos")} />
+                <NavItem to="/my-workspace/materials" icon={BookOpen} label={t("nav.myMaterials")} />
+                <NavItem to="/my-workspace/goals" icon={ClipboardList} label={t("nav.myGoals")} />
+                <NavItem to="/my-workspace/reflections" icon={MessageSquareText} label={t("nav.myReflections")} />
+                <NavItem to="/my-workspace/history" icon={History} label={t("nav.myHistory")} />
+              </>
+            ) : null}
+          </nav>
+
           {isSuperAdmin ? (
-            <div className="mb-3">
-              <div className="px-3 pb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-                {t("nav.platformBackend")}
+            <div className="mt-5 space-y-3 pb-4">
+              <div className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                {t("nav.organizationDirectory")}
               </div>
-              <NavItem to="/master-admin" icon={ShieldCheck} label={t("nav.masterAdmin")} />
-              <div className="mt-3 px-3 pb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-                {t("nav.operationalAccess")}
-              </div>
-              <NavItem to="/teachers" icon={Users} label={t("nav.teachers")} />
-              <NavItem to="/videos" icon={PlayCircle} label={t("nav.videos")} />
-              <NavItem to="/privacy-review" icon={ShieldCheck} label={t("nav.privacyReview")} />
+              {organizationListQuery.isLoading ? (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                  {t("nav.organizationsLoading")}
+                </div>
+              ) : null}
+              {organizationListQuery.isError ? (
+                <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                  {t("nav.organizationsLoadFailed")}
+                </div>
+              ) : null}
+              {!organizationListQuery.isLoading && !organizationTree.length ? (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                  {t("nav.organizationsEmpty")}
+                </div>
+              ) : null}
+              {organizationTree.map((entry) => (
+                <div key={entry.organization.id} className="rounded-xl border border-slate-200 bg-slate-50/70 p-2.5">
+                  <NavLink
+                    to={`/master-admin/organizations?q=${encodeURIComponent(entry.organization.name)}`}
+                    className="block rounded-lg px-2 py-1.5 text-sm font-semibold text-slate-800 hover:bg-white"
+                  >
+                    {entry.organization.name}
+                  </NavLink>
+                  <div className="px-2 text-[11px] uppercase tracking-[0.16em] text-slate-500">
+                    {entry.organization.organization_type === "training"
+                      ? t("nav.trainingAdminScope")
+                      : t("nav.schoolAdminScope")}
+                  </div>
+                  {entry.loading ? (
+                    <div className="mt-2 px-2 text-xs text-slate-500">{t("nav.organizationsLoading")}</div>
+                  ) : null}
+                  {entry.error ? (
+                    <div className="mt-2 px-2 text-xs text-rose-700">{t("nav.organizationsLoadFailed")}</div>
+                  ) : null}
+                  {!entry.loading && !entry.error ? (
+                    <div className="mt-2 space-y-2 px-2">
+                      <RoleMemberList
+                        title={t("nav.organizationAdmins")}
+                        members={entry.administrators}
+                        emptyLabel={t("nav.organizationNoAdmins")}
+                      />
+                      <RoleMemberList
+                        title={t("nav.organizationTeachers")}
+                        members={entry.teachers}
+                        emptyLabel={t("nav.organizationNoTeachers")}
+                      />
+                      <NavLink
+                        to={`/master-admin/users?organization_id=${entry.organization.id}`}
+                        className="block pt-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-primary hover:text-primary/80"
+                      >
+                        {t("nav.openOrganizationMembers")}
+                      </NavLink>
+                    </div>
+                  ) : null}
+                </div>
+              ))}
             </div>
           ) : null}
-          {isAdmin ? (
-            <>
-              <NavItem
-                to={dashboardHomeRoute}
-                icon={LayoutDashboard}
-                label={isTrainingAdmin ? t("nav.trainingDashboard") : t("nav.dashboard")}
-              />
-              <NavItem
-                to="/teachers"
-                icon={Users}
-                label={isTrainingAdmin ? t("nav.trainingParticipants") : t("nav.teachers")}
-              />
-              <NavItem to="/videos" icon={PlayCircle} label={t("nav.videos")} />
-              <NavItem to="/all-star-library" icon={BookOpen} label={t("nav.allStarLibrary")} />
-              {isSchoolAdmin ? (
-                <>
-                  <NavItem to="/privacy-review" icon={ShieldCheck} label={t("nav.privacyReview")} />
-                  <NavItem to="/recognition-review" icon={Trophy} label={t("nav.recognitionReview")} />
-                  <NavItem to="/school-setup" icon={Layers} label={t("nav.schoolSetup")} />
-                </>
-              ) : null}
-            </>
-          ) : (
-            <>
-              <NavItem to="/my-workspace" icon={LayoutDashboard} label={t("nav.myWorkspace")} />
-              <NavItem to="/videos" icon={PlayCircle} label={t("nav.myVideos")} />
-              <NavItem to="/my-workspace/materials" icon={BookOpen} label={t("nav.myMaterials")} />
-              <NavItem to="/my-workspace/goals" icon={ClipboardList} label={t("nav.myGoals")} />
-              <NavItem to="/my-workspace/reflections" icon={MessageSquareText} label={t("nav.myReflections")} />
-              <NavItem to="/my-workspace/history" icon={History} label={t("nav.myHistory")} />
-            </>
-          )}
-        </nav>
+        </div>
         {isSchoolAdmin && (
           <div className="mx-3 mt-4 rounded-xl border border-sky-200 bg-sky-50 p-3">
             <div className="text-[11px] font-semibold uppercase tracking-wide text-sky-700">
@@ -203,6 +319,35 @@ function NavItem({ to, icon: Icon, label }) {
       <Icon className="h-4 w-4 stroke-[2.25]" />
       <span>{label}</span>
     </NavLink>
+  );
+}
+
+function RoleMemberList({ title, members, emptyLabel }) {
+  const visibleMembers = members.slice(0, 5);
+  const hiddenCount = Math.max(0, members.length - visibleMembers.length);
+
+  return (
+    <div>
+      <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">{title}</div>
+      {visibleMembers.length ? (
+        <div className="mt-1 space-y-1">
+          {visibleMembers.map((member) => (
+            <NavLink
+              key={member.id}
+              to={`/master-admin/users/${member.id}`}
+              className="block rounded-md px-1.5 py-1 text-xs text-slate-700 hover:bg-white hover:text-slate-900"
+            >
+              {member.name || member.email}
+            </NavLink>
+          ))}
+          {hiddenCount ? (
+            <div className="px-1.5 text-[11px] text-slate-500">+{hiddenCount} more</div>
+          ) : null}
+        </div>
+      ) : (
+        <div className="mt-1 px-1.5 text-xs text-slate-500">{emptyLabel}</div>
+      )}
+    </div>
   );
 }
 
