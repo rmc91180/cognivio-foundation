@@ -1,12 +1,12 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { teacherApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { VideoRecorder } from "@/components/VideoRecorder";
-import { Button, EmptyState, PageContextHeader, Panel, SectionHeader } from "@/components/ui";
+import { Button, EmptyState, Field, Input, PageContextHeader, Panel, SectionHeader } from "@/components/ui";
 import { useAuth } from "@/hooks/useAuth";
 import { useTeacherWorkspaceData } from "@/pages/teacher-workspace/useTeacherWorkspaceData";
 import { resolveCoachingLink } from "@/lib/coachingRoutes";
@@ -23,7 +23,10 @@ function WorkspacePanel({ title, description, eyebrow, children }) {
 
 export function TeacherWorkspacePage() {
   const { t, i18n } = useTranslation();
-  const { user } = useAuth();
+  const { user, refreshUser } = useAuth();
+  const [profileSubject, setProfileSubject] = useState("");
+  const [profileGradeLevel, setProfileGradeLevel] = useState("");
+  const [profileDepartment, setProfileDepartment] = useState("");
   const location = useLocation();
   const section = useMemo(() => {
     const parts = location.pathname.split("/").filter(Boolean);
@@ -125,6 +128,17 @@ export function TeacherWorkspacePage() {
     organizationLabel: t("teacherWorkspace.linkedOrganizationLabel"),
     managerLabel: t("teacherWorkspace.linkedAdminNameLabel"),
     unknownLabel: t("teacherWorkspace.linkedAdminNotAssigned"),
+  });
+  const createSelfProfileMutation = useMutation({
+    mutationFn: (payload) => teacherApi.createSelfProfile(payload).then((r) => r.data),
+    onSuccess: async () => {
+      await refreshUser();
+      toast.success(t("teacherWorkspace.profileCreateSuccess"));
+    },
+    onError: (error) => {
+      const detail = error?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : t("teacherWorkspace.profileCreateFailed"));
+    },
   });
 
   const renderEmpty = (title, description, ctaLabel, ctaTo) => (
@@ -384,10 +398,89 @@ export function TeacherWorkspacePage() {
             description={t("teacherWorkspace.description")}
             meta={t("teacherWorkspace.roleMeta")}
             badge={t("teacherWorkspace.roleBadge")}
+            tags={institutionTags}
           />
-          <Panel className="space-y-2">
-            <h2 className="text-base font-semibold text-slate-900">{t("teacherWorkspace.noLinkedTeacherTitle")}</h2>
-            <p className="text-sm text-slate-500">{t("teacherWorkspace.noLinkedTeacherDescription")}</p>
+          <Panel className="space-y-5">
+            <div className="space-y-2">
+              <h2 className="text-base font-semibold text-slate-900">{t("teacherWorkspace.noLinkedTeacherTitle")}</h2>
+              <p className="text-sm text-slate-500">{t("teacherWorkspace.noLinkedTeacherDescription")}</p>
+              <p className="text-xs text-slate-500">{t("teacherWorkspace.profileCreateSyncNote")}</p>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-3">
+              <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  {t("teacherWorkspace.linkedOrganizationLabel")}
+                </div>
+                <div className="mt-2 text-sm font-semibold text-slate-900">
+                  {linkedOrganizationName || t("teacherWorkspace.linkedAdminNotAssigned")}
+                </div>
+              </div>
+              <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  {t("teacherWorkspace.linkedSchoolLabel")}
+                </div>
+                <div className="mt-2 text-sm font-semibold text-slate-900">
+                  {linkedSchoolName || t("teacherWorkspace.linkedAdminNotAssigned")}
+                </div>
+              </div>
+              <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  {t("teacherWorkspace.linkedAdminNameLabel")}
+                </div>
+                <div className="mt-2 text-sm font-semibold text-slate-900">
+                  {linkedAdminName || linkedAdminEmail || t("teacherWorkspace.linkedAdminNotAssigned")}
+                </div>
+              </div>
+            </div>
+
+            <form
+              className="grid gap-4 md:grid-cols-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                createSelfProfileMutation.mutate({
+                  subject: profileSubject,
+                  grade_level: profileGradeLevel,
+                  department: profileDepartment || undefined,
+                });
+              }}
+            >
+              <Field label={t("teacherWorkspace.profileSubjectLabel")}>
+                <Input
+                  value={profileSubject}
+                  onChange={(event) => setProfileSubject(event.target.value)}
+                  placeholder={t("teacherWorkspace.profileSubjectPlaceholder")}
+                />
+              </Field>
+              <Field label={t("teacherWorkspace.profileGradeLevelLabel")}>
+                <Input
+                  value={profileGradeLevel}
+                  onChange={(event) => setProfileGradeLevel(event.target.value)}
+                  placeholder={t("teacherWorkspace.profileGradeLevelPlaceholder")}
+                />
+              </Field>
+              <Field label={t("teacherWorkspace.profileDepartmentLabel")}>
+                <Input
+                  value={profileDepartment}
+                  onChange={(event) => setProfileDepartment(event.target.value)}
+                  placeholder={t("teacherWorkspace.profileDepartmentPlaceholder")}
+                />
+              </Field>
+              <div className="md:col-span-2">
+                <Button
+                  type="submit"
+                  disabled={
+                    createSelfProfileMutation.isPending ||
+                    !profileSubject.trim() ||
+                    !profileGradeLevel.trim()
+                  }
+                >
+                  {createSelfProfileMutation.isPending
+                    ? t("teacherWorkspace.profileCreatePending")
+                    : t("teacherWorkspace.profileCreateCta")}
+                </Button>
+              </div>
+            </form>
           </Panel>
         </div>
       </LayoutShell>

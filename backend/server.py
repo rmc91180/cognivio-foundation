@@ -2412,6 +2412,21 @@ def _get_s3_client():
     return session.client("s3", endpoint_url=S3_ENDPOINT or None)
 
 
+def _probe_s3_bucket_health() -> bool:
+    client = _get_s3_client()
+    try:
+        client.head_bucket(Bucket=S3_BUCKET)
+        return True
+    except (BotoCoreError, ClientError):
+        try:
+            client.list_objects_v2(Bucket=S3_BUCKET, MaxKeys=1)
+            return True
+        except (BotoCoreError, ClientError):
+            return False
+    except Exception:
+        return False
+
+
 def _validate_s3_config() -> None:
     if not S3_BUCKET:
         logger.warning("S3_BUCKET not set; using local upload storage fallback.")
@@ -4139,8 +4154,7 @@ async def api_health_check():
 def _upload_storage_is_healthy() -> bool:
     if S3_BUCKET:
         try:
-            _create_s3_client()
-            return True
+            return _probe_s3_bucket_health()
         except Exception:
             return False
     try:
@@ -5260,6 +5274,15 @@ class TeacherCreate(BaseModel):
     category: Optional[str] = None
     category_custom: Optional[str] = None
     next_coaching_conference: Optional[str] = None
+
+
+class TeacherSelfProfileCreate(BaseModel):
+    subject: str
+    grade_level: str
+    department: Optional[str] = None
+    category: Optional[str] = None
+    category_custom: Optional[str] = None
+
 
 class TeacherResponse(BaseModel):
     id: str
@@ -6903,6 +6926,33 @@ async def get_current_selection(current_user: dict = Depends(get_current_user)):
     selection.setdefault("focus_note", None)
     return selection
 
+
+async def _find_linkable_teacher_for_user(current_user: dict) -> Optional[dict]:
+    email = str(current_user.get("email") or "").strip().lower()
+    if not email or not hasattr(db, "teachers"):
+        return None
+    teacher_docs = await db.teachers.find(
+        {"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}},
+        {"_id": 0},
+    ).to_list(10)
+    if not teacher_docs:
+        return None
+
+    organization_id = current_user.get("organization_id")
+    school_id = current_user.get("school_id")
+    manager_user_id = current_user.get("manager_user_id")
+
+    for teacher_doc in teacher_docs:
+        if organization_id and teacher_doc.get("organization_id") and teacher_doc.get("organization_id") != organization_id:
+            continue
+        if school_id and teacher_doc.get("school_id") and teacher_doc.get("school_id") != school_id:
+            continue
+        if manager_user_id and teacher_doc.get("created_by") and teacher_doc.get("created_by") not in {manager_user_id, current_user.get("id")}:
+            continue
+        return teacher_doc
+    return None
+
+
 # ==================== TEACHER ENDPOINTS ====================
 @api_router.post("/teachers", response_model=TeacherResponse)
 async def create_teacher(teacher: TeacherCreate, current_user: dict = Depends(get_current_user)):
@@ -6932,6 +6982,74 @@ async def create_teacher(teacher: TeacherCreate, current_user: dict = Depends(ge
     }
     await db.teachers.insert_one(teacher_doc)
     return TeacherResponse(**{k: v for k, v in teacher_doc.items() if k not in ["created_by", "_id"]})
+
+
+@api_router.post("/teachers/self-profile", response_model=TeacherResponse)
+async def create_teacher_self_profile(
+    payload: TeacherSelfProfileCreate,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    tenant_role = _get_user_tenant_role(current_user)
+    if tenant_role != "teacher":
+        raise HTTPException(status_code=403, detail="Only teacher accounts can create self profiles")
+
+    existing_teacher_id = current_user.get("teacher_id")
+    if existing_teacher_id:
+        teacher = await _get_teacher_or_404(existing_teacher_id, current_user)
+        teacher = await _enrich_teacher_with_tenancy_context(teacher)
+        teacher.pop("created_by", None)
+        language = _resolve_request_language(request, default="en")
+        return TeacherResponse(**_localize_teacher_payload(teacher, language))
+
+    linked_teacher = await _find_linkable_teacher_for_user(current_user)
+    now = datetime.now(timezone.utc).isoformat()
+    if linked_teacher:
+        await db.users.update_one(
+            {"id": current_user["id"]},
+            {"$set": {"teacher_id": linked_teacher["id"], "updated_at": now}},
+        )
+        linked_teacher = await _enrich_teacher_with_tenancy_context(linked_teacher)
+        linked_teacher.pop("created_by", None)
+        language = _resolve_request_language(request, default="en")
+        return TeacherResponse(**_localize_teacher_payload(linked_teacher, language))
+
+    subject = _clean_optional_string(payload.subject)
+    grade_level = _clean_optional_string(payload.grade_level)
+    if not subject or not grade_level:
+        raise HTTPException(status_code=400, detail="subject and grade_level are required")
+
+    teacher_id = str(uuid.uuid4())
+    teacher_doc = {
+        "id": teacher_id,
+        "name": _clean_optional_string(current_user.get("name")) or "Teacher",
+        "email": str(current_user.get("email") or "").strip().lower(),
+        "subject": subject,
+        "grade_level": grade_level,
+        "department": _clean_optional_string(payload.department),
+        "school_id": current_user.get("school_id"),
+        "organization_id": current_user.get("organization_id"),
+        "category": _clean_optional_string(payload.category),
+        "category_custom": _clean_optional_string(payload.category_custom),
+        "next_coaching_conference": None,
+        "created_by": current_user.get("manager_user_id") or current_user["id"],
+        "created_at": now,
+    }
+    await db.teachers.insert_one(teacher_doc)
+    await db.users.update_one(
+        {"id": current_user["id"]},
+        {
+            "$set": {
+                "teacher_id": teacher_id,
+                "updated_at": now,
+            }
+        },
+    )
+    teacher_doc = await _enrich_teacher_with_tenancy_context(teacher_doc)
+    teacher_doc.pop("created_by", None)
+    language = _resolve_request_language(request, default="en")
+    return TeacherResponse(**_localize_teacher_payload(teacher_doc, language))
+
 
 @api_router.patch("/teachers/{teacher_id}", response_model=TeacherResponse)
 async def update_teacher(

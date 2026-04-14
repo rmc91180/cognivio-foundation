@@ -3,6 +3,7 @@ import api from "@/lib/apiClient";
 export const teacherApi = {
   list: () => api.get("/api/teachers"),
   create: (payload) => api.post("/api/teachers", payload),
+  createSelfProfile: (payload) => api.post("/api/teachers/self-profile", payload),
   get: (id) => api.get(`/api/teachers/${id}`),
   update: (id, payload) => api.patch(`/api/teachers/${id}`, payload),
   conferencePrep: (id) => api.get(`/api/teachers/${id}/conference-prep`),

@@ -7,8 +7,8 @@ import { Link, useLocation } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { useTranslation } from "react-i18next";
 import { VideoRow } from "@/features/videos/components/VideoRow";
+import { isAdminUser, isTeacherUser } from "@/lib/userRoutes";
 import {
-  Badge,
   Button,
   EmptyState,
   ErrorState,
@@ -25,7 +25,8 @@ export function VideosPage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const fileInputRef = useRef(null);
-  const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
+  const isAdmin = isAdminUser(user);
+  const isTeacher = isTeacherUser(user);
   const [selectedTeacher, setSelectedTeacher] = useState("");
   const [file, setFile] = useState(null);
   const [search, setSearch] = useState("");
@@ -35,18 +36,25 @@ export function VideosPage() {
   const location = useLocation();
 
   useEffect(() => {
+    if (isTeacher) {
+      setSelectedTeacher(user?.teacher_id || "");
+      return;
+    }
     const params = new URLSearchParams(location.search);
     const teacherId = params.get("teacher_id");
     if (teacherId) {
       setSelectedTeacher(teacherId);
     }
-  }, [location.search]);
+  }, [isTeacher, location.search, user?.teacher_id]);
+
+  const activeTeacherId = isTeacher ? user?.teacher_id || "" : selectedTeacher;
 
   const {
     data: teachers = [],
     isError: teachersError,
   } = useQuery({
     queryKey: ["teachers"],
+    enabled: isAdmin,
     queryFn: () => teacherApi.list().then((res) => res.data),
   });
 
@@ -55,10 +63,10 @@ export function VideosPage() {
     isLoading: loadingVideos,
     isError: videosError,
   } = useQuery({
-    queryKey: ["videos", { teacherId: selectedTeacher || undefined }],
+    queryKey: ["videos", { teacherId: activeTeacherId || undefined }],
     queryFn: () =>
       videoApi
-        .list({ teacher_id: selectedTeacher || undefined })
+        .list({ teacher_id: activeTeacherId || undefined })
         .then((res) => res.data),
   });
 
@@ -67,10 +75,10 @@ export function VideosPage() {
     isLoading: loadingAssessments,
     isError: assessmentsError,
   } = useQuery({
-    queryKey: ["assessments", { teacherId: selectedTeacher || undefined }],
+    queryKey: ["assessments", { teacherId: activeTeacherId || undefined }],
     queryFn: () =>
       assessmentApi
-        .list({ teacher_id: selectedTeacher || undefined })
+        .list({ teacher_id: activeTeacherId || undefined })
         .then((res) => res.data),
   });
 
@@ -113,9 +121,9 @@ export function VideosPage() {
   }, [videos, statusFilter, subjectFilter, search, timeRange]);
 
   const { data: selectedTeacherPrivacyProfile } = useQuery({
-    queryKey: ["teacher-privacy-profile", selectedTeacher],
-    enabled: Boolean(selectedTeacher),
-    queryFn: () => privacyProfileApi.get(selectedTeacher).then((r) => r.data),
+    queryKey: ["teacher-privacy-profile", activeTeacherId],
+    enabled: Boolean(activeTeacherId),
+    queryFn: () => privacyProfileApi.get(activeTeacherId).then((r) => r.data),
   });
   const selectedTeacherPrivacyReady = selectedTeacherPrivacyProfile?.status === "active";
 
@@ -165,7 +173,7 @@ export function VideosPage() {
 
   const onSubmit = (e) => {
     e.preventDefault();
-    if (!file || !selectedTeacher) {
+    if (!file || !activeTeacherId) {
       toast.error(t("videosPage.selectTeacherAndFile"));
       return;
     }
@@ -173,9 +181,38 @@ export function VideosPage() {
       toast.error(t("videosPage.completePrivacyProfile"));
       return;
     }
-    uploadMutation.mutate({ file, teacherId: selectedTeacher });
+    uploadMutation.mutate({ file, teacherId: activeTeacherId });
   };
   const hasLoadError = teachersError || videosError || assessmentsError;
+
+  if (isTeacher && !user?.teacher_id) {
+    return (
+      <LayoutShell>
+        <div className="mx-auto max-w-4xl px-6 py-6">
+          <PageHeader
+            title={t("videosPage.title")}
+            description={t("videosPage.description")}
+          />
+          <Panel className="space-y-3">
+            <h2 className="text-base font-semibold text-slate-900">
+              {t("videosPage.profileRequiredTitle")}
+            </h2>
+            <p className="text-sm text-slate-500">
+              {t("videosPage.profileRequiredMessage")}
+            </p>
+            <div>
+              <Link
+                to="/my-workspace"
+                className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
+              >
+                {t("videosPage.completeProfileCta")}
+              </Link>
+            </div>
+          </Panel>
+        </div>
+      </LayoutShell>
+    );
+  }
 
   return (
     <LayoutShell>
@@ -192,20 +229,22 @@ export function VideosPage() {
                 {t("videosPage.filters")}
               </h2>
               <div className="space-y-3 text-xs">
-                <Field label={t("teachersPage.teacher")}>
-                  <Select
-                    value={selectedTeacher}
-                    onChange={(e) => setSelectedTeacher(e.target.value)}
-                    size="sm"
-                  >
-                    <option value="">{t("videosPage.allTeachers")}</option>
-                    {teachers.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.name} • {t.subject}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
+                {!isTeacher ? (
+                  <Field label={t("teachersPage.teacher")}>
+                    <Select
+                      value={selectedTeacher}
+                      onChange={(e) => setSelectedTeacher(e.target.value)}
+                      size="sm"
+                    >
+                      <option value="">{t("videosPage.allTeachers")}</option>
+                      {teachers.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name} • {t.subject}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                ) : null}
                 <Field label={t("teachersPage.subject")}>
                   <Select
                     value={subjectFilter}
@@ -262,7 +301,7 @@ export function VideosPage() {
               <p className="mb-3 text-[11px] text-slate-500">
                 {t("videosPage.uploadAccepted")}
               </p>
-              {selectedTeacher && (
+              {activeTeacherId && (
                 <div className="mb-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-600">
                   {selectedTeacherPrivacyReady
                     ? t("videosPage.privacyProfileReady")
@@ -270,20 +309,28 @@ export function VideosPage() {
                 </div>
               )}
               <form onSubmit={onSubmit} className="space-y-3 text-sm">
-                <Field label={t("teachersPage.teacher")}>
-                  <Select
-                    value={selectedTeacher}
-                    onChange={(e) => setSelectedTeacher(e.target.value)}
-                    size="sm"
-                  >
-                    <option value="">{t("videosPage.selectTeacher")}</option>
-                    {teachers.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.name} • {t.subject}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
+                {!isTeacher ? (
+                  <Field label={t("teachersPage.teacher")}>
+                    <Select
+                      value={selectedTeacher}
+                      onChange={(e) => setSelectedTeacher(e.target.value)}
+                      size="sm"
+                    >
+                      <option value="">{t("videosPage.selectTeacher")}</option>
+                      {teachers.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name} • {t.subject}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                ) : (
+                  <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                    {t("videosPage.uploadingForTeacher", {
+                      name: user?.name || t("videosPage.teacherSelfLabel"),
+                    })}
+                  </div>
+                )}
                 <Field label={t("videosPage.videoFile")}>
                   <div className="mt-1 space-y-2">
                     <input
@@ -310,13 +357,13 @@ export function VideosPage() {
                 </Field>
                 <Button
                   type="submit"
-                  disabled={uploadMutation.isPending || (Boolean(selectedTeacher) && !selectedTeacherPrivacyReady)}
+                  disabled={uploadMutation.isPending || (Boolean(activeTeacherId) && !selectedTeacherPrivacyReady)}
                   fullWidth
                   className="mt-2"
                 >
                   {uploadMutation.isPending
                     ? t("videosPage.uploading")
-                    : Boolean(selectedTeacher) && !selectedTeacherPrivacyReady
+                    : Boolean(activeTeacherId) && !selectedTeacherPrivacyReady
                       ? t("videosPage.privacyProfileRequired")
                       : t("videosPage.uploadAnalyze")}
                 </Button>
@@ -355,7 +402,9 @@ export function VideosPage() {
                 <div className="space-y-3">
                   {filteredVideos.map((v) => {
                     const assessment = assessmentByVideoId.get(v.id);
-                    const teacher = teachers.find((t) => t.id === v.teacher_id);
+                    const teacher = isTeacher
+                      ? { id: user?.teacher_id, name: user?.name, subject: user?.subject }
+                      : teachers.find((t) => t.id === v.teacher_id);
                     return (
                       <VideoRow
                         key={v.id}

@@ -181,7 +181,7 @@ test.describe('Authentication', () => {
     await expect(page.getByText(/ready .*3 references/i)).toBeVisible();
 
     await page.goto('/videos');
-    await page.locator('form').last().locator('select').selectOption({ index: 1 });
+    await expect(page.getByRole('combobox', { name: /^teacher$/i })).toHaveCount(0);
     await expect(page.getByText(/privacy profile complete/i)).toBeVisible();
     await expect(page.getByRole('button', { name: /upload and analyze/i })).toBeEnabled();
   });
