@@ -33,7 +33,6 @@ import { clearPreviewSession } from "@/lib/previewMode";
 const SUPER_ADMIN_NAV_ITEMS = [
   { to: "/master-admin", icon: ShieldCheck, labelKey: "masterAdmin" },
   { to: "/master-admin/users?approval_status=pending", icon: Users, labelKey: "accessManagement" },
-  { to: "/master-admin/users", icon: Users, labelKey: "users" },
   { to: "/master-admin/organizations", icon: Database, labelKey: "organizationDirectory" },
   { to: "/master-admin/workspaces", icon: LayoutDashboard, labelKey: "workspaces" },
   { to: "/master-admin/videos", icon: PlayCircle, labelKey: "videos" },
