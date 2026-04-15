@@ -165,6 +165,7 @@ def _run_case(case: Dict[str, Any], server_module: Any) -> Any:
             focus_note=payload.get("focus_note"),
             language=payload.get("language", case.get("language", "en")),
             analysis_context=payload.get("analysis_context"),
+            analysis_confidence=payload.get("analysis_confidence"),
         )
     if kind == "recommendations":
         return server_module.generate_recommendations(
@@ -174,6 +175,7 @@ def _run_case(case: Dict[str, Any], server_module: Any) -> Any:
             focus_note=payload.get("focus_note"),
             language=payload.get("language", case.get("language", "en")),
             analysis_context=payload.get("analysis_context"),
+            analysis_confidence=payload.get("analysis_confidence"),
         )
     if kind == "packet":
         return server_module.build_observation_summary_packet(
@@ -184,6 +186,8 @@ def _run_case(case: Dict[str, Any], server_module: Any) -> Any:
             priority_element_ids=payload.get("priority_element_ids"),
             focus_note=payload.get("focus_note"),
             analysis_confidence=payload.get("analysis_confidence"),
+            analysis_context=payload.get("analysis_context"),
+            provided_recommendations=payload.get("provided_recommendations"),
             language=payload.get("language", case.get("language", "en")),
         )
     raise ValueError(f"Unsupported evaluation case kind: {kind}")

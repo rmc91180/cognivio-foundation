@@ -3243,14 +3243,22 @@ def _write_placeholder_thumbnail(output_path: Path, width: int = 640, height: in
 def _render_degraded_privacy_assets(source_video_path: str, output_video_path: str, thumbnail_output_path: str) -> Dict[str, Any]:
     output_path = Path(output_video_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(str(source_video_path), str(output_path))
+    runtime_fallback = "worker_copy_only"
+    transcode_error: Optional[str] = None
+    try:
+        transcode_video_asset(source_video_path, str(output_path))
+        runtime_fallback = "worker_transcode_only"
+    except Exception as exc:
+        transcode_error = str(exc)
+        shutil.copyfile(str(source_video_path), str(output_path))
     _write_placeholder_thumbnail(Path(thumbnail_output_path))
     return {
         "frames_processed": 0,
         "frames_with_teacher_visible": 0,
         "faces_detected_total": 0,
         "faces_blurred_total": 0,
-        "runtime_fallback": "worker_copy_only",
+        "runtime_fallback": runtime_fallback,
+        "transcode_error": transcode_error,
     }
 
 
@@ -3951,16 +3959,16 @@ OPENAI_ANALYSIS_INPUT_COST_PER_MILLION_USD = float(
 OPENAI_ANALYSIS_OUTPUT_COST_PER_MILLION_USD = float(
     os.getenv("OPENAI_ANALYSIS_OUTPUT_COST_PER_MILLION_USD", "1.60")
 )
-VIDEO_ANALYSIS_MAX_FRAMES = max(3, int(os.getenv("VIDEO_ANALYSIS_MAX_FRAMES", "6")))
+VIDEO_ANALYSIS_MAX_FRAMES = max(6, int(os.getenv("VIDEO_ANALYSIS_MAX_FRAMES", "18")))
 SMART_FRAME_SELECTION_ENABLED = os.getenv("SMART_FRAME_SELECTION_ENABLED", "false").lower() == "true"
-SMART_FRAME_SELECTION_VERSION = os.getenv("SMART_FRAME_SELECTION_VERSION", "smart_frames_v1").strip() or "smart_frames_v1"
-VIDEO_ANALYSIS_FRAME_SCAN_FPS = max(0.25, float(os.getenv("VIDEO_ANALYSIS_FRAME_SCAN_FPS", "1")))
+SMART_FRAME_SELECTION_VERSION = os.getenv("SMART_FRAME_SELECTION_VERSION", "smart_frames_v2").strip() or "smart_frames_v2"
+VIDEO_ANALYSIS_FRAME_SCAN_FPS = max(0.25, float(os.getenv("VIDEO_ANALYSIS_FRAME_SCAN_FPS", "2")))
 VIDEO_ANALYSIS_MIN_FRAME_GAP_SEC = max(1.0, float(os.getenv("VIDEO_ANALYSIS_MIN_FRAME_GAP_SEC", "8")))
 VIDEO_ANALYSIS_ENABLE_OCR_SIGNALS = os.getenv("VIDEO_ANALYSIS_ENABLE_OCR_SIGNALS", "false").lower() == "true"
 SMART_MOMENT_SAMPLING_ENABLED = os.getenv("SMART_MOMENT_SAMPLING_ENABLED", "true").lower() == "true"
-SMART_MOMENT_SAMPLING_VERSION = os.getenv("SMART_MOMENT_SAMPLING_VERSION", "lesson_moments_v1").strip() or "lesson_moments_v1"
+SMART_MOMENT_SAMPLING_VERSION = os.getenv("SMART_MOMENT_SAMPLING_VERSION", "lesson_moments_v2").strip() or "lesson_moments_v2"
 VIDEO_ANALYSIS_WINDOW_SEC = max(10.0, float(os.getenv("VIDEO_ANALYSIS_WINDOW_SEC", "20")))
-VIDEO_ANALYSIS_MAX_MOMENTS = max(3, int(os.getenv("VIDEO_ANALYSIS_MAX_MOMENTS", "6")))
+VIDEO_ANALYSIS_MAX_MOMENTS = max(4, int(os.getenv("VIDEO_ANALYSIS_MAX_MOMENTS", "10")))
 AUDIO_ANALYSIS_ENABLED = os.getenv("AUDIO_ANALYSIS_ENABLED", "false").lower() == "true"
 AUDIO_TRANSCRIPTION_ENABLED = os.getenv("AUDIO_TRANSCRIPTION_ENABLED", "false").lower() == "true"
 AUDIO_FEATURES_ENABLED = os.getenv("AUDIO_FEATURES_ENABLED", "false").lower() == "true"
@@ -5484,8 +5492,17 @@ class ObservationSummaryPacket(BaseModel):
     growth_areas: List[str] = []
     coaching_actions: List[str] = []
     priority_alignment: List[str] = []
+    evidence_highlights: List[str] = []
     focus_note: Optional[str] = None
     confidence_note: Optional[str] = None
+    primary_growth_focus: Optional[str] = None
+    longitudinal_insight: Optional[str] = None
+    reflection_prompts: List[str] = []
+    actionable_next_steps_structured: List[Dict[str, str]] = []
+    full_review_text: Optional[str] = None
+    output_order: List[str] = []
+    deferral_note: Optional[str] = None
+    reasoning_model: Optional[str] = "cognivio_four_layer_v1"
 
 
 class Observation(BaseModel):
@@ -7529,7 +7546,7 @@ async def _run_video_privacy_job(video_id: str) -> None:
                     redacted_full_path,
                     "redacted-videos",
                     f"{video_id}.mp4",
-                    video.get("content_type") or "video/mp4",
+                    "video/mp4",
                 )
                 redacted_file_url = uploaded_video_url or redacted_file_url
             except Exception as exc:
@@ -16469,6 +16486,7 @@ async def analyze_video(
             focus_note=focus_note,
             language=analysis_language,
             analysis_context=analysis_payload.get("analysis_context"),
+            analysis_confidence=analysis_metadata["analysis_confidence"],
         )
         summary_text = generate_summary(
             element_scores,
@@ -16478,6 +16496,7 @@ async def analyze_video(
             focus_note=focus_note,
             language=analysis_language,
             analysis_context=analysis_payload.get("analysis_context"),
+            analysis_confidence=analysis_metadata["analysis_confidence"],
         )
         observation_summary = build_observation_summary_packet(
             element_scores,
@@ -16487,6 +16506,8 @@ async def analyze_video(
             priority_element_ids=priority_elements,
             focus_note=focus_note,
             analysis_confidence=analysis_metadata["analysis_confidence"],
+            analysis_context=analysis_payload.get("analysis_context"),
+            provided_recommendations=analysis_payload.get("recommendations"),
             language=analysis_language,
         )
         
@@ -16511,6 +16532,7 @@ async def analyze_video(
             "analysis_modalities_used": analysis_metadata["analysis_modalities_used"],
             "specialist_orchestrator": analysis_metadata["specialist_orchestrator"],
             "specialist_trace": analysis_metadata["specialist_trace"],
+            "analysis_context_snapshot": analysis_payload.get("analysis_context"),
         }
         
         await db.assessments.insert_one(assessment_doc)
@@ -17175,7 +17197,11 @@ def _normalize_confidence(raw_confidence: Any) -> float:
     return max(0.0, min(100.0, round(confidence, 1)))
 
 
-def _normalize_evidence_segments(raw_segments: Any, fallback_timestamp: float) -> List[dict]:
+def _normalize_evidence_segments(
+    raw_segments: Any,
+    fallback_timestamp: float,
+    language: str = "en",
+) -> List[dict]:
     segments: List[dict] = []
     if not isinstance(raw_segments, list):
         raw_segments = []
@@ -17190,8 +17216,8 @@ def _normalize_evidence_segments(raw_segments: Any, fallback_timestamp: float) -
             end_sec = max(start_sec + 1.0, float(raw.get("end_sec", start_sec + 20.0)))
         except Exception:
             end_sec = start_sec + 20.0
-        summary = str(raw.get("summary") or "").strip()
-        rationale = str(raw.get("rationale") or "").strip()
+        summary = _normalize_analysis_wording(raw.get("summary"), language=language)
+        rationale = _normalize_analysis_wording(raw.get("rationale"), language=language)
         if not summary:
             continue
         segments.append(
@@ -17205,7 +17231,43 @@ def _normalize_evidence_segments(raw_segments: Any, fallback_timestamp: float) -
     return segments
 
 
-def _normalize_model_recommendations(raw_recommendations: Any) -> List[dict]:
+def _normalize_analysis_wording(text: Optional[str], language: str = "en") -> str:
+    clean_text = str(text or "").strip()
+    if not clean_text:
+        return ""
+
+    replacements = {
+        "in the sampled frames": "in the lesson evidence reviewed",
+        "in sampled frames": "in the lesson evidence reviewed",
+        "sampled frames": "lesson evidence reviewed",
+        "sampled moments": "recorded lesson evidence",
+        "sampled clips": "lesson evidence reviewed",
+        "sampled windows": "lesson evidence reviewed",
+        "Limited visible evidence was available": "The available lesson evidence was still partial",
+        "Visible evidence was limited": "The available lesson evidence was still partial",
+        "Evidence was limited": "The available lesson evidence was still partial",
+        "Insufficient visible evidence": "The available lesson evidence did not yet support",
+    }
+    normalized = clean_text
+    for source, target in replacements.items():
+        normalized = normalized.replace(source, target)
+
+    if _is_hebrew_language(language):
+        hebrew_replacements = {
+            "במדגם הרגעים שנבדק": "בראיות השיעור שנבדקו",
+            "במדגם שנבחר": "בראיות השיעור שנבדקו",
+            "במסגרת מדגם הרגעים שנבדק": "במסגרת ראיות השיעור שנבדקו",
+            "הראיות במדגם הרגעים שנבדק היו מוגבלות": "ראיות השיעור הזמינות עדיין חלקיות",
+            "הראיות החזותיות במדגם שנבחר לא הספיקו לקביעה בטוחה יותר": "ראיות השיעור הזמינות לא הספיקו עדיין לקביעה בטוחה יותר",
+            "נמצאו ראיות חזותיות חלקיות בלבד": "נמצאו ראיות חלקיות בלבד",
+        }
+        for source, target in hebrew_replacements.items():
+            normalized = normalized.replace(source, target)
+
+    return normalized.strip()
+
+
+def _normalize_model_recommendations(raw_recommendations: Any, language: str = "en") -> List[dict]:
     normalized: List[dict] = []
     if not isinstance(raw_recommendations, list):
         return normalized
@@ -17222,7 +17284,10 @@ def _normalize_model_recommendations(raw_recommendations: Any) -> List[dict]:
             continue
         if not isinstance(item, dict):
             continue
-        text = str(item.get("text") or item.get("recommendation") or "").strip()
+        text = _normalize_analysis_wording(
+            item.get("text") or item.get("recommendation") or "",
+            language=language,
+        )
         if not text:
             continue
         try:
@@ -17246,11 +17311,11 @@ def _normalize_model_recommendations(raw_recommendations: Any) -> List[dict]:
 
 def _build_placeholder_element_score(element: dict, timestamp_sec: float, language: str = "en") -> dict:
     if _is_hebrew_language(language):
-        observation_text = "הראיות החזותיות במדגם שנבחר לא הספיקו לקביעה בטוחה יותר."
-        summary_text = f"לגבי {element['name']} נמצאו ראיות חזותיות חלקיות בלבד במסגרת מדגם הרגעים שנבדק."
+        observation_text = "ראיות השיעור הזמינות לא הספיקו עדיין לקביעה בטוחה יותר."
+        summary_text = f"לגבי {element['name']} נמצאו בשיעור ראיות חלקיות בלבד ולכן נדרש איסוף נוסף של הוכחות."
     else:
-        observation_text = "Insufficient visible evidence in the sampled frames for a stronger judgment."
-        summary_text = f"Limited visible evidence was available for {element['name'].lower()} in the sampled frames."
+        observation_text = "The available lesson evidence did not yet support a stronger judgment."
+        summary_text = f"The lesson evidence reviewed for {element['name'].lower()} was still partial and needs more corroboration."
     return {
         "element_id": element["id"],
         "element_name": element["name"],
@@ -17294,7 +17359,7 @@ def _normalize_model_analysis(
             continue
         seen_ids.add(element_id)
         observations = [
-            str(item).strip()
+            _normalize_analysis_wording(item, language=language)
             for item in (raw_score.get("observations") or [])
             if str(item).strip()
         ][:3]
@@ -17302,14 +17367,15 @@ def _normalize_model_analysis(
         evidence_segments = _normalize_evidence_segments(
             raw_score.get("evidence_segments"),
             fallback_timestamp=fallback_timestamp,
+            language=language,
         )
         if not observations and evidence_segments:
             observations = [evidence_segments[0]["summary"]]
         if not observations:
             observations = (
-                ["הראיות במדגם הרגעים שנבדק היו מוגבלות."]
+                ["ראיות השיעור הזמינות עדיין חלקיות."]
                 if _is_hebrew_language(language)
-                else ["Evidence was limited in the sampled frames."]
+                else ["The available lesson evidence was still partial."]
             )
         if not evidence_segments:
             evidence_segments = [
@@ -17343,9 +17409,14 @@ def _normalize_model_analysis(
 
     return {
         "analysis_mode": analysis_mode,
-        "summary": (raw_payload or {}).get("summary") if isinstance(raw_payload, dict) else None,
+        "summary": (
+            _normalize_analysis_wording((raw_payload or {}).get("summary"), language=language)
+            if isinstance(raw_payload, dict)
+            else None
+        ),
         "recommendations": _normalize_model_recommendations(
-            (raw_payload or {}).get("recommendations") if isinstance(raw_payload, dict) else None
+            (raw_payload or {}).get("recommendations") if isinstance(raw_payload, dict) else None,
+            language=language,
         ),
         "element_scores": normalized_scores,
     }
@@ -17356,15 +17427,19 @@ async def _analyze_frames_with_openai(
     elements_to_analyze: List[dict],
     focus_instruction: Optional[str] = None,
     language: str = "en",
+    multimodal_payload: Optional[dict] = None,
 ) -> Optional[dict]:
     if not OPENAI_API_KEY or AsyncOpenAI is None:
         return None
 
     system_prompt = (
-        "You are an expert instructional coach evaluating sampled classroom video frames. "
-        "Use only visible evidence from the provided frames unless transcript context is explicitly provided. "
+        "You are an AI instructional observation assistant supporting experienced human observers. "
+        "Use only provided visual, audio, and lesson-coverage evidence. "
         "Do not invent unseen behavior. "
-        "Write the result as if a strong school leader observed the lesson and needs a concise, coaching-ready judgment. "
+        "Do not judge teachers, assign quality labels, infer intent, or replace human judgment. "
+        "Process evidence using four layers in order: observable actions, student cognitive opportunity, instructional effect signals (correlation only), and pedagogical interpretation framed as leverage. "
+        "If confidence is limited, name ambiguity and defer to human interpretation rather than asserting conclusions. "
+        "Do not mention sampling strategy, extracted frames, or model limitations in the final output. "
         "Return only valid JSON."
     )
     if _is_hebrew_language(language):
@@ -17378,6 +17453,37 @@ async def _analyze_frames_with_openai(
         for element in elements_to_analyze
     )
     focus_text = focus_instruction.strip() if focus_instruction else ""
+    multimodal_context = ""
+    if multimodal_payload:
+        lesson_timeline = []
+        for moment in (multimodal_payload.get("moments") or [])[:8]:
+            phase = str(moment.get("phase") or "lesson_segment").replace("_", " ")
+            selection_reason = str(moment.get("selection_reason") or "lesson evidence").replace("_", " ")
+            excerpt = str(moment.get("transcript_excerpt") or "").strip().replace("\n", " ")
+            segment_line = (
+                f"- {_format_timestamp(int(float(moment.get('start_sec', 0) or 0)))}"
+                f"–{_format_timestamp(int(float(moment.get('end_sec', 0) or 0)))}"
+                f" | {phase} | {selection_reason}"
+            )
+            if excerpt:
+                segment_line += f" | Transcript: {excerpt[:180]}"
+            lesson_timeline.append(segment_line)
+        audio_features = multimodal_payload.get("audio_features") or {}
+        audio_context = []
+        if audio_features:
+            audio_context.append(
+                "Audio interaction indicators: "
+                f"turns={audio_features.get('turn_count') or 0}, "
+                f"questions={audio_features.get('question_count') or 0}, "
+                f"open_questions={audio_features.get('open_question_count') or 0}."
+            )
+        if lesson_timeline or audio_context:
+            sections = []
+            if lesson_timeline:
+                sections.append("Lesson-wide evidence timeline:\n" + "\n".join(lesson_timeline))
+            if audio_context:
+                sections.append("\n".join(audio_context))
+            multimodal_context = "\n\n".join(sections)
     prompt = f"""
 Analyze the classroom frames below and score the teacher on a 1-10 scale for each rubric element.
 
@@ -17386,23 +17492,27 @@ Rubric elements:
 
 {focus_text}
 
+{multimodal_context}
+
 Requirements:
 - Use the timestamps provided with each frame.
 - Base every observation on the provided evidence only.
 - Keep observations concrete and specific to what is visible.
-- Make the summary feel like an administrator's classroom observation summary, not a technical model report.
-- If priority rubric elements are present, lead with them in the summary, strengths, growth areas, and recommendations.
-- For each element, include 1-2 timestamped evidence segments tied to the sampled frames when possible.
-- Include 2-3 targeted recommendations tied to timestamps and linked elements.
+- Treat timeline and transcript context as lesson-wide coverage, not isolated snapshots.
+- Use correlation-only language for effect signals (for example: "co-occurred with", "was followed by").
+- If priority rubric elements are present, lead with them in summary and recommendations.
+- For each element, include 1-2 timestamped evidence segments tied to lesson evidence when possible.
+- Include 2-3 recommendations only when confidence is sufficient.
+- Avoid judgmental labels and compliance tone.
 
 Return JSON with this exact shape:
 {{
-  "summary": "2-4 sentence lesson summary grounded in the sampled frames.",
+  "summary": "3-5 sentence lesson summary grounded in the lesson evidence.",
   "recommendations": [
     {{
       "start_sec": 90,
       "end_sec": 120,
-      "text": "Concrete coaching recommendation grounded in visible evidence.",
+      "text": "Concrete coaching recommendation grounded in lesson evidence.",
       "linked_element_id": "2b"
     }}
   ],
@@ -17540,6 +17650,7 @@ async def analyze_frames_with_ai(
                 elements_to_analyze,
                 focus_instruction=combined_instruction,
                 language=language,
+                multimodal_payload=multimodal_payload,
             )
             normalized = _normalize_model_analysis(
                 payload,
@@ -17601,25 +17712,25 @@ def generate_mock_scores(elements: List[dict], language: str = "en") -> List[dic
     scores = []
     if _is_hebrew_language(language):
         fallback_actions = [
-            "נראה מודלינג של המורה, אך בדיקות הבנה עקביות לא בלטו במידה מספקת במדגם הרגעים שנבדק.",
+            "נראה מודלינג של המורה, אך בדיקות הבנה עקביות עדיין לא בלטו במידה מספקת בראיות השיעור.",
             "נראו סימנים להשתתפות תלמידים, אך דפוסי מעורבות רחבים יותר לא היו ברורים די הצורך.",
-            "שגרות הכיתה נראו יציבות, אך המעברים ובדיקות התגובה דורשים ראיות חזותיות ברורות יותר.",
+            "שגרות הכיתה נראו יציבות, אך המעברים ובדיקות התגובה עדיין דורשים ראיות ברורות יותר.",
             "קצב ההוראה נראה סדור, אך הזדמנויות לחשיבה מעמיקה של תלמידים לא בלטו באופן מספק.",
         ]
     else:
         fallback_actions = [
-            "Teacher modeling was visible, but checks for understanding were not consistently evident in sampled frames.",
+            "Teacher modeling was visible, but checks for understanding were not yet consistently evident across the lesson evidence reviewed.",
             "Student participation cues were visible, though broader engagement routines were not consistently clear.",
-            "Classroom routines appeared stable, but transitions and response checks need stronger visual evidence.",
+            "Classroom routines appeared stable, but transitions and response checks still need stronger corroborating evidence.",
             "Instructional pacing looked steady, though opportunities for deeper student thinking were not clearly visible.",
         ]
     for idx, element in enumerate(elements):
         score = round(random.uniform(5.2, 7.4), 1)
         observation = fallback_actions[idx % len(fallback_actions)]
         primary_observation = (
-            f"נמצאה ראיה חלקית בלבד עבור {element['name']} במדגם הרגעים שנבדק."
+            f"נמצאה ראיה חלקית בלבד עבור {element['name']} בראיות השיעור שנבדקו."
             if _is_hebrew_language(language)
-            else f"Visible evidence for {element['name'].lower()} was limited to sampled frames."
+            else f"The lesson evidence reviewed for {element['name'].lower()} was still partial."
         )
         scores.append(
             {
@@ -17642,32 +17753,687 @@ def _format_timestamp(seconds: int) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def _build_recommendation_text(element_name: str, observation: str) -> str:
+def _format_timestamp_range(start_sec: float, end_sec: float) -> str:
+    start = int(max(0.0, float(start_sec or 0.0)))
+    end = int(max(start, float(end_sec or start)))
+    return f"{_format_timestamp(start)}–{_format_timestamp(end)}"
+
+
+def _primary_evidence_segment(item: dict) -> Optional[dict]:
+    for segment in item.get("evidence_segments") or []:
+        summary = str(segment.get("summary") or "").strip()
+        if summary:
+            return segment
+    return None
+
+
+def _evidence_detail_text(item: dict, language: str = "en") -> str:
+    segment = _primary_evidence_segment(item)
+    if segment:
+        summary = _normalize_analysis_wording(segment.get("summary"), language=language)
+        if summary:
+            return summary
+    observations = [
+        _normalize_analysis_wording(observation, language=language)
+        for observation in (item.get("observations") or [])
+        if str(observation).strip()
+    ]
+    return observations[0] if observations else ""
+
+
+def _build_observation_area_line(
+    item: dict,
+    label: str,
+    language: str = "en",
+) -> str:
+    detail = _evidence_detail_text(item, language=language)
+    segment = _primary_evidence_segment(item)
+    if segment and detail:
+        time_range = _format_timestamp_range(
+            float(segment.get("start_sec", 0.0) or 0.0),
+            float(segment.get("end_sec", segment.get("start_sec", 0.0)) or 0.0),
+        )
+        return f"{label}: {item['element_name']} - {detail.rstrip('.')} ({time_range})"
+    if detail:
+        return f"{label}: {item['element_name']} - {detail.rstrip('.')}"
+    return f"{label}: {item['element_name']}"
+
+
+def _build_evidence_highlight(item: dict, language: str = "en") -> Optional[str]:
+    segment = _primary_evidence_segment(item)
+    if not segment:
+        return None
+    summary = _normalize_analysis_wording(segment.get("summary"), language=language)
+    if not summary:
+        return None
+    time_range = _format_timestamp_range(
+        float(segment.get("start_sec", 0.0) or 0.0),
+        float(segment.get("end_sec", segment.get("start_sec", 0.0)) or 0.0),
+    )
+    return f"[{time_range}] {item['element_name']}: {summary.rstrip('.')}"
+
+
+def _build_recommendation_text(
+    element_name: str,
+    observation: str,
+    evidence_summary: Optional[str] = None,
+) -> str:
+    evidence_hint = str(evidence_summary or observation or "").lower()
     observation_lower = observation.lower()
     element_lower = element_name.lower()
     if "question" in observation_lower or "question" in element_lower:
-        return f"Increase probing questions and wait time to strengthen {element_name.lower()}."
+        return (
+            f"Deepen {element_name.lower()} in this stretch by planning one probing follow-up, "
+            "protecting 3-5 seconds of wait time, and requiring at least two student explanations before closing the exchange."
+        )
     if "engagement" in observation_lower or "participation" in observation_lower:
-        return f"Broaden participation routines so more students contribute during {element_name.lower()}."
+        return (
+            f"Widen {element_name.lower()} here by inserting think time or turn-and-talk first, "
+            "then pulling responses from multiple parts of the room so more students contribute before moving on."
+        )
     if "routine" in observation_lower or "transition" in observation_lower:
-        return f"Tighten transitions and reinforce routines to improve {element_name.lower()}."
-    if "feedback" in observation_lower:
-        return f"Make feedback more explicit and actionable to strengthen {element_name.lower()}."
-    return f"Strengthen {element_name.lower()} with clearer modeling, checks for understanding, and visible student response routines."
+        return (
+            f"Reset {element_name.lower()} before the next transition by naming the expected routine, "
+            "narrating the first compliant moves, and holding the release until the room is ready."
+        )
+    if "feedback" in observation_lower or "success criteria" in evidence_hint:
+        return (
+            f"Make {element_name.lower()} more actionable in this moment by stating the success criteria, "
+            "giving one specific next step, and checking that students can apply it immediately."
+        )
+    return (
+        f"Make {element_name.lower()} more visible in this stretch by modeling the move, "
+        "checking for understanding before advancing, and requiring a clear student response."
+    )
 
 
-def _build_recommendation_text_hebrew(element_name: str, observation: str) -> str:
+def _build_recommendation_text_hebrew(
+    element_name: str,
+    observation: str,
+    evidence_summary: Optional[str] = None,
+) -> str:
+    evidence_hint = str(evidence_summary or observation or "").lower()
     observation_lower = observation.lower()
     element_lower = element_name.lower()
     if "question" in observation_lower or "שאל" in observation_lower or "question" in element_lower:
-        return f"להעמיק את איכות השאלות ולהאריך זמן המתנה כדי לחזק את {element_name.lower()}."
+        return (
+            f"להעמיק את {element_name.lower()} ברגע הזה באמצעות שאלת המשך מתוכננת, "
+            "זמן המתנה של 3-5 שניות ודרישה לשתי תשובות תלמידים לפני סגירת הדיון."
+        )
     if "engagement" in observation_lower or "participation" in observation_lower or "מעורב" in observation_lower:
-        return f"להרחיב את מעגל ההשתתפות כדי שיותר תלמידים ייקחו חלק בתוך {element_name.lower()}."
+        return (
+            f"להרחיב את {element_name.lower()} בשלב הזה באמצעות זמן חשיבה או שיח בזוגות, "
+            "ואז למשוך קולות מכמה אזורים בכיתה לפני המעבר הלאה."
+        )
     if "routine" in observation_lower or "transition" in observation_lower or "שגר" in observation_lower or "מעבר" in observation_lower:
-        return f"לחדד מעברים ושגרות כדי לחזק את {element_name.lower()}."
-    if "feedback" in observation_lower or "משוב" in observation_lower:
-        return f"להפוך את המשוב למדויק וישים יותר כדי לחזק את {element_name.lower()}."
-    return f"לחזק את {element_name.lower()} באמצעות מודלינג ברור יותר, בדיקות הבנה עקביות ותגובות תלמידים גלויות."
+        return (
+            f"לחדד את {element_name.lower()} לפני המעבר הבא באמצעות ניסוח מפורש של השגרה, "
+            "נרמול הצעדים הראשונים של התלמידים והשהיית ההמשך עד שהכיתה מתאפסת."
+        )
+    if "feedback" in observation_lower or "משוב" in observation_lower or "success criteria" in evidence_hint:
+        return (
+            f"להפוך את {element_name.lower()} לישימה יותר ברגע הזה באמצעות ניסוח קריטריוני ההצלחה, "
+            "מתן צעד הבא ברור ובדיקה שהתלמידים יודעים ליישם אותו מייד."
+        )
+    return (
+        f"לחזק את {element_name.lower()} בקטע הזה באמצעות מודלינג ברור, "
+        "בדיקת הבנה לפני ההתקדמות ודרישה לתגובה תלמידית גלויה."
+    )
+
+
+_CANONICAL_OUTPUT_ORDER_EN = [
+    "Instructional Snapshot",
+    "Strengths to Keep and Build On",
+    "Primary Growth Focus",
+    "Evidence-Based Observation Highlights",
+    "Actionable Next Steps",
+    "Rubric-Aligned Interpretation",
+    "Longitudinal Insight",
+    "Reflection Prompts",
+]
+
+_CANONICAL_OUTPUT_ORDER_HE = [
+    "תמונת הוראה קצרה",
+    "חוזקות לשימור ולהעמקה",
+    "מוקד צמיחה מרכזי",
+    "הדגשות תצפית מבוססות ראיות",
+    "צעדים מעשיים להמשך",
+    "פרשנות מותאמת לרובריקה",
+    "תובנה לאורך זמן",
+    "שאלות לרפלקציה",
+]
+
+
+def _dedupe_strings(values: List[str], limit: int) -> List[str]:
+    output: List[str] = []
+    seen = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        output.append(text)
+        if len(output) >= limit:
+            break
+    return output
+
+
+def _infer_cognitive_opportunities(item: dict, language: str = "en") -> List[str]:
+    source = " ".join(
+        [
+            str(item.get("element_name") or ""),
+            " ".join(str(obs or "") for obs in (item.get("observations") or [])),
+            " ".join(str((seg or {}).get("summary") or "") for seg in (item.get("evidence_segments") or [])),
+        ]
+    ).lower()
+
+    opportunities: List[str] = []
+    if any(token in source for token in ["question", "discussion", "dialog", "שאל", "דיון", "שיח"]):
+        opportunities.extend(["process", "talk"])
+    if any(token in source for token in ["apply", "practice", "task", "יישום", "תרגול", "משימה"]):
+        opportunities.append("apply")
+    if any(
+        token in source
+        for token in [
+            "check for understanding",
+            "assessment",
+            "feedback",
+            "understand",
+            "הבנה",
+            "הערכה",
+            "משוב",
+        ]
+    ):
+        opportunities.append("demonstrate understanding")
+    if not opportunities:
+        opportunities.append("process")
+
+    opportunities = _dedupe_strings(opportunities, 4)
+    if _is_hebrew_language(language):
+        map_he = {
+            "process": "לעבד מידע",
+            "apply": "ליישם",
+            "talk": "לדבר ולהסביר",
+            "demonstrate understanding": "להדגים הבנה",
+        }
+        return [map_he.get(value, value) for value in opportunities]
+    return opportunities
+
+
+def _format_opportunity_phrase(opportunities: List[str], language: str = "en") -> str:
+    if not opportunities:
+        if _is_hebrew_language(language):
+            return "לעבד מידע"
+        return "process"
+    if len(opportunities) == 1:
+        return opportunities[0]
+    if _is_hebrew_language(language):
+        return ", ".join(opportunities[:-1]) + f" ו{opportunities[-1]}"
+    return ", ".join(opportunities[:-1]) + f", and {opportunities[-1]}"
+
+
+def _build_four_layer_event(item: dict, language: str = "en") -> dict:
+    segment = _primary_evidence_segment(item) or {}
+    observable = _normalize_analysis_wording(_evidence_detail_text(item, language=language), language=language)
+    if not observable:
+        observable = (
+            "A bounded instructional event was visible in the reviewed lesson evidence."
+            if not _is_hebrew_language(language)
+            else "נראה אירוע הוראתי תחום בתוך ראיות השיעור שנבדקו."
+        )
+    opportunities = _infer_cognitive_opportunities(item, language=language)
+    opportunity_phrase = _format_opportunity_phrase(opportunities, language=language)
+
+    if _is_hebrew_language(language):
+        signal = f"האירוע הופיע יחד עם הזמנה של תלמידים ל{opportunity_phrase}."
+        leverage = (
+            f"מנוף פדגוגי: להפוך את המהלך הזה לעקבי כדי להרחיב ראיות לחשיבה תלמידית ב-{item.get('element_name') or 'המוקד'}."
+        )
+    else:
+        signal = f"This event co-occurred with invitations for students to {opportunity_phrase}."
+        leverage = (
+            f"Pedagogical leverage: make this move more consistent so student thinking is visible in {item.get('element_name') or 'the focus area'}."
+        )
+
+    return {
+        "element_id": item.get("element_id"),
+        "element_name": item.get("element_name"),
+        "score": float(item.get("score", 0.0) or 0.0),
+        "priority": bool(item.get("priority")),
+        "start_sec": float(segment.get("start_sec", 0.0) or 0.0),
+        "end_sec": float(segment.get("end_sec", segment.get("start_sec", 0.0)) or 0.0),
+        "time_range": _format_timestamp_range(
+            float(segment.get("start_sec", 0.0) or 0.0),
+            float(segment.get("end_sec", segment.get("start_sec", 0.0)) or 0.0),
+        ),
+        "observable": observable.rstrip("."),
+        "opportunities": opportunities,
+        "signal": signal.rstrip("."),
+        "leverage": leverage.rstrip("."),
+    }
+
+
+def _growth_focus_priority(
+    item: dict,
+    analysis_context: Optional[dict] = None,
+) -> Tuple[float, float, float, float, float, float]:
+    source = " ".join(
+        [
+            str(item.get("element_name") or ""),
+            " ".join(str(obs or "") for obs in (item.get("observations") or [])),
+        ]
+    ).lower()
+    impact_weight = 1.0
+    if any(token in source for token in ["question", "discussion", "engagement", "assessment", "feedback", "שאל", "דיון", "מעורב", "הבנה", "משוב"]):
+        impact_weight = 2.0
+    persistence = float(len(item.get("evidence_segments") or [])) + float(len(item.get("observations") or [])) * 0.5
+
+    readiness = 1.0
+    active_goals = [str(goal or "").strip().lower() for goal in ((analysis_context or {}).get("active_goals") or [])]
+    element_name = str(item.get("element_name") or "").strip().lower()
+    if element_name and any(element_name in goal for goal in active_goals):
+        readiness = 2.0
+
+    feasibility = 2.0
+    if any(token in source for token in ["policy", "system-wide", "district"]):
+        feasibility = 1.0
+
+    growth_need = max(0.0, 10.0 - float(item.get("score", 0.0) or 0.0))
+    priority_boost = 1.0 if bool(item.get("priority")) else 0.0
+    return (
+        impact_weight,
+        priority_boost,
+        persistence,
+        readiness,
+        feasibility,
+        growth_need,
+    )
+
+
+def _build_primary_growth_focus_line(
+    focus_item: dict,
+    opportunities: List[str],
+    language: str = "en",
+    *,
+    tentative: bool = False,
+) -> str:
+    name = str(focus_item.get("element_name") or focus_item.get("element_id") or "instructional focus").strip()
+    opportunity_phrase = _format_opportunity_phrase(opportunities, language=language)
+    if _is_hebrew_language(language):
+        suffix = " (טיוטה עד לאישור צופה אנושי)." if tentative else "."
+        return f"{name}: להרחיב הזדמנויות של תלמידים ל{opportunity_phrase} באותו מהלך הוראתי{suffix}"
+    suffix = " (tentative, pending human confirmation)." if tentative else "."
+    return f"{name}: expand opportunities for students to {opportunity_phrase} within the same instructional event{suffix}"
+
+
+def _build_action_steps_for_focus(
+    focus_event: dict,
+    provided_recommendations: Optional[List[dict]] = None,
+    language: str = "en",
+) -> List[Dict[str, str]]:
+    focus_name = str(focus_event.get("element_name") or focus_event.get("element_id") or "instructional focus").strip()
+    observable = str(focus_event.get("observable") or "").strip().rstrip(".")
+    time_range = str(focus_event.get("time_range") or "00:00-00:30")
+    opportunities = list(focus_event.get("opportunities") or [])
+    opportunity_phrase = _format_opportunity_phrase(opportunities, language=language)
+
+    preferred_try_this = None
+    focus_element_id = str(focus_event.get("element_id") or "").strip()
+    normalized_recommendations = [item for item in (provided_recommendations or []) if isinstance(item, dict)]
+    prioritized_recommendations = sorted(
+        normalized_recommendations,
+        key=lambda item: (
+            0
+            if focus_element_id and str(item.get("linked_element_id") or "").strip() == focus_element_id
+            else 1,
+            float(item.get("start_sec", 0.0) or 0.0),
+        ),
+    )
+    for item in prioritized_recommendations:
+        if not isinstance(item, dict):
+            continue
+        text = _normalize_analysis_wording(item.get("text") or "", language=language)
+        if text:
+            preferred_try_this = text.rstrip(".")
+            break
+
+    if _is_hebrew_language(language):
+        step_one_try = preferred_try_this or (
+            f"בחלון הזמן {time_range}, תכננו מהלך אחד ברור ב-{focus_name} שיזמין יותר תלמידים ל{opportunity_phrase}."
+        )
+        step_one = {
+            "try_this": step_one_try,
+            "look_for": "לפחות שלושה תלמידים מציגים חשיבה גלויה לפני סגירת המהלך.",
+            "evidence_of_success": "באותו חלון שיעור נראית חלוקת דיבור רחבה יותר בין קבוצות תלמידים.",
+        }
+        step_two = {
+            "try_this": f"סיימו כל מהלך ב-{focus_name} בשאלת המשך אחת שמבקשת הסבר תלמידי.",
+            "look_for": "המורה ממתינה לתגובה וממשיכה מתשובת תלמיד אחד לפחות.",
+            "evidence_of_success": "נוצרת שרשרת תגובות של תלמידים ולא רק תגובה בודדת מהמורה.",
+        }
+        step_three = {
+            "try_this": f"תעדו בסוף השיעור שתי דוגמאות קצרות שבהן {focus_name} הוביל לחשיבה תלמידית.",
+            "look_for": "הדוגמאות נקשרות לרגעים מוגדרים מהווידאו.",
+            "evidence_of_success": "בשיחת המעקב ניתן להצביע על מהלך שנשמר ועל מהלך שדורש דיוק נוסף.",
+        }
+    else:
+        step_one_try = preferred_try_this or (
+            f"In the {time_range} window, pre-plan one concrete {focus_name} move that invites more students to {opportunity_phrase}."
+        )
+        step_one = {
+            "try_this": step_one_try,
+            "look_for": "At least three students make thinking visible before the move is closed.",
+            "evidence_of_success": "Within that lesson stretch, participation is distributed across groups rather than concentrated in one cluster.",
+        }
+        step_two = {
+            "try_this": f"End each {focus_name} move with one follow-up prompt that asks for student explanation.",
+            "look_for": "The teacher pauses for response time and extends at least one student idea.",
+            "evidence_of_success": "A short chain of student responses appears before teacher closure.",
+        }
+        step_three = {
+            "try_this": f"Capture two short post-lesson notes showing where {focus_name} produced visible student thinking.",
+            "look_for": "Each note is tied to a concrete video moment.",
+            "evidence_of_success": "The next coaching conversation can identify one move to keep and one move to refine.",
+        }
+
+    return [step_one, step_two, step_three]
+
+
+def _format_action_step_line(step: Dict[str, str], language: str = "en") -> str:
+    if _is_hebrew_language(language):
+        return (
+            f"נסו זאת -> {step.get('try_this', '').strip()} "
+            f"| מה לחפש -> {step.get('look_for', '').strip()} "
+            f"| עדות להצלחה -> {step.get('evidence_of_success', '').strip()}"
+        ).strip()
+    return (
+        f"Try This -> {step.get('try_this', '').strip()} "
+        f"| Look For -> {step.get('look_for', '').strip()} "
+        f"| Evidence of Success -> {step.get('evidence_of_success', '').strip()}"
+    ).strip()
+
+
+def _build_deferral_reasons(
+    element_scores: List[dict],
+    analysis_confidence: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    if not analysis_confidence:
+        return []
+    reasons: List[str] = []
+    confidence = float((analysis_confidence or {}).get("overall", 0.0) or 0.0)
+    degradation = list((analysis_confidence or {}).get("degradation_reasons") or [])
+    evidence_count = sum(len(item.get("evidence_segments") or []) for item in element_scores or [])
+    scores = [float(item.get("score", 0.0) or 0.0) for item in element_scores or [] if item.get("score") is not None]
+
+    if confidence > 0 and confidence < 45.0:
+        reasons.append("overall_confidence_is_low")
+    if evidence_count <= 0:
+        reasons.append("student_response_data_is_sparse")
+    elif evidence_count < 2 and confidence > 0 and confidence < 60.0:
+        reasons.append("student_response_data_is_sparse")
+    if "audio_unavailable" in degradation and any(
+        token in " ".join(str(item.get("element_name") or "").lower() for item in element_scores or [])
+        for token in ["question", "discussion", "engagement", "שאל", "דיון", "מעורב"]
+    ) and confidence > 0 and confidence < 70.0:
+        reasons.append("missing_audio_for_student_response_signals")
+    if len(scores) >= 2 and (max(scores) - min(scores)) >= 2.8 and confidence < 70.0:
+        reasons.append("signals_are_mixed")
+    return _dedupe_strings(reasons, 4)
+
+
+def _build_deferral_note(
+    deferral_reasons: List[str],
+    language: str = "en",
+) -> Optional[str]:
+    if not deferral_reasons:
+        return None
+    if _is_hebrew_language(language):
+        return (
+            "דחייה מקצועית: בסיס הראיות הנוכחי חלקי ולכן מוצעות שתי פרשנויות אפשריות - "
+            "1) דפוס ההוראה הגביל זמנית את נראות תגובות התלמידים; "
+            "2) זווית ההקלטה או איכות הקול הגבילו את היכולת לאסוף אותות עקביים. "
+            "נדרש שיקול דעת של צופה אנושי לפני קביעת מהלך ליווי."
+        )
+    return (
+        "Professional deferral: the current evidence base is partial, so two interpretations remain plausible - "
+        "1) the instructional move temporarily narrowed visible student response signals; "
+        "2) camera or audio conditions limited what can be confirmed. "
+        "A human observer should choose the interpretation that best fits the full lesson context."
+    )
+
+
+def _build_canonical_review_output(
+    element_scores: List[dict],
+    priority_element_ids: Optional[List[str]] = None,
+    focus_note: Optional[str] = None,
+    analysis_confidence: Optional[Dict[str, Any]] = None,
+    analysis_context: Optional[dict] = None,
+    provided_recommendations: Optional[List[dict]] = None,
+    language: str = "en",
+) -> Dict[str, Any]:
+    priority_set = set(priority_element_ids or [])
+    ranked = sorted(
+        element_scores or [],
+        key=lambda item: (
+            0 if (bool(item.get("priority")) or item.get("element_id") in priority_set) else 1,
+            -float(item.get("score", 0.0) or 0.0),
+            -float(item.get("confidence", 0.0) or 0.0),
+        ),
+    )
+    events = [_build_four_layer_event(item, language=language) for item in ranked]
+    events = [event for event in events if event.get("observable")]
+
+    opportunities_seen = _dedupe_strings(
+        [op for event in events for op in (event.get("opportunities") or [])],
+        4,
+    )
+    opportunity_phrase = _format_opportunity_phrase(opportunities_seen, language=language)
+
+    snapshot_sentences: List[str] = []
+    if _is_hebrew_language(language):
+        if events:
+            snapshot_sentences.append(f"בקטע {events[0]['time_range']} נצפה: {events[0]['observable']}.")
+        if len(events) > 1:
+            snapshot_sentences.append(f"בהמשך בקטע {events[1]['time_range']} נצפה: {events[1]['observable']}.")
+        snapshot_sentences.append(f"לאורך הראיות שנבדקו, תלמידים הוזמנו ל{opportunity_phrase}.")
+        snapshot_sentences.append("אותות השפעה זוהו כקורלציות בלבד: מהלכי הוראה הופיעו יחד עם שינויים בנראות תגובות תלמידים.")
+        snapshot_sentences.append("פרשנות פדגוגית: יש כאן מנוף לשיפור מהלך ההוראה תוך שמירה על שיקול דעת אנושי.")
+        if focus_note:
+            snapshot_sentences.append(f"הערת מוקד מהצופה: {str(focus_note).strip().rstrip('.')}.")
+    else:
+        if events:
+            snapshot_sentences.append(f"In {events[0]['time_range']}, the reviewed lesson evidence shows: {events[0]['observable']}.")
+        if len(events) > 1:
+            snapshot_sentences.append(f"Later in {events[1]['time_range']}, the evidence shows: {events[1]['observable']}.")
+        snapshot_sentences.append(f"Across the reviewed evidence, students were invited to {opportunity_phrase}.")
+        snapshot_sentences.append("Instructional effect signals are treated as correlation only: teacher moves co-occurred with shifts in visible student response.")
+        snapshot_sentences.append("Pedagogical interpretation: this pattern creates leverage for the next coaching cycle and remains fully human-overrideable.")
+        if focus_note:
+            snapshot_sentences.append(f"Observer focus note: {str(focus_note).strip().rstrip('.')}.")
+    instructional_snapshot = " ".join(_dedupe_strings(snapshot_sentences, 6))
+
+    strength_items = sorted(
+        ranked,
+        key=lambda item: (
+            -float(item.get("score", 0.0) or 0.0),
+            -(1 if (bool(item.get("priority")) or item.get("element_id") in priority_set) else 0),
+        ),
+    )[:3]
+    strengths_to_keep = _dedupe_strings(
+        [
+            (
+                f"[{_build_four_layer_event(item, language=language)['time_range']}] {item.get('element_name')}: "
+                f"{_build_four_layer_event(item, language=language)['observable']}."
+            )
+            for item in strength_items
+        ],
+        3,
+    )
+
+    growth_candidates = sorted(
+        ranked,
+        key=lambda item: _growth_focus_priority(
+            {
+                **item,
+                "priority": bool(item.get("priority")) or item.get("element_id") in priority_set,
+            },
+            analysis_context=analysis_context,
+        ),
+        reverse=True,
+    )
+    focus_item = growth_candidates[0] if growth_candidates else (ranked[0] if ranked else {})
+    focus_event = _build_four_layer_event(focus_item, language=language) if focus_item else {}
+
+    deferral_reasons = _build_deferral_reasons(element_scores, analysis_confidence=analysis_confidence)
+    deferral_note = _build_deferral_note(deferral_reasons, language=language)
+    primary_growth_focus = _build_primary_growth_focus_line(
+        focus_item,
+        list(focus_event.get("opportunities") or opportunities_seen),
+        language=language,
+        tentative=bool(deferral_note),
+    )
+
+    evidence_highlights = _dedupe_strings(
+        [
+            (
+                (
+                    f"[{event['time_range']}] שכבה 1 - פעולות נצפות: {event['observable']}. "
+                    f"שכבה 2 - הזדמנות קוגניטיבית לתלמידים: תלמידים הוזמנו ל{_format_opportunity_phrase(event['opportunities'], language=language)}. "
+                    f"שכבה 3 - אותות השפעה הוראתיים: {event['signal']}. "
+                    f"שכבה 4 - פרשנות פדגוגית: {event['leverage']}."
+                    if _is_hebrew_language(language)
+                    else (
+                        f"[{event['time_range']}] Layer 1 - Observable Actions: {event['observable']}. "
+                        f"Layer 2 - Student Cognitive Opportunity: students were invited to {_format_opportunity_phrase(event['opportunities'], language=language)}. "
+                        f"Layer 3 - Instructional Effect Signals: {event['signal']}. "
+                        f"Layer 4 - Pedagogical Interpretation: {event['leverage']}."
+                    )
+                )
+            )
+            for event in events
+        ],
+        5,
+    )
+    if len(evidence_highlights) < 3:
+        fallback_highlight = (
+            "Layered evidence is currently partial; additional observer review of full-lesson context is recommended."
+            if not _is_hebrew_language(language)
+            else "הראיות הרב-שכבתיות כרגע חלקיות, ולכן מומלץ להשלים בחינה אנושית של הקשר השיעורי המלא."
+        )
+        while len(evidence_highlights) < 3:
+            evidence_highlights.append(fallback_highlight)
+
+    actionable_steps_structured = []
+    actionable_next_step_lines: List[str] = []
+    if not deferral_note:
+        actionable_steps_structured = _build_action_steps_for_focus(
+            focus_event,
+            provided_recommendations=provided_recommendations,
+            language=language,
+        )[:3]
+        actionable_next_step_lines = [_format_action_step_line(step, language=language) for step in actionable_steps_structured]
+
+    if _is_hebrew_language(language):
+        rubric_aligned_interpretation = (
+            f"הפרשנות המותאמת לרובריקה מצביעה על התאמה בולטת ל-{focus_item.get('element_name') or 'מוקד ההוראה'}. "
+            "הפרשנות זמנית ונועדה לתמוך בשיקול דעת צופה אנושי."
+        )
+    else:
+        rubric_aligned_interpretation = (
+            f"Rubric-aligned interpretation: observed instructional events align most directly to {focus_item.get('element_name') or 'the instructional focus'}. "
+            "This interpretation is provisional and intended to support human observer judgment."
+        )
+
+    longitudinal_candidates = list((analysis_context or {}).get("goal_progress_signals") or [])
+    longitudinal_insight = None
+    for item in longitudinal_candidates:
+        summary = str((item or {}).get("progress_summary") or "").strip()
+        title = str((item or {}).get("title") or "").strip()
+        if summary:
+            longitudinal_insight = f"{title}: {summary}".strip(": ")
+            break
+    if not longitudinal_insight:
+        continuity = [str(line or "").strip() for line in ((analysis_context or {}).get("conference_continuity_lines") or []) if str(line or "").strip()]
+        if continuity:
+            longitudinal_insight = continuity[0]
+    if not longitudinal_insight:
+        longitudinal_insight = (
+            "No prior multi-lesson evidence pattern is currently available in this record set."
+            if not _is_hebrew_language(language)
+            else "במערך הרשומות הנוכחי עדיין אין דפוס רב-שיעורי זמין."
+        )
+
+    if _is_hebrew_language(language):
+        reflection_prompts = [
+            "איזה רגע ספציפי מהווידאו תרצו לאשר או לאתגר לפני קביעת המהלך הבא?",
+            "איזה סימן תלמידי נראה לעין ייחשב מבחינתכם כעדות להתקדמות בתוך שבוע?",
+        ]
+        if deferral_note:
+            reflection_prompts.append("איזו משתי הפרשנויות הסבירות מתאימה יותר להקשר הכיתתי המלא לדעתכם?")
+    else:
+        reflection_prompts = [
+            "Which specific video moment would you confirm or challenge before finalizing the next coaching move?",
+            "What visible student signal would count as one-week progress in your context?",
+        ]
+        if deferral_note:
+            reflection_prompts.append("Which of the two plausible interpretations fits the full classroom context best in your judgment?")
+    reflection_prompts = _dedupe_strings(reflection_prompts, 3)
+
+    order = _CANONICAL_OUTPUT_ORDER_HE if _is_hebrew_language(language) else _CANONICAL_OUTPUT_ORDER_EN
+    section_five_lines = actionable_next_step_lines or (
+        ["Deferred: recommendations are intentionally withheld until ambiguity is resolved by human review."]
+        if not _is_hebrew_language(language)
+        else ["דחייה מקצועית: צעדי פעולה הושהו עד להכרעת פרשנות אנושית."]
+    )
+
+    full_review_lines: List[str] = []
+    full_review_lines.append(f"1. {order[0]}")
+    full_review_lines.append(instructional_snapshot)
+    full_review_lines.append("")
+    full_review_lines.append(f"2. {order[1]}")
+    full_review_lines.extend([f"- {line}" for line in strengths_to_keep[:3]])
+    full_review_lines.append("")
+    full_review_lines.append(f"3. {order[2]}")
+    full_review_lines.append(primary_growth_focus)
+    full_review_lines.append("")
+    full_review_lines.append(f"4. {order[3]}")
+    full_review_lines.extend([f"- {line}" for line in evidence_highlights[:5]])
+    full_review_lines.append("")
+    full_review_lines.append(f"5. {order[4]}")
+    full_review_lines.extend([f"- {line}" for line in section_five_lines[:3]])
+    full_review_lines.append("")
+    full_review_lines.append(f"6. {order[5]}")
+    full_review_lines.append(rubric_aligned_interpretation)
+    full_review_lines.append("")
+    full_review_lines.append(f"7. {order[6]}")
+    full_review_lines.append(longitudinal_insight)
+    full_review_lines.append("")
+    full_review_lines.append(f"8. {order[7]}")
+    full_review_lines.extend([f"- {line}" for line in reflection_prompts[:3]])
+    if deferral_note:
+        full_review_lines.append("")
+        full_review_lines.append(
+            f"Deferral Note: {deferral_note}"
+            if not _is_hebrew_language(language)
+            else f"הערת דחייה מקצועית: {deferral_note}"
+        )
+
+    return {
+        "instructional_snapshot": instructional_snapshot,
+        "strengths_to_keep_and_build_on": strengths_to_keep[:3],
+        "primary_growth_focus": primary_growth_focus,
+        "evidence_based_observation_highlights": evidence_highlights[:5],
+        "actionable_next_steps_structured": actionable_steps_structured[:3],
+        "actionable_next_steps": actionable_next_step_lines[:3],
+        "rubric_aligned_interpretation": rubric_aligned_interpretation,
+        "longitudinal_insight": longitudinal_insight,
+        "reflection_prompts": reflection_prompts[:3],
+        "deferral_note": deferral_note,
+        "output_order": list(order),
+        "full_review_text": "\n".join(full_review_lines).strip(),
+    }
 
 
 def _score_priority_rank(item: dict, priority_element_ids: Optional[List[str]] = None) -> Tuple[int, float]:
@@ -17767,41 +18533,19 @@ def build_observation_summary_packet(
     priority_element_ids: Optional[List[str]] = None,
     focus_note: Optional[str] = None,
     analysis_confidence: Optional[Dict[str, Any]] = None,
+    analysis_context: Optional[dict] = None,
+    provided_recommendations: Optional[List[dict]] = None,
     language: str = "en",
 ) -> Dict[str, Any]:
-    priority_set = set(priority_element_ids or [])
-    ranked_strengths = sorted(
-        [es for es in element_scores if es.get("score", 0) >= 7.0],
-        key=lambda item: _score_priority_rank(item, priority_element_ids),
-    )[:3]
-    ranked_growth = sorted(
-        [es for es in element_scores if es.get("score", 0) < 7.0],
-        key=lambda item: (0 if (bool(item.get("priority")) or item.get("element_id") in priority_set) else 1, item.get("score", 0)),
-    )[:3]
-
-    def _format_area(item: dict) -> str:
-        observation = str((item.get("observations") or [""])[0]).strip()
-        label = (
-            "מוקד מועדף"
-            if _is_hebrew_language(language) and (bool(item.get("priority")) or item.get("element_id") in priority_set)
-            else "תחום להתבוננות"
-            if _is_hebrew_language(language)
-            else _observation_focus_label(item, priority_element_ids)
-        )
-        if observation:
-            return f"{label}: {item['element_name']} - {observation.rstrip('.')}"
-        return f"{label}: {item['element_name']}"
-
-    priority_alignment: List[str] = []
-    for item in element_scores:
-        if item.get("element_id") not in priority_set and not item.get("priority"):
-            continue
-        score = float(item.get("score", 0.0))
-        if _is_hebrew_language(language):
-            direction = "מהווה נקודת חוזק" if score >= 7.0 else "דורש תשומת לב פדגוגית"
-        else:
-            direction = "currently strong" if score >= 7.0 else "needs coaching attention"
-        priority_alignment.append(f"{item['element_name']}: {direction} ({score:.1f}/10)")
+    canonical = _build_canonical_review_output(
+        element_scores,
+        priority_element_ids=priority_element_ids,
+        focus_note=focus_note,
+        analysis_confidence=analysis_confidence,
+        analysis_context=analysis_context,
+        provided_recommendations=provided_recommendations,
+        language=language,
+    )
 
     confidence_note = None
     degradation_reasons = ((analysis_confidence or {}).get("degradation_reasons") or [])
@@ -17818,15 +18562,30 @@ def build_observation_summary_packet(
                 if _is_hebrew_language(language)
                 else "This observation was completed with partial evidence and should be reviewed alongside the video."
             )
+    if canonical.get("deferral_note"):
+        confidence_note = (
+            f"{confidence_note} {canonical['deferral_note']}".strip()
+            if confidence_note
+            else str(canonical["deferral_note"])
+        )
 
     return {
-        "executive_summary": summary_text,
-        "top_strengths": [_format_area(item) for item in ranked_strengths],
-        "growth_areas": [_format_area(item) for item in ranked_growth],
-        "coaching_actions": recommendations[:3],
-        "priority_alignment": priority_alignment[:3],
+        "executive_summary": canonical["instructional_snapshot"],
+        "top_strengths": canonical["strengths_to_keep_and_build_on"][:3],
+        "growth_areas": [canonical["primary_growth_focus"]],
+        "coaching_actions": canonical["actionable_next_steps"][:3],
+        "priority_alignment": [canonical["rubric_aligned_interpretation"]],
+        "evidence_highlights": canonical["evidence_based_observation_highlights"][:5],
         "focus_note": focus_note or None,
         "confidence_note": confidence_note,
+        "primary_growth_focus": canonical["primary_growth_focus"],
+        "longitudinal_insight": canonical["longitudinal_insight"],
+        "reflection_prompts": canonical["reflection_prompts"][:3],
+        "actionable_next_steps_structured": canonical["actionable_next_steps_structured"][:3],
+        "full_review_text": canonical["full_review_text"],
+        "output_order": canonical["output_order"],
+        "deferral_note": canonical.get("deferral_note"),
+        "reasoning_model": "cognivio_four_layer_v1",
     }
 
 
@@ -17851,8 +18610,21 @@ def _localize_element_scores_for_response(
             language,
         )
         localized["observations"] = [
-            _localize_observation_text(observation, language)
+            _normalize_analysis_wording(
+                _localize_observation_text(observation, language),
+                language=language,
+            )
             for observation in list(item.get("observations") or [])
+        ]
+        localized["evidence_segments"] = [
+            {
+                **segment,
+                "summary": _normalize_analysis_wording(
+                    _localize_observation_text(segment.get("summary"), language),
+                    language=language,
+                ),
+            }
+            for segment in list(item.get("evidence_segments") or [])
         ]
         localized_scores.append(localized)
     return localized_scores
@@ -17869,6 +18641,7 @@ def _enrich_assessment_for_response(
     priority_elements = list(enriched.get("priority_elements") or [])
     focus_note = enriched.get("focus_note")
     analysis_confidence = enriched.get("analysis_confidence") or {}
+    analysis_context_snapshot = enriched.get("analysis_context_snapshot") or {}
     localized_element_scores = _localize_element_scores_for_response(
         enriched.get("element_scores") or [],
         framework_type,
@@ -17876,7 +18649,10 @@ def _enrich_assessment_for_response(
     )
     enriched["element_scores"] = localized_element_scores
 
-    stored_recommendations = list(enriched.get("recommendations") or [])
+    stored_recommendations = [
+        _normalize_analysis_wording(item, language=display_language) if isinstance(item, str) else item
+        for item in list(enriched.get("recommendations") or [])
+    ]
     should_regenerate_localized_text = display_language != analysis_language or (
         _is_hebrew_language(display_language)
         and _should_regenerate_hebrew_assessment_text(enriched.get("summary"), stored_recommendations)
@@ -17888,6 +18664,8 @@ def _enrich_assessment_for_response(
         priority_element_ids=priority_elements,
         focus_note=focus_note,
         language=display_language,
+        analysis_context=analysis_context_snapshot,
+        analysis_confidence=analysis_confidence,
     )
     localized_recommendations = (
         stored_recommendations
@@ -17898,6 +18676,8 @@ def _enrich_assessment_for_response(
             priority_element_ids=priority_elements,
             focus_note=focus_note,
             language=display_language,
+            analysis_context=analysis_context_snapshot,
+            analysis_confidence=analysis_confidence,
         )
         if localized_element_scores
         else stored_recommendations
@@ -17912,6 +18692,7 @@ def _enrich_assessment_for_response(
         priority_element_ids=priority_elements,
         focus_note=focus_note,
         analysis_confidence=analysis_confidence,
+        analysis_context=analysis_context_snapshot,
         language=display_language,
     )
     enriched.setdefault("priority_elements", priority_elements)
@@ -17919,6 +18700,7 @@ def _enrich_assessment_for_response(
     enriched.setdefault("analysis_confidence", analysis_confidence)
     enriched.setdefault("analysis_modalities_used", list(enriched.get("analysis_modalities_used") or []))
     enriched.setdefault("analysis_language", analysis_language)
+    enriched.setdefault("analysis_context_snapshot", analysis_context_snapshot)
     return enriched
 
 
@@ -17930,92 +18712,17 @@ def generate_summary(
     focus_note: Optional[str] = None,
     language: str = "en",
     analysis_context: Optional[dict] = None,
+    analysis_confidence: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Generate an evidence-grounded summary of the assessment."""
-    if provided_summary:
-        return provided_summary.strip()
-
-    level = get_performance_level(overall_score)
-    strengths = sorted(
-        [es for es in element_scores if es.get("score", 0) >= 7.5],
-        key=lambda item: _score_priority_rank(item, priority_element_ids),
-    )[:3]
-    growth_areas = sorted(
-        [es for es in element_scores if es.get("score", 0) < 6.5],
-        key=lambda item: (0 if (bool(item.get("priority")) or item.get("element_id") in set(priority_element_ids or [])) else 1, item.get("score", 0)),
-    )[:2]
-
-    if _is_hebrew_language(language):
-        level_map = {
-            "excellent": "חזקה מאוד",
-            "needs_improvement": "דורשת שיפור",
-            "critical": "נדרשת התערבות",
-            "distinguished": "מצוין",
-            "proficient": "טוב",
-            "basic": "בסיסי",
-            "unsatisfactory": "דורש שיפור",
-        }
-        summary_parts = [f"התרשמות כללית: {level_map.get(level, level)} (ציון: {overall_score}/10)."]
-    else:
-        summary_parts = [f"Overall performance: {level.replace('_', ' ').title()} (Score: {overall_score}/10)."]
-    if priority_element_ids:
-        focus_names = _priority_focus_names(element_scores, priority_element_ids)
-        if focus_names:
-            if _is_hebrew_language(language):
-                summary_parts.append(f"מוקד התצפית הושם על {', '.join(focus_names[:3])}.")
-            else:
-                summary_parts.append(f"Observation emphasis was placed on {', '.join(focus_names[:3])}.")
-    if focus_note:
-        if _is_hebrew_language(language):
-            summary_parts.append(f"הערת מיקוד לתצפית: {focus_note.rstrip('.')}.")
-        else:
-            summary_parts.append(f"Observation focus note: {focus_note.rstrip('.')}.")
-    priority_focus_sentence = _build_priority_focus_summary_sentence(
+    canonical = _build_canonical_review_output(
         element_scores,
         priority_element_ids=priority_element_ids,
+        focus_note=focus_note,
+        analysis_confidence=analysis_confidence,
+        analysis_context=analysis_context,
         language=language,
     )
-    if priority_focus_sentence:
-        summary_parts.append(priority_focus_sentence)
-
-    if strengths:
-        strength_notes = []
-        for item in strengths:
-            observation = (item.get("observations") or [""])[0].strip()
-            note = item["element_name"]
-            if observation:
-                note = f"{note} ({observation.rstrip('.')})"
-            strength_notes.append(note)
-        if _is_hebrew_language(language):
-            summary_parts.append(f"נקודות החוזקה הבולטות ביותר היו {', '.join(strength_notes)}.")
-        else:
-            summary_parts.append(f"Strongest visible practices were {', '.join(strength_notes)}.")
-
-    if growth_areas:
-        growth_notes = []
-        for item in growth_areas:
-            observation = (item.get("observations") or [""])[0].strip()
-            note = item["element_name"]
-            if observation:
-                note = f"{note} ({observation.rstrip('.')})"
-            growth_notes.append(note)
-        if _is_hebrew_language(language):
-            summary_parts.append(f"תחומי הצמיחה המרכזיים הם {', '.join(growth_notes)}.")
-        else:
-            summary_parts.append(f"Priority growth areas are {', '.join(growth_notes)}.")
-
-    active_goals = [
-        str(item).strip()
-        for item in ((analysis_context or {}).get("active_goals") or [])
-        if str(item).strip()
-    ]
-    if active_goals:
-        if _is_hebrew_language(language):
-            summary_parts.append(f"יעדי הליווי הפעילים כרגע הם {', '.join(active_goals[:2])}.")
-        else:
-            summary_parts.append(f"Current coaching goals are {', '.join(active_goals[:2])}.")
-
-    return " ".join(summary_parts)
+    return canonical["full_review_text"]
 
 
 def generate_recommendations(
@@ -18025,109 +18732,20 @@ def generate_recommendations(
     focus_note: Optional[str] = None,
     language: str = "en",
     analysis_context: Optional[dict] = None,
+    analysis_confidence: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
-    """Generate timestamped, evidence-grounded recommendations."""
-    if provided_recommendations:
-        rendered = []
-        priority_set = set(priority_element_ids or [])
-        element_name_by_id = {
-            str(item.get("element_id") or ""): str(item.get("element_name") or "").strip()
-            for item in element_scores or []
-        }
-        sorted_recommendations = sorted(
-            [item for item in provided_recommendations if isinstance(item, dict)],
-            key=lambda item: (
-                0 if item.get("linked_element_id") in priority_set else 1,
-                float(item.get("start_sec", 0) or 0),
-            ),
-        )
-        for item in sorted_recommendations:
-            text = str(item.get("text") or "").strip()
-            if not text:
-                continue
-            linked_element_id = str(item.get("linked_element_id") or "")
-            is_priority = linked_element_id in priority_set
-            element_name = element_name_by_id.get(linked_element_id)
-            text = _apply_priority_recommendation_context(text, element_name, is_priority, language)
-            start_sec = int(float(item.get("start_sec", 0)))
-            end_sec = int(float(item.get("end_sec", start_sec + 30)))
-            rendered.append(f"[{_format_timestamp(start_sec)}–{_format_timestamp(end_sec)}] {text}")
-        if rendered:
-            rendered = rendered[:3]
-            signal_guidance = [
-                str(item).strip()
-                for item in ((analysis_context or {}).get("signal_summary") or {}).get("guidance", [])
-                if str(item).strip()
-            ]
-            if signal_guidance:
-                if _is_hebrew_language(language):
-                    rendered.append(f"[00:15–00:30] העדפת הסוקרים: {signal_guidance[0].rstrip('.')}.")
-                else:
-                    rendered.append(f"[00:15–00:30] Reviewer guidance: {signal_guidance[0].rstrip('.')}.")
-            return rendered[:3]
-
-    recommendations: List[str] = []
-    priority_set = set(priority_element_ids or [])
-    low_scores = sorted(
-        [es for es in element_scores if es.get("score", 0) < 7.0],
-        key=lambda x: (0 if (bool(x.get("priority")) or x.get("element_id") in priority_set) else 1, x.get("score", 0)),
-    )[:3]
-
-    for idx, es in enumerate(low_scores):
-        segments = es.get("evidence_segments") or []
-        first_segment = segments[0] if segments else None
-        start_sec = int(float(first_segment.get("start_sec", 90 + idx * 150))) if first_segment else 90 + idx * 150
-        end_sec = int(float(first_segment.get("end_sec", start_sec + 30))) if first_segment else start_sec + 30
-        default_observation = (
-            "הראיות שנצפו היו מוגבלות."
-            if _is_hebrew_language(language)
-            else "Visible evidence was limited."
-        )
-        observation = str((es.get("observations") or [default_observation])[0]).strip()
-        is_priority = bool(es.get("priority")) or es.get("element_id") in priority_set
-        if _is_hebrew_language(language):
-            action = _build_recommendation_text_hebrew(es["element_name"], observation)
-            action = _apply_priority_recommendation_context(action, es.get("element_name"), is_priority, language)
-            recommendations.append(
-                f"[{_format_timestamp(start_sec)}–{_format_timestamp(end_sec)}] {action} "
-                f"ראיה שנצפתה: {observation.rstrip('.')}."
-            )
-        else:
-            action = _build_recommendation_text(es["element_name"], observation)
-            action = _apply_priority_recommendation_context(action, es.get("element_name"), is_priority, language)
-            recommendations.append(
-                f"[{_format_timestamp(start_sec)}–{_format_timestamp(end_sec)}] {action} "
-                f"Observed evidence: {observation.rstrip('.')}."
-            )
-
-    if not recommendations:
-        if _is_hebrew_language(language):
-            closing_note = "לשמר את השגרות החזקות שנראו בשיעור ולחזק אותן באמצעות בדיקות הבנה ברורות."
-            if focus_note:
-                closing_note = f"לשמר את השגרות החזקות שנראו בשיעור תוך שמירה על מוקד התצפית: {focus_note.rstrip('.')}."
-        else:
-            closing_note = "Maintain the strongest routines visible in the lesson and reinforce them with explicit checks for understanding."
-            if focus_note:
-                closing_note = f"Maintain the strongest routines visible in the lesson while keeping the observation focus on {focus_note.rstrip('.')}."
-        recommendations.append(f"[00:30–01:00] {closing_note}")
-
-    active_goals = [
-        str(item).strip()
-        for item in ((analysis_context or {}).get("active_goals") or [])
-        if str(item).strip()
-    ]
-    if active_goals:
-        goal_text = active_goals[0]
-        if _is_hebrew_language(language):
-            recommendations.append(
-                f"[01:00–01:20] חברו את המשוב לשיעור ליעד הפעיל: {goal_text}."
-            )
-        else:
-            recommendations.append(
-                f"[01:00–01:20] Connect the next coaching move to the active goal: {goal_text}."
-            )
-
-    return recommendations[:3]
+    canonical = _build_canonical_review_output(
+        element_scores,
+        priority_element_ids=priority_element_ids,
+        focus_note=focus_note,
+        analysis_confidence=analysis_confidence,
+        analysis_context=analysis_context,
+        provided_recommendations=provided_recommendations,
+        language=language,
+    )
+    if canonical.get("deferral_note"):
+        return []
+    return list(canonical.get("actionable_next_steps") or [])[:3]
 
 
 def _clamp_demo_value(value: float, minimum: float, maximum: float) -> float:

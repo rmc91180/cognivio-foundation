@@ -196,6 +196,59 @@ def test_build_privacy_profile_summary_returns_missing_defaults():
     assert profile.needs_refresh is True
 
 
+def test_render_degraded_privacy_assets_prefers_mp4_transcode(monkeypatch, tmp_path):
+    source = tmp_path / "source.mov"
+    source.write_bytes(b"raw-video-bytes")
+    output = tmp_path / "redacted.mp4"
+    thumbnail = tmp_path / "thumb.jpg"
+
+    def _fake_transcode(input_path, output_path):
+        Path(output_path).write_bytes(b"mp4-video-bytes")
+        return {"output_path": output_path, "content_type": "video/mp4"}
+
+    monkeypatch.setattr(server, "transcode_video_asset", _fake_transcode)
+
+    written_thumbs = []
+
+    def _fake_thumbnail(path):
+        target = Path(path)
+        target.write_bytes(b"thumb")
+        written_thumbs.append(str(target))
+
+    monkeypatch.setattr(server, "_write_placeholder_thumbnail", _fake_thumbnail)
+
+    stats = server._render_degraded_privacy_assets(str(source), str(output), str(thumbnail))
+
+    assert stats["runtime_fallback"] == "worker_transcode_only"
+    assert stats["transcode_error"] is None
+    assert output.read_bytes() == b"mp4-video-bytes"
+    assert written_thumbs == [str(thumbnail)]
+
+
+def test_render_degraded_privacy_assets_falls_back_to_copy_when_transcode_fails(monkeypatch, tmp_path):
+    source = tmp_path / "source.mov"
+    source.write_bytes(b"raw-video-bytes")
+    output = tmp_path / "redacted.mp4"
+    thumbnail = tmp_path / "thumb.jpg"
+
+    def _failing_transcode(input_path, output_path):
+        raise RuntimeError("ffmpeg unavailable")
+
+    monkeypatch.setattr(server, "transcode_video_asset", _failing_transcode)
+    monkeypatch.setattr(
+        server,
+        "_write_placeholder_thumbnail",
+        lambda path: Path(path).write_bytes(b"thumb"),
+    )
+
+    stats = server._render_degraded_privacy_assets(str(source), str(output), str(thumbnail))
+
+    assert stats["runtime_fallback"] == "worker_copy_only"
+    assert "ffmpeg unavailable" in (stats.get("transcode_error") or "")
+    assert output.read_bytes() == b"raw-video-bytes"
+    assert thumbnail.exists()
+
+
 def test_build_transcoded_raw_cleanup_fields_shortens_retention_when_processed_asset_exists(monkeypatch):
     monkeypatch.setattr(server, "VIDEO_TRANSCODE_RAW_CLEANUP_ENABLED", True)
     monkeypatch.setattr(server, "VIDEO_TRANSCODE_RAW_RETENTION_HOURS", 24)

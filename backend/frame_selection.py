@@ -184,28 +184,128 @@ def _histogram_correlation(candidate: Dict[str, Any], selected: Dict[str, Any]) 
     return float(cv2.compareHist(hist_a, hist_b, cv2.HISTCMP_CORREL))
 
 
+def _candidate_identifier(candidate: Dict[str, Any]) -> tuple[str, Any]:
+    frame_idx = candidate.get("frame_idx")
+    if frame_idx is not None:
+        try:
+            return ("frame_idx", int(frame_idx))
+        except (TypeError, ValueError):
+            pass
+
+    timestamp = candidate.get("timestamp_sec")
+    if timestamp is not None:
+        try:
+            return ("timestamp_sec", round(float(timestamp), 3))
+        except (TypeError, ValueError):
+            pass
+
+    return ("object", id(candidate))
+
+
+def _can_add_candidate(
+    candidate: Dict[str, Any],
+    selected: List[Dict[str, Any]],
+    min_gap_sec: float,
+) -> bool:
+    timestamp = float(candidate.get("timestamp_sec", 0.0))
+    too_close = any(
+        abs(timestamp - float(existing.get("timestamp_sec", 0.0))) < float(min_gap_sec)
+        for existing in selected
+    )
+    too_similar = any(_histogram_correlation(candidate, existing) > 0.985 for existing in selected)
+    return not too_close and not too_similar
+
+
+def _select_coverage_candidates(
+    candidates: List[Dict[str, Any]],
+    target_count: int,
+    min_gap_sec: float,
+) -> List[Dict[str, Any]]:
+    if not candidates or target_count <= 0:
+        return []
+
+    ordered = sorted(candidates, key=lambda item: float(item.get("timestamp_sec", 0.0)))
+    duration_sec = float(ordered[-1].get("timestamp_sec", 0.0))
+    if duration_sec <= 0:
+        return ordered[:target_count]
+
+    window_count = min(len(ordered), max(1, target_count))
+    window_span = max(duration_sec / window_count, min_gap_sec)
+    selected: List[Dict[str, Any]] = []
+    chosen_ids = set()
+
+    for window_index in range(window_count):
+        start_sec = window_index * window_span
+        end_sec = duration_sec + 0.001 if window_index == window_count - 1 else start_sec + window_span
+        window_candidates = [
+            candidate
+            for candidate in ordered
+            if start_sec <= float(candidate.get("timestamp_sec", 0.0)) <= end_sec
+        ]
+        if not window_candidates:
+            continue
+        ranked = sorted(
+            window_candidates,
+            key=lambda item: (
+                float(item.get("score", 0.0) or 0.0),
+                -abs(float(item.get("timestamp_sec", 0.0)) - ((start_sec + end_sec) / 2.0)),
+            ),
+            reverse=True,
+        )
+        for candidate in ranked:
+            candidate_key = _candidate_identifier(candidate)
+            if candidate_key in chosen_ids:
+                continue
+            if not selected or _can_add_candidate(candidate, selected, min_gap_sec):
+                selected.append(candidate)
+                chosen_ids.add(candidate_key)
+                break
+
+    if len(selected) < target_count:
+        for candidate in ordered:
+            candidate_key = _candidate_identifier(candidate)
+            if candidate_key in chosen_ids:
+                continue
+            if not selected or _can_add_candidate(candidate, selected, min_gap_sec):
+                selected.append(candidate)
+                chosen_ids.add(candidate_key)
+            if len(selected) >= target_count:
+                break
+
+    return selected[:target_count]
+
+
 def select_diverse_frames(
     candidates: List[Dict[str, Any]],
     max_frames: int,
     min_gap_sec: float,
 ) -> List[Dict[str, Any]]:
     selected: List[Dict[str, Any]] = []
+    selected_ids = set()
+    coverage_target = min(max_frames, max(1, int(math.ceil(max_frames * 0.6))))
+
+    for candidate in _select_coverage_candidates(candidates, coverage_target, min_gap_sec):
+        selected.append(candidate)
+        selected_ids.add(_candidate_identifier(candidate))
+
     for candidate in candidates:
         if len(selected) >= max_frames:
             break
-        timestamp = float(candidate.get("timestamp_sec", 0.0))
-        too_close = any(abs(timestamp - float(existing.get("timestamp_sec", 0.0))) < float(min_gap_sec) for existing in selected)
-        too_similar = any(_histogram_correlation(candidate, existing) > 0.985 for existing in selected)
-        if too_close or too_similar:
+        candidate_key = _candidate_identifier(candidate)
+        if candidate_key in selected_ids:
+            continue
+        if not _can_add_candidate(candidate, selected, min_gap_sec):
             continue
         selected.append(candidate)
+        selected_ids.add(candidate_key)
 
     if len(selected) < max_frames:
-        selected_ids = {id(item) for item in selected}
         for candidate in candidates:
             if len(selected) >= max_frames:
                 break
-            if id(candidate) in selected_ids:
+            candidate_key = _candidate_identifier(candidate)
+            if candidate_key in selected_ids:
                 continue
             selected.append(candidate)
+            selected_ids.add(candidate_key)
     return sorted(selected, key=lambda item: item.get("timestamp_sec", 0.0))

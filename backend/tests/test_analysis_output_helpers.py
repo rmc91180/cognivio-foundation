@@ -68,12 +68,14 @@ def test_generate_summary_uses_10_point_thresholds_and_observations():
         focus_note="Pay particular attention to questioning and checks for understanding.",
     )
 
-    assert "Overall performance" in summary
-    assert "Observation emphasis was placed on Questioning" in summary
-    assert "Observation focus note" in summary
-    assert "Within the selected focus, current strengths were Questioning." in summary
-    assert "Strongest visible practices" in summary
-    assert "Priority growth areas" in summary
+    assert summary.startswith("1. Instructional Snapshot")
+    assert "2. Strengths to Keep and Build On" in summary
+    assert "3. Primary Growth Focus" in summary
+    assert "4. Evidence-Based Observation Highlights" in summary
+    assert "5. Actionable Next Steps" in summary
+    assert "6. Rubric-Aligned Interpretation" in summary
+    assert "7. Longitudinal Insight" in summary
+    assert "8. Reflection Prompts" in summary
     assert "Questioning" in summary
     assert "Engagement" in summary
 
@@ -100,10 +102,10 @@ def test_generate_summary_supports_hebrew_output():
         language="he",
     )
 
-    assert "התרשמות כללית" in summary
-    assert "מוקד התצפית" in summary
-    assert "הערת מיקוד לתצפית" in summary
-    assert "בתוך מוקד התצפית" in summary
+    assert summary.startswith("1. תמונת הוראה קצרה")
+    assert "2. חוזקות לשימור ולהעמקה" in summary
+    assert "3. מוקד צמיחה מרכזי" in summary
+    assert "4. הדגשות תצפית מבוססות ראיות" in summary
 
 
 def test_generate_recommendations_uses_evidence_segments_and_not_canned_defaults():
@@ -128,10 +130,11 @@ def test_generate_recommendations_uses_evidence_segments_and_not_canned_defaults
     )
 
     assert recommendations
-    assert recommendations[0].startswith("[01:35–02:05]")
-    assert "Priority focus on Engagement" in recommendations[0]
+    assert recommendations[0].startswith("Try This ->")
+    assert "Look For ->" in recommendations[0]
+    assert "Evidence of Success ->" in recommendations[0]
     assert "Engagement".lower() in recommendations[0].lower()
-    assert "Observed evidence" in recommendations[0]
+    assert "students" in recommendations[0].lower()
     assert "Continue modeling strong routines" not in recommendations[0]
 
 
@@ -158,8 +161,9 @@ def test_generate_recommendations_supports_hebrew_output():
     )
 
     assert recommendations
-    assert "מוקד עדיפות" in recommendations[0]
-    assert "ראיה שנצפתה" in recommendations[0]
+    assert "נסו זאת ->" in recommendations[0]
+    assert "מה לחפש ->" in recommendations[0]
+    assert "עדות להצלחה ->" in recommendations[0]
 
 
 def test_build_focus_instruction_preserves_hebrew_admin_text_without_english_normalization():
@@ -198,8 +202,8 @@ def test_generate_recommendations_prioritizes_admin_pressure_points_when_model_o
         priority_element_ids=["2b"],
     )
 
-    assert recommendations[0].endswith("Increase probing questions and wait time.")
-    assert "Priority focus on Questioning" in recommendations[0]
+    assert recommendations
+    assert "Increase probing questions and wait time" in recommendations[0]
 
 
 def test_normalize_analysis_score_scales_legacy_four_point_scores():
@@ -233,7 +237,7 @@ async def test_analyze_frames_with_ai_marks_multimodal_mode_when_audio_present(m
     monkeypatch.setattr(server, "PAID_ANALYSIS_ALLOWLIST_EMAILS", {"teacher@demo.cognivio.app"})
     monkeypatch.setattr(server, "OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(server, "AsyncOpenAI", object())
-    async def _fake_openai(frames, elements, focus_instruction=None, language="en"):
+    async def _fake_openai(frames, elements, focus_instruction=None, language="en", multimodal_payload=None):
         return {
             "summary": "Teacher models at the board and prompts students to compare strategies.",
             "recommendations": [],
@@ -332,9 +336,10 @@ def test_build_observation_summary_packet_prioritizes_focus_areas():
         analysis_confidence={"degradation_reasons": ["audio_unavailable"]},
     )
 
-    assert packet["executive_summary"].startswith("Students stayed engaged")
+    assert packet["executive_summary"].startswith("In ")
     assert packet["focus_note"] == "Look closely at questioning."
-    assert packet["priority_alignment"][0].startswith("Questioning:")
+    assert packet["primary_growth_focus"]
+    assert packet["priority_alignment"][0].startswith("Rubric-aligned interpretation:")
     assert "Audio was unavailable" in packet["confidence_note"]
 
 
@@ -367,10 +372,10 @@ def test_enrich_assessment_for_response_rebuilds_hebrew_summary_for_english_asse
         response_language="he",
     )
 
-    assert enriched["summary"].startswith("התרשמות כללית")
+    assert enriched["summary"].startswith("1. תמונת הוראה קצרה")
     assert enriched["element_scores"][0]["element_name"] == "שימוש בשאלות ובדיון"
-    assert enriched["observation_summary"]["executive_summary"].startswith("התרשמות כללית")
-    assert enriched["recommendations"]
+    assert enriched["observation_summary"]["full_review_text"].startswith("1. תמונת הוראה קצרה")
+    assert isinstance(enriched["recommendations"], list)
 
 
 def test_enrich_assessment_for_response_regenerates_mixed_hebrew_text_when_english_leaks():
