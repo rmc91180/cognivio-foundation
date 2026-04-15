@@ -1,7 +1,7 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { assessmentApi, exemplarApi, observationApi, recognitionApi, shareAssetApi, videoApi } from "@/lib/api";
+import { assessmentApi, evidenceApi, exemplarApi, observationApi, recognitionApi, shareAssetApi, videoApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { AssessmentFeedbackWidget } from "@/components/assessment/AssessmentFeedbackWidget";
 import { ObservationFocusPanel } from "@/components/assessment/ObservationFocusPanel";
@@ -120,6 +120,10 @@ export function VideoPlayerPage() {
     const remainder = safeSeconds % 60;
     return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
   }, []);
+  const formatClockRange = useCallback(
+    (start, end) => `${formatClock(start)}-${formatClock(end)}`,
+    [formatClock]
+  );
   const formatAnalyzedAt = useCallback(
     (value) => {
       if (!value) return "";
@@ -233,6 +237,11 @@ export function VideoPlayerPage() {
     queryKey: ["assessment", assessmentId],
     enabled: !!assessmentId,
     queryFn: () => assessmentApi.get(assessmentId).then((r) => r.data),
+  });
+  const { data: assessmentEvidenceRes } = useQuery({
+    queryKey: ["assessment-evidence", assessmentId],
+    enabled: Boolean(assessmentId),
+    queryFn: () => evidenceApi.get(assessmentId).then((r) => r.data),
   });
   const assessmentFeedbackEnabled = runtimeConfig.assessmentFeedbackEnabled;
   const { data: assessmentFeedbackRes } = useQuery({
@@ -373,6 +382,50 @@ export function VideoPlayerPage() {
     setExemplarSummary(assessmentRes.summary);
   }, [assessmentRes, exemplarSummary]);
 
+  useEffect(() => {
+    if (summaryNotes.trim() || !observationSummary) return;
+    const generatedNotes = [
+      ...(observationSummary.top_strengths || []).slice(0, 2),
+      ...(observationSummary.growth_areas || []).slice(0, 2),
+    ]
+      .filter(Boolean)
+      .join("\n");
+    if (generatedNotes) {
+      setSummaryNotes(generatedNotes);
+    }
+  }, [observationSummary, summaryNotes]);
+
+  useEffect(() => {
+    if (actionItems.trim()) return;
+    const canonicalActionLines = (observationSummary?.actionable_next_steps_structured || [])
+      .slice(0, 3)
+      .map((step) => {
+        const tryThis = String(step?.try_this || "").trim();
+        const lookFor = String(step?.look_for || "").trim();
+        const evidenceOfSuccess = String(step?.evidence_of_success || "").trim();
+        if (!tryThis || !lookFor || !evidenceOfSuccess) return null;
+        return `${t("videoPlayer.tryThis")} -> ${tryThis} | ${t("videoPlayer.lookFor")} -> ${lookFor} | ${t("videoPlayer.evidenceOfSuccess")} -> ${evidenceOfSuccess}`;
+      })
+      .filter(Boolean);
+    const generatedActions = [
+      ...canonicalActionLines,
+      ...((observationSummary?.coaching_actions || assessmentRes?.recommendations || []).slice(0, 3)),
+      ...recommendedMomentNoteLines.slice(0, 2),
+    ]
+      .filter(Boolean)
+      .join("\n");
+    if (generatedActions) {
+      setActionItems(generatedActions);
+    }
+  }, [
+    actionItems,
+    assessmentRes?.recommendations,
+    observationSummary?.actionable_next_steps_structured,
+    observationSummary?.coaching_actions,
+    recommendedMomentNoteLines,
+    t,
+  ]);
+
   const handleSeek = (seconds) => {
     if (!videoRef.current || typeof seconds !== "number") return;
     videoRef.current.currentTime = seconds;
@@ -382,9 +435,17 @@ export function VideoPlayerPage() {
   const handleGenerateReport = () => {
     const win = window.open("", "_blank");
     if (!win) return;
-    const observations = observationsRes ?? [];
+    const reportTimeline = timelineEntries;
     const assessment = assessmentRes;
-    const reportSummary = observationSummary?.executive_summary || assessment?.summary || "";
+    const reportSummary =
+      observationSummary?.full_review_text ||
+      observationSummary?.executive_summary ||
+      assessment?.summary ||
+      "";
+    const reportPrimaryGrowthFocus = observationSummary?.primary_growth_focus || "";
+    const reportLongitudinalInsight = observationSummary?.longitudinal_insight || "";
+    const reportReflectionPrompts = (observationSummary?.reflection_prompts || []).slice(0, 3);
+    const reportStructuredActions = (observationSummary?.actionable_next_steps_structured || []).slice(0, 3);
     const recommendedMomentsSection = recommendedMomentNoteLines.length
       ? `
           <div class="section">
@@ -418,27 +479,81 @@ export function VideoPlayerPage() {
           </div>
           <div class="section">
             <h2>${t("videoPlayer.reportSummary")}</h2>
-            <p>${reportSummary}</p>
+            <p style="white-space: pre-wrap;">${reportSummary}</p>
             <p>${summaryNotes || ""}</p>
           </div>
+          ${
+            reportPrimaryGrowthFocus
+              ? `
+          <div class="section">
+            <h2>${t("videoPlayer.reportPrimaryGrowthFocus")}</h2>
+            <p>${reportPrimaryGrowthFocus}</p>
+          </div>
+          `
+              : ""
+          }
           <div class="section">
             <h2>${t("videoPlayer.reportObservations")}</h2>
             <ul>
-              ${observations
+              ${reportTimeline
                 .map(
-                  (o) =>
-                    `<li>${o.admin_comment || ""} ${
-                      typeof o.timestamp_seconds === "number"
-                        ? `(${formatClock(o.timestamp_seconds)})`
+                  (entry) =>
+                    `<li>${entry.text || ""} ${
+                      typeof entry.timestamp === "number"
+                        ? `(${
+                            typeof entry.endTimestamp === "number" &&
+                            entry.endTimestamp !== entry.timestamp
+                              ? formatClockRange(entry.timestamp, entry.endTimestamp)
+                              : formatClock(entry.timestamp)
+                          })`
                         : ""
                     }</li>`
                 )
                 .join("")}
             </ul>
           </div>
-          ${recommendedMomentsSection}
+          ${
+            reportStructuredActions.length
+              ? `
           <div class="section">
             <h2>${t("videoPlayer.reportActionItems")}</h2>
+            <ul>
+              ${reportStructuredActions
+                .map(
+                  (item) =>
+                    `<li><strong>${t("videoPlayer.tryThis")}:</strong> ${item.try_this || ""}<br/><strong>${t("videoPlayer.lookFor")}:</strong> ${item.look_for || ""}<br/><strong>${t("videoPlayer.evidenceOfSuccess")}:</strong> ${item.evidence_of_success || ""}</li>`
+                )
+                .join("")}
+            </ul>
+          </div>
+          `
+              : ""
+          }
+          ${
+            reportLongitudinalInsight
+              ? `
+          <div class="section">
+            <h2>${t("videoPlayer.reportLongitudinalInsight")}</h2>
+            <p>${reportLongitudinalInsight}</p>
+          </div>
+          `
+              : ""
+          }
+          ${
+            reportReflectionPrompts.length
+              ? `
+          <div class="section">
+            <h2>${t("videoPlayer.reportReflectionPrompts")}</h2>
+            <ul>
+              ${reportReflectionPrompts.map((item) => `<li>${item}</li>`).join("")}
+            </ul>
+          </div>
+          `
+              : ""
+          }
+          ${recommendedMomentsSection}
+          <div class="section">
+            <h2>${t("videoPlayer.reportAdditionalActionNotes")}</h2>
             <p>${actionItems || ""}</p>
           </div>
         </body>
@@ -464,12 +579,65 @@ export function VideoPlayerPage() {
   };
 
   const observations = observationsRes ?? [];
+  const assessmentEvidence = assessmentEvidenceRes?.evidence || [];
   const recognitionStatus = recognitionRes?.recognition?.status || "not_evaluated";
   const recognitionEligible = Boolean(recognitionRes?.eligibility?.is_eligible);
   const recognitionReasons = recognitionRes?.eligibility?.reasons || [];
   const publicationStatus = recognitionRes?.publication?.submission_status || "not_submitted";
   const observationSummary = assessmentRes?.observation_summary;
   const recommendedMoments = analysisMomentsRes?.moments || [];
+  const evidenceByElement = useMemo(() => {
+    const map = {};
+    assessmentEvidence.forEach((item) => {
+      if (!item.element_id) return;
+      if (!map[item.element_id]) map[item.element_id] = [];
+      map[item.element_id].push(item);
+    });
+    Object.values(map).forEach((items) => {
+      items.sort(
+        (left, right) =>
+          Number(left.timestamp_start || 0) - Number(right.timestamp_start || 0)
+      );
+    });
+    return map;
+  }, [assessmentEvidence]);
+  const timelineEntries = useMemo(() => {
+    const manualEntries = observations.map((item) => ({
+      id: `manual-${item.id}`,
+      timestamp: item.timestamp_seconds,
+      endTimestamp: item.timestamp_seconds,
+      text: item.admin_comment || t("videoPlayer.observationFallback"),
+      source: "manual",
+    }));
+    const aiEntries = assessmentEvidence.map((item) => ({
+      id: `ai-${item.id}`,
+      timestamp: item.timestamp_start,
+      endTimestamp: item.timestamp_end,
+      text: item.evidence_text,
+      source: "ai",
+    }));
+    const merged = [...manualEntries, ...aiEntries]
+      .filter((item) => typeof item.timestamp === "number" && item.text)
+      .sort((left, right) => left.timestamp - right.timestamp);
+    const deduped = [];
+    const seen = new Set();
+    merged.forEach((item) => {
+      const key = `${item.source}:${Math.round(item.timestamp)}:${item.text}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      deduped.push(item);
+    });
+    return deduped;
+  }, [assessmentEvidence, observations, t]);
+  const visualTimelineMarkers = useMemo(() => {
+    if (observations.length) return observations;
+    return assessmentEvidence.map((item) => ({
+      id: `evidence-${item.id}`,
+      timestamp_seconds: item.timestamp_start,
+      admin_comment: item.evidence_text,
+      element_id: item.element_id,
+    }));
+  }, [assessmentEvidence, observations]);
   const recommendedMomentNoteLines = recommendedMoments.slice(0, 3).map((moment) => {
     const jumpTime =
       typeof moment.representative_frame_sec === "number"
@@ -601,6 +769,8 @@ export function VideoPlayerPage() {
                   <video
                     ref={videoRef}
                     controls
+                    playsInline
+                    preload="metadata"
                     className="h-full w-full bg-black"
                     src={videoUrl}
                     poster={thumbnailUrl || undefined}
@@ -609,12 +779,12 @@ export function VideoPlayerPage() {
                   />
                   <div className="border-t border-slate-200 bg-slate-50 px-3 py-3">
                     {/* Visual timeline with observation markers */}
-                    {duration > 0 && observations.length > 0 && (
+                    {duration > 0 && visualTimelineMarkers.length > 0 && (
                       <div className="mb-3">
                         <VideoTimeline
                           duration={duration}
                           currentTime={currentTime}
-                          observations={observations}
+                          observations={visualTimelineMarkers}
                           onSeek={handleSeek}
                         />
                       </div>
@@ -681,6 +851,26 @@ export function VideoPlayerPage() {
                 <div className="mt-3 rounded-md border border-slate-200 bg-white px-3 py-3 text-sm leading-6 text-slate-700">
                   {observationSummary?.executive_summary || assessmentRes?.summary || t("videoPlayer.noSummaryAvailable")}
                 </div>
+                {observationSummary?.primary_growth_focus && (
+                  <div className="mt-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-blue-700">
+                      {t("videoPlayer.primaryGrowthFocus")}
+                    </div>
+                    <div className="mt-1 text-xs text-blue-800">
+                      {observationSummary.primary_growth_focus}
+                    </div>
+                  </div>
+                )}
+                {observationSummary?.full_review_text && (
+                  <div className="mt-3 rounded-md border border-slate-200 bg-white px-3 py-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      {t("videoPlayer.fullStructuredReview")}
+                    </div>
+                    <pre className="mt-2 whitespace-pre-wrap text-xs leading-6 text-slate-700">
+                      {observationSummary.full_review_text}
+                    </pre>
+                  </div>
+                )}
                 {assessmentFeedbackEnabled && assessmentId && (
                   <AssessmentFeedbackWidget
                     assessmentId={assessmentId}
@@ -704,6 +894,28 @@ export function VideoPlayerPage() {
                     {observationSummary.confidence_note}
                   </div>
                 )}
+                {observationSummary?.deferral_note && (
+                  <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-3 text-[11px] text-amber-900">
+                    <span className="font-semibold">{t("videoPlayer.deferralNoteLabel")}: </span>
+                    <span>{observationSummary.deferral_note}</span>
+                  </div>
+                )}
+                <div className="mt-3 rounded-md border border-slate-200 bg-white px-3 py-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {t("videoPlayer.evidenceHighlights")}
+                  </div>
+                  {observationSummary?.evidence_highlights?.length ? (
+                    <ul className="mt-2 space-y-2 text-xs text-slate-700">
+                      {observationSummary.evidence_highlights.map((item, idx) => (
+                        <li key={idx} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                          {item}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="mt-2 text-xs text-slate-500">{t("videoPlayer.noEvidenceHighlights")}</div>
+                  )}
+                </div>
                 <div className="mt-4 grid gap-3 md:grid-cols-2">
                   <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
@@ -737,9 +949,17 @@ export function VideoPlayerPage() {
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       {t("videoPlayer.coachingMoves")}
                     </div>
-                    {observationSummary?.coaching_actions?.length ? (
+                    {(observationSummary?.actionable_next_steps_structured?.length ||
+                      observationSummary?.coaching_actions?.length) ? (
                       <ul className="mt-2 space-y-2 text-xs text-slate-700">
-                        {observationSummary.coaching_actions.map((item, idx) => (
+                        {(observationSummary?.actionable_next_steps_structured?.length
+                          ? observationSummary.actionable_next_steps_structured.map((item) => (
+                              `${t("videoPlayer.tryThis")} -> ${item.try_this || ""} | ${t("videoPlayer.lookFor")} -> ${
+                                item.look_for || ""
+                              } | ${t("videoPlayer.evidenceOfSuccess")} -> ${item.evidence_of_success || ""}`
+                            ))
+                          : observationSummary.coaching_actions
+                        ).map((item, idx) => (
                           <li
                             key={idx}
                             className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3"
@@ -782,6 +1002,32 @@ export function VideoPlayerPage() {
                       </ul>
                     ) : (
                       <div className="mt-2 text-xs text-slate-500">{t("videoPlayer.noPriorityAlignment")}</div>
+                    )}
+                  </div>
+                  <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      {t("videoPlayer.longitudinalInsight")}
+                    </div>
+                    {observationSummary?.longitudinal_insight ? (
+                      <div className="mt-2 text-xs text-slate-700">
+                        {observationSummary.longitudinal_insight}
+                      </div>
+                    ) : (
+                      <div className="mt-2 text-xs text-slate-500">{t("videoPlayer.noLongitudinalInsight")}</div>
+                    )}
+                  </div>
+                  <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      {t("videoPlayer.reflectionPrompts")}
+                    </div>
+                    {observationSummary?.reflection_prompts?.length ? (
+                      <ul className="mt-2 list-disc space-y-1 ps-4 text-xs text-slate-700">
+                        {observationSummary.reflection_prompts.map((item, idx) => (
+                          <li key={idx}>{item}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="mt-2 text-xs text-slate-500">{t("videoPlayer.noReflectionPrompts")}</div>
                     )}
                   </div>
                 </div>
@@ -1125,25 +1371,32 @@ export function VideoPlayerPage() {
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 {t("videoPlayer.timestampedObservations")}
               </h2>
-              {observations.length === 0 ? (
+              {timelineEntries.length === 0 ? (
                 <div className="text-xs text-slate-500">
                   {t("videoPlayer.noObservations")}
                 </div>
               ) : (
                 <ul className="space-y-1">
-                  {observations.map((o) => (
-                    <li key={o.id}>
+                  {timelineEntries.map((entry) => (
+                    <li key={entry.id}>
                       <button
                         type="button"
-                        onClick={() => handleSeek(o.timestamp_seconds)}
+                        onClick={() => handleSeek(entry.timestamp)}
                         className={`w-full rounded-md px-2 py-1 ${isRtl ? "text-right" : "text-left"} text-xs text-slate-700 hover:bg-slate-100`}
                       >
-                        <span className={`${isRtl ? "ml-2" : "mr-2"} inline-flex min-w-[46px] items-center justify-center rounded-full bg-slate-200 px-2 py-0.5 text-[10px] text-slate-700`}>
-                          {typeof o.timestamp_seconds === "number"
-                            ? formatClock(o.timestamp_seconds)
+                        <span className={`${isRtl ? "ml-2" : "mr-2"} inline-flex min-w-[74px] items-center justify-center rounded-full bg-slate-200 px-2 py-0.5 text-[10px] text-slate-700`}>
+                          {typeof entry.timestamp === "number"
+                            ? typeof entry.endTimestamp === "number" && entry.endTimestamp !== entry.timestamp
+                              ? formatClockRange(entry.timestamp, entry.endTimestamp)
+                              : formatClock(entry.timestamp)
                             : "--"}
                         </span>
-                        {o.admin_comment || t("videoPlayer.observationFallback")}
+                        <span>{entry.text || t("videoPlayer.observationFallback")}</span>
+                        {entry.source === "ai" ? (
+                          <span className={`${isRtl ? "mr-2" : "ml-2"} inline-flex rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] text-sky-700`}>
+                            {t("videoPlayer.linkedAiInsights")}
+                          </span>
+                        ) : null}
                       </button>
                     </li>
                   ))}
@@ -1238,7 +1491,7 @@ export function VideoPlayerPage() {
                   {assessmentRes.element_scores.slice(0, 6).map((es) => (
                     <li
                       key={es.element_id}
-                      className="rounded-md bg-slate-50 px-2 py-1"
+                      className="rounded-md bg-slate-50 px-2 py-2"
                     >
                       <div className="flex items-center justify-between">
                         <span className="text-[11px] font-medium text-slate-900">
@@ -1248,9 +1501,27 @@ export function VideoPlayerPage() {
                           {scoreFormatter.format(es.score)}/10
                         </span>
                       </div>
-                      <div className="text-[11px] text-slate-500">
+                      <div className="mt-1 text-[11px] text-slate-500">
                         {es.observations?.[0]}
                       </div>
+                      {(evidenceByElement[es.element_id] || []).length ? (
+                        <ul className="mt-2 space-y-1">
+                          {evidenceByElement[es.element_id].slice(0, 2).map((item) => (
+                            <li key={item.id}>
+                              <button
+                                type="button"
+                                onClick={() => handleSeek(item.timestamp_start)}
+                                className={`w-full rounded-md border border-slate-200 bg-white px-2 py-2 ${isRtl ? "text-right" : "text-left"} text-[11px] text-slate-700 hover:bg-slate-100`}
+                              >
+                                <div className="font-medium text-slate-800">
+                                  {formatClockRange(item.timestamp_start, item.timestamp_end)}
+                                </div>
+                                <div className="mt-1 text-slate-600">{item.evidence_text}</div>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
                     </li>
                   ))}
                 </ul>
