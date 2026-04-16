@@ -321,6 +321,57 @@ def test_voice_gate_release_enforcement_allows_passed_feedback(monkeypatch):
     assert enriched["recommendations"]
 
 
+def test_master_observer_regeneration_retries_and_then_passes(monkeypatch):
+    call_count = {"value": 0}
+
+    def _flip_gate(*args, **kwargs):
+        call_count["value"] += 1
+        if call_count["value"] == 1:
+            return {"passed": False, "failures": ["language.banned_term:correlation"], "section_count": 6}
+        return {"passed": True, "failures": [], "section_count": 6}
+
+    monkeypatch.setattr(server, "validate_voice_gate", _flip_gate)
+
+    result = server._render_master_observer_with_regeneration(
+        [
+            {
+                "element_id": "2b",
+                "element_name": "Questioning",
+                "score": 7.1,
+                "observations": ["This suggests a correlation in student response."],
+            }
+        ],
+        priority_element_ids=["2b"],
+        language="en",
+        max_attempts=2,
+    )
+
+    assert result["attempts"] == 2
+    assert result["gate_result"]["passed"] is True
+    assert len(result["history"]) == 2
+
+
+def test_build_governed_feedback_bundle_marks_blocked_when_gate_fails(monkeypatch):
+    monkeypatch.setattr(server, "validate_voice_gate", lambda *args, **kwargs: {"passed": False, "failures": ["snapshot.opens_with_timestamp"], "section_count": 6})
+
+    bundle = server._build_governed_feedback_bundle(
+        [
+            {
+                "element_id": "2b",
+                "element_name": "Questioning",
+                "score": 7.2,
+                "observations": ["You asked a follow-up question and paused."],
+            }
+        ],
+        priority_element_ids=["2b"],
+        language="en",
+    )
+
+    assert bundle["release_metadata"]["feedback_release_status"] == "blocked"
+    assert bundle["release_metadata"]["feedback_human_review_required"] is True
+    assert bundle["release_metadata"]["feedback_regeneration_attempts"] >= 1
+
+
 def test_build_focus_instruction_preserves_hebrew_admin_text_without_english_normalization():
     instruction = server._build_focus_instruction(
         [{"id": "d3b", "name": "שימוש בשאלות ובדיון", "priority": True}],

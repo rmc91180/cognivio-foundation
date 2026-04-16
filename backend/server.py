@@ -3986,6 +3986,8 @@ PAID_ANALYSIS_ALLOWLIST_EMAILS = {
 MASTER_OBSERVER_PIPELINE_ENABLED = os.getenv("MASTER_OBSERVER_PIPELINE_ENABLED", "false").lower() == "true"
 MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS = os.getenv("MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS", "true").lower() == "true"
 VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED = os.getenv("VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED", "false").lower() == "true"
+VOICE_GATE_REGEN_MAX_ATTEMPTS = max(1, int(os.getenv("VOICE_GATE_REGEN_MAX_ATTEMPTS", "2")))
+VOICE_GATE_HUMAN_ESCALATION_ENABLED = os.getenv("VOICE_GATE_HUMAN_ESCALATION_ENABLED", "true").lower() == "true"
 PRIVACY_PROFILE_MIN_REFERENCES = max(1, int(os.getenv("PRIVACY_PROFILE_MIN_REFERENCES", "3")))
 PRIVACY_PROFILE_MAX_REFERENCES = max(PRIVACY_PROFILE_MIN_REFERENCES, int(os.getenv("PRIVACY_PROFILE_MAX_REFERENCES", "5")))
 PRIVACY_MANUAL_REVIEW_ENABLED = os.getenv("PRIVACY_MANUAL_REVIEW_ENABLED", "true").lower() == "true"
@@ -5793,6 +5795,39 @@ class RecognitionReviewQueueItem(BaseModel):
 
 class RecognitionReviewQueueResponse(BaseModel):
     items: List[RecognitionReviewQueueItem]
+
+
+class FeedbackReviewQueueItem(BaseModel):
+    id: str
+    assessment_id: str
+    video_id: Optional[str] = None
+    teacher_id: str
+    owner_user_id: Optional[str] = None
+    status: str
+    reason: str
+    voice_gate_failures: List[str] = []
+    voice_gate_status: Optional[str] = None
+    regeneration_attempts: int = 0
+    summary_preview: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class FeedbackReviewQueueResponse(BaseModel):
+    items: List[FeedbackReviewQueueItem]
+
+
+class FeedbackReviewDecisionRequest(BaseModel):
+    decision: str
+    note: Optional[str] = None
+
+
+class FeedbackReviewDecisionResponse(BaseModel):
+    id: str
+    status: str
+    assessment_id: str
+    resolved_by: str
+    resolved_at: str
 
 
 class ExemplarSubmissionRequest(BaseModel):
@@ -9152,6 +9187,90 @@ async def review_video_recognition(
         video_id=video_id,
         recognition_status="rejected" if decision == "reject" else "revoked",
         badge=None,
+    )
+
+
+@api_router.get("/feedback/review-queue", response_model=FeedbackReviewQueueResponse)
+async def get_feedback_review_queue(current_user: dict = Depends(get_current_user)):
+    if not _is_admin_role(_get_user_role(current_user)):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    docs = await db.feedback_review_queue.find({"status": "pending"}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    if _get_user_role(current_user) == "admin":
+        docs = [doc for doc in docs if doc.get("owner_user_id") == current_user.get("id")]
+    return FeedbackReviewQueueResponse(items=[FeedbackReviewQueueItem(**doc) for doc in docs])
+
+
+@api_router.post("/feedback/review-queue/{review_id}/resolve", response_model=FeedbackReviewDecisionResponse)
+async def resolve_feedback_review_queue_item(
+    review_id: str,
+    payload: FeedbackReviewDecisionRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    if not _is_admin_role(_get_user_role(current_user)):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    review_doc = await db.feedback_review_queue.find_one({"id": review_id}, {"_id": 0})
+    if not review_doc:
+        raise HTTPException(status_code=404, detail="Feedback review item not found")
+    if _get_user_role(current_user) == "admin" and review_doc.get("owner_user_id") != current_user.get("id"):
+        raise HTTPException(status_code=403, detail="Not authorized for this review item")
+
+    decision = str(payload.decision or "").strip().lower()
+    if decision not in {"approved_for_release", "needs_regeneration", "dismissed"}:
+        raise HTTPException(status_code=400, detail="Unsupported feedback review decision")
+
+    resolved_at = datetime.now(timezone.utc).isoformat()
+    status_value = "resolved_release_approved" if decision == "approved_for_release" else (
+        "resolved_needs_regeneration" if decision == "needs_regeneration" else "resolved_dismissed"
+    )
+    await db.feedback_review_queue.update_one(
+        {"id": review_id},
+        {
+            "$set": {
+                "status": status_value,
+                "decision": decision,
+                "review_note": payload.note,
+                "resolved_at": resolved_at,
+                "resolved_by": current_user["id"],
+                "updated_at": resolved_at,
+            }
+        },
+    )
+
+    if decision == "approved_for_release":
+        await db.assessments.update_one(
+            {"id": review_doc.get("assessment_id")},
+            {
+                "$set": {
+                    "feedback_release_status": "released",
+                    "feedback_human_review_required": False,
+                    "voice_gate_status": "human_override_release",
+                    "voice_gate_failures": [],
+                    "feedback_release_override_at": resolved_at,
+                    "feedback_release_override_by": current_user["id"],
+                }
+            },
+        )
+    elif decision == "needs_regeneration":
+        await db.assessments.update_one(
+            {"id": review_doc.get("assessment_id")},
+            {
+                "$set": {
+                    "feedback_release_status": "blocked",
+                    "feedback_human_review_required": True,
+                    "feedback_regeneration_requested_at": resolved_at,
+                    "feedback_regeneration_requested_by": current_user["id"],
+                }
+            },
+        )
+
+    return FeedbackReviewDecisionResponse(
+        id=review_id,
+        status=status_value,
+        assessment_id=review_doc.get("assessment_id"),
+        resolved_by=current_user["id"],
+        resolved_at=resolved_at,
     )
 
 
@@ -16482,51 +16601,63 @@ async def analyze_video(
         # Calculate overall score (1-10 gradient mapped from underlying 1-4 scale if needed)
         valid_scores = [es["score"] for es in element_scores if es["score"] > 0]
         overall_score = round(sum(valid_scores) / len(valid_scores), 2) if valid_scores else 0
-        
-        # Generate recommendations
-        recommendations = generate_recommendations(
-            element_scores,
-            provided_recommendations=analysis_payload.get("recommendations"),
-            priority_element_ids=priority_elements,
-            focus_note=focus_note,
-            language=analysis_language,
-            analysis_context=analysis_payload.get("analysis_context"),
-            analysis_confidence=analysis_metadata["analysis_confidence"],
-        )
-        summary_text = generate_summary(
-            element_scores,
-            overall_score,
-            provided_summary=analysis_payload.get("summary"),
-            priority_element_ids=priority_elements,
-            focus_note=focus_note,
-            language=analysis_language,
-            analysis_context=analysis_payload.get("analysis_context"),
-            analysis_confidence=analysis_metadata["analysis_confidence"],
-        )
-        observation_summary = build_observation_summary_packet(
-            element_scores,
-            overall_score,
-            summary_text,
-            recommendations,
-            priority_element_ids=priority_elements,
-            focus_note=focus_note,
-            analysis_confidence=analysis_metadata["analysis_confidence"],
-            analysis_context=analysis_payload.get("analysis_context"),
-            provided_recommendations=analysis_payload.get("recommendations"),
-            language=analysis_language,
-        )
-        release_metadata = _build_feedback_release_metadata(
-            observation_summary.get("full_review_text") or summary_text,
-            language=analysis_language,
-        )
-        if _is_voice_gate_release_enforced() and release_metadata.get("feedback_release_status") != "released":
-            log_structured(
-                logger,
-                "warning",
-                "feedback_release_blocked_by_voice_gate",
-                video_id=video_id,
-                teacher_id=teacher_id,
-                failures=release_metadata.get("voice_gate_failures", []),
+
+        if _is_voice_gate_release_enforced():
+            governed = _build_governed_feedback_bundle(
+                element_scores,
+                priority_element_ids=priority_elements,
+                focus_note=focus_note,
+                language=analysis_language,
+            )
+            recommendations = list(governed["recommendations"] or [])
+            summary_text = str(governed["summary_text"] or "")
+            observation_summary = dict(governed["observation_summary"] or {})
+            release_metadata = dict(governed["release_metadata"] or {})
+            if release_metadata.get("feedback_release_status") != "released":
+                log_structured(
+                    logger,
+                    "warning",
+                    "feedback_release_blocked_by_voice_gate",
+                    video_id=video_id,
+                    teacher_id=teacher_id,
+                    failures=release_metadata.get("voice_gate_failures", []),
+                    regeneration_attempts=release_metadata.get("feedback_regeneration_attempts", 0),
+                )
+        else:
+            recommendations = generate_recommendations(
+                element_scores,
+                provided_recommendations=analysis_payload.get("recommendations"),
+                priority_element_ids=priority_elements,
+                focus_note=focus_note,
+                language=analysis_language,
+                analysis_context=analysis_payload.get("analysis_context"),
+                analysis_confidence=analysis_metadata["analysis_confidence"],
+            )
+            summary_text = generate_summary(
+                element_scores,
+                overall_score,
+                provided_summary=analysis_payload.get("summary"),
+                priority_element_ids=priority_elements,
+                focus_note=focus_note,
+                language=analysis_language,
+                analysis_context=analysis_payload.get("analysis_context"),
+                analysis_confidence=analysis_metadata["analysis_confidence"],
+            )
+            observation_summary = build_observation_summary_packet(
+                element_scores,
+                overall_score,
+                summary_text,
+                recommendations,
+                priority_element_ids=priority_elements,
+                focus_note=focus_note,
+                analysis_confidence=analysis_metadata["analysis_confidence"],
+                analysis_context=analysis_payload.get("analysis_context"),
+                provided_recommendations=analysis_payload.get("recommendations"),
+                language=analysis_language,
+            )
+            release_metadata = _build_feedback_release_metadata(
+                observation_summary.get("full_review_text") or summary_text,
+                language=analysis_language,
             )
         
         # Create assessment document
@@ -16555,6 +16686,20 @@ async def analyze_video(
         }
         
         await db.assessments.insert_one(assessment_doc)
+        if (
+            _is_voice_gate_release_enforced()
+            and assessment_doc.get("feedback_release_status") != "released"
+        ):
+            review_id = await _enqueue_feedback_human_review(
+                assessment_doc,
+                release_metadata=release_metadata,
+            )
+            if review_id:
+                assessment_doc["feedback_review_queue_id"] = review_id
+                await db.assessments.update_one(
+                    {"id": assessment_doc["id"]},
+                    {"$set": {"feedback_review_queue_id": review_id}},
+                )
         await _persist_assessment_evidence_from_scores(assessment_doc, {"id": user_id})
         
         # Update video status
@@ -18648,6 +18793,212 @@ def _apply_feedback_release_guard(
     return guarded
 
 
+def _sanitize_text_for_voice_gate(text: Any, *, language: str = "en") -> str:
+    sanitized = str(text or "")
+    replacements = {
+        r"\blayer\b": "instructional move",
+        r"\bconfidence\b": "clarity",
+        r"\bsignal\b": "pattern",
+        r"\bcorrelation\b": "pattern",
+        r"\boverrideable\b": "adjustable",
+        r"\baligned to\b": "connected to",
+        r"\bmodel\b": "instructional",
+        r"\bsystem\b": "coaching",
+        r"\bframework\b": "rubric lens",
+        r"\beffective\b": "strong",
+        r"\bineffective\b": "not yet consistent",
+        r"\bindicator\b": "evidence",
+        r"\bdomain\b": "focus area",
+        r"\brating\b": "observation",
+        r"\bscore\b": "current level",
+        r"\bcompliance\b": "follow-through",
+        r"\brequirement\b": "next step",
+        r"\bbased on analysis\b": "from the lesson evidence",
+        r"\bthis suggests\b": "this shows",
+        r"\bdata indicates\b": "the lesson shows",
+    }
+    for pattern, replacement in replacements.items():
+        sanitized = re.sub(pattern, replacement, sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\s+", " ", sanitized).strip()
+    if not sanitized:
+        if _is_hebrew_language(language):
+            return "נצפתה עדות להוראה עקבית התומכת בחשיבת תלמידים."
+        return "A clear instructional move was visible in the lesson and supported student thinking."
+    return sanitized
+
+
+def _sanitize_element_scores_for_voice_gate(
+    element_scores: List[dict],
+    *,
+    language: str = "en",
+) -> List[dict]:
+    sanitized_scores: List[dict] = []
+    for item in element_scores or []:
+        clone = dict(item)
+        clone["element_name"] = _sanitize_text_for_voice_gate(
+            clone.get("element_name") or clone.get("element_id") or "Instruction",
+            language=language,
+        )
+        observations = [
+            _sanitize_text_for_voice_gate(observation, language=language)
+            for observation in list(clone.get("observations") or [])
+            if str(observation or "").strip()
+        ]
+        if not observations:
+            observations = [_sanitize_text_for_voice_gate("You used a clear instructional move.", language=language)]
+        clone["observations"] = observations[:3]
+
+        segments = []
+        for segment in list(clone.get("evidence_segments") or []):
+            segment_clone = dict(segment)
+            segment_clone["summary"] = _sanitize_text_for_voice_gate(segment_clone.get("summary"), language=language)
+            segments.append(segment_clone)
+        clone["evidence_segments"] = segments
+        sanitized_scores.append(clone)
+    return sanitized_scores
+
+
+def _render_master_observer_with_regeneration(
+    element_scores: List[dict],
+    *,
+    priority_element_ids: Optional[List[str]] = None,
+    language: str = "en",
+    max_attempts: int = 2,
+) -> Dict[str, Any]:
+    attempt_scores = element_scores
+    history: List[Dict[str, Any]] = []
+    artifact: Dict[str, Any] = {}
+    gate_result: Dict[str, Any] = {"passed": False, "failures": ["voice_gate.no_attempt"], "section_count": 0}
+
+    for attempt in range(1, max_attempts + 1):
+        artifact = render_master_observer_feedback(
+            attempt_scores,
+            priority_element_ids=priority_element_ids,
+            language=language,
+        )
+        gate_result = validate_voice_gate(artifact.get("full_review_text", ""), language=language)
+        history.append(
+            {
+                "attempt": attempt,
+                "passed": bool(gate_result.get("passed")),
+                "failures": list(gate_result.get("failures") or []),
+            }
+        )
+        if gate_result.get("passed"):
+            break
+        attempt_scores = _sanitize_element_scores_for_voice_gate(attempt_scores, language=language)
+
+    return {
+        "artifact": artifact,
+        "gate_result": gate_result,
+        "attempts": len(history),
+        "history": history,
+    }
+
+
+def _build_observation_summary_from_master_observer_artifact(
+    artifact: Dict[str, Any],
+    *,
+    language: str = "en",
+    focus_note: Optional[str] = None,
+) -> Dict[str, Any]:
+    structured_steps = list(artifact.get("actionable_next_steps_structured") or [])[:2]
+    action_lines = [_format_action_step_line(step, language=language) for step in structured_steps]
+    return {
+        "executive_summary": artifact.get("instructional_snapshot"),
+        "top_strengths": list(artifact.get("strengths_to_keep_and_build_on") or [])[:2],
+        "growth_areas": [artifact.get("primary_growth_focus")],
+        "coaching_actions": action_lines[:2],
+        "priority_alignment": [artifact.get("rubric_aligned_interpretation")],
+        "evidence_highlights": list(artifact.get("evidence_based_observation_highlights") or [])[:3],
+        "focus_note": focus_note or None,
+        "confidence_note": None,
+        "primary_growth_focus": artifact.get("primary_growth_focus"),
+        "longitudinal_insight": None,
+        "reflection_prompts": [],
+        "actionable_next_steps_structured": structured_steps,
+        "full_review_text": artifact.get("full_review_text"),
+        "output_order": list(artifact.get("output_order") or []),
+        "deferral_note": None,
+        "reasoning_model": "master_observer_v1",
+    }
+
+
+def _build_governed_feedback_bundle(
+    element_scores: List[dict],
+    *,
+    priority_element_ids: Optional[List[str]] = None,
+    focus_note: Optional[str] = None,
+    language: str = "en",
+) -> Dict[str, Any]:
+    result = _render_master_observer_with_regeneration(
+        element_scores,
+        priority_element_ids=priority_element_ids,
+        language=language,
+        max_attempts=VOICE_GATE_REGEN_MAX_ATTEMPTS,
+    )
+    artifact = result["artifact"]
+    gate_result = result["gate_result"]
+    observation_summary = _build_observation_summary_from_master_observer_artifact(
+        artifact,
+        language=language,
+        focus_note=focus_note,
+    )
+    summary_text = str(artifact.get("full_review_text") or "").strip()
+    recommendations = list(observation_summary.get("coaching_actions") or [])[:2]
+    release_metadata = {
+        "voice_gate_version": "voice_gate_rules_v1",
+        "voice_gate_status": "pass" if gate_result.get("passed") else "fail",
+        "voice_gate_failures": list(gate_result.get("failures") or []),
+        "voice_gate_section_count": gate_result.get("section_count"),
+        "voice_gate_validated_at": datetime.now(timezone.utc).isoformat(),
+        "feedback_release_status": "released" if gate_result.get("passed") else "blocked",
+        "feedback_human_review_required": not bool(gate_result.get("passed")),
+        "feedback_regeneration_attempts": result.get("attempts", 0),
+        "feedback_regeneration_history": result.get("history") or [],
+    }
+    return {
+        "summary_text": summary_text,
+        "recommendations": recommendations,
+        "observation_summary": observation_summary,
+        "release_metadata": release_metadata,
+    }
+
+
+async def _enqueue_feedback_human_review(
+    assessment_doc: Dict[str, Any],
+    *,
+    release_metadata: Dict[str, Any],
+) -> Optional[str]:
+    if not VOICE_GATE_HUMAN_ESCALATION_ENABLED:
+        return None
+
+    queue_id = str(uuid.uuid4())
+    now_iso = datetime.now(timezone.utc).isoformat()
+    review_doc = {
+        "id": queue_id,
+        "assessment_id": assessment_doc.get("id"),
+        "video_id": assessment_doc.get("video_id"),
+        "teacher_id": assessment_doc.get("teacher_id"),
+        "owner_user_id": assessment_doc.get("user_id"),
+        "status": "pending",
+        "reason": "voice_gate_release_failure",
+        "voice_gate_failures": list(release_metadata.get("voice_gate_failures") or []),
+        "voice_gate_status": release_metadata.get("voice_gate_status"),
+        "regeneration_attempts": int(release_metadata.get("feedback_regeneration_attempts") or 0),
+        "regeneration_history": list(release_metadata.get("feedback_regeneration_history") or []),
+        "summary_preview": str(assessment_doc.get("summary") or "")[:600],
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+    await db.feedback_review_queue.update_one(
+        {"assessment_id": assessment_doc.get("id"), "status": "pending"},
+        {"$set": review_doc},
+        upsert=True,
+    )
+    return queue_id
+
+
 def build_observation_summary_packet(
     element_scores: List[dict],
     overall_score: float,
@@ -19470,6 +19821,8 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.video_audio_transcripts, [("video_id", 1), ("created_at", -1)])
     await _safe_create_index(db.video_audio_transcripts, [("retention_expires_at", 1)])
     await _safe_create_index(db.video_analysis_features, [("video_id", 1)], unique=True)
+    await _safe_create_index(db.feedback_review_queue, [("status", 1), ("created_at", -1)])
+    await _safe_create_index(db.feedback_review_queue, [("assessment_id", 1), ("status", 1)])
 
 
 async def _stop_video_workers() -> None:
