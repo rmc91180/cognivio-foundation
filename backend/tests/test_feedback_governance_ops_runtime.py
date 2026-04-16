@@ -6,6 +6,8 @@ from pathlib import Path
 import sys
 import types
 
+import pytest
+
 
 def _load_server_module():
     os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
@@ -331,3 +333,86 @@ def test_admin_ops_launch_health_and_observability_embed_governance(monkeypatch)
     assert launch_payload["metrics"]["feedback_release_blocked"] == 2
     assert any("human-review queue" in item for item in launch_payload["recommended_actions"])
     assert observability_payload["observability"]["feedback_governance"]["incident_level"] == "red"
+
+
+def test_voice_gate_gold_set_runtime_validation_passes_defaults():
+    report = server._run_voice_gate_gold_set_validation()
+
+    assert report["case_count"] >= 6
+    assert report["failed_count"] == 0
+    assert report["passed"] is True
+
+
+def test_feedback_governance_release_gate_snapshot_blocks_when_invariants_fail(monkeypatch):
+    governance_snapshot = _governance_snapshot_fixture(incident_level="amber")
+    governance_snapshot["policy"]["voice_gate_release_enforcement_enabled"] = False
+    governance_snapshot["assessment_counts"]["blocked_without_queue"] = 1
+    monkeypatch.setattr(
+        server,
+        "_get_feedback_governance_runtime_snapshot",
+        lambda **kwargs: asyncio.sleep(0, result=governance_snapshot),
+    )
+    monkeypatch.setattr(
+        server,
+        "_run_voice_gate_gold_set_validation",
+        lambda *args, **kwargs: {
+            "version": "test",
+            "case_count": 2,
+            "passed_count": 1,
+            "failed_count": 1,
+            "passed": False,
+            "failed_case_ids": ["voice_gate_case_failed"],
+            "gold_set_path": "backend/evals/voice_gate_gold_set.json",
+        },
+    )
+
+    snapshot = asyncio.run(server._get_feedback_governance_release_gate_snapshot(owner_user_id="admin-1"))
+
+    assert snapshot["go_no_go"] == "hold"
+    assert snapshot["incident_level"] == "red"
+    assert "Voice Gate release enforcement is disabled." in snapshot["blocking_items"]
+    assert "Voice Gate gold set validation failed." in snapshot["blocking_items"]
+
+
+def test_admin_ops_feedback_governance_readiness_rejects_cross_workspace_for_admin(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_get_feedback_governance_release_gate_snapshot",
+        lambda **kwargs: asyncio.sleep(0, result={"go_no_go": "go", "incident_level": "green"}),
+    )
+
+    with pytest.raises(server.HTTPException) as exc:
+        asyncio.run(
+            server.get_admin_ops_feedback_governance_readiness(
+                owner_user_id="another-owner",
+                current_user={"id": "admin-1", "email": "admin@example.com", "role": "admin"},
+            )
+        )
+
+    assert exc.value.status_code == 403
+
+
+def test_admin_ops_feedback_governance_readiness_supports_super_admin_scope(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_get_feedback_governance_release_gate_snapshot",
+        lambda **kwargs: asyncio.sleep(
+            0,
+            result={
+                "go_no_go": "go",
+                "incident_level": "green",
+                "blocking_items": [],
+                "warnings": [],
+            },
+        ),
+    )
+    monkeypatch.setattr(server, "log_structured", lambda *args, **kwargs: None)
+
+    payload = asyncio.run(
+        server.get_admin_ops_feedback_governance_readiness(
+            owner_user_id="admin-1",
+            current_user={"id": "super-1", "email": "root@example.com", "role": "super_admin"},
+        )
+    )
+
+    assert payload["go_no_go"] == "go"

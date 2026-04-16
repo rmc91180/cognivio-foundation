@@ -3988,6 +3988,13 @@ MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS = os.getenv("MASTER_OBSERVER_REQUIRE_VOI
 VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED = os.getenv("VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED", "false").lower() == "true"
 VOICE_GATE_REGEN_MAX_ATTEMPTS = max(1, int(os.getenv("VOICE_GATE_REGEN_MAX_ATTEMPTS", "2")))
 VOICE_GATE_HUMAN_ESCALATION_ENABLED = os.getenv("VOICE_GATE_HUMAN_ESCALATION_ENABLED", "true").lower() == "true"
+FEEDBACK_GOVERNANCE_QUEUE_AGE_WARNING_MINUTES = max(
+    30, int(os.getenv("FEEDBACK_GOVERNANCE_QUEUE_AGE_WARNING_MINUTES", "120"))
+)
+FEEDBACK_GOVERNANCE_QUEUE_AGE_BLOCKING_MINUTES = max(
+    FEEDBACK_GOVERNANCE_QUEUE_AGE_WARNING_MINUTES,
+    int(os.getenv("FEEDBACK_GOVERNANCE_QUEUE_AGE_BLOCKING_MINUTES", "480")),
+)
 PRIVACY_PROFILE_MIN_REFERENCES = max(1, int(os.getenv("PRIVACY_PROFILE_MIN_REFERENCES", "3")))
 PRIVACY_PROFILE_MAX_REFERENCES = max(PRIVACY_PROFILE_MIN_REFERENCES, int(os.getenv("PRIVACY_PROFILE_MAX_REFERENCES", "5")))
 PRIVACY_MANUAL_REVIEW_ENABLED = os.getenv("PRIVACY_MANUAL_REVIEW_ENABLED", "true").lower() == "true"
@@ -16316,6 +16323,175 @@ async def _get_feedback_governance_runtime_snapshot(
         "incident_level": incident_level,
         "recommended_actions": actions,
     }
+
+
+def _default_voice_gate_gold_set_runtime_path() -> Path:
+    return ROOT_DIR / "evals" / "voice_gate_gold_set.json"
+
+
+def _evaluate_runtime_text_checks(text: str, checks: Optional[Dict[str, Any]]) -> bool:
+    criteria = checks or {}
+    for phrase in list(criteria.get("includes") or []):
+        if str(phrase) not in text:
+            return False
+    for phrase in list(criteria.get("excludes") or []):
+        if str(phrase) in text:
+            return False
+    for pattern in list(criteria.get("regex") or []):
+        if not re.search(str(pattern), text, flags=re.MULTILINE):
+            return False
+    for pattern in list(criteria.get("not_regex") or []):
+        if re.search(str(pattern), text, flags=re.MULTILINE):
+            return False
+    return True
+
+
+def _run_voice_gate_gold_set_validation(path: Optional[Path] = None) -> Dict[str, Any]:
+    gold_set_path = Path(path or _default_voice_gate_gold_set_runtime_path())
+    with gold_set_path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+
+    results: List[Dict[str, Any]] = []
+    for case in list(payload.get("cases") or []):
+        if case.get("kind") != "voice_gate":
+            continue
+        case_input = case.get("input") or {}
+        language = str(case_input.get("language") or case.get("language") or "en")
+        gate_result = validate_voice_gate(
+            str(case_input.get("text") or ""),
+            language=language,
+        )
+        serialized = json.dumps(gate_result, ensure_ascii=False, sort_keys=True)
+        specificity_checks = ((case.get("checks") or {}).get("specificity") or {})
+        case_passed = _evaluate_runtime_text_checks(serialized, specificity_checks)
+        results.append(
+            {
+                "id": case.get("id"),
+                "language": language,
+                "passed": case_passed,
+                "result": gate_result,
+            }
+        )
+
+    passed_count = sum(1 for item in results if item.get("passed"))
+    failed_case_ids = [str(item.get("id") or "") for item in results if not item.get("passed")]
+    return {
+        "version": payload.get("version"),
+        "gold_set_path": str(gold_set_path),
+        "case_count": len(results),
+        "passed_count": passed_count,
+        "failed_count": len(results) - passed_count,
+        "passed": passed_count == len(results),
+        "failed_case_ids": failed_case_ids,
+    }
+
+
+async def _get_feedback_governance_release_gate_snapshot(
+    *,
+    owner_user_id: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    governance = await _get_feedback_governance_runtime_snapshot(
+        owner_user_id=owner_user_id,
+        now=now,
+    )
+    gold_set_report = _run_voice_gate_gold_set_validation()
+
+    policy = governance.get("policy") or {}
+    counts = governance.get("assessment_counts") or {}
+    queue = governance.get("review_queue") or {}
+    blocking_items: List[str] = []
+    warnings: List[str] = []
+
+    if not policy.get("master_observer_pipeline_enabled"):
+        blocking_items.append("Master Observer pipeline is disabled.")
+    if not policy.get("master_observer_require_voice_gate_pass"):
+        blocking_items.append("Master Observer is not configured to require Voice Gate pass.")
+    if not policy.get("voice_gate_release_enforcement_enabled"):
+        blocking_items.append("Voice Gate release enforcement is disabled.")
+    if int(counts.get("blocked_without_queue") or 0) > 0:
+        blocking_items.append("Blocked feedback exists without matching human review queue coverage.")
+    if int(counts.get("blocked") or 0) > 0 and not policy.get("voice_gate_human_escalation_enabled"):
+        blocking_items.append("Voice Gate human escalation is disabled while blocked feedback exists.")
+    if not gold_set_report.get("passed"):
+        blocking_items.append("Voice Gate gold set validation failed.")
+
+    oldest_pending_age = queue.get("oldest_pending_age_minutes")
+    if oldest_pending_age is not None:
+        oldest_pending_age = int(oldest_pending_age)
+        if oldest_pending_age >= FEEDBACK_GOVERNANCE_QUEUE_AGE_BLOCKING_MINUTES:
+            blocking_items.append(
+                f"Feedback review queue age exceeded blocking threshold ({FEEDBACK_GOVERNANCE_QUEUE_AGE_BLOCKING_MINUTES} minutes)."
+            )
+        elif oldest_pending_age >= FEEDBACK_GOVERNANCE_QUEUE_AGE_WARNING_MINUTES:
+            warnings.append(
+                f"Feedback review queue age exceeded warning threshold ({FEEDBACK_GOVERNANCE_QUEUE_AGE_WARNING_MINUTES} minutes)."
+            )
+
+    if int(queue.get("pending") or 0) > 0:
+        warnings.append("Feedback review queue has pending items.")
+    if int(counts.get("overrides_last_24h") or 0) > 0:
+        warnings.append("Recent human overrides were used in the last 24 hours.")
+
+    incident_level = str(governance.get("incident_level") or "green")
+    if blocking_items:
+        incident_level = "red"
+    elif warnings:
+        incident_level = _max_incident_level(incident_level, "amber")
+
+    actions = list(governance.get("recommended_actions") or [])
+    if not gold_set_report.get("passed"):
+        actions.append("Fix Voice Gate regressions and rerun the deterministic gold set before release.")
+    if not actions:
+        actions.append("No urgent governance actions. Continue routine monitoring.")
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "scope_owner_user_id": owner_user_id,
+        "go_no_go": "go" if not blocking_items else "hold",
+        "incident_level": incident_level,
+        "blocking_items": blocking_items,
+        "warnings": warnings,
+        "policy": policy,
+        "assessment_counts": counts,
+        "review_queue": queue,
+        "top_voice_gate_failures": list(governance.get("top_voice_gate_failures") or []),
+        "voice_gate_gold_set": gold_set_report,
+        "recommended_actions": actions,
+    }
+
+
+@api_router.get("/admin/ops/feedback-governance-readiness")
+async def get_admin_ops_feedback_governance_readiness(
+    owner_user_id: Optional[str] = Query(default=None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require_admin_ops_user(current_user)
+    role = _get_user_role(current_user)
+    requested_owner = str(owner_user_id or "").strip() or None
+    if role != "super_admin":
+        if requested_owner and requested_owner != current_user["id"]:
+            raise HTTPException(status_code=403, detail="Admin access is limited to your workspace")
+        scope_owner_user_id = current_user["id"]
+    else:
+        scope_owner_user_id = requested_owner
+
+    snapshot = await _get_feedback_governance_release_gate_snapshot(
+        owner_user_id=scope_owner_user_id,
+    )
+    log_structured(
+        logger,
+        "info",
+        "feedback_governance_readiness_checked",
+        actor_user_id=current_user["id"],
+        role=role,
+        scope_owner_user_id=scope_owner_user_id,
+        go_no_go=snapshot.get("go_no_go"),
+        incident_level=snapshot.get("incident_level"),
+        blocking_items=len(list(snapshot.get("blocking_items") or [])),
+        warnings=len(list(snapshot.get("warnings") or [])),
+    )
+    return snapshot
 
 
 @api_router.get("/admin/ops/readiness")
