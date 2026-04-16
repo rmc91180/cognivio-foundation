@@ -372,6 +372,57 @@ def test_build_governed_feedback_bundle_marks_blocked_when_gate_fails(monkeypatc
     assert bundle["release_metadata"]["feedback_regeneration_attempts"] >= 1
 
 
+def test_feedback_governance_update_blocks_when_enforced_and_gate_fails(monkeypatch):
+    monkeypatch.setattr(server, "MASTER_OBSERVER_PIPELINE_ENABLED", True)
+    monkeypatch.setattr(server, "MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS", True)
+    monkeypatch.setattr(server, "VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED", True)
+    monkeypatch.setattr(
+        server,
+        "validate_voice_gate",
+        lambda *args, **kwargs: {"passed": False, "failures": ["language.banned_term:correlation"], "section_count": 6},
+    )
+
+    plan = server._build_feedback_governance_update_for_assessment(
+        {
+            "id": "assessment-100",
+            "summary": "This suggests a correlation in student response.",
+            "analysis_language": "en",
+            "feedback_release_status": "released",
+        }
+    )
+
+    assert plan["changed"] is True
+    assert plan["requires_queue"] is True
+    assert plan["updates"]["feedback_release_status"] == "blocked"
+    assert plan["updates"]["feedback_human_review_required"] is True
+
+
+def test_feedback_governance_update_respects_human_override_release(monkeypatch):
+    monkeypatch.setattr(server, "MASTER_OBSERVER_PIPELINE_ENABLED", True)
+    monkeypatch.setattr(server, "MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS", True)
+    monkeypatch.setattr(server, "VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED", True)
+    monkeypatch.setattr(
+        server,
+        "validate_voice_gate",
+        lambda *args, **kwargs: {"passed": False, "failures": ["language.banned_term:correlation"], "section_count": 6},
+    )
+
+    plan = server._build_feedback_governance_update_for_assessment(
+        {
+            "id": "assessment-101",
+            "summary": "This suggests a correlation in student response.",
+            "analysis_language": "en",
+            "feedback_release_status": "released",
+            "feedback_release_override_at": "2026-04-16T09:00:00+00:00",
+        }
+    )
+
+    assert plan["requires_queue"] is False
+    assert plan["updates"]["feedback_release_status"] == "released"
+    assert plan["updates"]["feedback_human_review_required"] is False
+    assert plan["updates"]["voice_gate_status"] == "human_override_release"
+
+
 def test_build_focus_instruction_preserves_hebrew_admin_text_without_english_normalization():
     instruction = server._build_focus_instruction(
         [{"id": "d3b", "name": "שימוש בשאלות ובדיון", "priority": True}],

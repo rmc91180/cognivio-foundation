@@ -5937,6 +5937,25 @@ class AdminSmokeCleanupResponse(BaseModel):
     executed_at: str
 
 
+class FeedbackGovernanceBackfillRequest(BaseModel):
+    owner_user_id: Optional[str] = None
+    limit: int = 500
+    dry_run: bool = True
+
+
+class FeedbackGovernanceBackfillResponse(BaseModel):
+    scope_owner_user_id: Optional[str] = None
+    dry_run: bool
+    scanned: int
+    updated: int
+    blocked: int
+    released: int
+    escalated: int
+    skipped: int
+    failures: List[str] = []
+    executed_at: str
+
+
 class Schedule(BaseModel):
     """Upcoming class session scheduled for recording."""
 
@@ -16061,6 +16080,44 @@ async def run_admin_smoke_cleanup(
     return result
 
 
+@api_router.post("/admin/ops/feedback-governance-backfill", response_model=FeedbackGovernanceBackfillResponse)
+async def run_feedback_governance_backfill(
+    payload: FeedbackGovernanceBackfillRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_admin_ops_user(current_user)
+    role = _get_user_role(current_user)
+    requested_owner = str(payload.owner_user_id or "").strip() or None
+
+    if role != "super_admin":
+        if requested_owner and requested_owner != current_user["id"]:
+            raise HTTPException(status_code=403, detail="Admin access is limited to your workspace")
+        scope_owner_user_id = current_user["id"]
+    else:
+        scope_owner_user_id = requested_owner
+
+    result = await _run_feedback_governance_backfill(
+        owner_user_id=scope_owner_user_id,
+        limit=max(1, min(int(payload.limit), 2000)),
+        dry_run=bool(payload.dry_run),
+    )
+    log_structured(
+        logger,
+        "info",
+        "feedback_governance_backfill_executed",
+        actor_user_id=current_user["id"],
+        role=role,
+        scope_owner_user_id=scope_owner_user_id,
+        dry_run=bool(payload.dry_run),
+        scanned=result["scanned"],
+        updated=result["updated"],
+        blocked=result["blocked"],
+        escalated=result["escalated"],
+        failures=len(result["failures"]),
+    )
+    return FeedbackGovernanceBackfillResponse(**result)
+
+
 @api_router.get("/admin/ops/readiness")
 async def get_admin_ops_readiness(current_user: dict = Depends(get_current_user)):
     _require_admin_ops_user(current_user)
@@ -18791,6 +18848,135 @@ def _apply_feedback_release_guard(
     guarded["recommendations"] = []
     guarded["observation_summary"] = observation_summary
     return guarded
+
+
+def _select_feedback_text_for_governance(assessment: Dict[str, Any]) -> str:
+    observation_summary = assessment.get("observation_summary") or {}
+    full_review = str(observation_summary.get("full_review_text") or "").strip()
+    if full_review:
+        return full_review
+    summary = str(assessment.get("summary") or "").strip()
+    if summary:
+        return summary
+    recommendation_lines = [str(item or "").strip() for item in list(assessment.get("recommendations") or []) if str(item or "").strip()]
+    if recommendation_lines:
+        return "\n".join(recommendation_lines)
+    return ""
+
+
+def _build_feedback_governance_update_for_assessment(
+    assessment: Dict[str, Any],
+    *,
+    enforce_release: Optional[bool] = None,
+) -> Dict[str, Any]:
+    enforce = _is_voice_gate_release_enforced() if enforce_release is None else bool(enforce_release)
+    language = _normalize_app_language(assessment.get("analysis_language"), default="en")
+    review_text = _select_feedback_text_for_governance(assessment)
+    metadata = _build_feedback_release_metadata(review_text, language=language)
+
+    current_status = str(assessment.get("feedback_release_status") or "").strip().lower()
+    override_released = bool(
+        assessment.get("feedback_release_override_at")
+        and current_status == "released"
+    )
+
+    updates: Dict[str, Any] = {
+        "voice_gate_version": metadata["voice_gate_version"],
+        "voice_gate_status": metadata["voice_gate_status"],
+        "voice_gate_failures": metadata["voice_gate_failures"],
+        "voice_gate_section_count": metadata["voice_gate_section_count"],
+        "voice_gate_validated_at": metadata["voice_gate_validated_at"],
+        "feedback_release_status": metadata["feedback_release_status"],
+        "feedback_human_review_required": metadata["feedback_human_review_required"],
+    }
+
+    requires_queue = False
+    if enforce and not override_released:
+        if metadata["feedback_release_status"] != "released":
+            updates["feedback_release_status"] = "blocked"
+            updates["feedback_human_review_required"] = True
+            requires_queue = True
+
+    if override_released:
+        updates["feedback_release_status"] = "released"
+        updates["feedback_human_review_required"] = False
+        updates["voice_gate_status"] = "human_override_release"
+        updates["voice_gate_failures"] = []
+        requires_queue = False
+
+    changed = any(assessment.get(key) != value for key, value in updates.items())
+    return {
+        "updates": updates,
+        "changed": changed,
+        "requires_queue": requires_queue,
+    }
+
+
+async def _run_feedback_governance_backfill(
+    *,
+    owner_user_id: Optional[str] = None,
+    limit: int = 500,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    query: Dict[str, Any] = {}
+    if owner_user_id:
+        query["user_id"] = owner_user_id
+
+    docs = await db.assessments.find(query, {"_id": 0}).sort("analyzed_at", -1).to_list(max(1, int(limit)))
+    stats = {
+        "scope_owner_user_id": owner_user_id,
+        "dry_run": bool(dry_run),
+        "scanned": len(docs),
+        "updated": 0,
+        "blocked": 0,
+        "released": 0,
+        "escalated": 0,
+        "skipped": 0,
+        "failures": [],
+        "executed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    for assessment in docs:
+        assessment_id = assessment.get("id")
+        if not assessment_id:
+            stats["skipped"] += 1
+            continue
+        try:
+            plan = _build_feedback_governance_update_for_assessment(assessment)
+            updates = dict(plan["updates"])
+            next_status = str(updates.get("feedback_release_status") or "").strip().lower()
+            if next_status == "blocked":
+                stats["blocked"] += 1
+            elif next_status == "released":
+                stats["released"] += 1
+
+            if not plan["changed"]:
+                stats["skipped"] += 1
+                continue
+
+            if dry_run:
+                stats["updated"] += 1
+                if plan["requires_queue"]:
+                    stats["escalated"] += 1
+                continue
+
+            await db.assessments.update_one({"id": assessment_id}, {"$set": updates})
+            stats["updated"] += 1
+            if plan["requires_queue"]:
+                queue_id = await _enqueue_feedback_human_review(
+                    {**assessment, **updates},
+                    release_metadata=updates,
+                )
+                if queue_id:
+                    stats["escalated"] += 1
+                    await db.assessments.update_one(
+                        {"id": assessment_id},
+                        {"$set": {"feedback_review_queue_id": queue_id}},
+                    )
+        except Exception as exc:
+            stats["failures"].append(f"{assessment_id}: {exc}")
+
+    return stats
 
 
 def _sanitize_text_for_voice_gate(text: Any, *, language: str = "en") -> str:
