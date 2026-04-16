@@ -4,10 +4,12 @@ __all__ = [
     "analysis_orchestrator",
     "audio_pipeline",
     "frame_selection",
+    "master_observer",
     "model_clients",
     "moment_sampler",
     "multimodal_analysis",
     "recognition_engine",
     "specialist_contracts",
     "specialist_orchestrator",
+    "voice_gate",
 ]

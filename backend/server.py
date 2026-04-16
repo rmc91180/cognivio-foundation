@@ -75,6 +75,8 @@ from app.observability import (
     record_worker_result,
     snapshot as observability_snapshot,
 )
+from app.analysis.master_observer import render_master_observer_feedback
+from app.analysis.voice_gate import validate_voice_gate
 from share_assets import (
     build_email_signature_html,
     render_email_signature_badge,
@@ -3981,6 +3983,9 @@ PAID_ANALYSIS_ENABLED = os.getenv("PAID_ANALYSIS_ENABLED", "false").lower() == "
 PAID_ANALYSIS_ALLOWLIST_EMAILS = {
     email.lower() for email in _get_optional_env_list("PAID_ANALYSIS_ALLOWLIST_EMAILS")
 }
+MASTER_OBSERVER_PIPELINE_ENABLED = os.getenv("MASTER_OBSERVER_PIPELINE_ENABLED", "false").lower() == "true"
+MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS = os.getenv("MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS", "true").lower() == "true"
+VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED = os.getenv("VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED", "false").lower() == "true"
 PRIVACY_PROFILE_MIN_REFERENCES = max(1, int(os.getenv("PRIVACY_PROFILE_MIN_REFERENCES", "3")))
 PRIVACY_PROFILE_MAX_REFERENCES = max(PRIVACY_PROFILE_MIN_REFERENCES, int(os.getenv("PRIVACY_PROFILE_MAX_REFERENCES", "5")))
 PRIVACY_MANUAL_REVIEW_ENABLED = os.getenv("PRIVACY_MANUAL_REVIEW_ENABLED", "true").lower() == "true"
@@ -16510,6 +16515,19 @@ async def analyze_video(
             provided_recommendations=analysis_payload.get("recommendations"),
             language=analysis_language,
         )
+        release_metadata = _build_feedback_release_metadata(
+            observation_summary.get("full_review_text") or summary_text,
+            language=analysis_language,
+        )
+        if _is_voice_gate_release_enforced() and release_metadata.get("feedback_release_status") != "released":
+            log_structured(
+                logger,
+                "warning",
+                "feedback_release_blocked_by_voice_gate",
+                video_id=video_id,
+                teacher_id=teacher_id,
+                failures=release_metadata.get("voice_gate_failures", []),
+            )
         
         # Create assessment document
         assessment_doc = {
@@ -16533,6 +16551,7 @@ async def analyze_video(
             "specialist_orchestrator": analysis_metadata["specialist_orchestrator"],
             "specialist_trace": analysis_metadata["specialist_trace"],
             "analysis_context_snapshot": analysis_payload.get("analysis_context"),
+            **release_metadata,
         }
         
         await db.assessments.insert_one(assessment_doc)
@@ -16557,6 +16576,8 @@ async def analyze_video(
                     "priority_elements": priority_elements,
                     "focus_note": focus_note or None,
                     "analysis_language": analysis_language,
+                    "feedback_release_status": release_metadata.get("feedback_release_status"),
+                    "feedback_human_review_required": release_metadata.get("feedback_human_review_required"),
                     "status_updated_at": completed_at,
                     "processing_completed_at": completed_at,
                     "processing_failed_at": None,
@@ -18525,6 +18546,108 @@ def _apply_priority_recommendation_context(
     return f"Priority focus on {element_name}: {clean_text}"
 
 
+def _build_master_observer_artifact(
+    element_scores: List[dict],
+    *,
+    priority_element_ids: Optional[List[str]] = None,
+    language: str = "en",
+) -> Optional[Dict[str, Any]]:
+    if not MASTER_OBSERVER_PIPELINE_ENABLED:
+        return None
+
+    artifact = render_master_observer_feedback(
+        element_scores,
+        priority_element_ids=priority_element_ids,
+        language=language,
+    )
+    gate_result = validate_voice_gate(artifact.get("full_review_text", ""), language=language)
+    artifact["voice_gate"] = gate_result
+
+    if gate_result.get("passed") or not MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS:
+        return artifact
+
+    log_structured(
+        logger,
+        "warning",
+        "master_observer_voice_gate_failed",
+        failures=gate_result.get("failures", []),
+        language=language,
+    )
+    return None
+
+
+def _build_feedback_release_metadata(
+    review_text: str,
+    *,
+    language: str = "en",
+) -> Dict[str, Any]:
+    gate_result = validate_voice_gate(review_text, language=language)
+    return {
+        "voice_gate_version": "voice_gate_rules_v1",
+        "voice_gate_status": "pass" if gate_result.get("passed") else "fail",
+        "voice_gate_failures": list(gate_result.get("failures") or []),
+        "voice_gate_section_count": gate_result.get("section_count"),
+        "voice_gate_validated_at": datetime.now(timezone.utc).isoformat(),
+        "feedback_release_status": "released" if gate_result.get("passed") else "blocked",
+        "feedback_human_review_required": not bool(gate_result.get("passed")),
+    }
+
+
+def _is_voice_gate_release_enforced() -> bool:
+    return (
+        MASTER_OBSERVER_PIPELINE_ENABLED
+        and MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS
+        and VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED
+    )
+
+
+def _feedback_blocked_message(language: str = "en") -> str:
+    if _is_hebrew_language(language):
+        return "המשוב ממתין לבדיקת איכות אנושית לפני שחרור."
+    return "Feedback is pending human quality review before release."
+
+
+def _apply_feedback_release_guard(
+    assessment: Dict[str, Any],
+    *,
+    language: str = "en",
+) -> Dict[str, Any]:
+    guarded = dict(assessment)
+    if not _is_voice_gate_release_enforced():
+        return guarded
+
+    status = str(guarded.get("feedback_release_status") or "").strip().lower()
+    if status == "released":
+        return guarded
+
+    message = _feedback_blocked_message(language)
+    observation_summary = dict(guarded.get("observation_summary") or {})
+    observation_summary.update(
+        {
+            "executive_summary": message,
+            "top_strengths": [],
+            "growth_areas": [],
+            "coaching_actions": [],
+            "priority_alignment": [],
+            "evidence_highlights": [],
+            "focus_note": None,
+            "confidence_note": None,
+            "primary_growth_focus": None,
+            "longitudinal_insight": None,
+            "reflection_prompts": [],
+            "actionable_next_steps_structured": [],
+            "full_review_text": message,
+            "output_order": [],
+            "deferral_note": None,
+            "reasoning_model": observation_summary.get("reasoning_model") or "master_observer_v1",
+        }
+    )
+    guarded["summary"] = message
+    guarded["recommendations"] = []
+    guarded["observation_summary"] = observation_summary
+    return guarded
+
+
 def build_observation_summary_packet(
     element_scores: List[dict],
     overall_score: float,
@@ -18537,6 +18660,33 @@ def build_observation_summary_packet(
     provided_recommendations: Optional[List[dict]] = None,
     language: str = "en",
 ) -> Dict[str, Any]:
+    master_observer = _build_master_observer_artifact(
+        element_scores,
+        priority_element_ids=priority_element_ids,
+        language=language,
+    )
+    if master_observer:
+        structured_steps = list(master_observer.get("actionable_next_steps_structured") or [])[:2]
+        action_lines = [_format_action_step_line(step, language=language) for step in structured_steps]
+        return {
+            "executive_summary": master_observer.get("instructional_snapshot"),
+            "top_strengths": list(master_observer.get("strengths_to_keep_and_build_on") or [])[:2],
+            "growth_areas": [master_observer.get("primary_growth_focus")],
+            "coaching_actions": action_lines[:2],
+            "priority_alignment": [master_observer.get("rubric_aligned_interpretation")],
+            "evidence_highlights": list(master_observer.get("evidence_based_observation_highlights") or [])[:3],
+            "focus_note": focus_note or None,
+            "confidence_note": None,
+            "primary_growth_focus": master_observer.get("primary_growth_focus"),
+            "longitudinal_insight": None,
+            "reflection_prompts": [],
+            "actionable_next_steps_structured": structured_steps,
+            "full_review_text": master_observer.get("full_review_text"),
+            "output_order": list(master_observer.get("output_order") or []),
+            "deferral_note": None,
+            "reasoning_model": "master_observer_v1",
+        }
+
     canonical = _build_canonical_review_output(
         element_scores,
         priority_element_ids=priority_element_ids,
@@ -18695,13 +18845,32 @@ def _enrich_assessment_for_response(
         analysis_context=analysis_context_snapshot,
         language=display_language,
     )
+    response_release_metadata = _build_feedback_release_metadata(
+        enriched["observation_summary"].get("full_review_text") or localized_summary,
+        language=display_language,
+    )
+    for key, value in response_release_metadata.items():
+        enriched.setdefault(key, value)
+
+    if _is_voice_gate_release_enforced():
+        stored_status = str(enriched.get("feedback_release_status") or "").strip().lower()
+        response_passed = response_release_metadata.get("feedback_release_status") == "released"
+        if stored_status != "released" or not response_passed:
+            merged_failures = sorted(
+                set(list(enriched.get("voice_gate_failures") or []) + list(response_release_metadata.get("voice_gate_failures") or []))
+            )
+            enriched["voice_gate_status"] = "fail"
+            enriched["voice_gate_failures"] = merged_failures
+            enriched["feedback_release_status"] = "blocked"
+            enriched["feedback_human_review_required"] = True
+
     enriched.setdefault("priority_elements", priority_elements)
     enriched.setdefault("focus_note", focus_note)
     enriched.setdefault("analysis_confidence", analysis_confidence)
     enriched.setdefault("analysis_modalities_used", list(enriched.get("analysis_modalities_used") or []))
     enriched.setdefault("analysis_language", analysis_language)
     enriched.setdefault("analysis_context_snapshot", analysis_context_snapshot)
-    return enriched
+    return _apply_feedback_release_guard(enriched, language=display_language)
 
 
 def generate_summary(
@@ -18714,6 +18883,14 @@ def generate_summary(
     analysis_context: Optional[dict] = None,
     analysis_confidence: Optional[Dict[str, Any]] = None,
 ) -> str:
+    master_observer = _build_master_observer_artifact(
+        element_scores,
+        priority_element_ids=priority_element_ids,
+        language=language,
+    )
+    if master_observer:
+        return str(master_observer.get("full_review_text") or "").strip()
+
     canonical = _build_canonical_review_output(
         element_scores,
         priority_element_ids=priority_element_ids,
@@ -18734,6 +18911,17 @@ def generate_recommendations(
     analysis_context: Optional[dict] = None,
     analysis_confidence: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
+    master_observer = _build_master_observer_artifact(
+        element_scores,
+        priority_element_ids=priority_element_ids,
+        language=language,
+    )
+    if master_observer:
+        return [
+            _format_action_step_line(step, language=language)
+            for step in list(master_observer.get("actionable_next_steps_structured") or [])[:2]
+        ]
+
     canonical = _build_canonical_review_output(
         element_scores,
         priority_element_ids=priority_element_ids,

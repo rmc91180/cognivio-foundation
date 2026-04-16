@@ -166,6 +166,161 @@ def test_generate_recommendations_supports_hebrew_output():
     assert "עדות להצלחה ->" in recommendations[0]
 
 
+def test_master_observer_flag_uses_new_renderer_when_voice_gate_passes(monkeypatch):
+    monkeypatch.setattr(server, "MASTER_OBSERVER_PIPELINE_ENABLED", True)
+    monkeypatch.setattr(server, "MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS", True)
+
+    element_scores = [
+        {
+            "element_id": "2b",
+            "element_name": "Questioning",
+            "priority": True,
+            "score": 7.3,
+            "observations": ["You used wait time before inviting the next response."],
+            "evidence_segments": [{"start_sec": 70, "end_sec": 95, "summary": "Students referred to notes before responding."}],
+        }
+    ]
+
+    summary = server.generate_summary(element_scores, 7.3, priority_element_ids=["2b"])
+    recommendations = server.generate_recommendations(element_scores, priority_element_ids=["2b"])
+
+    assert "6. Rubric-Aligned Interpretation (Light)" in summary
+    assert "8. Reflection Prompts" not in summary
+    assert 1 <= len(recommendations) <= 2
+    assert recommendations[0].startswith("Try This ->")
+
+    packet = server.build_observation_summary_packet(
+        element_scores,
+        7.3,
+        summary,
+        recommendations,
+        priority_element_ids=["2b"],
+    )
+    assert packet["reasoning_model"] == "master_observer_v1"
+    assert packet["full_review_text"] == summary
+
+
+def test_master_observer_flag_falls_back_when_voice_gate_fails(monkeypatch):
+    monkeypatch.setattr(server, "MASTER_OBSERVER_PIPELINE_ENABLED", True)
+    monkeypatch.setattr(server, "MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS", True)
+
+    def _failing_renderer(*args, **kwargs):
+        return {
+            "instructional_snapshot": "You led a clear lesson.",
+            "strengths_to_keep_and_build_on": ["Questioning move remained clear."],
+            "primary_growth_focus": "Build one discussion routine.",
+            "evidence_based_observation_highlights": ["Around 01:20, students responded to your prompt."],
+            "actionable_next_steps_structured": [
+                {"try_this": "Try a quick write.", "look_for": "More voices.", "evidence_of_success": "Wider participation."}
+            ],
+            "rubric_aligned_interpretation": "This suggests a correlation.",
+            "output_order": [],
+            "full_review_text": "1. Instructional Snapshot\nYou led a clear lesson.\n\n2. Strengths to Keep and Build On\n- Questioning move remained clear.\n\n3. Primary Growth Focus\nBuild one discussion routine.\n\n4. Evidence-Based Observation Highlights\n- Around 01:20, students responded to your prompt.\n\n5. Try This Next (Actionable, Near-Term)\n- Try This: Try a quick write.\n  Look For: More voices.\n  Evidence of Success: Wider participation.\n\n6. Rubric-Aligned Interpretation (Light)\nThis suggests a correlation.",
+        }
+
+    monkeypatch.setattr(server, "render_master_observer_feedback", _failing_renderer)
+
+    summary = server.generate_summary(
+        [
+            {
+                "element_id": "2b",
+                "element_name": "Questioning",
+                "score": 7.0,
+                "observations": ["Teacher used wait time before inviting responses."],
+            }
+        ],
+        7.0,
+        priority_element_ids=["2b"],
+    )
+
+    assert "8. Reflection Prompts" in summary
+
+
+def test_voice_gate_release_enforcement_blocks_teacher_facing_feedback(monkeypatch):
+    monkeypatch.setattr(server, "MASTER_OBSERVER_PIPELINE_ENABLED", True)
+    monkeypatch.setattr(server, "MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS", True)
+    monkeypatch.setattr(server, "VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED", True)
+
+    def _always_fail(*args, **kwargs):
+        return {"passed": False, "failures": ["language.banned_term:correlation"], "section_count": 6}
+
+    monkeypatch.setattr(server, "validate_voice_gate", _always_fail)
+
+    enriched = server._enrich_assessment_for_response(
+        {
+            "id": "assessment-1",
+            "video_id": "video-1",
+            "teacher_id": "teacher-1",
+            "framework_type": "danielson",
+            "element_scores": [
+                {
+                    "element_id": "2b",
+                    "element_name": "Questioning",
+                    "score": 7.1,
+                    "observations": ["Teacher used wait time before taking responses."],
+                }
+            ],
+            "overall_score": 7.1,
+            "summary": "Legacy summary text.",
+            "recommendations": ["Legacy recommendation."],
+            "analyzed_at": "2026-04-16T08:00:00+00:00",
+            "analysis_language": "en",
+            "priority_elements": ["2b"],
+            "analysis_confidence": {},
+            "feedback_release_status": "released",
+            "voice_gate_status": "pass",
+            "voice_gate_failures": [],
+        },
+        response_language="en",
+    )
+
+    assert enriched["feedback_release_status"] == "blocked"
+    assert enriched["feedback_human_review_required"] is True
+    assert enriched["summary"] == "Feedback is pending human quality review before release."
+    assert enriched["recommendations"] == []
+    assert enriched["observation_summary"]["executive_summary"] == "Feedback is pending human quality review before release."
+
+
+def test_voice_gate_release_enforcement_allows_passed_feedback(monkeypatch):
+    monkeypatch.setattr(server, "MASTER_OBSERVER_PIPELINE_ENABLED", True)
+    monkeypatch.setattr(server, "MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS", True)
+    monkeypatch.setattr(server, "VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED", True)
+
+    enriched = server._enrich_assessment_for_response(
+        {
+            "id": "assessment-2",
+            "video_id": "video-2",
+            "teacher_id": "teacher-2",
+            "framework_type": "danielson",
+            "element_scores": [
+                {
+                    "element_id": "2b",
+                    "element_name": "Questioning",
+                    "priority": True,
+                    "score": 7.4,
+                    "observations": ["You used a follow-up question and pause time."],
+                    "evidence_segments": [{"start_sec": 64, "end_sec": 88, "summary": "Students referred to notes before speaking."}],
+                }
+            ],
+            "overall_score": 7.4,
+            "summary": "Legacy summary text.",
+            "recommendations": ["Legacy recommendation."],
+            "analyzed_at": "2026-04-16T08:00:00+00:00",
+            "analysis_language": "en",
+            "priority_elements": ["2b"],
+            "analysis_confidence": {},
+            "feedback_release_status": "released",
+            "voice_gate_status": "pass",
+            "voice_gate_failures": [],
+        },
+        response_language="en",
+    )
+
+    assert enriched["feedback_release_status"] == "released"
+    assert enriched["summary"] != "Feedback is pending human quality review before release."
+    assert enriched["recommendations"]
+
+
 def test_build_focus_instruction_preserves_hebrew_admin_text_without_english_normalization():
     instruction = server._build_focus_instruction(
         [{"id": "d3b", "name": "שימוש בשאלות ובדיון", "priority": True}],
