@@ -1,0 +1,113 @@
+{
+  "version": "2026-04-16.voice-gate-v1",
+  "cases": [
+    {
+      "id": "voice_gate_pass_well_formed_en",
+      "kind": "voice_gate",
+      "language": "en",
+      "description": "A well-formed master-observer output should pass deterministic voice gate checks.",
+      "input": {
+        "language": "en",
+        "text": "1. Instructional Snapshot\nYou led a clear, steady lesson with strong pacing and clear direction. A strength was your follow-up prompting, which gave students useful space to think before responding. Students were attentive through most of the lesson, and participation narrowed at a few points to a smaller cluster of voices. The class climate stayed calm and focused, which gave you a strong base to build from. The clearest next leverage point is widening who shares thinking during discussion.\n\n2. Strengths to Keep and Build On\n- Your follow-up prompts and wait time created stronger student responses and supported deeper thinking.\n- Your lesson flow stayed coherent from start to finish, helping students stay oriented to the learning goal.\n\n3. Primary Growth Focus\nBuild a consistent discussion routine that broadens who responds during each questioning sequence.\n\n4. Evidence-Based Observation Highlights\n- Around 01:20, your pause after a follow-up prompt led to a clearer student response.\n- Around 02:15-02:50, most responses came from one table, limiting visibility into classwide understanding.\n- Across these moments, the highest-leverage move is keeping your strong questioning while distributing participation.\n\n5. Try This Next (Actionable, Near-Term)\n- Try This: Before each whole-class question, use 20-30 seconds of think-and-jot, then call on two students from different tables.\n  Look For: A wider spread of voices and more students referring to notes before speaking.\n  Evidence of Success: In one lesson, at least five students from different tables contribute accurate responses.\n- Try This: Track participation during one discussion segment with quick table-level checkmarks.\n  Look For: Fewer repeat responders and more first-time contributors.\n  Evidence of Success: By the end of the segment, each table contributes at least one response tied to the lesson target.\n\n6. Rubric-Aligned Interpretation (Light)\nThrough a questioning-and-engagement lens, your instructional clarity is a clear asset, and the next step is broadening visible student thinking across the room."
+      },
+      "checks": {
+        "specificity": {
+          "includes": [
+            "\"passed\": true"
+          ]
+        }
+      }
+    },
+    {
+      "id": "voice_gate_fail_banned_correlation",
+      "kind": "voice_gate",
+      "language": "en",
+      "description": "Banned language should hard-fail the voice gate.",
+      "input": {
+        "language": "en",
+        "text": "1. Instructional Snapshot\nYou led a clear lesson.\n\n2. Strengths to Keep and Build On\n- You paced the lesson clearly.\n\n3. Primary Growth Focus\nBuild one participation routine.\n\n4. Evidence-Based Observation Highlights\n- Around 01:10, students responded to your prompt.\n\n5. Try This Next (Actionable, Near-Term)\n- Try This: Use think-and-jot before discussion.\n  Look For: More students ready to respond.\n  Evidence of Success: At least five students contribute accurate responses.\n\n6. Rubric-Aligned Interpretation (Light)\nThis suggests a correlation between prompt timing and response quality."
+      },
+      "checks": {
+        "specificity": {
+          "includes": [
+            "\"passed\": false",
+            "language.banned_term:correlation"
+          ]
+        }
+      }
+    },
+    {
+      "id": "voice_gate_fail_strengths_contains_contrast",
+      "kind": "voice_gate",
+      "language": "en",
+      "description": "Strengths containing contrast language should fail.",
+      "input": {
+        "language": "en",
+        "text": "1. Instructional Snapshot\nYou led a clear lesson with steady pacing and calm transitions.\n\n2. Strengths to Keep and Build On\n- Your explanations were clear, but student participation narrowed during discussion.\n\n3. Primary Growth Focus\nBuild one routine that widens participation.\n\n4. Evidence-Based Observation Highlights\n- Around 01:20, your follow-up question opened space for a student to clarify thinking.\n\n5. Try This Next (Actionable, Near-Term)\n- Try This: Use think-and-jot before whole-class share.\n  Look For: More students responding from across the room.\n  Evidence of Success: Multiple tables contribute accurate responses.\n\n6. Rubric-Aligned Interpretation (Light)\nYour clarity is a strength, and broader participation is the next move."
+      },
+      "checks": {
+        "specificity": {
+          "includes": [
+            "\"passed\": false",
+            "structural.strengths_contains_contrast_language"
+          ]
+        }
+      }
+    },
+    {
+      "id": "voice_gate_fail_snapshot_timestamp_first",
+      "kind": "voice_gate",
+      "language": "en",
+      "description": "Snapshot opening with timestamp should fail.",
+      "input": {
+        "language": "en",
+        "text": "1. Instructional Snapshot\nAt 07:30, you explained the task and then called on a student.\n\n2. Strengths to Keep and Build On\n- Your directions were clear and concise.\n\n3. Primary Growth Focus\nBuild one routine that broadens participation.\n\n4. Evidence-Based Observation Highlights\n- Around 02:10, your follow-up prompt helped a student revise an answer.\n\n5. Try This Next (Actionable, Near-Term)\n- Try This: Use think-and-jot before whole-class share.\n  Look For: Wider participation across student groups.\n  Evidence of Success: More students from different tables contribute accurate responses.\n\n6. Rubric-Aligned Interpretation (Light)\nYour clarity is strong, and broader participation is the next move."
+      },
+      "checks": {
+        "specificity": {
+          "includes": [
+            "\"passed\": false",
+            "snapshot.opens_with_timestamp"
+          ]
+        }
+      }
+    },
+    {
+      "id": "voice_gate_fail_action_triplet_missing",
+      "kind": "voice_gate",
+      "language": "en",
+      "description": "Actions missing triplet labels should fail.",
+      "input": {
+        "language": "en",
+        "text": "1. Instructional Snapshot\nYou led a clear lesson with strong pacing and coherent transitions.\n\n2. Strengths to Keep and Build On\n- Your follow-up prompts supported deeper responses.\n\n3. Primary Growth Focus\nBuild one routine that broadens participation.\n\n4. Evidence-Based Observation Highlights\n- Around 01:20, your pause gave students more thinking time.\n\n5. Try This Next (Actionable, Near-Term)\n- Try This: Use think-and-jot before whole-class share.\n\n6. Rubric-Aligned Interpretation (Light)\nYour clarity is strong, and broader participation is the next move."
+      },
+      "checks": {
+        "specificity": {
+          "includes": [
+            "\"passed\": false",
+            "actionability.look_for_missing",
+            "actionability.evidence_of_success_missing"
+          ]
+        }
+      }
+    },
+    {
+      "id": "voice_gate_fail_too_many_action_steps",
+      "kind": "voice_gate",
+      "language": "en",
+      "description": "More than two action steps should fail.",
+      "input": {
+        "language": "en",
+        "text": "1. Instructional Snapshot\nYou led a clear lesson with steady pacing and a calm learning climate.\n\n2. Strengths to Keep and Build On\n- Your follow-up prompts helped students clarify reasoning.\n\n3. Primary Growth Focus\nBuild one routine that broadens participation.\n\n4. Evidence-Based Observation Highlights\n- Around 01:20, your pause after a prompt improved response quality.\n\n5. Try This Next (Actionable, Near-Term)\n- Try This: Use think-and-jot before whole-class share.\n  Look For: More students prepared to respond.\n  Evidence of Success: At least five students respond accurately.\n- Try This: Track participation by table.\n  Look For: More first-time contributors.\n  Evidence of Success: Each table contributes once.\n- Try This: Use quick partner rehearsal before public share.\n  Look For: Students respond with greater precision.\n  Evidence of Success: Responses include lesson vocabulary.\n\n6. Rubric-Aligned Interpretation (Light)\nYour instructional clarity is a clear asset, and broader participation is the next move."
+      },
+      "checks": {
+        "specificity": {
+          "includes": [
+            "\"passed\": false",
+            "actionability.too_many_action_steps"
+          ]
+        }
+      }
+    }
+  ]
+}

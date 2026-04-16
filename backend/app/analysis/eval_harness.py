@@ -22,6 +22,10 @@ def _default_gold_set_path() -> Path:
     return Path(__file__).resolve().parents[2] / "evals" / "analysis_gold_set.json"
 
 
+def _default_voice_gate_gold_set_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "evals" / "voice_gate_gold_set.json"
+
+
 def _stub_optional_dependencies() -> None:
     os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
     os.environ.setdefault("DB_NAME", "cognivio_test")
@@ -190,6 +194,11 @@ def _run_case(case: Dict[str, Any], server_module: Any) -> Any:
             provided_recommendations=payload.get("provided_recommendations"),
             language=payload.get("language", case.get("language", "en")),
         )
+    if kind == "voice_gate":
+        return server_module.validate_voice_gate(
+            payload.get("text", ""),
+            language=payload.get("language", case.get("language", "en")),
+        )
     raise ValueError(f"Unsupported evaluation case kind: {kind}")
 
 
@@ -241,6 +250,10 @@ def evaluate_gold_set(path: Optional[Path] = None) -> Dict[str, Any]:
         "passed": passed_count == len(results),
         "results": results,
     }
+
+
+def evaluate_voice_gate_gold_set(path: Optional[Path] = None) -> Dict[str, Any]:
+    return evaluate_gold_set(path=path or _default_voice_gate_gold_set_path())
 
 
 def format_report(report: Dict[str, Any]) -> str:
