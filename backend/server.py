@@ -16118,6 +16118,206 @@ async def run_feedback_governance_backfill(
     return FeedbackGovernanceBackfillResponse(**result)
 
 
+def _max_incident_level(current: str, candidate: str) -> str:
+    order = {"green": 0, "amber": 1, "red": 2}
+    current_level = str(current or "green").strip().lower()
+    candidate_level = str(candidate or "green").strip().lower()
+    if order.get(candidate_level, 0) > order.get(current_level, 0):
+        return candidate_level
+    return current_level
+
+
+async def _get_feedback_governance_runtime_snapshot(
+    *,
+    owner_user_id: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    now_iso = now_utc.isoformat()
+    cutoff_24h_iso = (now_utc - timedelta(hours=24)).isoformat()
+    assessment_scope: Dict[str, Any] = {}
+    queue_scope: Dict[str, Any] = {}
+    if owner_user_id:
+        assessment_scope["user_id"] = owner_user_id
+        queue_scope["owner_user_id"] = owner_user_id
+
+    assessment_total = await db.assessments.count_documents(assessment_scope)
+    released_total = await db.assessments.count_documents(
+        {**assessment_scope, "feedback_release_status": "released"}
+    )
+    blocked_total = await db.assessments.count_documents(
+        {**assessment_scope, "feedback_release_status": "blocked"}
+    )
+    pending_human_review_total = await db.assessments.count_documents(
+        {**assessment_scope, "feedback_human_review_required": True}
+    )
+    overrides_total = await db.assessments.count_documents(
+        {**assessment_scope, "feedback_release_override_at": {"$ne": None}}
+    )
+    blocked_last_24h = await db.assessments.count_documents(
+        {
+            **assessment_scope,
+            "feedback_release_status": "blocked",
+            "analyzed_at": {"$gte": cutoff_24h_iso},
+        }
+    )
+    overrides_last_24h = await db.assessments.count_documents(
+        {
+            **assessment_scope,
+            "feedback_release_override_at": {"$gte": cutoff_24h_iso},
+        }
+    )
+    blocked_without_queue = await db.assessments.count_documents(
+        {
+            **assessment_scope,
+            "feedback_release_status": "blocked",
+            "feedback_human_review_required": True,
+            "feedback_review_queue_id": {"$in": [None, ""]},
+        }
+    )
+
+    queue_pending = await db.feedback_review_queue.count_documents({**queue_scope, "status": "pending"})
+    queue_resolved_release_24h = await db.feedback_review_queue.count_documents(
+        {
+            **queue_scope,
+            "status": "resolved_release_approved",
+            "resolved_at": {"$gte": cutoff_24h_iso},
+        }
+    )
+    queue_resolved_regen_24h = await db.feedback_review_queue.count_documents(
+        {
+            **queue_scope,
+            "status": "resolved_needs_regeneration",
+            "resolved_at": {"$gte": cutoff_24h_iso},
+        }
+    )
+    queue_resolved_dismissed_24h = await db.feedback_review_queue.count_documents(
+        {
+            **queue_scope,
+            "status": "resolved_dismissed",
+            "resolved_at": {"$gte": cutoff_24h_iso},
+        }
+    )
+    pending_docs = await db.feedback_review_queue.find(
+        {**queue_scope, "status": "pending"},
+        {"_id": 0, "created_at": 1},
+    ).sort("created_at", 1).to_list(1)
+    oldest_pending_age_minutes = None
+    if pending_docs:
+        oldest_dt = _parse_iso_datetime(pending_docs[0].get("created_at"))
+        if oldest_dt:
+            oldest_pending_age_minutes = max(0, int((now_utc - oldest_dt).total_seconds() // 60))
+
+    failure_counts: Dict[str, int] = {}
+    aggregate_fn = getattr(db.assessments, "aggregate", None)
+    if callable(aggregate_fn):
+        try:
+            rows = await aggregate_fn(
+                [
+                    {
+                        "$match": {
+                            **assessment_scope,
+                            "feedback_release_status": "blocked",
+                            "voice_gate_failures": {"$exists": True, "$ne": []},
+                        }
+                    },
+                    {"$unwind": "$voice_gate_failures"},
+                    {"$group": {"_id": "$voice_gate_failures", "count": {"$sum": 1}}},
+                    {"$sort": {"count": -1}},
+                    {"$limit": 10},
+                ]
+            ).to_list(10)
+            for row in rows:
+                token = str(row.get("_id") or "").strip()
+                if not token:
+                    continue
+                failure_counts[token] = int(row.get("count") or 0)
+        except Exception:
+            failure_counts = {}
+    if not failure_counts:
+        blocked_docs = await db.assessments.find(
+            {**assessment_scope, "feedback_release_status": "blocked"},
+            {"_id": 0, "voice_gate_failures": 1},
+        ).to_list(1000)
+        for doc in blocked_docs:
+            for token in list(doc.get("voice_gate_failures") or []):
+                failure = str(token or "").strip()
+                if not failure:
+                    continue
+                failure_counts[failure] = failure_counts.get(failure, 0) + 1
+    top_failures = [
+        {"failure": token, "count": count}
+        for token, count in sorted(failure_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
+    ]
+
+    policy_drift = (
+        MASTER_OBSERVER_PIPELINE_ENABLED
+        and MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS
+        and not VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED
+    )
+    incident_level = "green"
+    if blocked_without_queue > 0:
+        incident_level = "red"
+    elif policy_drift and blocked_total > 0:
+        incident_level = "red"
+    elif queue_pending >= 10 or blocked_last_24h >= 5:
+        incident_level = "amber"
+    elif queue_pending > 0 or blocked_last_24h > 0 or overrides_last_24h > 0:
+        incident_level = "amber"
+    if policy_drift and incident_level == "green":
+        incident_level = "amber"
+
+    actions = []
+    if policy_drift:
+        actions.append("Enable `VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED=true` before broad feedback release.")
+    if blocked_without_queue > 0 and not VOICE_GATE_HUMAN_ESCALATION_ENABLED:
+        actions.append("Enable `VOICE_GATE_HUMAN_ESCALATION_ENABLED=true` and enqueue blocked feedback for human review.")
+    elif blocked_without_queue > 0:
+        actions.append("Backfill blocked assessments missing review queue entries using `POST /api/admin/ops/feedback-governance-backfill`.")
+    if queue_pending > 0:
+        actions.append("Work the feedback human-review queue to unblock teacher-facing release.")
+    if blocked_last_24h > 0:
+        actions.append("Review recent Voice Gate failures and tighten render-time prompt and sanitizer controls.")
+    if not actions:
+        actions.append("No urgent governance actions. Continue routine monitoring.")
+
+    blocked_rate = round((blocked_total / assessment_total), 4) if assessment_total else 0.0
+    return {
+        "generated_at": now_iso,
+        "scope_owner_user_id": owner_user_id,
+        "policy": {
+            "master_observer_pipeline_enabled": MASTER_OBSERVER_PIPELINE_ENABLED,
+            "master_observer_require_voice_gate_pass": MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS,
+            "voice_gate_release_enforcement_enabled": VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED,
+            "voice_gate_human_escalation_enabled": VOICE_GATE_HUMAN_ESCALATION_ENABLED,
+            "voice_gate_regen_max_attempts": VOICE_GATE_REGEN_MAX_ATTEMPTS,
+            "release_gate_active": _is_voice_gate_release_enforced(),
+            "policy_drift": policy_drift,
+        },
+        "assessment_counts": {
+            "total": assessment_total,
+            "released": released_total,
+            "blocked": blocked_total,
+            "pending_human_review": pending_human_review_total,
+            "blocked_without_queue": blocked_without_queue,
+            "overrides_total": overrides_total,
+            "blocked_last_24h": blocked_last_24h,
+            "overrides_last_24h": overrides_last_24h,
+            "blocked_rate": blocked_rate,
+        },
+        "review_queue": {
+            "pending": queue_pending,
+            "oldest_pending_age_minutes": oldest_pending_age_minutes,
+            "resolved_release_approved_last_24h": queue_resolved_release_24h,
+            "resolved_needs_regeneration_last_24h": queue_resolved_regen_24h,
+            "resolved_dismissed_last_24h": queue_resolved_dismissed_24h,
+        },
+        "top_voice_gate_failures": top_failures,
+        "incident_level": incident_level,
+        "recommended_actions": actions,
+    }
+
+
 @api_router.get("/admin/ops/readiness")
 async def get_admin_ops_readiness(current_user: dict = Depends(get_current_user)):
     _require_admin_ops_user(current_user)
@@ -16173,6 +16373,15 @@ async def get_admin_ops_readiness(current_user: dict = Depends(get_current_user)
     if schedules_upcoming == 0:
         warnings.append("No upcoming recording schedules are set.")
     observability = observability_snapshot()
+    governance = await _get_feedback_governance_runtime_snapshot(owner_user_id=admin_id)
+    if governance["policy"]["policy_drift"]:
+        warnings.append("Voice Gate release enforcement is disabled while Master Observer pipeline requirements are enabled.")
+    if governance["assessment_counts"]["blocked_without_queue"] > 0:
+        blocking_items.append(
+            f"{governance['assessment_counts']['blocked_without_queue']} blocked feedback item(s) are missing review queue coverage."
+        )
+    if governance["review_queue"]["pending"] > 0:
+        warnings.append(f"{governance['review_queue']['pending']} feedback item(s) are pending human review.")
 
     return {
         "generated_at": now_iso,
@@ -16195,12 +16404,23 @@ async def get_admin_ops_readiness(current_user: dict = Depends(get_current_user)
             "gradebook_connected": gradebook_connected,
             "analysis_total_runs": observability["analysis"]["total_runs"],
             "analysis_failed_runs": observability["analysis"]["failed_runs"],
+            "feedback_release_released": governance["assessment_counts"]["released"],
+            "feedback_release_blocked": governance["assessment_counts"]["blocked"],
+            "feedback_release_pending_human_review": governance["assessment_counts"]["pending_human_review"],
+            "feedback_review_queue_pending": governance["review_queue"]["pending"],
+            "feedback_release_overrides_24h": governance["assessment_counts"]["overrides_last_24h"],
         },
         "observability": {
             "analysis": {
                 "by_mode": observability["analysis"]["by_mode"],
                 "recent_failures": observability["analysis"]["recent_failures"][:5],
-            }
+            },
+            "feedback_governance": {
+                "incident_level": governance["incident_level"],
+                "policy": governance["policy"],
+                "top_voice_gate_failures": governance["top_voice_gate_failures"][:5],
+                "review_queue": governance["review_queue"],
+            },
         },
     }
 
@@ -16285,6 +16505,13 @@ async def get_admin_ops_launch_health(current_user: dict = Depends(get_current_u
     if not actions:
         actions.append("No urgent actions. Continue normal monitoring cadence.")
     observability = observability_snapshot()
+    governance = await _get_feedback_governance_runtime_snapshot(owner_user_id=admin_id)
+    incident_level = _max_incident_level(incident_level, governance["incident_level"])
+    for action in governance["recommended_actions"]:
+        if action not in actions:
+            actions.append(action)
+    observability_with_governance = dict(observability)
+    observability_with_governance["feedback_governance"] = governance
     return {
         "generated_at": now_iso,
         "incident_level": incident_level,
@@ -16301,8 +16528,11 @@ async def get_admin_ops_launch_health(current_user: dict = Depends(get_current_u
             "analysis_average_duration_seconds": observability["analysis"]["average_duration_seconds"],
             "analysis_average_estimated_input_tokens": observability["analysis"]["average_estimated_input_tokens"],
             "analysis_average_estimated_output_tokens": observability["analysis"]["average_estimated_output_tokens"],
+            "feedback_release_blocked": governance["assessment_counts"]["blocked"],
+            "feedback_review_queue_pending": governance["review_queue"]["pending"],
+            "feedback_review_queue_oldest_pending_age_minutes": governance["review_queue"]["oldest_pending_age_minutes"],
         },
-        "observability": observability,
+        "observability": observability_with_governance,
         "recommended_actions": actions,
     }
 
@@ -16312,10 +16542,12 @@ async def get_admin_ops_observability(current_user: dict = Depends(get_current_u
     _require_admin_ops_user(current_user)
     await refresh_runtime_metrics()
     snapshot = observability_snapshot()
+    governance = await _get_feedback_governance_runtime_snapshot(owner_user_id=current_user["id"])
     snapshot["queues"] = {
         "video_queue_depth": VIDEO_JOB_QUEUE.qsize(),
         "privacy_queue_depth": VIDEO_PRIVACY_JOB_QUEUE.qsize(),
     }
+    snapshot["feedback_governance"] = governance
     specialist_activity = await _get_specialist_activity_snapshot(current_user)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -19954,6 +20186,7 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.videos, [("status", 1), ("upload_date", -1)])
     await _safe_create_index(db.videos, [("privacy_status", 1), ("upload_date", -1)])
     await _safe_create_index(db.assessments, [("teacher_id", 1), ("analyzed_at", -1)])
+    await _safe_create_index(db.assessments, [("user_id", 1), ("feedback_release_status", 1), ("analyzed_at", -1)])
     await _safe_create_index(
         db.assessment_report_feedback,
         [("assessment_id", 1), ("user_id", 1), ("target_type", 1), ("target_id", 1)],
@@ -20009,6 +20242,8 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.video_analysis_features, [("video_id", 1)], unique=True)
     await _safe_create_index(db.feedback_review_queue, [("status", 1), ("created_at", -1)])
     await _safe_create_index(db.feedback_review_queue, [("assessment_id", 1), ("status", 1)])
+    await _safe_create_index(db.feedback_review_queue, [("owner_user_id", 1), ("status", 1), ("created_at", -1)])
+    await _safe_create_index(db.feedback_review_queue, [("owner_user_id", 1), ("resolved_at", -1)])
 
 
 async def _stop_video_workers() -> None:
