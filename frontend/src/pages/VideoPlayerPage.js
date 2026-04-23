@@ -202,11 +202,10 @@ export function VideoPlayerPage() {
   const privacyStatus = statusRes?.privacy_status || videoRes?.privacy_status || "queued";
 
   useEffect(() => {
-    const token = localStorage.getItem("cognivio_token");
-    if (!videoId || !token || !runtimeConfig.backendUrl) return;
+    if (!videoId || !runtimeConfig.backendUrl) return;
     const base = runtimeConfig.backendUrl;
     const wsBase = base.replace("https://", "wss://").replace("http://", "ws://");
-    const ws = new WebSocket(`${wsBase}/ws/videos/${videoId}?token=${token}`);
+    const ws = new WebSocket(`${wsBase}/ws/videos/${videoId}`);
     setWsConnected(true);
 
     ws.onmessage = (event) => {

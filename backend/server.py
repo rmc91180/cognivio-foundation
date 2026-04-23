@@ -25,6 +25,8 @@ import shutil
 import sys
 import time
 import html
+import hmac
+import secrets
 from urllib.parse import quote
 import requests
 import smtplib
@@ -3612,6 +3614,11 @@ db = client[_get_required_env("DB_NAME")]
 JWT_SECRET = _get_required_env("JWT_SECRET")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24
+SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "cognivio_session").strip() or "cognivio_session"
+CSRF_COOKIE_NAME = os.getenv("CSRF_COOKIE_NAME", "cognivio_csrf").strip() or "cognivio_csrf"
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() == "true"
+SESSION_COOKIE_MAX_AGE_SECONDS = max(300, int(os.getenv("SESSION_COOKIE_MAX_AGE_SECONDS", "86400")))
+SESSION_COOKIE_SAMESITE = "strict"
 
 # Demo mode (fixed demo users, registration disabled)
 DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
@@ -4027,7 +4034,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 VIDEO_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 VIDEO_WORKER_TASKS: List[asyncio.Task] = []
 VIDEO_TRANSCODE_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
@@ -4159,6 +4166,30 @@ async def block_write_requests_in_preview_mode(request: Request, call_next):
             status_code=403,
             content={"detail": "Preview mode is read-only. Exit preview mode before making changes."},
         )
+    return await call_next(request)
+
+
+CSRF_EXEMPT_PATHS = {
+    "/api/auth/login",
+    "/api/auth/register",
+    "/api/auth/request-access",
+    "/api/auth/password-reset/request",
+    "/api/auth/password-reset/confirm",
+}
+
+
+@app.middleware("http")
+async def enforce_csrf_for_session_auth(request: Request, call_next):
+    method = request.method.upper()
+    path = request.url.path
+    if (
+        method in {"POST", "PUT", "PATCH", "DELETE"}
+        and path.startswith("/api/")
+        and path not in CSRF_EXEMPT_PATHS
+    ):
+        if request.cookies.get(SESSION_COOKIE_NAME):
+            if not _csrf_is_valid(request):
+                return JSONResponse(status_code=403, content={"detail": "CSRF token validation failed"})
     return await call_next(request)
 
 # Health check endpoint (at root level for Railway)
@@ -4861,6 +4892,10 @@ class UserResponse(BaseModel):
 
 class TokenResponse(BaseModel):
     token: str
+    user: UserResponse
+
+
+class AuthSessionResponse(BaseModel):
     user: UserResponse
 
 
@@ -6287,6 +6322,81 @@ def create_token(user_id: str, *, session_id: Optional[str] = None) -> str:
         payload["sid"] = session_id
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
+
+def _build_csrf_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def _set_auth_cookies(
+    response: Response,
+    *,
+    token: str,
+    csrf_token: Optional[str] = None,
+) -> str:
+    csrf_value = str(csrf_token or _build_csrf_token())
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        max_age=SESSION_COOKIE_MAX_AGE_SECONDS,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=SESSION_COOKIE_SAMESITE,
+        path="/",
+    )
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=csrf_value,
+        max_age=SESSION_COOKIE_MAX_AGE_SECONDS,
+        httponly=False,
+        secure=COOKIE_SECURE,
+        samesite=SESSION_COOKIE_SAMESITE,
+        path="/",
+    )
+    return csrf_value
+
+
+def _clear_auth_cookies(response: Response) -> None:
+    response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
+    response.delete_cookie(key=CSRF_COOKIE_NAME, path="/")
+
+
+def _extract_bearer_token_from_authorization_header(authorization_header: Optional[str]) -> Optional[str]:
+    parts = str(authorization_header or "").strip().split(" ", 1)
+    if len(parts) != 2:
+        return None
+    scheme, value = parts
+    if scheme.lower() != "bearer":
+        return None
+    token = value.strip()
+    return token or None
+
+
+def _resolve_auth_token(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = None,
+) -> Optional[str]:
+    cookies = getattr(request, "cookies", None) or {}
+    headers = getattr(request, "headers", None) or {}
+    cookie_token = str(cookies.get(SESSION_COOKIE_NAME) or "").strip()
+    if cookie_token:
+        return cookie_token
+    credential_value = str(getattr(credentials, "credentials", "") or "").strip() if credentials else ""
+    credential_scheme = str(getattr(credentials, "scheme", "bearer") or "bearer").lower() if credentials else ""
+    if credential_value and credential_scheme == "bearer":
+        return credential_value
+    return _extract_bearer_token_from_authorization_header(headers.get("Authorization"))
+
+
+def _csrf_is_valid(request: Request) -> bool:
+    cookies = getattr(request, "cookies", None) or {}
+    headers = getattr(request, "headers", None) or {}
+    csrf_cookie = str(cookies.get(CSRF_COOKIE_NAME) or "").strip()
+    csrf_header = str(headers.get("X-CSRF-Token") or "").strip()
+    if not csrf_cookie or not csrf_header:
+        return False
+    return hmac.compare_digest(csrf_cookie, csrf_header)
+
+
 def _is_admin_role(role: Optional[str]) -> bool:
     return role in {"admin", "principal", "super_admin"}
 
@@ -6308,9 +6418,14 @@ def _requested_role_matches_user(requested_role: Optional[str], user_doc: dict) 
         return True
     return requested_role == _get_user_tenant_role(user_doc)
 
-async def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def get_current_user(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
     try:
-        token = credentials.credentials
+        token = _resolve_auth_token(request, credentials)
+        if not token:
+            raise HTTPException(status_code=401, detail="Not authenticated")
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         user_id = payload.get("user_id")
         if not user_id:
@@ -6359,8 +6474,8 @@ async def get_current_user(request: Request, credentials: HTTPAuthorizationCrede
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # ==================== AUTH ENDPOINTS ====================
-@api_router.post("/auth/register", response_model=TokenResponse)
-async def register(user: UserCreate, request: Request):
+@api_router.post("/auth/register", response_model=AuthSessionResponse)
+async def register(user: UserCreate, request: Request, response: Response = None):
     from app.services.workspace_service import enrich_user_with_workspace_mode
 
     if DEMO_MODE:
@@ -6393,12 +6508,11 @@ async def register(user: UserCreate, request: Request):
     
     session_id = await _create_user_session(user=enriched_user, role=_get_user_role(enriched_user), request=request)
     token = create_token(user_id, session_id=session_id)
-    return TokenResponse(
-        token=token,
-        user=UserResponse(
-            **enriched_user,
-        )
-    )
+    response_user = UserResponse(**enriched_user)
+    if response is not None:
+        _set_auth_cookies(response, token=token)
+        return AuthSessionResponse(user=response_user)
+    return TokenResponse(token=token, user=response_user)
 
 
 @api_router.post("/auth/request-access", response_model=AccessRequestResponse)
@@ -6591,8 +6705,8 @@ async def lookup_institutions(
         suggestions=suggestions,
     )
 
-@api_router.post("/auth/login", response_model=TokenResponse)
-async def login(user: UserLogin, request: Request):
+@api_router.post("/auth/login", response_model=AuthSessionResponse)
+async def login(user: UserLogin, request: Request, response: Response = None):
     from app.services.workspace_service import enrich_user_with_workspace_mode
 
     email = str(user.email or "").lower()
@@ -6684,10 +6798,30 @@ async def login(user: UserLogin, request: Request):
 
     session_id = await _create_user_session(user=db_user, role=actual_role, request=request)
     token = create_token(db_user["id"], session_id=session_id)
-    return TokenResponse(
-        token=token,
-        user=UserResponse(**enriched_user)
-    )
+    response_user = UserResponse(**enriched_user)
+    if response is not None:
+        _set_auth_cookies(response, token=token)
+        return AuthSessionResponse(user=response_user)
+    return TokenResponse(token=token, user=response_user)
+
+
+@api_router.post("/auth/logout")
+async def logout(request: Request, response: Response):
+    token = _resolve_auth_token(request)
+    now = datetime.now(timezone.utc).isoformat()
+    if token:
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            session_id = payload.get("sid")
+            if session_id:
+                await db.user_sessions.update_one(
+                    {"id": session_id, "revoked_at": None},
+                    {"$set": {"revoked_at": now, "revoke_reason": "logout"}},
+                )
+        except jwt.PyJWTError:
+            pass
+    _clear_auth_cookies(response)
+    return {"status": "ok"}
 
 
 @api_router.post("/auth/password-reset/request")
@@ -6777,8 +6911,23 @@ async def confirm_password_reset(
     return {"status": "ok", "message": "Password updated successfully. You can now sign in."}
 
 @api_router.get("/auth/me", response_model=UserResponse)
-async def get_me(current_user: dict = Depends(get_current_user)):
+async def get_me(
+    request: Request,
+    response: Response,
+    current_user: dict = Depends(get_current_user),
+):
     from app.services.workspace_service import enrich_user_with_workspace_mode
+
+    if not str(request.cookies.get(CSRF_COOKIE_NAME) or "").strip():
+        response.set_cookie(
+            key=CSRF_COOKIE_NAME,
+            value=_build_csrf_token(),
+            max_age=SESSION_COOKIE_MAX_AGE_SECONDS,
+            httponly=False,
+            secure=COOKIE_SECURE,
+            samesite=SESSION_COOKIE_SAMESITE,
+            path="/",
+        )
 
     return UserResponse(**(await enrich_user_with_workspace_mode(current_user)))
 
@@ -9707,7 +9856,9 @@ async def generate_email_signature(
 
 @app.websocket("/ws/videos/{video_id}")
 async def video_status_ws(websocket: WebSocket, video_id: str):
-    token = websocket.query_params.get("token")
+    token = str(websocket.cookies.get(SESSION_COOKIE_NAME) or "").strip()
+    if not token:
+        token = str(websocket.query_params.get("token") or "").strip()
     if not token:
         await websocket.close(code=1008)
         return

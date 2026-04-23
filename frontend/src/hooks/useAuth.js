@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { authApi } from "@/lib/api";
+import { setUnauthorizedHandler } from "@/lib/apiClient";
 import { clearPreviewSession } from "@/lib/previewMode";
 
 const AuthContext = createContext(null);
@@ -38,28 +39,33 @@ export function AuthProvider({ children }) {
         return res.data;
       })
       .catch((error) => {
-        localStorage.removeItem("cognivio_token");
         setUser(null);
         throw error;
       });
 
   useEffect(() => {
-    const token = localStorage.getItem("cognivio_token");
-    if (!token) {
-      setInitializing(false);
-      return;
-    }
     refreshUser()
       .catch(() => {})
       .finally(() => setInitializing(false));
   }, []);
 
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      clearPreviewSession();
+      setUser(null);
+      queryClient.clear();
+      if (window.location.pathname !== "/login") {
+        window.location.assign("/login");
+      }
+    });
+    return () => setUnauthorizedHandler(null);
+  }, [queryClient]);
+
   const loginMutation = useMutation({
     mutationFn: authApi.login,
     onSuccess: (res) => {
       clearPreviewSession();
-      localStorage.setItem("cognivio_token", res.data.token);
-      setUser(res.data.user);
+      setUser(res.data.user || null);
       toast.success(t("auth.loggedInSuccessfully"));
       queryClient.clear();
     },
@@ -72,8 +78,7 @@ export function AuthProvider({ children }) {
     mutationFn: authApi.register,
     onSuccess: (res) => {
       clearPreviewSession();
-      localStorage.setItem("cognivio_token", res.data.token);
-      setUser(res.data.user);
+      setUser(res.data.user || null);
       toast.success(t("auth.accountCreated"));
       queryClient.clear();
     },
@@ -112,8 +117,12 @@ export function AuthProvider({ children }) {
     },
   });
 
-  const logout = () => {
-    localStorage.removeItem("cognivio_token");
+  const logout = async () => {
+    try {
+      await authApi.logout();
+    } catch (error) {
+      // ignore backend logout errors; clear local auth state regardless
+    }
     clearPreviewSession();
     setUser(null);
     queryClient.clear();

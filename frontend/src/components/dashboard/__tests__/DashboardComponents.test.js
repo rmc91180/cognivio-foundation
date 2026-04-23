@@ -3,6 +3,35 @@ import { render, screen } from "@testing-library/react";
 import { LeadershipInsightsCard } from "../LeadershipInsightsCard";
 import { DomainTrendsChart } from "../DomainTrendsChart";
 
+jest.mock("react-i18next", () => ({
+  useTranslation: () => ({
+    t: (key) => {
+      const translations = {
+        "dashboard.leadershipInsightsTitle": "Leadership insights",
+        "dashboard.leadershipInsightsDescription": "Top school-level trends and next moves.",
+        "dashboard.leadershipFocusLabel": "Leadership focus:",
+        "dashboard.leadershipBulletFallbackAction":
+          "Decide the next principal-led action and review progress in the next leadership meeting.",
+        "dashboard.leadershipFallback1Insight": "Review where progress has slowed across departments.",
+        "dashboard.leadershipFallback1Action":
+          "Choose one schoolwide move and align team leads on evidence to monitor.",
+        "dashboard.leadershipFallback2Insight": "Clarify ownership for the highest-leverage growth area.",
+        "dashboard.leadershipFallback2Action":
+          "Assign one owner, one milestone, and one check-in date.",
+        "dashboard.leadershipFallback3Insight": "Strengthen cross-team consistency in instructional routines.",
+        "dashboard.leadershipFallback3Action":
+          "Use a short look-for list during walkthroughs and calibrate next steps.",
+        "dashboard.leadershipFallback4Insight": "Protect momentum by tracking one visible weekly indicator.",
+        "dashboard.leadershipFallback4Action":
+          "Share trend snapshots with leaders and decide one adjustment each week.",
+        "dashboard.noTrendDataForFilters": "No trend data for the selected filters.",
+      };
+      return translations[key] || key;
+    },
+    i18n: { language: "en" },
+  }),
+}));
+
 describe("dashboard v2 components", () => {
   it("renders 4 principal-focused leadership insights and excludes teacher-specific items", () => {
     const insights = {
