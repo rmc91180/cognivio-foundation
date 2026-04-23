@@ -54,9 +54,6 @@ export function AuthProvider({ children }) {
       clearPreviewSession();
       setUser(null);
       queryClient.clear();
-      if (window.location.pathname !== "/login") {
-        window.location.assign("/login");
-      }
     });
     return () => setUnauthorizedHandler(null);
   }, [queryClient]);

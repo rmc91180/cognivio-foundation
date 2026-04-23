@@ -18,6 +18,7 @@ import { useTranslation } from "react-i18next";
 import { useAuth } from "@/hooks/useAuth";
 import { BrandMark } from "@/components/BrandMark";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { OfflineBanner } from "@/components/OfflineBanner";
 import { Button } from "@/components/ui";
 import { masterAdminApi } from "@/lib/api";
 import {
@@ -274,6 +275,7 @@ export function LayoutShell({ children }) {
         </div>
       </aside>
       <main className="flex-1 overflow-y-auto bg-slate-50">
+        <OfflineBanner />
         {isPreviewMode ? (
           <div className="border-b border-amber-200 bg-amber-50 px-6 py-3">
             <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3">

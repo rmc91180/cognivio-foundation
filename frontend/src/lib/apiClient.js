@@ -1,5 +1,16 @@
 import axios from "axios";
+import { toast } from "sonner";
 import { runtimeConfig } from "@/lib/runtimeConfig";
+import {
+  extractErrorMessage,
+  handleGlobalServerError,
+  isAuthError,
+  isNetworkError,
+  isPermissionError,
+  isServerError,
+  isValidationError,
+  setOfflineStatus,
+} from "@/lib/apiErrorHandler";
 import { getPreviewTargetUserId } from "@/lib/previewMode";
 
 const API_BASE_URL = runtimeConfig.backendUrl;
@@ -16,6 +27,8 @@ const api = axios.create({
 });
 
 let unauthorizedHandler = null;
+let authRedirectTimer = null;
+let authRedirectScheduled = false;
 
 function readCookie(name) {
   if (typeof document === "undefined") {
@@ -34,6 +47,34 @@ function readCookie(name) {
 
 export function setUnauthorizedHandler(handler) {
   unauthorizedHandler = typeof handler === "function" ? handler : null;
+}
+
+function isAuthBootstrapRequest(error) {
+  const url = String(error?.config?.url || "");
+  return (
+    url.includes("/api/auth/login")
+    || url.includes("/api/auth/register")
+    || url.includes("/api/auth/request-access")
+    || url.includes("/api/auth/password-reset/request")
+    || url.includes("/api/auth/password-reset/confirm")
+  );
+}
+
+function scheduleAuthRedirectToLogin() {
+  if (typeof window === "undefined" || authRedirectScheduled) {
+    return;
+  }
+  authRedirectScheduled = true;
+  if (authRedirectTimer) {
+    window.clearTimeout(authRedirectTimer);
+  }
+  authRedirectTimer = window.setTimeout(() => {
+    authRedirectScheduled = false;
+    authRedirectTimer = null;
+    if (window.location.pathname !== "/login") {
+      window.location.assign("/login");
+    }
+  }, 1500);
 }
 
 api.interceptors.request.use((config) => {
@@ -57,11 +98,43 @@ api.interceptors.request.use((config) => {
 });
 
 api.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    setOfflineStatus(false);
+    return response;
+  },
   (error) => {
-    if (error?.response?.status === 401 && unauthorizedHandler) {
-      unauthorizedHandler(error);
+    if (isNetworkError(error)) {
+      setOfflineStatus(true);
+      return Promise.reject(error);
     }
+
+    setOfflineStatus(false);
+
+    if (isAuthError(error)) {
+      if (!isAuthBootstrapRequest(error) && typeof window !== "undefined" && window.location.pathname !== "/login") {
+        if (unauthorizedHandler) {
+          unauthorizedHandler(error);
+        }
+        toast.error("Your session has expired — please log in again");
+        scheduleAuthRedirectToLogin();
+      }
+      return Promise.reject(error);
+    }
+
+    if (isPermissionError(error)) {
+      toast.error("You don't have permission to do that");
+      return Promise.reject(error);
+    }
+
+    if (isValidationError(error)) {
+      toast.error(extractErrorMessage(error));
+      return Promise.reject(error);
+    }
+
+    if (isServerError(error)) {
+      handleGlobalServerError(error);
+    }
+
     return Promise.reject(error);
   }
 );
