@@ -1,6 +1,7 @@
 import axios from "axios";
 import { toast } from "sonner";
 import { runtimeConfig } from "@/lib/runtimeConfig";
+import logger from "@/lib/logger";
 import {
   extractErrorMessage,
   handleGlobalServerError,
@@ -17,8 +18,9 @@ const API_BASE_URL = runtimeConfig.backendUrl;
 const CSRF_COOKIE_NAME = "cognivio_csrf";
 
 if (!API_BASE_URL) {
-  // eslint-disable-next-line no-console
-  console.error("REACT_APP_BACKEND_URL is not configured; API calls will fail.");
+  if (process.env.NODE_ENV !== "production") {
+    logger.error("REACT_APP_BACKEND_URL is not configured; API calls will fail.");
+  }
 }
 
 const api = axios.create({

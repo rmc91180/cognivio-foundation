@@ -1,4 +1,5 @@
 import { toast } from "sonner";
+import logger from "@/lib/logger";
 
 let offline = false;
 let browserOnlineListenerAttached = false;
@@ -9,8 +10,7 @@ function notifyOfflineListeners() {
     try {
       listener(offline);
     } catch (error) {
-      // eslint-disable-next-line no-console
-      console.error("Failed notifying offline listener", error);
+      logger.error("Failed notifying offline listener", error);
     }
   });
 }
@@ -104,6 +104,5 @@ export function handleGlobalServerError(error) {
   const status = error?.response?.status;
   const url = error?.config?.url || "unknown-url";
   toast.error("Something went wrong on our end");
-  // eslint-disable-next-line no-console
-  console.error(`[API ${status}] ${url}`, error);
+  logger.error(`[API ${status}] ${url}`, error);
 }

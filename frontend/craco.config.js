@@ -76,6 +76,35 @@ const webpackConfig = {
       if (config.enableHealthCheck && healthPluginInstance) {
         webpackConfig.plugins.push(healthPluginInstance);
       }
+
+      if (
+        process.env.NODE_ENV === "production"
+        && webpackConfig.optimization
+        && Array.isArray(webpackConfig.optimization.minimizer)
+      ) {
+        webpackConfig.optimization.minimizer.forEach((minimizer) => {
+          if (
+            minimizer
+            && minimizer.constructor
+            && minimizer.constructor.name === "TerserPlugin"
+          ) {
+            const existingCompress = minimizer.options?.terserOptions?.compress || {};
+            minimizer.options = {
+              ...minimizer.options,
+              terserOptions: {
+                ...minimizer.options?.terserOptions,
+                compress: {
+                  ...existingCompress,
+                  pure_funcs: Array.from(
+                    new Set([...(existingCompress.pure_funcs || []), "console.log"])
+                  ),
+                },
+              },
+            };
+          }
+        });
+      }
+
       return webpackConfig;
     },
   },
