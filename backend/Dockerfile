@@ -33,4 +33,4 @@ RUN python -m pip install --upgrade pip && \
 
 COPY . .
 
-CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port ${PORT:-8080}"]
+CMD ["sh", "-c", "python scripts/ensure_indexes.py && uvicorn server:app --host 0.0.0.0 --port ${PORT:-8080}"]

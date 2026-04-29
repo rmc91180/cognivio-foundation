@@ -14,10 +14,10 @@ import {
   ErrorState,
   Field,
   Input,
-  LoadingState,
   PageHeader,
   Panel,
   Select,
+  SkeletonCard,
 } from "@/components/ui";
 
 export function VideosPage() {
@@ -387,7 +387,11 @@ export function VideosPage() {
                 </div>
               </div>
               {loadingVideos || loadingAssessments ? (
-                <LoadingState message={t("videosPage.loadingRecordings")} />
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                  {Array.from({ length: 6 }).map((_, index) => (
+                    <SkeletonCard key={index} height={180} />
+                  ))}
+                </div>
               ) : hasLoadError ? (
                 <ErrorState
                   title={t("videosPage.unableToLoadTitle")}

@@ -14,13 +14,13 @@ export function useAdminTeacherDeepDiveData({ teacherId, periodMonths = 3 }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.language === "he" ? "he-IL" : "en-US";
 
-  const { data: teacherRes } = useQuery({
+  const { data: teacherRes, isLoading: teacherLoading } = useQuery({
     queryKey: ["teacher", teacherId],
     enabled: Boolean(teacherId),
     queryFn: () => teacherApi.get(teacherId).then((r) => r.data),
   });
 
-  const { data: dashboardRes } = useQuery({
+  const { data: dashboardRes, isLoading: dashboardLoading } = useQuery({
     queryKey: ["teacher-dashboard", teacherId, periodMonths],
     enabled: Boolean(teacherId),
     queryFn: () => {
@@ -36,49 +36,49 @@ export function useAdminTeacherDeepDiveData({ teacherId, periodMonths = 3 }) {
     },
   });
 
-  const { data: summaryInsightsRes } = useQuery({
+  const { data: summaryInsightsRes, isLoading: summaryInsightsLoading } = useQuery({
     queryKey: ["teacher-summary-insights", teacherId],
     enabled: Boolean(teacherId),
     queryFn: () => assessmentApi.teacherSummaryInsights(teacherId).then((r) => r.data),
   });
 
-  const { data: conferencePrepRes } = useQuery({
+  const { data: conferencePrepRes, isLoading: conferencePrepLoading } = useQuery({
     queryKey: ["teacher-conference-prep", teacherId],
     enabled: Boolean(teacherId),
     queryFn: () => teacherApi.conferencePrep(teacherId).then((r) => r.data),
   });
 
-  const { data: coachingTimelineRes } = useQuery({
+  const { data: coachingTimelineRes, isLoading: coachingTimelineLoading } = useQuery({
     queryKey: ["teacher-coaching-timeline", teacherId],
     enabled: Boolean(teacherId),
     queryFn: () => teacherApi.coachingTimeline(teacherId).then((r) => r.data),
   });
 
-  const { data: coachingTasksRes } = useQuery({
+  const { data: coachingTasksRes, isLoading: coachingTasksLoading } = useQuery({
     queryKey: ["coaching-tasks", teacherId],
     enabled: Boolean(teacherId),
     queryFn: () => teacherApi.coachingTasks({ teacher_id: teacherId }).then((r) => r.data),
   });
 
-  const { data: reflectionHistoryRes } = useQuery({
+  const { data: reflectionHistoryRes, isLoading: reflectionHistoryLoading } = useQuery({
     queryKey: ["teacher-reflection-history", teacherId],
     enabled: Boolean(teacherId),
     queryFn: () => assessmentApi.teacherReflectionHistory(teacherId).then((r) => r.data),
   });
 
-  const { data: observationsRes } = useQuery({
+  const { data: observationsRes, isLoading: observationsLoading } = useQuery({
     queryKey: ["teacher-observations", teacherId],
     enabled: Boolean(teacherId),
     queryFn: () => observationApi.listForTeacher(teacherId).then((r) => r.data),
   });
 
-  const { data: actionPlanRes } = useQuery({
+  const { data: actionPlanRes, isLoading: actionPlanLoading } = useQuery({
     queryKey: ["action-plan", teacherId],
     enabled: Boolean(teacherId),
     queryFn: () => actionPlanApi.get(teacherId).then((r) => r.data),
   });
 
-  const { data: actionPlanHistoryRes } = useQuery({
+  const { data: actionPlanHistoryRes, isLoading: actionPlanHistoryLoading } = useQuery({
     queryKey: ["action-plan-history", teacherId],
     enabled: Boolean(teacherId),
     queryFn: () => actionPlanApi.history(teacherId).then((r) => r.data),
@@ -314,6 +314,17 @@ export function useAdminTeacherDeepDiveData({ teacherId, periodMonths = 3 }) {
   };
 
   return {
+    isLoading:
+      teacherLoading ||
+      dashboardLoading ||
+      summaryInsightsLoading ||
+      conferencePrepLoading ||
+      coachingTimelineLoading ||
+      coachingTasksLoading ||
+      reflectionHistoryLoading ||
+      observationsLoading ||
+      actionPlanLoading ||
+      actionPlanHistoryLoading,
     teacherRes,
     dashboardRes,
     summaryInsightsRes,

@@ -2,14 +2,46 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches:
+      - main
   pull_request:
-    branches: [main, develop]
+    branches:
+      - main
 
 jobs:
-  backend-tests:
+  backend:
     name: Backend Tests
     runs-on: ubuntu-latest
+
+    services:
+      mongodb:
+        image: mongo:7.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.adminCommand(\"ping\")'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      MONGO_URL: mongodb://localhost:27017
+      DB_NAME: cognivio_ci
+      JWT_SECRET: test-secret-ci
+      OPENAI_API_KEY: sk-test
+      S3_BUCKET: test-bucket
+      S3_REGION: us-east-1
+      BACKEND_PUBLIC_BASE_URL: http://localhost:8000
+      FRONTEND_URL: http://localhost:3000
+      CORS_ORIGINS: http://localhost:3000
+      COOKIE_SECURE: "false"
+      PRIVACY_REQUIRE_PROFILE: "false"
+      VIDEO_TRANSCODE_PIPELINE_ENABLED: "false"
+      AUDIO_TRANSCRIPTION_ENABLED: "false"
+      AUDIO_ANALYSIS_ENABLED: "false"
+      ACCESS_APPROVAL_REQUIRED: "false"
+      MASTER_ADMIN_EMAIL: ci-admin@example.com
+      MASTER_ADMIN_PASSWORD: test-password-ci
 
     steps:
       - name: Checkout
@@ -18,30 +50,42 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.11"
           cache: "pip"
-          cache-dependency-path: backend/requirements-dev.txt
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
 
       - name: Install backend dependencies
-        run: python -m pip install -r backend/requirements-dev.txt
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt -r backend/requirements-dev.txt
 
-      - name: Run backend test suite
-        env:
-          MONGO_URL: mongodb://localhost:27017
-          DB_NAME: cognivio_test
-          JWT_SECRET: test-jwt-secret
-          BACKEND_PUBLIC_BASE_URL: https://api.example.com
-        run: python -m pytest backend/tests -q
+      - name: Run backend tests
+        working-directory: backend
+        run: python -m pytest tests/ -q --tb=short --timeout=30 --junitxml=test-results/backend-pytest.xml
 
-  frontend-build:
-    name: Frontend Build
+      - name: Upload backend test results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-results
+          path: backend/test-results/
+          if-no-files-found: ignore
+
+  frontend:
+    name: Frontend Tests and Build
     runs-on: ubuntu-latest
+
+    env:
+      CI: "true"
+      REACT_APP_BACKEND_URL: http://localhost:8000
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -52,6 +96,48 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Run frontend tests
+        working-directory: frontend
+        run: npm test -- --watchAll=false --passWithNoTests
+
       - name: Build frontend
         working-directory: frontend
         run: npm run build
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install backend lint dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install flake8
+
+      - name: Lint backend app
+        run: flake8 backend/app/ --max-line-length=120
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint frontend if configured
+        working-directory: frontend
+        run: npm run lint --if-present

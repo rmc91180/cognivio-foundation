@@ -229,8 +229,7 @@ def _build_memory_support_snapshot_from_inputs(
         return str(language or "").lower().startswith("he")
 
     open_goals = [
-        goal for goal in enriched_goals
-        if goal.get("title") and goal.get("status") not in {"complete", "implemented"}
+        goal for goal in enriched_goals if goal.get("title") and goal.get("status") not in {"complete", "implemented"}
     ]
     open_goals.sort(
         key=lambda goal: (
@@ -256,69 +255,68 @@ def _build_memory_support_snapshot_from_inputs(
             if is_hebrew():
                 teacher_prompt_title = f"פוקוס לשיעור הבא: {goal_title}"
                 teacher_prompt_body = (
-                    f"ראיות אחרונות מראות שהאתגר סביב \"{goal_title}\" עדיין חוזר. "
+                    f'ראיות אחרונות מראות שהאתגר סביב "{goal_title}" עדיין חוזר. '
                     "תעדו מה תנסו לעשות אחרת בשיעור הבא וקשרו זאת לראיה האחרונה."
                 )
                 admin_prompt_title = f"אתגר חוזר: {goal_title}"
                 admin_prompt_body = (
-                    f"היעד \"{goal_title}\" עדיין מופיע כאתגר חוזר. "
+                    f'היעד "{goal_title}" עדיין מופיע כאתגר חוזר. '
                     "עדיף למקד את שיחת הליווי הקרובה ביעד הזה ולבדוק תגובת מורה."
                 )
             else:
                 teacher_prompt_title = f"Next class focus: {goal_title}"
                 teacher_prompt_body = (
-                    f"Recent evidence shows that \"{goal_title}\" is still repeating as a challenge. "
+                    f'Recent evidence shows that "{goal_title}" is still repeating as a challenge. '
                     "Log what you will try next and connect it to the latest evidence."
                 )
                 admin_prompt_title = f"Recurring challenge: {goal_title}"
                 admin_prompt_body = (
-                    f"\"{goal_title}\" is still showing up as a repeated challenge. "
+                    f'"{goal_title}" is still showing up as a repeated challenge. '
                     "Center the next coaching move on this goal and confirm teacher follow-through."
                 )
         elif signal == "reinforcing_progress":
             if is_hebrew():
                 teacher_prompt_title = f"שמרו על התנופה: {goal_title}"
                 teacher_prompt_body = (
-                    f"נראה שהעבודה על \"{goal_title}\" מתחילה להתחזק. "
+                    f'נראה שהעבודה על "{goal_title}" מתחילה להתחזק. '
                     "תעדו מה עבד כדי שהמנהל יוכל לחזק את זה בשיחה הבאה."
                 )
                 admin_prompt_title = f"מומנטום חיובי: {goal_title}"
                 admin_prompt_body = (
-                    f"היעד \"{goal_title}\" מקבל חיזוק מראיות אחרונות. "
-                    "שווה לחזק את המהלך שעבד ולשמר אותו."
+                    f'היעד "{goal_title}" מקבל חיזוק מראיות אחרונות. ' "שווה לחזק את המהלך שעבד ולשמר אותו."
                 )
             else:
                 teacher_prompt_title = f"Keep building: {goal_title}"
                 teacher_prompt_body = (
-                    f"Recent evidence suggests progress on \"{goal_title}\". "
+                    f'Recent evidence suggests progress on "{goal_title}". '
                     "Capture what worked so your admin can reinforce it in the next conference."
                 )
                 admin_prompt_title = f"Positive momentum: {goal_title}"
                 admin_prompt_body = (
-                    f"Recent evidence is reinforcing progress on \"{goal_title}\". "
+                    f'Recent evidence is reinforcing progress on "{goal_title}". '
                     "Use the next conference to reinforce what is starting to work."
                 )
         else:
             if is_hebrew():
                 teacher_prompt_title = f"צרו ראיה חדשה עבור: {goal_title}"
                 teacher_prompt_body = (
-                    f"היעד \"{goal_title}\" עדיין פעיל, אבל אין מספיק ראיות חדשות. "
+                    f'היעד "{goal_title}" עדיין פעיל, אבל אין מספיק ראיות חדשות. '
                     "אחרי השיעור הבא, הוסיפו רפלקציה קצרה או העלו שיעור חדש."
                 )
                 admin_prompt_title = f"נדרשת ראיה חדשה: {goal_title}"
                 admin_prompt_body = (
-                    f"היעד \"{goal_title}\" עדיין פעיל, אבל חסרות ראיות חדשות. "
+                    f'היעד "{goal_title}" עדיין פעיל, אבל חסרות ראיות חדשות. '
                     "כדאי לוודא שיש שיעור או תגובת מורה חדשים לפני שינוי הכיוון."
                 )
             else:
                 teacher_prompt_title = f"Create fresh evidence for: {goal_title}"
                 teacher_prompt_body = (
-                    f"\"{goal_title}\" is still active, but there is not enough fresh evidence yet. "
+                    f'"{goal_title}" is still active, but there is not enough fresh evidence yet. '
                     "After the next class, add a short reflection or link new lesson evidence."
                 )
                 admin_prompt_title = f"Fresh evidence needed: {goal_title}"
                 admin_prompt_body = (
-                    f"\"{goal_title}\" is still active, but the recent evidence base is thin. "
+                    f'"{goal_title}" is still active, but the recent evidence base is thin. '
                     "Look for a new lesson or teacher response before changing the coaching plan."
                 )
         if progress_summary:
@@ -330,7 +328,8 @@ def _build_memory_support_snapshot_from_inputs(
                 )
             else:
                 continuity_lines.append(
-                    f"Latest linked evidence for \"{goal_title}\" was updated on {primary_goal.get('latest_evidence_at')}."
+                    "Latest linked evidence for "
+                    f"\"{goal_title}\" was updated on {primary_goal.get('latest_evidence_at')}."
                 )
 
     if actions_taken:
@@ -345,7 +344,10 @@ def _build_memory_support_snapshot_from_inputs(
         if is_hebrew():
             continuity_lines.append("שיחת הליווי הבאה מתקרבת, ולכן כדאי להגיע עם ראיה ותגובה מעודכנות.")
         else:
-            continuity_lines.append("The next coaching conference is coming up, so it is worth bringing fresh evidence and a current follow-through response.")
+            continuity_lines.append(
+                "The next coaching conference is coming up, so it is worth bringing fresh evidence "
+                "and a current follow-through response."
+            )
 
     unique_lines: List[str] = []
     seen = set()
@@ -393,10 +395,13 @@ async def build_teacher_memory_support(
         {"teacher_id": teacher_id, "user_id": owner_id},
         {"_id": 0},
     ) or {"goals": [], "notes": None}
-    reflection = await legacy.db.summary_reflections.find_one(
-        {"teacher_id": teacher_id, "user_id": owner_id},
-        {"_id": 0},
-    ) or {}
+    reflection = (
+        await legacy.db.summary_reflections.find_one(
+            {"teacher_id": teacher_id, "user_id": owner_id},
+            {"_id": 0},
+        )
+        or {}
+    )
     evidence_catalog = await legacy._build_teacher_evidence_catalog(teacher, current_user)
     enriched_goals = legacy._enrich_action_plan_goals_with_evidence(
         action_plan.get("goals") or [],
@@ -416,7 +421,9 @@ async def build_teacher_memory_support(
     )
 
 
-async def list_organization_memory(current_user: dict, scope_type: Optional[str] = None, scope_id: Optional[str] = None) -> List[dict]:
+async def list_organization_memory(
+    current_user: dict, scope_type: Optional[str] = None, scope_id: Optional[str] = None
+) -> List[dict]:
     return await workspace_repository.list_memory_entries(
         _owner_id(current_user),
         scope_type=scope_type,
@@ -452,22 +459,16 @@ async def build_feedback_signal_summary(current_user: dict, teacher_id: Optional
         for item in override_docs
         if item.get("override_type") == "recommendation_usefulness" and item.get("adjusted_value") == "needs_rewrite"
     )
-    evidence_overrides = sum(
-        1 for item in override_docs if item.get("override_type") == "evidence_relevance"
-    )
+    evidence_overrides = sum(1 for item in override_docs if item.get("override_type") == "evidence_relevance")
     guidance: List[str] = []
     if rewrite_overrides + not_useful >= useful + useful_overrides:
-        guidance.append(
-            "Keep recommendations short, specific, and immediately usable in a coaching conference."
-        )
+        guidance.append("Keep recommendations short, specific, and immediately usable in a coaching conference.")
     if evidence_overrides > 0:
         guidance.append(
             "Prioritize evidence segments that align closely to the active focus note and current coaching goals."
         )
     if useful + useful_overrides > rewrite_overrides + not_useful:
-        guidance.append(
-            "Preserve concrete, timestamped coaching language because reviewers are responding well to it."
-        )
+        guidance.append("Preserve concrete, timestamped coaching language because reviewers are responding well to it.")
     return {
         "feedback_counts": {
             "useful": useful,
@@ -505,10 +506,14 @@ async def build_analysis_context(current_user: dict, teacher_id: str) -> Dict[st
         scope_type="teacher",
         scope_id=teacher_id,
     )
-    enriched_goals = legacy._enrich_action_plan_goals_with_evidence(
-        (action_plan or {}).get("goals", []),
-        await legacy._build_teacher_evidence_catalog(teacher or {"id": teacher_id}, current_user),
-    ) if teacher else []
+    enriched_goals = (
+        legacy._enrich_action_plan_goals_with_evidence(
+            (action_plan or {}).get("goals", []),
+            await legacy._build_teacher_evidence_catalog(teacher or {"id": teacher_id}, current_user),
+        )
+        if teacher
+        else []
+    )
     signal_summary = await build_feedback_signal_summary(current_user, teacher_id=teacher_id)
     memory_support = await build_teacher_memory_support(
         current_user,
@@ -517,9 +522,7 @@ async def build_analysis_context(current_user: dict, teacher_id: str) -> Dict[st
     )
     linked_goal_ids = list((reflection or {}).get("linked_goal_ids") or [])
     linked_goal_titles = [
-        goal.get("title")
-        for goal in enriched_goals
-        if goal.get("id") in linked_goal_ids and goal.get("title")
+        goal.get("title") for goal in enriched_goals if goal.get("id") in linked_goal_ids and goal.get("title")
     ]
     return {
         "teacher_name": (teacher or {}).get("name"),

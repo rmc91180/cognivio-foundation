@@ -76,7 +76,8 @@ def _build_strengths(
             )
         else:
             strengths.append(
-                f"{element_name}: {observed}. Why this matters: this move supports clarity and helps student thinking become visible."
+                f"{element_name}: {observed}. Why this matters: this move supports clarity "
+                "and helps student thinking become visible."
             )
     return strengths[:2]
 
@@ -110,12 +111,14 @@ def _build_evidence_highlights(
         if _is_hebrew(language):
             prefix = f"סביב {range_text}, " if range_text else ""
             highlights.append(
-                f"{prefix}{summary.rstrip('.')}. זה חשוב כי הרגע הזה מראה איך מהלך הוראה משפיע על נראות החשיבה של תלמידים."
+                f"{prefix}{summary.rstrip('.')}. זה חשוב כי הרגע הזה מראה איך מהלך הוראה "
+                "משפיע על נראות החשיבה של תלמידים."
             )
         else:
             prefix = f"Around {range_text}, " if range_text else ""
             highlights.append(
-                f"{prefix}{summary.rstrip('.')}. This matters because it shows how an instructional move shapes visible student thinking."
+                f"{prefix}{summary.rstrip('.')}. This matters because it shows how an instructional move "
+                "shapes visible student thinking."
             )
     return highlights[:3]
 
@@ -129,7 +132,10 @@ def _build_action_steps(
     if _is_hebrew(language):
         return [
             {
-                "try_this": f"לפני שאלה כיתתית, תנו 20-30 שניות של חשיבה וכתיבה קצרה, ואז הזמינו שתי תשובות מאזורים שונים בכיתה סביב {focus_name}.",
+                "try_this": (
+                    "לפני שאלה כיתתית, תנו 20-30 שניות של חשיבה וכתיבה קצרה, ואז הזמינו שתי "
+                    f"תשובות מאזורים שונים בכיתה סביב {focus_name}."
+                ),
                 "look_for": "יותר תלמידים מסתמכים על הרשימות שלהם ומשתתפים באופן מגוון יותר.",
                 "evidence_of_success": "במהלך שיעור אחד נשמעות לפחות 4-5 תגובות מדויקות מתלמידים מאזורים שונים בכיתה.",
             },
@@ -141,14 +147,24 @@ def _build_action_steps(
         ]
     return [
         {
-            "try_this": f"Before each whole-class question, use 20-30 seconds of think-and-jot, then invite two responses from different parts of the room around {focus_name}.",
+            "try_this": (
+                "Before each whole-class question, use 20-30 seconds of think-and-jot, then invite "
+                f"two responses from different parts of the room around {focus_name}."
+            ),
             "look_for": "More students reference notes and a wider spread of voices enters the discussion.",
-            "evidence_of_success": "Within one lesson, at least 4-5 accurate responses come from different parts of the room.",
+            "evidence_of_success": (
+                "Within one lesson, at least 4-5 accurate responses come from different parts of the room."
+            ),
         },
         {
-            "try_this": f"For one discussion segment, track participation with a quick checkmark routine tied to {focus_name}.",
+            "try_this": (
+                f"For one discussion segment, track participation with a quick checkmark routine tied to {focus_name}."
+            ),
             "look_for": "Fewer repeat responders and more first-time contributors.",
-            "evidence_of_success": "By the end of the segment, each table or group has contributed at least one response tied to the lesson target.",
+            "evidence_of_success": (
+                "By the end of the segment, each table or group has contributed at least one response "
+                "tied to the lesson target."
+            ),
         },
     ]
 
@@ -165,7 +181,8 @@ def _build_snapshot(
         sentences = [
             "הובלת שיעור ברור ומסודר עם רצף הוראה יציב.",
             f"חוזקה בולטת הייתה: {strength_text.rstrip('.')}.",
-            f"ברוב השיעור תלמידים היו במעקב אחר ההוראה, ובחלק מהרגעים ההשתתפות התמקדה במספר קטן של קולות ({student_text.rstrip('.')}).",
+            "ברוב השיעור תלמידים היו במעקב אחר ההוראה, ובחלק מהרגעים ההשתתפות "
+            f"התמקדה במספר קטן של קולות ({student_text.rstrip('.')}).",
             "אקלים הכיתה נשאר רגוע וממוקד, וזה בסיס טוב להמשך צמיחה.",
             f"מנוף ההשפעה המרכזי לשלב הבא הוא: {primary_growth_focus.rstrip('.')}.",
         ]
@@ -173,7 +190,8 @@ def _build_snapshot(
         sentences = [
             "You led a clear, steady lesson with a consistent instructional flow.",
             f"A visible strength was this move: {strength_text.rstrip('.')}.",
-            f"For most of the lesson, students stayed attentive, while participation narrowed at points ({student_text.rstrip('.')}).",
+            "For most of the lesson, students stayed attentive, while participation narrowed "
+            f"at points ({student_text.rstrip('.')}).",
             "The class climate stayed calm and focused, giving you a strong base to build from.",
             f"The clearest next leverage point is: {primary_growth_focus.rstrip('.')}.",
         ]
@@ -182,8 +200,14 @@ def _build_snapshot(
 
 def _build_rubric_lens(primary_growth_focus: str, *, language: str) -> str:
     if _is_hebrew(language):
-        return f"מבט רובריקי קל: החוזקה ההוראתית ברורה, והצעד הבא הוא ליישם בעקביות את מוקד הצמיחה הבא - {primary_growth_focus.rstrip('.')}."
-    return f"Light rubric lens: your instructional clarity is evident, and the highest-leverage next move is to consistently enact {primary_growth_focus.rstrip('.')}."
+        return (
+            "מבט רובריקי קל: החוזקה ההוראתית ברורה, והצעד הבא הוא ליישם בעקביות "
+            f"את מוקד הצמיחה הבא - {primary_growth_focus.rstrip('.')}."
+        )
+    return (
+        "Light rubric lens: your instructional clarity is evident, and the highest-leverage "
+        f"next move is to consistently enact {primary_growth_focus.rstrip('.')}."
+    )
 
 
 def render_master_observer_feedback(
@@ -201,7 +225,13 @@ def render_master_observer_feedback(
         ),
     )
     if not ranked:
-        ranked = [{"element_id": "instruction", "element_name": "Instruction", "observations": ["You sustained a coherent lesson flow."]}]
+        ranked = [
+            {
+                "element_id": "instruction",
+                "element_name": "Instruction",
+                "observations": ["You sustained a coherent lesson flow."],
+            }
+        ]
 
     focus_item = ranked[0]
     if len(ranked) > 1 and not (bool(focus_item.get("priority")) or focus_item.get("element_id") in priority_set):

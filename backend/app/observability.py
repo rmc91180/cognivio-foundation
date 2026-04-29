@@ -5,7 +5,7 @@ import threading
 from collections import deque
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from . import metrics
 
@@ -173,9 +173,7 @@ def snapshot() -> Dict[str, Any]:
         for key in ("recent_failures", "recent_runs"):
             copied[group_name][key] = list(copied[group_name][key])
     for worker_name in copied["workers"]:
-        copied["workers"][worker_name]["recent_failures"] = list(
-            copied["workers"][worker_name]["recent_failures"]
-        )
+        copied["workers"][worker_name]["recent_failures"] = list(copied["workers"][worker_name]["recent_failures"])
     return copied
 
 

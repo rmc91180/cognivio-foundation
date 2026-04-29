@@ -8,10 +8,48 @@ import { ObservationFocusPanel } from "@/components/assessment/ObservationFocusP
 import { VideoTimeline } from "@/components/VideoTimeline";
 import { useAuth } from "@/hooks/useAuth";
 import { toast } from "sonner";
-import { Badge, Button, EmptyState, Field, PageContextHeader, Panel, Textarea } from "@/components/ui";
+import {
+  Badge,
+  Button,
+  EmptyState,
+  Field,
+  PageContextHeader,
+  Panel,
+  SkeletonCard,
+  SkeletonText,
+  Textarea,
+} from "@/components/ui";
 import { useTranslation } from "react-i18next";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 import { resolveCoachingLink } from "@/lib/coachingRoutes";
+
+function VideoPlayerSkeleton() {
+  return (
+    <LayoutShell>
+      <div className="mx-auto max-w-6xl px-6 py-6">
+        <div className="rounded-xl border border-slate-200 bg-white p-5">
+          <SkeletonText width={120} />
+          <SkeletonText width={360} className="mt-4" />
+          <SkeletonText width={220} className="mt-3" />
+        </div>
+        <div className="mt-4 grid grid-cols-1 gap-6 md:grid-cols-12">
+          <section className="space-y-3 md:col-span-7">
+            <SkeletonCard height={450} className="aspect-video" />
+            <div className="rounded-xl border border-slate-200 bg-white p-4">
+              <SkeletonText width="70%" />
+              <SkeletonText width="52%" className="mt-3" />
+              <SkeletonText width="62%" className="mt-3" />
+            </div>
+          </section>
+          <aside className="space-y-3 md:col-span-5">
+            <SkeletonCard height={180} />
+            <SkeletonCard height={220} />
+          </aside>
+        </div>
+      </div>
+    </LayoutShell>
+  );
+}
 
 export function VideoPlayerPage() {
   const { t, i18n } = useTranslation();
@@ -181,7 +219,7 @@ export function VideoPlayerPage() {
     });
   }, [currentTime, t]);
 
-  const { data: videoRes } = useQuery({
+  const { data: videoRes, isLoading: videoLoading } = useQuery({
     queryKey: ["video", videoId],
     queryFn: () => videoApi.detail(videoId).then((r) => r.data),
   });
@@ -688,6 +726,10 @@ export function VideoPlayerPage() {
         : videoStatus === "processing" || videoStatus === "queued"
           ? "warning"
           : "neutral";
+
+  if (videoLoading) {
+    return <VideoPlayerSkeleton />;
+  }
 
   return (
     <LayoutShell>

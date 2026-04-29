@@ -66,7 +66,10 @@ def get_default_specialist_contracts() -> List[SpecialistContract]:
         SpecialistContract(
             specialist_id="longitudinal_pattern",
             name="Longitudinal Pattern Specialist",
-            purpose="Carry repeated challenge or progress context into the summary and next-step framing without overriding lesson evidence.",
+            purpose=(
+                "Carry repeated challenge or progress context into the summary and next-step framing "
+                "without overriding lesson evidence."
+            ),
             owned_fields=("summary", "recommendations"),
             inputs=("analysis_context.goal_progress_signals", "analysis_context.reflection_summary"),
             guardrails=(
@@ -97,7 +100,10 @@ def get_conference_prep_specialist_contracts() -> List[SpecialistContract]:
         SpecialistContract(
             specialist_id="conference_prep_synthesis",
             name="Conference Prep Synthesis Specialist",
-            purpose="Keep conference prep concise, continuity-aware, and centered on the most important ongoing coaching thread.",
+            purpose=(
+                "Keep conference prep concise, continuity-aware, and centered on the most important "
+                "ongoing coaching thread."
+            ),
             owned_fields=("agenda", "continuity_lines"),
             inputs=("adaptive_support.primary_goal", "adaptive_support.admin_prompt_body", "continuity_lines"),
             guardrails=(

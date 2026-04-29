@@ -29,7 +29,9 @@ import { TeacherHistoryPage } from "@/pages/TeacherHistoryPage";
 import { TeacherOperationsPage } from "@/pages/TeacherOperationsPage";
 import { CoachingHubPage } from "@/pages/CoachingHubPage";
 import { MasterSchedulePage } from "@/pages/MasterSchedulePage";
+import { ObservationSetupPage } from "@/pages/ObservationSetupPage";
 import { VideoPlayerPage } from "@/pages/VideoPlayerPage";
+import { VideoRecorderPage } from "@/pages/VideoRecorderPage";
 import { FrameworksPage } from "@/pages/FrameworksPage";
 import { PrivacyReviewQueuePage } from "@/pages/PrivacyReviewQueuePage";
 import { RecognitionReviewPage } from "@/pages/RecognitionReviewPage";
@@ -38,7 +40,7 @@ import { OpsMetricsPage } from "@/pages/OpsMetricsPage";
 import { TeacherWorkspacePage } from "@/pages/TeacherWorkspacePage";
 import { ActionPlanRecordPage } from "@/pages/ActionPlanRecordPage";
 import { ReflectionRecordPage } from "@/pages/ReflectionRecordPage";
-import { getDefaultHomeRoute } from "@/lib/userRoutes";
+import { getHomeRoute } from "@/lib/roleRouter";
 
 function HomeRedirect() {
   const { user, initializing } = useAuth();
@@ -51,7 +53,7 @@ function HomeRedirect() {
     return <Navigate to="/login" replace />;
   }
 
-  return <Navigate to={getDefaultHomeRoute(user)} replace />;
+  return <Navigate to={getHomeRoute(user)} replace />;
 }
 
 function App() {
@@ -190,8 +192,8 @@ function App() {
         <Route
           path="/dashboard"
           element={
-            <ProtectedRoute allowedTenantRoles={["school_admin"]}>
-              <DashboardPage forcedWorkspaceMode="school" />
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
+              <DashboardPage />
             </ProtectedRoute>
           }
         />
@@ -199,7 +201,7 @@ function App() {
           path="/dashboard/training"
           element={
             <ProtectedRoute allowedTenantRoles={["training_admin"]}>
-              <DashboardPage forcedWorkspaceMode="training" />
+              <Navigate to="/dashboard" replace />
             </ProtectedRoute>
           }
         />
@@ -367,8 +369,24 @@ function App() {
         <Route
           path="/master-schedule"
           element={
-            <ProtectedRoute allowedTenantRoles={["school_admin"]}>
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
               <MasterSchedulePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/observation/new"
+          element={
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
+              <ObservationSetupPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/record"
+          element={
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
+              <VideoRecorderPage />
             </ProtectedRoute>
           }
         />

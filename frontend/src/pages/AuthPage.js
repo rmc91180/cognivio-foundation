@@ -9,7 +9,7 @@ import { InstitutionSuggestionList } from "@/components/ui/InstitutionSuggestion
 import { Button, Field, Input, Panel } from "@/components/ui";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 import { authApi } from "@/lib/api";
-import { getDefaultHomeRoute } from "@/lib/userRoutes";
+import { getHomeRoute } from "@/lib/roleRouter";
 
 function SegmentButton({ active, onClick, children }) {
   return (
@@ -77,7 +77,7 @@ export function AuthPage() {
 
   useEffect(() => {
     if (user) {
-      navigate(getDefaultHomeRoute(user), { replace: true });
+      navigate(getHomeRoute(user), { replace: true });
     }
   }, [navigate, user]);
 

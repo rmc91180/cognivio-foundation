@@ -12,12 +12,9 @@ from app.analysis.specialist_contracts import (
 )
 
 
-SPECIALIST_ORCHESTRATOR_ENABLED = (
-    os.getenv("SPECIALIST_ORCHESTRATOR_ENABLED", "true").lower() == "true"
-)
+SPECIALIST_ORCHESTRATOR_ENABLED = os.getenv("SPECIALIST_ORCHESTRATOR_ENABLED", "true").lower() == "true"
 SPECIALIST_ORCHESTRATOR_VERSION = (
-    os.getenv("SPECIALIST_ORCHESTRATOR_VERSION", "specialist_orchestrator_v1").strip()
-    or "specialist_orchestrator_v1"
+    os.getenv("SPECIALIST_ORCHESTRATOR_VERSION", "specialist_orchestrator_v1").strip() or "specialist_orchestrator_v1"
 )
 
 
@@ -154,10 +151,12 @@ def _apply_recommendation_sequence(payload: Dict[str, Any], context: SpecialistC
         deduped.append(item)
     deduped.sort(
         key=lambda item: (
-            0
-            if str(item.get("linked_element_id") or "") in priority_set
-            or int(item.get("priority_rank", 1) or 1) == 0
-            else 1,
+            (
+                0
+                if str(item.get("linked_element_id") or "") in priority_set
+                or int(item.get("priority_rank", 1) or 1) == 0
+                else 1
+            ),
             float(item.get("start_sec", 0.0) or 0.0),
         )
     )
@@ -238,7 +237,9 @@ def _apply_longitudinal_pattern(payload: Dict[str, Any], context: SpecialistCont
             summary_prefix = f"לאורך שיעורים אחרונים, {goal_title} עדיין פעיל אבל בסיס הראיות עדיין דל. "
             recommendation_suffix = f" בקשו ראיה חדשה שתאשר או תעדכן את הכיוון סביב {goal_title}."
         else:
-            summary_prefix = f"Across recent lessons, {goal_title} is still active but the recent evidence base is still thin. "
+            summary_prefix = (
+                f"Across recent lessons, {goal_title} is still active but the recent evidence base is still thin. "
+            )
             recommendation_suffix = f" Ask for fresh evidence before changing direction on {goal_title}."
     elif signal == "one_off_evidence":
         if _is_hebrew(context.language):
@@ -283,9 +284,7 @@ def _apply_conference_prep_synthesis(
     notes: List[str] = []
     agenda = [str(item or "").strip() for item in (payload.get("agenda") or []) if str(item or "").strip()]
     continuity_lines = [
-        str(item or "").strip()
-        for item in (payload.get("continuity_lines") or [])
-        if str(item or "").strip()
+        str(item or "").strip() for item in (payload.get("continuity_lines") or []) if str(item or "").strip()
     ]
     adaptive = adaptive_support or {}
     primary_goal = adaptive.get("primary_goal") or {}
@@ -371,12 +370,8 @@ def orchestrate_specialists(
             ]
             if str(item or "").strip()
         ],
-        conference_continuity_lines=list(
-            ((analysis_context or {}).get("conference_continuity_lines") or [])
-        ),
-        signal_guidance=list(
-            ((analysis_context or {}).get("signal_summary") or {}).get("guidance") or []
-        ),
+        conference_continuity_lines=list(((analysis_context or {}).get("conference_continuity_lines") or [])),
+        signal_guidance=list(((analysis_context or {}).get("signal_summary") or {}).get("guidance") or []),
         analysis_context=analysis_context,
     )
     specialist_trace: List[dict] = []

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from time import perf_counter
 from typing import Any, Dict, Iterator, Optional
 
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Gauge, Histogram, generate_latest
@@ -289,14 +288,15 @@ def snapshot_summary() -> Dict[str, Any]:
 
 
 @contextmanager
-def track_analysis_run(*, analysis_mode: Optional[str], language: Optional[str], modalities: Optional[list[str]]) -> Iterator[dict[str, str]]:
+def track_analysis_run(
+    *, analysis_mode: Optional[str], language: Optional[str], modalities: Optional[list[str]]
+) -> Iterator[dict[str, str]]:
     labels = {
         "analysis_mode": normalize_analysis_mode(analysis_mode),
         "language": normalize_language(language),
         "modalities": normalize_modalities(modalities),
     }
     ANALYSIS_RUNS_INFLIGHT.labels(**labels).inc()
-    start = perf_counter()
     try:
         yield labels
     finally:

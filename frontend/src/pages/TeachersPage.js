@@ -5,7 +5,15 @@ import { LayoutShell } from "@/components/LayoutShell";
 import { toast } from "sonner";
 import { Link } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
-import { Button, Dialog, EmptyState, LoadingState, PageHeader, Panel } from "@/components/ui";
+import {
+  Button,
+  Dialog,
+  EmptyState,
+  PageHeader,
+  Panel,
+  SkeletonTable,
+  SkeletonText,
+} from "@/components/ui";
 import { useTranslation } from "react-i18next";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 import { getUserTenantRole } from "@/lib/userRoutes";
@@ -457,12 +465,19 @@ export function TeachersPage() {
             </div>
 
             <div className="grid gap-3 md:grid-cols-3">
-              {primaryRosterStats.map((stat) => (
-                <div key={stat.id} className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
-                  <div className="text-[11px] uppercase tracking-wide text-slate-500">{stat.label}</div>
-                  <div className={`mt-2 text-2xl font-semibold ${stat.tone}`}>{stat.value}</div>
-                </div>
-              ))}
+              {isLoading
+                ? Array.from({ length: 3 }).map((_, index) => (
+                    <div key={index} className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+                      <SkeletonText width="58%" />
+                      <SkeletonText width="34%" className="mt-3" />
+                    </div>
+                  ))
+                : primaryRosterStats.map((stat) => (
+                    <div key={stat.id} className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+                      <div className="text-[11px] uppercase tracking-wide text-slate-500">{stat.label}</div>
+                      <div className={`mt-2 text-2xl font-semibold ${stat.tone}`}>{stat.value}</div>
+                    </div>
+                  ))}
             </div>
 
             <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
@@ -473,9 +488,13 @@ export function TeachersPage() {
                   </div>
                   <p className="mt-1 text-xs text-slate-500">{t("teachersPage.filtersDescription")}</p>
                 </div>
-                <div className="text-[11px] text-slate-500">
-                  {t("teachersPage.scoredCountLine", { count: teacherFlowSummary.withScores })}
-                </div>
+                {isLoading ? (
+                  <SkeletonText width={140} />
+                ) : (
+                  <div className="text-[11px] text-slate-500">
+                    {t("teachersPage.scoredCountLine", { count: teacherFlowSummary.withScores })}
+                  </div>
+                )}
               </div>
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
                 <FilterSelect
@@ -621,7 +640,7 @@ export function TeachersPage() {
             ) : null}
 
             {isLoading ? (
-              <LoadingState message={t("labels.loadingTeachers")} />
+              <SkeletonTable rows={8} columns={teacherRowQuickActionsEnabled ? 9 : 8} />
             ) : tableRows.length === 0 ? (
               <EmptyState title={noTeachersTitle} message={noTeachersMessage} />
             ) : (

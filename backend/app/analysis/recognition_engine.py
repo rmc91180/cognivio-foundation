@@ -1,3 +1,3 @@
 from __future__ import annotations
 
-from recognition_engine import *  # noqa: F403
+from recognition_engine import *  # noqa: F401,F403

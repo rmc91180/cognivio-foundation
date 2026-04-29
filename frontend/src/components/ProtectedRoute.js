@@ -1,21 +1,13 @@
 import React from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "@/hooks/useAuth";
-import {
-  canAccessTenantRole,
-  getDefaultHomeRoute,
-  isAdminUser,
-  isSuperAdminUser,
-} from "@/lib/userRoutes";
+import { RoleMismatchPage } from "@/pages/RoleMismatchPage";
+import { canAccess, getHomeRoute } from "@/lib/roleRouter";
 
-export function ProtectedRoute({
-  children,
-  adminOnly = false,
-  superAdminOnly = false,
-  allowedTenantRoles = null,
-}) {
+export function ProtectedRoute({ children }) {
   const { t } = useTranslation();
+  const location = useLocation();
   const { user, initializing } = useAuth();
 
   if (initializing) {
@@ -32,16 +24,23 @@ export function ProtectedRoute({
     return <Navigate to="/login" replace />;
   }
 
-  if (superAdminOnly && !isSuperAdminUser(user)) {
-    return <Navigate to={getDefaultHomeRoute(user)} replace />;
+  if (!canAccess(user, location.pathname)) {
+    if (process.env.NODE_ENV === "development") {
+      const role = user?.tenant_role || user?.role || "unknown";
+      console.warn(`Role ${role} attempted to access ${location.pathname} — redirected`);
+    }
+
+    return (
+      <Navigate
+        to={getHomeRoute(user)}
+        replace
+        state={{ roleMismatch: true, attemptedPath: location.pathname }}
+      />
+    );
   }
 
-  if (adminOnly && !isAdminUser(user)) {
-    return <Navigate to={getDefaultHomeRoute(user)} replace />;
-  }
-
-  if (allowedTenantRoles && !canAccessTenantRole(user, allowedTenantRoles)) {
-    return <Navigate to={getDefaultHomeRoute(user)} replace />;
+  if (location.state?.roleMismatch) {
+    return <RoleMismatchPage />;
   }
 
   return children;

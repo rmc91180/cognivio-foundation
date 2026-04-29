@@ -8,3 +8,11 @@ export { SectionHeader } from "./SectionHeader";
 export { Dialog } from "./Dialog";
 export { LoadingState, EmptyState, ErrorState, SuccessState } from "./StatePanel";
 export { TableShell, DataTable } from "./Table";
+export {
+  Skeleton,
+  SkeletonAvatar,
+  SkeletonCard,
+  SkeletonStat,
+  SkeletonTable,
+  SkeletonText,
+} from "./Skeleton";

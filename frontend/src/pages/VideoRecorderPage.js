@@ -1,15 +1,19 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { LayoutShell } from "@/components/LayoutShell";
 import { VideoRecorder } from "@/components/VideoRecorder";
-import { teacherApi, videoApi } from "@/lib/api";
+import { observationSessionApi, teacherApi, videoApi } from "@/lib/api";
 import { toast } from "sonner";
 
 export function VideoRecorderPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const [selectedTeacher, setSelectedTeacher] = useState("");
+  const [searchParams] = useSearchParams();
+  const teacherIdFromUrl = searchParams.get("teacher_id") || "";
+  const observationSessionId = searchParams.get("observation_session_id") || "";
+  const [selectedTeacher, setSelectedTeacher] = useState(teacherIdFromUrl);
   const [subject, setSubject] = useState("");
   const [recordedBlob, setRecordedBlob] = useState(null);
   const [recordedUrl, setRecordedUrl] = useState("");
@@ -21,18 +25,41 @@ export function VideoRecorderPage() {
     queryFn: () => teacherApi.list().then((res) => res.data),
   });
 
+  const { data: linkedSession } = useQuery({
+    queryKey: ["observation-session", observationSessionId],
+    enabled: Boolean(observationSessionId),
+    queryFn: () => observationSessionApi.get(observationSessionId).then((res) => res.data),
+  });
+
+  useEffect(() => {
+    if (linkedSession?.teacher_id) {
+      setSelectedTeacher(linkedSession.teacher_id);
+      return;
+    }
+    if (teacherIdFromUrl) {
+      setSelectedTeacher(teacherIdFromUrl);
+    }
+  }, [linkedSession?.teacher_id, teacherIdFromUrl]);
+
   const selectedTeacherObj = useMemo(
     () => teachers.find((t) => t.id === selectedTeacher),
     [teachers, selectedTeacher]
   );
 
+  useEffect(() => {
+    if (selectedTeacherObj?.subject) {
+      setSubject((current) => current || selectedTeacherObj.subject);
+    }
+  }, [selectedTeacherObj?.id, selectedTeacherObj?.subject]);
+
   const uploadMutation = useMutation({
-    mutationFn: ({ file, teacherId, subjectValue, recordedAt }) => {
+    mutationFn: ({ file, teacherId, subjectValue, recordedAt, sessionId }) => {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("teacher_id", teacherId);
       if (subjectValue) formData.append("subject", subjectValue);
       if (recordedAt) formData.append("recorded_at", recordedAt);
+      if (sessionId) formData.append("observation_session_id", sessionId);
       return videoApi.upload(formData, {
         onUploadProgress: (event) => {
           if (event.total) {
@@ -48,6 +75,11 @@ export function VideoRecorderPage() {
       setUploadProgress(0);
       queryClient.invalidateQueries({ queryKey: ["videos"] });
       queryClient.invalidateQueries({ queryKey: ["assessments"] });
+      queryClient.invalidateQueries({ queryKey: ["observation-sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["upcoming-observation-sessions"] });
+      if (observationSessionId) {
+        queryClient.invalidateQueries({ queryKey: ["observation-session", observationSessionId] });
+      }
     },
     onError: (error) => {
       toast.error(error?.response?.data?.detail || t("videoRecorderPage.uploadFailed"));
@@ -72,8 +104,11 @@ export function VideoRecorderPage() {
       teacherId: selectedTeacher,
       subjectValue,
       recordedAt,
+      sessionId: observationSessionId,
     });
   };
+
+  const focusElements = linkedSession?.focus_elements || [];
 
   return (
     <LayoutShell>
@@ -86,6 +121,19 @@ export function VideoRecorderPage() {
             {t("videoRecorderPage.description")}
           </p>
         </div>
+
+        {linkedSession ? (
+          <div className="mb-6 rounded-md border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900">
+            <div className="font-semibold">
+              Focusing on {focusElements.length ? focusElements.join(", ") : "the planned observation goals"}
+            </div>
+            {linkedSession.focus_note ? (
+              <div className="mt-1 text-xs leading-5 text-sky-800">
+                {linkedSession.focus_note}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
 
         <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
           <div className="md:col-span-7">
@@ -109,6 +157,7 @@ export function VideoRecorderPage() {
                   <select
                     className="mt-1 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 outline-none ring-primary/40 focus:ring"
                     value={selectedTeacher}
+                    disabled={Boolean(linkedSession?.teacher_id)}
                     onChange={(e) => {
                       setSelectedTeacher(e.target.value);
                       const teacher = teachers.find((t) => t.id === e.target.value);

@@ -15,6 +15,8 @@ import {
 import { LayoutShell } from "@/components/LayoutShell";
 import { LeadershipInsightsCard } from "@/components/dashboard/LeadershipInsightsCard";
 import { DomainTrendsChart } from "@/components/dashboard/DomainTrendsChart";
+import { TrainingDashboard } from "@/components/dashboard/TrainingDashboard";
+import { UpcomingObservationsWidget } from "@/components/dashboard/UpcomingObservationsWidget";
 import {
   Bar,
   BarChart,
@@ -28,13 +30,40 @@ import {
 import { toast } from "sonner";
 import { subDays } from "date-fns";
 import { useAuth } from "@/hooks/useAuth";
-import { Button, EmptyState, LoadingState, PageHeader, Panel, SectionHeader } from "@/components/ui";
+import {
+  Button,
+  EmptyState,
+  PageHeader,
+  Panel,
+  SectionHeader,
+  SkeletonCard,
+  SkeletonStat,
+  SkeletonTable,
+} from "@/components/ui";
 import { Link } from "react-router-dom";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 import { resolveCoachingLink } from "@/lib/coachingRoutes";
 import { getDefaultHomeRoute, getUserTenantRole } from "@/lib/userRoutes";
 
 const DASHBOARD_SIGNAL_WINDOW_DAYS = 14;
+
+function DashboardPageSkeleton() {
+  return (
+    <div className="mt-8 space-y-6">
+      <div className="grid gap-3 md:grid-cols-4">
+        {Array.from({ length: 4 }).map((_, index) => (
+          <SkeletonStat key={index} />
+        ))}
+      </div>
+      <Panel className="space-y-4">
+        <div>
+          <SkeletonCard height={200} />
+        </div>
+      </Panel>
+      <SkeletonTable rows={5} columns={5} />
+    </div>
+  );
+}
 
 function parseIsoDate(value) {
   if (!value) return null;
@@ -73,6 +102,20 @@ function buildGroupedTeacherLabel(tasks, t) {
 }
 
 export function DashboardPage({ forcedWorkspaceMode = null }) {
+  const { user } = useAuth();
+  const tenantRole = getUserTenantRole(user);
+  const isTrainingAdmin = tenantRole === "training_admin";
+  const effectiveWorkspaceMode =
+    forcedWorkspaceMode || (isTrainingAdmin ? "training" : user?.workspace_mode || "school");
+
+  if (effectiveWorkspaceMode === "training") {
+    return <TrainingDashboard />;
+  }
+
+  return <SchoolDashboardPage forcedWorkspaceMode={forcedWorkspaceMode} />;
+}
+
+function SchoolDashboardPage({ forcedWorkspaceMode = null }) {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const { user } = useAuth();
@@ -1065,6 +1108,8 @@ export function DashboardPage({ forcedWorkspaceMode = null }) {
           }
         />
 
+        {isAdmin ? <UpcomingObservationsWidget className="mb-6" /> : null}
+
         {dashboardRoleShellEnabled && (
           <Panel className="mb-6 border border-slate-200 bg-white">
             <div className="mb-5 border-b border-slate-100 pb-4">
@@ -1707,7 +1752,7 @@ export function DashboardPage({ forcedWorkspaceMode = null }) {
         )}
 
         {isLoading ? (
-          <LoadingState className="mt-8" message={t("dashboard.loadingRoster")} />
+          <DashboardPageSkeleton />
         ) : roster.length === 0 ? (
           improvedEmptyStatesEnabled ? (
             <Panel className="mt-8 border border-dashed border-slate-300 bg-white">

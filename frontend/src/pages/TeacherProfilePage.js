@@ -1,20 +1,59 @@
 import React from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { LayoutShell } from "@/components/LayoutShell";
-import { PageContextHeader, Panel, SectionHeader } from "@/components/ui";
+import {
+  PageContextHeader,
+  Panel,
+  SectionHeader,
+  SkeletonCard,
+  SkeletonText,
+} from "@/components/ui";
 import { resolveCoachingLink } from "@/lib/coachingRoutes";
-import { reportApi } from "@/lib/api";
+import { observationSessionApi, reportApi } from "@/lib/api";
 import { useAdminTeacherDeepDiveData } from "@/pages/teacher-deep-dive/useAdminTeacherDeepDiveData";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
 import { isSuperAdminUser } from "@/lib/userRoutes";
 
+function TeacherProfileSkeleton() {
+  return (
+    <LayoutShell>
+      <div className="mx-auto max-w-6xl px-6 py-6">
+        <div className="rounded-xl border border-slate-200 bg-white p-5">
+          <SkeletonText width={120} />
+          <SkeletonText width={320} className="mt-4" />
+          <SkeletonText width={460} className="mt-3" />
+          <div className="mt-5 grid gap-3 md:grid-cols-3">
+            <SkeletonText width="80%" />
+            <SkeletonText width="70%" />
+            <SkeletonText width="75%" />
+          </div>
+        </div>
+        <div className="mt-6 space-y-4">
+          <SkeletonCard height={180} />
+          <SkeletonCard height={260} />
+          <SkeletonCard height={220} />
+        </div>
+      </div>
+    </LayoutShell>
+  );
+}
+
+function observationSessionOutcomeLabel(status) {
+  if (status === "feedback_given") return "Feedback shared";
+  if (status === "analysis_complete") return "Feedback ready";
+  if (status === "recording_uploaded") return "Recording uploaded";
+  return "Planned";
+}
+
 export function TeacherProfilePage() {
   const { teacherId } = useParams();
   const { t, i18n } = useTranslation();
   const { user } = useAuth();
   const {
+    isLoading,
     teacherRes,
     summaryInsightsRes,
     conferencePrepRes,
@@ -32,6 +71,15 @@ export function TeacherProfilePage() {
     formatDateTime,
     formatScore,
   } = useAdminTeacherDeepDiveData({ teacherId });
+
+  const { data: observationSessions = [] } = useQuery({
+    queryKey: ["observation-sessions", teacherId],
+    enabled: Boolean(teacherId),
+    queryFn: () =>
+      observationSessionApi
+        .list({ teacher_id: teacherId })
+        .then((res) => res.data),
+  });
 
   const latestVideoLink = latestAssessment?.video_id
     ? `/videos/${latestAssessment.video_id}`
@@ -78,6 +126,10 @@ export function TeacherProfilePage() {
     }
   };
 
+  if (isLoading) {
+    return <TeacherProfileSkeleton />;
+  }
+
   return (
     <LayoutShell>
       <div className="mx-auto max-w-6xl px-6 py-6">
@@ -113,6 +165,10 @@ export function TeacherProfilePage() {
             },
           ]}
           quickLinks={[
+            {
+              label: "Plan observation",
+              to: `/observation/new?teacher_id=${teacherId}`,
+            },
             {
               label: t("teacherProfile.openLatestLessonPage"),
               to: `/teachers/${teacherId}/latest-lesson`,
@@ -405,6 +461,64 @@ export function TeacherProfilePage() {
                 >
                   {t("teacherProfile.exportCsv")}
                 </button>
+              </div>
+            </section>
+
+            <section className="rounded-xl border border-slate-200 bg-white p-5">
+              <SectionHeader
+                eyebrow="Observation planning"
+                title="Observation sessions"
+                description="Plan a focused visit or review past focus areas and outcomes."
+                actions={
+                  <Link
+                    to={`/observation/new?teacher_id=${teacherId}`}
+                    className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90"
+                  >
+                    Plan observation
+                  </Link>
+                }
+              />
+              <div className="mt-4 space-y-3">
+                {observationSessions.length ? (
+                  observationSessions.slice(0, 5).map((session) => (
+                    <div
+                      key={session.id}
+                      className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-4"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="text-sm font-semibold text-slate-900">
+                          {session.scheduled_date
+                            ? formatDateTime(session.scheduled_date)
+                            : "Date not set"}
+                        </div>
+                        <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-slate-600">
+                          {observationSessionOutcomeLabel(session.status)}
+                        </span>
+                      </div>
+                      {session.focus_elements?.length ? (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {session.focus_elements.map((focus) => (
+                            <span
+                              key={focus}
+                              className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] text-slate-700"
+                            >
+                              {focus}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                      {session.focus_note ? (
+                        <p className="mt-3 text-xs leading-5 text-slate-600">
+                          {session.focus_note}
+                        </p>
+                      ) : null}
+                    </div>
+                  ))
+                ) : (
+                  <div className="rounded-md border border-dashed border-slate-200 px-3 py-3 text-xs text-slate-500">
+                    Focused observation plans will appear here.
+                  </div>
+                )}
               </div>
             </section>
 

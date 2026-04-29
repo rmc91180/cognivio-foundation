@@ -22,38 +22,63 @@ import { OfflineBanner } from "@/components/OfflineBanner";
 import { Button } from "@/components/ui";
 import { masterAdminApi } from "@/lib/api";
 import {
-  getDashboardHomeRoute,
   getUserTenantRole,
-  isAdminUser,
   isSchoolAdminUser,
   isSuperAdminUser,
   isTrainingAdminUser,
 } from "@/lib/userRoutes";
+import { getRoleShell } from "@/lib/roleRouter";
 import { clearPreviewSession } from "@/lib/previewMode";
 
-const SUPER_ADMIN_NAV_ITEMS = [
-  { to: "/master-admin", icon: ShieldCheck, labelKey: "masterAdmin" },
-  { to: "/master-admin/users?approval_status=pending", icon: Users, labelKey: "accessManagement" },
-  { to: "/master-admin/organizations", icon: Database, labelKey: "organizationDirectory" },
-  { to: "/master-admin/workspaces", icon: LayoutDashboard, labelKey: "workspaces" },
-  { to: "/master-admin/videos", icon: PlayCircle, labelKey: "videos" },
-  { to: "/master-admin/incidents", icon: History, labelKey: "incidents" },
-  { to: "/master-admin/dependencies", icon: Layers, labelKey: "dependencies" },
-];
+const ROLE_NAV_ITEMS = {
+  master: [
+    { to: "/master-admin/organizations", icon: Database, label: "Organizations" },
+    { to: "/master-admin/users", icon: Users, label: "Users" },
+    { to: "/master-admin/videos", icon: PlayCircle, label: "Videos" },
+    { to: "/master-admin/audit", icon: ClipboardList, label: "Audit" },
+    { to: "/master-admin/incidents", icon: History, label: "Incidents" },
+    { to: "/master-admin/storage", icon: Database, label: "Storage" },
+    { to: "/master-admin/support", icon: MessageSquareText, label: "Support" },
+    { to: "/master-admin", icon: ShieldCheck, label: "Ops", end: true },
+  ],
+  admin: [
+    { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard", end: true },
+    { to: "/teachers", icon: Users, label: "Teachers" },
+    { to: "/master-schedule", icon: ClipboardList, label: "Schedule" },
+    { to: "/teachers?focus=coaching", icon: MessageSquareText, label: "Coaching" },
+    { to: "/recognition-review", icon: Trophy, label: "Recognition" },
+    { to: "/ops/metrics", icon: BookOpen, label: "Reports" },
+    { to: "/school-setup", icon: Layers, label: "Settings" },
+  ],
+  training: [
+    { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard", end: true },
+    { to: "/teachers?view=cohorts", icon: Layers, label: "Cohorts" },
+    { to: "/teachers", icon: Users, label: "Trainees" },
+    { to: "/master-schedule", icon: ClipboardList, label: "Schedule" },
+    { to: "/dashboard?view=reports", icon: BookOpen, label: "Reports" },
+    { to: "/dashboard?view=settings", icon: Layers, label: "Settings" },
+  ],
+  teacher: [
+    { to: "/my-workspace", icon: LayoutDashboard, label: "My Workspace", end: true },
+    { to: "/videos", icon: PlayCircle, label: "My Lessons" },
+    { to: "/my-workspace/coaching", icon: MessageSquareText, label: "My Coaching" },
+    { to: "/all-star-library", icon: Trophy, label: "My Recognition" },
+    { to: "/my-workspace/settings", icon: Layers, label: "Settings" },
+  ],
+};
 
 export function LayoutShell({ children }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { user, logout, refreshUser } = useAuth();
-  const isAdmin = isAdminUser(user);
+  const roleShell = getRoleShell(user);
   const isSuperAdmin = isSuperAdminUser(user);
   const isSchoolAdmin = isSchoolAdminUser(user);
   const isTrainingAdmin = isTrainingAdminUser(user);
   const tenantRole = getUserTenantRole(user);
-  const dashboardHomeRoute = getDashboardHomeRoute(user);
   const isPreviewMode = Boolean(user?.is_preview_mode);
-  const isGeneralAdmin = isAdmin && !isSuperAdmin;
+  const navItems = ROLE_NAV_ITEMS[roleShell] || [];
 
   const organizationListQuery = useQuery({
     queryKey: ["layout-shell-master-admin-organizations"],
@@ -114,49 +139,15 @@ export function LayoutShell({ children }) {
         </div>
         <div className="mt-5 flex-1 overflow-y-auto px-3">
           <nav className="space-y-1.5 text-sm">
-            {isSuperAdmin ? (
-              <div className="mb-3">
-                <div className="px-3 pb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-                  {t("nav.platformBackend")}
-                </div>
-                {SUPER_ADMIN_NAV_ITEMS.map((item) => (
-                  <NavItem key={item.to} to={item.to} icon={item.icon} label={t(`nav.${item.labelKey}`)} />
-                ))}
-              </div>
-            ) : null}
-            {isGeneralAdmin ? (
-              <>
-                <NavItem
-                  to={dashboardHomeRoute}
-                  icon={LayoutDashboard}
-                  label={isTrainingAdmin ? t("nav.trainingDashboard") : t("nav.dashboard")}
-                />
-                <NavItem
-                  to="/teachers"
-                  icon={Users}
-                  label={isTrainingAdmin ? t("nav.trainingParticipants") : t("nav.teachers")}
-                />
-                <NavItem to="/videos" icon={PlayCircle} label={t("nav.videos")} />
-                <NavItem to="/all-star-library" icon={BookOpen} label={t("nav.allStarLibrary")} />
-                {isSchoolAdmin ? (
-                  <>
-                    <NavItem to="/privacy-review" icon={ShieldCheck} label={t("nav.privacyReview")} />
-                    <NavItem to="/recognition-review" icon={Trophy} label={t("nav.recognitionReview")} />
-                    <NavItem to="/school-setup" icon={Layers} label={t("nav.schoolSetup")} />
-                  </>
-                ) : null}
-              </>
-            ) : null}
-            {!isAdmin ? (
-              <>
-                <NavItem to="/my-workspace" icon={LayoutDashboard} label={t("nav.myWorkspace")} />
-                <NavItem to="/videos" icon={PlayCircle} label={t("nav.myVideos")} />
-                <NavItem to="/my-workspace/materials" icon={BookOpen} label={t("nav.myMaterials")} />
-                <NavItem to="/my-workspace/goals" icon={ClipboardList} label={t("nav.myGoals")} />
-                <NavItem to="/my-workspace/reflections" icon={MessageSquareText} label={t("nav.myReflections")} />
-                <NavItem to="/my-workspace/history" icon={History} label={t("nav.myHistory")} />
-              </>
-            ) : null}
+            {navItems.map((item) => (
+              <NavItem
+                key={`${item.to}-${item.label}`}
+                to={item.to}
+                icon={item.icon}
+                label={item.label}
+                end={item.end}
+              />
+            ))}
           </nav>
 
           {isSuperAdmin ? (
@@ -304,10 +295,11 @@ export function LayoutShell({ children }) {
   );
 }
 
-function NavItem({ to, icon: Icon, label }) {
+function NavItem({ to, icon: Icon, label, end = false }) {
   return (
     <NavLink
       to={to}
+      end={end}
       className={({ isActive }) =>
         [
           "flex items-center gap-2 rounded-xl px-3 py-2.5 transition-colors",

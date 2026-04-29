@@ -1,9 +1,12 @@
+import { getHomeRoute } from "@/lib/roleRouter";
+
 function normalizeTenantRole(user) {
   const tenantRole = String(user?.tenant_role || "").trim().toLowerCase();
+  if (tenantRole === "master_admin") return "super_admin";
   if (tenantRole) return tenantRole;
 
   const legacyRole = String(user?.role || "").trim().toLowerCase();
-  if (legacyRole === "super_admin") return "super_admin";
+  if (legacyRole === "master_admin" || legacyRole === "super_admin") return "super_admin";
   if (legacyRole === "admin" || legacyRole === "principal") return "school_admin";
   return "teacher";
 }
@@ -32,10 +35,7 @@ export function isAdminUser(user) {
   return isSchoolAdminUser(user) || isTrainingAdminUser(user) || isSuperAdminUser(user);
 }
 
-export function getDashboardHomeRoute(user) {
-  if (isTrainingAdminUser(user)) {
-    return "/dashboard/training";
-  }
+export function getDashboardHomeRoute() {
   return "/dashboard";
 }
 
@@ -46,11 +46,5 @@ export function canAccessTenantRole(user, allowedTenantRoles = []) {
 }
 
 export function getDefaultHomeRoute(user) {
-  if (isSuperAdminUser(user)) {
-    return "/master-admin";
-  }
-  if (isSchoolAdminUser(user) || isTrainingAdminUser(user)) {
-    return getDashboardHomeRoute(user);
-  }
-  return "/my-workspace";
+  return getHomeRoute(user);
 }

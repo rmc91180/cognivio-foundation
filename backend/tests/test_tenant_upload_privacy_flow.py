@@ -129,10 +129,29 @@ def _privacy_image(name: str) -> UploadFile:
 
 def _video_file(name: str) -> UploadFile:
     return UploadFile(
-        file=BytesIO(b"fake-mp4-data"),
+        file=BytesIO(b"\x00\x00\x00\x18ftypisom" + b"0" * 1024),
         filename=name,
         headers=Headers({"content-type": "video/mp4"}),
     )
+
+
+def test_video_upload_validation_rejects_renamed_text_file():
+    upload = UploadFile(
+        file=BytesIO(b"this is not a video"),
+        filename="lesson.mp4",
+        headers=Headers({"content-type": "video/mp4"}),
+    )
+
+    with pytest.raises(server.InvalidVideoFileTypeError):
+        asyncio.run(server._validate_video_upload_file(upload))
+
+
+def test_video_upload_validation_rejects_declared_oversize_file():
+    upload = _video_file("lesson.mp4")
+    upload.size = server.VIDEO_MAX_UPLOAD_BYTES + 1
+
+    with pytest.raises(server.UploadTooLargeError):
+        asyncio.run(server._validate_video_upload_file(upload))
 
 
 def _fake_school_db():

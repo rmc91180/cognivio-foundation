@@ -5,6 +5,9 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 import os
 import logging
 from pathlib import Path
@@ -3423,6 +3426,78 @@ def _build_video_visibility_query(
     return {"uploaded_by": current_user["id"]}
 
 
+def _detect_video_file_signature(header: bytes, filename: Optional[str]) -> Optional[Dict[str, str]]:
+    suffix = Path(filename or "").suffix.lower()
+    if header.startswith(b"\x1a\x45\xdf\xa3"):
+        return {"extension": ".webm", "content_type": "video/webm"}
+    if header.startswith(b"RIFF"):
+        return {"extension": ".avi", "content_type": "video/x-msvideo"}
+    if len(header) >= 8 and header[:3] == b"\x00\x00\x00" and header[4:8] in {b"ftyp", b"moov"}:
+        if suffix == ".mov":
+            return {"extension": ".mov", "content_type": "video/quicktime"}
+        return {"extension": ".mp4", "content_type": "video/mp4"}
+    return None
+
+
+async def _validate_video_upload_file(file: UploadFile) -> Dict[str, str]:
+    if not (file.filename or "").strip():
+        raise HTTPException(status_code=400, detail="Filename is required")
+
+    upload_size = getattr(file, "size", None)
+    if upload_size is not None and int(upload_size) > VIDEO_MAX_UPLOAD_BYTES:
+        raise UploadTooLargeError()
+
+    header = await file.read(512)
+    await file.seek(0)
+    detected = _detect_video_file_signature(header, file.filename)
+    if not detected:
+        raise InvalidVideoFileTypeError()
+
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix and suffix not in VIDEO_ALLOWED_EXTENSIONS:
+        raise InvalidVideoFileTypeError()
+    if detected["extension"] not in VIDEO_ALLOWED_EXTENSIONS:
+        raise InvalidVideoFileTypeError()
+    return detected
+
+
+async def _count_workspace_videos_for_teacher(teacher: dict, current_user: dict) -> int:
+    organization_id = teacher.get("organization_id") or current_user.get("organization_id")
+    school_id = teacher.get("school_id") or current_user.get("school_id")
+    owner_id = teacher.get("created_by") or current_user.get("id")
+
+    teacher_query: Dict[str, Any]
+    if organization_id:
+        teacher_query = {"organization_id": organization_id}
+    elif school_id:
+        teacher_query = {"school_id": school_id}
+    else:
+        teacher_query = {"created_by": owner_id}
+
+    teachers = await db.teachers.find(teacher_query, {"_id": 0, "id": 1}).to_list(10000)
+    teacher_ids = [item["id"] for item in teachers if item.get("id")]
+    videos_collection = getattr(db, "videos", None)
+    if videos_collection is None:
+        return 0
+    if teacher_ids:
+        query = {"teacher_id": {"$in": teacher_ids}}
+        if hasattr(videos_collection, "count_documents"):
+            return await videos_collection.count_documents(query)
+        return len(await videos_collection.find(query, {"_id": 0, "id": 1}).to_list(10000))
+    if owner_id:
+        query = {"uploaded_by": owner_id}
+        if hasattr(videos_collection, "count_documents"):
+            return await videos_collection.count_documents(query)
+        return len(await videos_collection.find(query, {"_id": 0, "id": 1}).to_list(10000))
+    return 0
+
+
+async def _ensure_workspace_upload_quota_available(teacher: dict, current_user: dict) -> None:
+    current_count = await _count_workspace_videos_for_teacher(teacher, current_user)
+    if current_count >= WORKSPACE_VIDEO_QUOTA:
+        raise UploadQuotaReachedError()
+
+
 def _parse_teacher_subjects(subject_value: Optional[Any]) -> List[str]:
     if not subject_value:
         return []
@@ -3936,13 +4011,14 @@ async def _ensure_demo_tenant_state() -> None:
 # Upload constraints
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10MB
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".jpeg", ".jpg"}
-VIDEO_ALLOWED_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+VIDEO_ALLOWED_EXTENSIONS = {".mp4", ".mov", ".avi", ".webm"}
+VIDEO_ALLOWED_FILE_TYPES = ["mp4", "mov", "avi", "webm"]
 VIDEO_ALLOWED_CONTENT_TYPES = {
     "video/mp4",
     "video/quicktime",
     "video/x-msvideo",
-    "video/x-matroska",
     "video/webm",
+    "video/mpeg",
 }
 PRIVACY_REFERENCE_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 PRIVACY_REFERENCE_ALLOWED_CONTENT_TYPES = {
@@ -3950,7 +4026,12 @@ PRIVACY_REFERENCE_ALLOWED_CONTENT_TYPES = {
     "image/png",
     "image/webp",
 }
-VIDEO_MAX_UPLOAD_BYTES = int(os.getenv("MAX_VIDEO_BYTES", str(1024 * 1024 * 1024)))
+VIDEO_MAX_UPLOAD_BYTES = int(os.getenv("MAX_VIDEO_BYTES", str(2 * 1024 * 1024 * 1024)))
+WORKSPACE_VIDEO_QUOTA = max(1, int(os.getenv("WORKSPACE_VIDEO_QUOTA", "500")))
+POST_RATE_LIMIT_WINDOW_SECONDS = 60
+POST_RATE_LIMIT_MAX_REQUESTS = 30
+POST_RATE_LIMIT_EXEMPT_PATHS = {"/api/auth/login", "/api/videos/upload"}
+POST_RATE_LIMIT_BUCKETS: Dict[Tuple[str, str], Tuple[int, float]] = {}
 VIDEO_WORKER_COUNT = max(1, int(os.getenv("VIDEO_WORKER_COUNT", "1")))
 VIDEO_TRANSCODE_PIPELINE_ENABLED = os.getenv("VIDEO_TRANSCODE_PIPELINE_ENABLED", "false").lower() == "true"
 VIDEO_TRANSCODE_PROFILE = os.getenv("VIDEO_TRANSCODE_PROFILE", "analysis_master_v1").strip() or "analysis_master_v1"
@@ -4035,6 +4116,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 api_router = APIRouter(prefix="/api")
 
 security = HTTPBearer(auto_error=False)
+limiter = Limiter(key_func=get_remote_address)
 VIDEO_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 VIDEO_WORKER_TASKS: List[asyncio.Task] = []
 VIDEO_TRANSCODE_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
@@ -4146,12 +4228,116 @@ async def lifespan(app: FastAPI):
         await _app_shutdown()
 
 
+class UploadTooLargeError(Exception):
+    pass
+
+
+class InvalidVideoFileTypeError(Exception):
+    pass
+
+
+class UploadQuotaReachedError(Exception):
+    pass
+
+
+def _retry_after_from_rate_limit(exc: RateLimitExceeded) -> int:
+    limit = getattr(exc, "limit", None)
+    get_expiry = getattr(limit, "get_expiry", None)
+    if callable(get_expiry):
+        try:
+            return max(1, int(math.ceil(float(get_expiry()))))
+        except (TypeError, ValueError):
+            pass
+    return POST_RATE_LIMIT_WINDOW_SECONDS
+
+
+async def _rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    retry_after = _retry_after_from_rate_limit(exc)
+    return JSONResponse(
+        status_code=429,
+        content={"error": "Too many requests", "retry_after": retry_after},
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
+def _consume_post_rate_limit(request: Request) -> Optional[int]:
+    path = request.url.path
+    if request.method.upper() != "POST" or not path.startswith("/api/") or path in POST_RATE_LIMIT_EXEMPT_PATHS:
+        return None
+    now = time.monotonic()
+    client_key = get_remote_address(request) or "unknown"
+    bucket_key = (client_key, path)
+    count, window_started_at = POST_RATE_LIMIT_BUCKETS.get(bucket_key, (0, now))
+    elapsed = now - window_started_at
+    if elapsed >= POST_RATE_LIMIT_WINDOW_SECONDS:
+        POST_RATE_LIMIT_BUCKETS[bucket_key] = (1, now)
+        return None
+    if count >= POST_RATE_LIMIT_MAX_REQUESTS:
+        return max(1, int(math.ceil(POST_RATE_LIMIT_WINDOW_SECONDS - elapsed)))
+    POST_RATE_LIMIT_BUCKETS[bucket_key] = (count + 1, window_started_at)
+    return None
+
+
 # Create the main app
 app = FastAPI(
     title="Cognivio API",
     description="Teacher Assessment Platform",
     lifespan=lifespan,
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.exception_handler(UploadTooLargeError)
+async def upload_too_large_handler(request: Request, exc: UploadTooLargeError):
+    return JSONResponse(
+        status_code=413,
+        content={"error": "File too large", "max_bytes": VIDEO_MAX_UPLOAD_BYTES},
+    )
+
+
+@app.exception_handler(InvalidVideoFileTypeError)
+async def invalid_video_file_type_handler(request: Request, exc: InvalidVideoFileTypeError):
+    return JSONResponse(
+        status_code=422,
+        content={"error": "Invalid file type", "allowed": VIDEO_ALLOWED_FILE_TYPES},
+    )
+
+
+@app.exception_handler(UploadQuotaReachedError)
+async def upload_quota_reached_handler(request: Request, exc: UploadQuotaReachedError):
+    return JSONResponse(
+        status_code=402,
+        content={"error": "Upload quota reached", "contact": "support@cognivio.com"},
+    )
+
+
+@app.middleware("http")
+async def reject_oversized_video_uploads(request: Request, call_next):
+    if request.method.upper() == "POST" and request.url.path == "/api/videos/upload":
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > VIDEO_MAX_UPLOAD_BYTES:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"error": "File too large", "max_bytes": VIDEO_MAX_UPLOAD_BYTES},
+                    )
+            except ValueError:
+                pass
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def enforce_general_post_rate_limit(request: Request, call_next):
+    retry_after = _consume_post_rate_limit(request)
+    if retry_after is not None:
+        return JSONResponse(
+            status_code=429,
+            content={"error": "Too many requests", "retry_after": retry_after},
+            headers={"Retry-After": str(retry_after)},
+        )
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -5411,6 +5597,7 @@ class VideoUploadResponse(BaseModel):
     id: str
     filename: str
     teacher_id: str
+    observation_session_id: Optional[str] = None
     status: str
     privacy_status: str
     analysis_status: str
@@ -5613,6 +5800,49 @@ class ScheduleStatus(str, Enum):
     PLANNED = "planned"
     RECORDING = "recording"
     COMPLETED = "completed"
+
+
+class ObservationSessionStatus(str, Enum):
+    PLANNED = "planned"
+    RECORDING_UPLOADED = "recording_uploaded"
+    ANALYSIS_COMPLETE = "analysis_complete"
+    FEEDBACK_GIVEN = "feedback_given"
+
+
+class ObservationSession(BaseModel):
+    id: str
+    workspace_id: Optional[str] = None
+    observer_id: str
+    teacher_id: str
+    scheduled_date: Optional[str] = None
+    focus_elements: List[str] = []
+    focus_note: str = ""
+    personal_goals: List[str] = []
+    status: ObservationSessionStatus = ObservationSessionStatus.PLANNED
+    linked_video_id: Optional[str] = None
+    linked_assessment_id: Optional[str] = None
+    created_at: str
+    updated_at: Optional[str] = None
+    teacher_name: Optional[str] = None
+    school_site: Optional[str] = None
+
+
+class ObservationSessionCreate(BaseModel):
+    teacher_id: str
+    scheduled_date: Optional[datetime] = None
+    focus_elements: List[str]
+    focus_note: Optional[str] = None
+    personal_goals: List[str] = []
+
+
+class ObservationSessionUpdate(BaseModel):
+    scheduled_date: Optional[datetime] = None
+    focus_elements: Optional[List[str]] = None
+    focus_note: Optional[str] = None
+    personal_goals: Optional[List[str]] = None
+    status: Optional[ObservationSessionStatus] = None
+    linked_video_id: Optional[str] = None
+    linked_assessment_id: Optional[str] = None
 
 
 class VideoProcessingStatus(str, Enum):
@@ -6245,6 +6475,44 @@ class CoachingTaskListResponse(BaseModel):
     tasks: List[CoachingTask]
 
 
+class TrainingSupervisorTraineeStatus(BaseModel):
+    trainee_id: str
+    trainee_name: str
+    school_site: Optional[str] = None
+    required: int
+    completed: int
+    status: str
+
+
+class TrainingSupervisorUpcomingObservation(BaseModel):
+    trainee_id: str
+    trainee_name: str
+    school_site: Optional[str] = None
+    scheduled_date: Optional[str] = None
+    focus_elements: List[str] = []
+
+
+class TrainingSupervisorRecentObservation(BaseModel):
+    trainee_id: str
+    trainee_name: str
+    school_site: Optional[str] = None
+    completed_date: Optional[str] = None
+    summary: Optional[str] = None
+
+
+class TrainingSupervisorSummaryResponse(BaseModel):
+    total_trainees: int
+    active_placements: int
+    observations_this_cycle: int
+    required_per_trainee: int
+    trainees_on_track: int
+    trainees_at_risk: int
+    trainees_not_started: int
+    trainees: List[TrainingSupervisorTraineeStatus] = []
+    upcoming_observations: List[TrainingSupervisorUpcomingObservation]
+    recent_observations: List[TrainingSupervisorRecentObservation]
+
+
 class TeacherAdaptiveSupportResponse(BaseModel):
     teacher_id: str
     teacher_name: Optional[str] = None
@@ -6410,6 +6678,12 @@ def _require_school_admin_user(current_user: dict) -> dict:
 def _require_training_admin_user(current_user: dict) -> dict:
     if _get_user_tenant_role(current_user) != "training_admin":
         raise HTTPException(status_code=403, detail="Training administrator access required")
+    organization_type = _normalize_organization_type(
+        current_user.get("organization_type") or current_user.get("org_type"),
+        "training_admin",
+    )
+    if organization_type != "training":
+        raise HTTPException(status_code=403, detail="Training organization access required")
     return current_user
 
 
@@ -6706,6 +6980,7 @@ async def lookup_institutions(
     )
 
 @api_router.post("/auth/login", response_model=AuthSessionResponse)
+@limiter.limit("5/minute")
 async def login(user: UserLogin, request: Request, response: Response = None):
     from app.services.workspace_service import enrich_user_with_workspace_mode
 
@@ -6803,6 +7078,9 @@ async def login(user: UserLogin, request: Request, response: Response = None):
         _set_auth_cookies(response, token=token)
         return AuthSessionResponse(user=response_user)
     return TokenResponse(token=token, user=response_user)
+
+
+login = login.__wrapped__
 
 
 @api_router.post("/auth/logout")
@@ -8546,36 +8824,40 @@ async def _start_privacy_maintenance_tasks() -> None:
 
 
 @api_router.post("/videos/upload", response_model=VideoUploadResponse)
+@limiter.limit("10/minute")
 async def upload_video(
     request: Request,
     file: UploadFile = File(...),
     teacher_id: str = Form(...),
     subject: Optional[str] = Form(None),
     recorded_at: Optional[str] = Form(None),
+    observation_session_id: Optional[str] = Form(None),
     current_user: dict = Depends(get_current_user)
 ):
     preferred_language = _resolve_request_language(request, default="en")
+    upload_started_perf = time.perf_counter()
     try:
-        upload_started_perf = time.perf_counter()
         upload_source = _get_user_role(current_user)
-        if not (file.filename or "").strip():
-            raise HTTPException(status_code=400, detail="Filename is required")
-        file_ext = Path(file.filename or "").suffix.lower()
-        if file_ext not in VIDEO_ALLOWED_EXTENSIONS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid file type. Allowed: {sorted(VIDEO_ALLOWED_EXTENSIONS)}",
-            )
-        content_type = (file.content_type or "").lower()
-        if content_type and content_type not in VIDEO_ALLOWED_CONTENT_TYPES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid content type. Allowed: {sorted(VIDEO_ALLOWED_CONTENT_TYPES)}",
-            )
+        if not isinstance(observation_session_id, str) or not observation_session_id.strip():
+            observation_session_id = None
+        else:
+            observation_session_id = observation_session_id.strip()
+        detected_video = await _validate_video_upload_file(file)
+        file_ext = detected_video["extension"]
+        content_type = detected_video["content_type"]
         normalized_recorded_at = _parse_optional_iso_datetime(recorded_at, "recorded_at")
         upload_time = datetime.now(timezone.utc).isoformat()
 
         teacher = await _get_teacher_or_404(teacher_id, current_user)
+        observation_session = None
+        if observation_session_id:
+            observation_session = await _get_observation_session_or_404(observation_session_id, current_user)
+            if observation_session.get("teacher_id") != teacher_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Observation session must belong to the selected teacher",
+                )
+        await _ensure_workspace_upload_quota_available(teacher, current_user)
         active_profile = await _get_active_privacy_profile(teacher_id)
         if PRIVACY_REQUIRE_PROFILE and not active_profile:
             raise HTTPException(
@@ -8605,13 +8887,7 @@ async def upload_video(
                 if VIDEO_MAX_UPLOAD_BYTES and size > VIDEO_MAX_UPLOAD_BYTES:
                     await f.close()
                     os.remove(file_path)
-                    raise HTTPException(
-                        status_code=413,
-                        detail=(
-                            f"File too large. Maximum allowed is "
-                            f"{VIDEO_MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
-                        ),
-                    )
+                    raise UploadTooLargeError()
                 await f.write(chunk)
 
         s3_key = None
@@ -8622,7 +8898,7 @@ async def upload_video(
                 file_path,
                 "videos",
                 filename,
-                content_type or "video/mp4",
+                content_type,
                 key_override=raw_s3_key_override,
             )
         except Exception as exc:
@@ -8644,7 +8920,7 @@ async def upload_video(
             "raw_file_url": file_url,
             "file_path": relative_path,
             "raw_file_path": relative_path,
-            "content_type": content_type or "video/mp4",
+            "content_type": content_type,
             "file_size_bytes": size,
             "raw_file_size_bytes": size,
             "processed_s3_key": None,
@@ -8653,6 +8929,7 @@ async def upload_video(
             "processed_content_type": None,
             "processed_file_size_bytes": None,
             "teacher_id": teacher_id,
+            "observation_session_id": observation_session_id or None,
             "uploaded_by": current_user["id"],
             "status": VideoProcessingStatus.QUEUED.value,
             "privacy_status": PrivacyProcessingStatus.QUEUED.value,
@@ -8689,7 +8966,7 @@ async def upload_video(
                 teacher_id=teacher_id,
                 user_id=current_user["id"],
                 file_path=str(file_path),
-                source_content_type=content_type or "video/mp4",
+                source_content_type=content_type,
                 raw_s3_key=s3_key,
                 raw_file_url=file_url,
                 requested_profile=VIDEO_TRANSCODE_PROFILE,
@@ -8699,6 +8976,7 @@ async def upload_video(
             "id": str(uuid.uuid4()),
             "video_id": video_id,
             "teacher_id": teacher_id,
+            "observation_session_id": observation_session_id or None,
             "file_path": relative_path,
             "subject": subject,
             "recorded_at": normalized_recorded_at,
@@ -8707,6 +8985,18 @@ async def upload_video(
             "uploaded_by": current_user["id"],
             "uploaded_at": upload_time,
         })
+
+        if observation_session:
+            await db.observation_sessions.update_one(
+                {"id": observation_session["id"]},
+                {
+                    "$set": {
+                        "linked_video_id": video_id,
+                        "status": ObservationSessionStatus.RECORDING_UPLOADED.value,
+                        "updated_at": upload_time,
+                    }
+                },
+            )
 
         try:
             admin_id = teacher.get("created_by") or current_user["id"]
@@ -8747,6 +9037,7 @@ async def upload_video(
             id=video_id,
             filename=file.filename,
             teacher_id=teacher_id,
+            observation_session_id=observation_session_id or None,
             status=VideoProcessingStatus.QUEUED.value,
             privacy_status=PrivacyProcessingStatus.QUEUED.value,
             analysis_status=VideoProcessingStatus.QUEUED.value,
@@ -8756,7 +9047,7 @@ async def upload_video(
             recorded_at=normalized_recorded_at,
             file_path=relative_path,
             file_size_bytes=size,
-            content_type=content_type or "video/mp4",
+            content_type=content_type,
         )
     except HTTPException:
         app_metrics.record_upload_result(
@@ -8774,6 +9065,10 @@ async def upload_video(
             duration_seconds=time.perf_counter() - upload_started_perf,
         )
         raise
+
+
+upload_video = upload_video.__wrapped__
+
 
 @api_router.get("/videos")
 async def get_videos(teacher_id: Optional[str] = None, current_user: dict = Depends(get_current_user)):
@@ -13049,6 +13344,177 @@ async def get_dashboard_leadership_insights(
     return final_payload
 
 
+def _training_cycle_window(now: datetime) -> Tuple[datetime, datetime, datetime]:
+    cycle_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+    if now.month == 12:
+        cycle_end = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        cycle_end = datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc)
+    cycle_midpoint = cycle_start + ((cycle_end - cycle_start) / 2)
+    return cycle_start, cycle_midpoint, cycle_end
+
+
+def _training_placement_site(teacher: dict, fallback: Optional[str] = None) -> Optional[str]:
+    return _clean_optional_string(
+        teacher.get("school_site")
+        or teacher.get("placement_site")
+        or teacher.get("school_name")
+        or teacher.get("site_name")
+        or fallback
+    )
+
+
+def _training_schedule_focus_elements(schedule: dict) -> List[str]:
+    reminder_context = schedule.get("reminder_context") or {}
+    candidates = (
+        schedule.get("focus_elements")
+        or reminder_context.get("focus_elements")
+        or reminder_context.get("priority_elements")
+        or reminder_context.get("elements")
+        or []
+    )
+    if isinstance(candidates, str):
+        candidates = [item.strip() for item in candidates.split(",")]
+    rendered: List[str] = []
+    for item in candidates or []:
+        if isinstance(item, dict):
+            label = item.get("name") or item.get("label") or item.get("title") or item.get("id")
+        else:
+            label = item
+        cleaned = _clean_optional_string(label)
+        if cleaned:
+            rendered.append(cleaned)
+    return rendered[:4]
+
+
+async def _training_required_per_trainee(current_user: dict) -> int:
+    policy = await db.recording_policies.find_one(
+        {"created_by": current_user["id"]},
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    try:
+        return max(1, int((policy or {}).get("min_recordings_per_period") or 2))
+    except (TypeError, ValueError):
+        return 2
+
+
+@api_router.get("/training/supervisor-summary", response_model=TrainingSupervisorSummaryResponse)
+async def get_training_supervisor_summary(
+    current_user: dict = Depends(get_current_user),
+):
+    _require_training_admin_user(current_user)
+    teacher_ids = await _list_teacher_ids_for_user(current_user)
+    teachers = await db.teachers.find(
+        {"id": {"$in": teacher_ids or ["__none__"]}},
+        {"_id": 0},
+    ).to_list(5000)
+    teacher_ids = [teacher["id"] for teacher in teachers if teacher.get("id")]
+    teacher_map = {teacher["id"]: teacher for teacher in teachers if teacher.get("id")}
+
+    now = datetime.now(timezone.utc)
+    cycle_start, cycle_midpoint, cycle_end = _training_cycle_window(now)
+    required_per_trainee = await _training_required_per_trainee(current_user)
+
+    cycle_observations = await db.observations.find(
+        {
+            "teacher_id": {"$in": teacher_ids or ["__none__"]},
+            "created_at": {
+                "$gte": cycle_start.isoformat(),
+                "$lt": cycle_end.isoformat(),
+            },
+        },
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(5000)
+
+    observations_by_teacher: Dict[str, int] = {}
+    for observation in cycle_observations:
+        observations_by_teacher[observation.get("teacher_id")] = (
+            observations_by_teacher.get(observation.get("teacher_id"), 0) + 1
+        )
+
+    trainees: List[TrainingSupervisorTraineeStatus] = []
+    status_counts = {"on_track": 0, "at_risk": 0, "not_started": 0}
+    risk_threshold = required_per_trainee * 0.5
+    is_after_midpoint = now >= cycle_midpoint
+
+    for teacher in teachers:
+        trainee_id = teacher.get("id")
+        completed = observations_by_teacher.get(trainee_id, 0)
+        if completed == 0:
+            status = "not_started"
+        elif is_after_midpoint and completed < risk_threshold:
+            status = "at_risk"
+        else:
+            status = "on_track"
+        status_counts[status] += 1
+        trainees.append(
+            TrainingSupervisorTraineeStatus(
+                trainee_id=trainee_id,
+                trainee_name=teacher.get("name") or teacher.get("email") or "Trainee",
+                school_site=_training_placement_site(teacher),
+                required=required_per_trainee,
+                completed=completed,
+                status=status,
+            )
+        )
+
+    upcoming_schedule_docs = await db.schedules.find(
+        {
+            "teacher_id": {"$in": teacher_ids or ["__none__"]},
+            "recording_status": ScheduleStatus.PLANNED.value,
+            "start_time": {"$gte": now.isoformat()},
+        },
+        {"_id": 0},
+    ).sort("start_time", 1).to_list(7)
+    upcoming_observations = []
+    for schedule in upcoming_schedule_docs:
+        teacher = teacher_map.get(schedule.get("teacher_id"), {})
+        upcoming_observations.append(
+            TrainingSupervisorUpcomingObservation(
+                trainee_id=schedule.get("teacher_id"),
+                trainee_name=teacher.get("name") or teacher.get("email") or "Trainee",
+                school_site=_training_placement_site(teacher, schedule.get("location")),
+                scheduled_date=schedule.get("start_time"),
+                focus_elements=_training_schedule_focus_elements(schedule),
+            )
+        )
+
+    recent_observations = []
+    for observation in cycle_observations[:5]:
+        teacher = teacher_map.get(observation.get("teacher_id"), {})
+        summary = (
+            observation.get("summary")
+            or observation.get("admin_comment")
+            or observation.get("teacher_response")
+        )
+        recent_observations.append(
+            TrainingSupervisorRecentObservation(
+                trainee_id=observation.get("teacher_id"),
+                trainee_name=teacher.get("name") or teacher.get("email") or "Trainee",
+                school_site=_training_placement_site(teacher),
+                completed_date=observation.get("created_at") or observation.get("updated_at"),
+                summary=summary,
+            )
+        )
+
+    active_placements = sum(1 for teacher in teachers if _training_placement_site(teacher))
+    trainees.sort(key=lambda item: (item.status != "at_risk", item.status != "not_started", item.trainee_name))
+
+    return TrainingSupervisorSummaryResponse(
+        total_trainees=len(teachers),
+        active_placements=active_placements,
+        observations_this_cycle=len(cycle_observations),
+        required_per_trainee=required_per_trainee,
+        trainees_on_track=status_counts["on_track"],
+        trainees_at_risk=status_counts["at_risk"],
+        trainees_not_started=status_counts["not_started"],
+        trainees=trainees,
+        upcoming_observations=upcoming_observations,
+        recent_observations=recent_observations,
+    )
+
+
 @api_router.get("/dashboard/cohort-analytics")
 async def get_dashboard_cohort_analytics(
     window_months: int = Query(6, ge=1, le=12),
@@ -14439,6 +14905,211 @@ async def _ensure_mock_evidence(assessment: dict, current_user: dict) -> List[di
     return evidence_docs
 
 
+# ==================== OBSERVATION SESSION ENDPOINTS ====================
+def _normalize_observation_focus_elements(
+    elements: Optional[List[Any]],
+    *,
+    strict: bool = True,
+) -> List[str]:
+    cleaned: List[str] = []
+    seen = set()
+    for raw in elements or []:
+        value = str(raw or "").strip()
+        if not value or value in seen:
+            continue
+        cleaned.append(value)
+        seen.add(value)
+    if len(cleaned) > 3 and strict:
+        raise HTTPException(status_code=400, detail="Choose 1-3 focus elements")
+    return cleaned[:3]
+
+
+def _normalize_observation_personal_goals(goals: Optional[List[Any]]) -> List[str]:
+    cleaned: List[str] = []
+    seen = set()
+    for raw in goals or []:
+        value = str(raw or "").strip()
+        if not value or value in seen:
+            continue
+        cleaned.append(value)
+        seen.add(value)
+    return cleaned[:5]
+
+
+def _resolve_observation_workspace_id(current_user: dict, teacher: Optional[dict] = None) -> str:
+    return (
+        current_user.get("organization_id")
+        or (teacher or {}).get("organization_id")
+        or (teacher or {}).get("school_id")
+        or current_user["id"]
+    )
+
+
+def _require_observation_planner(current_user: dict) -> None:
+    tenant_role = _get_user_tenant_role(current_user)
+    if tenant_role not in {"school_admin", "training_admin", "super_admin"}:
+        raise HTTPException(status_code=403, detail="Observation planning requires an administrator account")
+
+
+async def _serialize_observation_session(session: dict) -> dict:
+    payload = dict(session or {})
+    payload.pop("_id", None)
+    teacher_id = payload.get("teacher_id")
+    if teacher_id:
+        teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
+        if teacher:
+            payload["teacher_name"] = teacher.get("name") or teacher.get("email")
+            payload["school_site"] = (
+                teacher.get("school_name")
+                or teacher.get("placement_site")
+                or teacher.get("school")
+                or teacher.get("organization_name")
+            )
+    payload["focus_elements"] = _normalize_observation_focus_elements(
+        payload.get("focus_elements") or [],
+        strict=False,
+    )
+    payload["personal_goals"] = _normalize_observation_personal_goals(payload.get("personal_goals") or [])
+    payload["focus_note"] = payload.get("focus_note") or ""
+    payload["status"] = payload.get("status") or ObservationSessionStatus.PLANNED.value
+    return payload
+
+
+async def _get_observation_session_or_404(session_id: str, current_user: dict) -> dict:
+    session = await db.observation_sessions.find_one({"id": session_id}, {"_id": 0})
+    if not session:
+        raise HTTPException(status_code=404, detail="Observation session not found")
+    await _get_teacher_or_404(session.get("teacher_id"), current_user)
+    return session
+
+
+@api_router.post("/observation-sessions", response_model=ObservationSession)
+async def create_observation_session(
+    payload: ObservationSessionCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_observation_planner(current_user)
+    teacher = await _get_teacher_or_404(payload.teacher_id, current_user)
+    focus_elements = _normalize_observation_focus_elements(payload.focus_elements)
+    if not focus_elements:
+        raise HTTPException(status_code=400, detail="Choose at least one focus element")
+
+    now = datetime.now(timezone.utc).isoformat()
+    session_doc = {
+        "id": str(uuid.uuid4()),
+        "workspace_id": _resolve_observation_workspace_id(current_user, teacher),
+        "observer_id": current_user["id"],
+        "teacher_id": payload.teacher_id,
+        "scheduled_date": payload.scheduled_date.isoformat() if payload.scheduled_date else None,
+        "focus_elements": focus_elements,
+        "focus_note": (payload.focus_note or "").strip(),
+        "personal_goals": _normalize_observation_personal_goals(payload.personal_goals),
+        "status": ObservationSessionStatus.PLANNED.value,
+        "linked_video_id": None,
+        "linked_assessment_id": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.observation_sessions.insert_one(session_doc)
+    return ObservationSession(**(await _serialize_observation_session(session_doc)))
+
+
+@api_router.get("/observation-sessions", response_model=List[ObservationSession])
+async def list_observation_sessions(
+    teacher_id: Optional[str] = None,
+    status: Optional[ObservationSessionStatus] = None,
+    observer_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    query: Dict[str, Any] = {}
+    if teacher_id:
+        await _get_teacher_or_404(teacher_id, current_user)
+        query["teacher_id"] = teacher_id
+    else:
+        visible_teacher_ids = await _list_teacher_ids_for_user(current_user)
+        query["teacher_id"] = {"$in": visible_teacher_ids or ["__none__"]}
+    if status is not None:
+        query["status"] = status.value
+    if observer_id:
+        query["observer_id"] = observer_id
+
+    docs = await db.observation_sessions.find(query, {"_id": 0}).sort(
+        [("scheduled_date", -1), ("created_at", -1)]
+    ).to_list(1000)
+    return [ObservationSession(**(await _serialize_observation_session(doc))) for doc in docs]
+
+
+@api_router.get("/observation-sessions/upcoming", response_model=List[ObservationSession])
+async def list_upcoming_observation_sessions(
+    current_user: dict = Depends(get_current_user),
+):
+    now = datetime.now(timezone.utc)
+    end = now + timedelta(days=14)
+    docs = await db.observation_sessions.find(
+        {
+            "observer_id": current_user["id"],
+            "status": ObservationSessionStatus.PLANNED.value,
+            "scheduled_date": {
+                "$gte": now.isoformat(),
+                "$lte": end.isoformat(),
+            },
+        },
+        {"_id": 0},
+    ).sort("scheduled_date", 1).to_list(100)
+    return [ObservationSession(**(await _serialize_observation_session(doc))) for doc in docs]
+
+
+@api_router.get("/observation-sessions/{session_id}", response_model=ObservationSession)
+async def get_observation_session(
+    session_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    session = await _get_observation_session_or_404(session_id, current_user)
+    return ObservationSession(**(await _serialize_observation_session(session)))
+
+
+@api_router.patch("/observation-sessions/{session_id}", response_model=ObservationSession)
+async def update_observation_session(
+    session_id: str,
+    payload: ObservationSessionUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    session = await _get_observation_session_or_404(session_id, current_user)
+    updates = payload.dict(exclude_unset=True)
+    update_fields: Dict[str, Any] = {}
+
+    if "scheduled_date" in updates:
+        update_fields["scheduled_date"] = (
+            payload.scheduled_date.isoformat() if payload.scheduled_date else None
+        )
+    if "focus_elements" in updates:
+        update_fields["focus_elements"] = _normalize_observation_focus_elements(payload.focus_elements)
+    if "focus_note" in updates:
+        update_fields["focus_note"] = (payload.focus_note or "").strip()
+    if "personal_goals" in updates:
+        update_fields["personal_goals"] = _normalize_observation_personal_goals(payload.personal_goals)
+    if "status" in updates and payload.status is not None:
+        update_fields["status"] = payload.status.value
+    if "linked_video_id" in updates:
+        update_fields["linked_video_id"] = payload.linked_video_id
+    if "linked_assessment_id" in updates:
+        update_fields["linked_assessment_id"] = payload.linked_assessment_id
+
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    update_fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    updated = await db.observation_sessions.find_one_and_update(
+        {"id": session["id"]},
+        {"$set": update_fields},
+        return_document=True,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Observation session not found")
+    updated.pop("_id", None)
+    return ObservationSession(**(await _serialize_observation_session(updated)))
+
+
 # ==================== OBSERVATIONS ENDPOINTS ====================
 @api_router.post("/observations", response_model=Observation)
 async def create_observation(
@@ -14896,6 +15567,97 @@ def _require_master_admin_user(current_user: dict) -> None:
     role = _get_user_role(current_user)
     if role != "super_admin":
         raise HTTPException(status_code=403, detail="Master admin access required")
+
+
+def _normalize_index_keys(keys: Any) -> List[Tuple[str, int]]:
+    if hasattr(keys, "items"):
+        return [(str(field), int(direction)) for field, direction in keys.items()]
+    return [(str(field), int(direction)) for field, direction in (keys or [])]
+
+
+async def _build_db_index_health() -> Dict[str, Any]:
+    from scripts.ensure_indexes import INDEX_SPECS
+
+    collections: Dict[str, Dict[str, Any]] = {}
+    for spec in INDEX_SPECS:
+        collections.setdefault(
+            spec.collection,
+            {
+                "collection": spec.collection,
+                "expected_indexes": [],
+                "existing_indexes": [],
+                "missing_indexes": [],
+                "stats": {},
+            },
+        )
+        collections[spec.collection]["expected_indexes"].append(
+            {
+                "name": spec.name,
+                "keys": [{"field": field, "direction": direction} for field, direction in spec.keys],
+                "unique": spec.unique,
+            }
+        )
+
+    for collection_name, item in collections.items():
+        collection = db[collection_name]
+        index_docs = await collection.list_indexes().to_list(None)
+        item["existing_indexes"] = [
+            {
+                "name": index_doc.get("name"),
+                "keys": [
+                    {"field": field, "direction": direction}
+                    for field, direction in _normalize_index_keys(index_doc.get("key"))
+                ],
+                "unique": bool(index_doc.get("unique", False)),
+            }
+            for index_doc in index_docs
+        ]
+        existing_signatures = {
+            (
+                tuple((entry["field"], int(entry["direction"])) for entry in index["keys"]),
+                bool(index["unique"]),
+            )
+            for index in item["existing_indexes"]
+        }
+        item["missing_indexes"] = [
+            expected
+            for expected in item["expected_indexes"]
+            if (
+                tuple((entry["field"], int(entry["direction"])) for entry in expected["keys"]),
+                bool(expected["unique"]),
+            )
+            not in existing_signatures
+        ]
+        try:
+            stats = await db.command("collStats", collection_name)
+            item["stats"] = {
+                "document_count": stats.get("count", 0),
+                "storage_size_bytes": stats.get("storageSize", 0),
+                "total_index_size_bytes": stats.get("totalIndexSize", 0),
+                "index_sizes": stats.get("indexSizes", {}),
+            }
+        except Exception as exc:
+            item["stats"] = {"error": str(exc)}
+
+    total_expected = sum(len(item["expected_indexes"]) for item in collections.values())
+    total_missing = sum(len(item["missing_indexes"]) for item in collections.values())
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "database": os.getenv("DB_NAME"),
+        "healthy": total_missing == 0,
+        "summary": {
+            "collections": len(collections),
+            "expected_indexes": total_expected,
+            "missing_indexes": total_missing,
+        },
+        "collections": list(collections.values()),
+    }
+
+
+@api_router.get("/admin/db-health")
+async def get_admin_db_health(current_user: dict = Depends(get_current_user)):
+    _require_master_admin_user(current_user)
+    return await _build_db_index_health()
 
 
 @api_router.get("/master-admin/bootstrap")
@@ -17123,6 +17885,22 @@ async def analyze_video(
         selected_elements = selection.get("selected_elements", []) if selection else []
         priority_elements = selection.get("priority_elements", []) if selection else []
         focus_note = (selection.get("focus_note") or "").strip() if selection else ""
+        observation_session = None
+        if video.get("observation_session_id"):
+            observation_session = await db.observation_sessions.find_one(
+                {"id": video.get("observation_session_id")},
+                {"_id": 0},
+            )
+            if observation_session:
+                session_focus_elements = _normalize_observation_focus_elements(
+                    observation_session.get("focus_elements") or [],
+                    strict=False,
+                )
+                session_focus_note = (observation_session.get("focus_note") or "").strip()
+                if session_focus_elements:
+                    priority_elements = session_focus_elements
+                if session_focus_note:
+                    focus_note = session_focus_note
         analysis_language = _normalize_app_language(video.get("analysis_language"), default="en")
         
         # Get framework data
@@ -17349,6 +18127,17 @@ async def analyze_video(
             {"video_id": video_id, "uploaded_by": user_id},
             {"$set": {"analysis_status": VideoProcessingStatus.COMPLETED.value}},
         )
+        if observation_session:
+            await db.observation_sessions.update_one(
+                {"id": observation_session["id"]},
+                {
+                    "$set": {
+                        "status": ObservationSessionStatus.ANALYSIS_COMPLETE.value,
+                        "linked_assessment_id": assessment_doc["id"],
+                        "updated_at": completed_at,
+                    }
+                },
+            )
         updated_video = await db.videos.find_one({"id": video_id}, {"_id": 0})
         if updated_video:
             await _sync_video_recognition_state(updated_video)
@@ -20526,6 +21315,10 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.summary_reflection_history, [("teacher_id", 1), ("author_user_id", 1), ("saved_at", -1)])
     await _safe_create_index(db.published_conference_agendas, [("teacher_id", 1), ("published_at", -1)])
     await _safe_create_index(db.observations, [("video_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.observation_sessions, [("observer_id", 1), ("scheduled_date", 1)])
+    await _safe_create_index(db.observation_sessions, [("teacher_id", 1), ("scheduled_date", -1)])
+    await _safe_create_index(db.observation_sessions, [("status", 1), ("scheduled_date", 1)])
+    await _safe_create_index(db.observation_sessions, [("linked_video_id", 1)])
     await _safe_create_index(db.video_processing_jobs, [("video_id", 1)], unique=True)
     await _safe_create_index(db.video_processing_jobs, [("status", 1), ("updated_at", -1)])
     await _safe_create_index(db.video_transcode_jobs, [("video_id", 1)], unique=True)

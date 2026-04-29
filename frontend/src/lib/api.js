@@ -66,6 +66,14 @@ export const scheduleApi = {
   update: (id, payload) => api.patch(`/api/schedules/${id}`, payload),
 };
 
+export const observationSessionApi = {
+  create: (payload) => api.post("/api/observation-sessions", payload),
+  list: (params = {}) => api.get("/api/observation-sessions", { params }),
+  upcoming: () => api.get("/api/observation-sessions/upcoming"),
+  get: (id) => api.get(`/api/observation-sessions/${id}`),
+  update: (id, payload) => api.patch(`/api/observation-sessions/${id}`, payload),
+};
+
 export const reportApi = {
   export: (format, params = {}) =>
     api.post(
