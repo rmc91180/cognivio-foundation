@@ -1,7 +1,8 @@
-import React from "react";
-import { useQuery } from "@tanstack/react-query";
+import React, { useMemo } from "react";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { LayoutShell } from "@/components/LayoutShell";
+import { TalkTimeChart } from "@/components/TalkTimeChart";
 import {
   PageContextHeader,
   Panel,
@@ -10,12 +11,21 @@ import {
   SkeletonText,
 } from "@/components/ui";
 import { resolveCoachingLink } from "@/lib/coachingRoutes";
-import { observationSessionApi, reportApi } from "@/lib/api";
+import { observationSessionApi, reportApi, videoApi } from "@/lib/api";
 import { useAdminTeacherDeepDiveData } from "@/pages/teacher-deep-dive/useAdminTeacherDeepDiveData";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
 import { isSuperAdminUser } from "@/lib/userRoutes";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 function TeacherProfileSkeleton() {
   return (
@@ -55,6 +65,7 @@ export function TeacherProfilePage() {
   const {
     isLoading,
     teacherRes,
+    dashboardRes,
     summaryInsightsRes,
     conferencePrepRes,
     coachingTasks,
@@ -84,6 +95,42 @@ export function TeacherProfilePage() {
   const latestVideoLink = latestAssessment?.video_id
     ? `/videos/${latestAssessment.video_id}`
     : `/videos?teacher_id=${teacherId}`;
+  const recentAudioAssessments = useMemo(
+    () =>
+      (dashboardRes?.assessments || [])
+        .filter((assessment) => assessment?.video_id)
+        .slice(-3),
+    [dashboardRes]
+  );
+  const audioAnalysisQueries = useQueries({
+    queries: recentAudioAssessments.map((assessment) => ({
+      queryKey: ["video-audio-analysis", assessment.video_id],
+      enabled: Boolean(assessment.video_id),
+      queryFn: () => videoApi.audioAnalysis(assessment.video_id).then((res) => res.data),
+    })),
+  });
+  const audioTrend = useMemo(
+    () =>
+      recentAudioAssessments
+        .map((assessment, index) => {
+          const audio = audioAnalysisQueries[index]?.data;
+          if (!audio?.features_available && !audio?.transcript_available && !audio?.segments?.length) {
+            return null;
+          }
+          return {
+            label: `Lesson ${index + 1}`,
+            date: assessment.analyzed_at,
+            teacher: Number(audio.teacher_talk_pct || 0),
+            student: Number(audio.student_talk_pct || 0),
+            silence: Number(audio.silence_pct || 0),
+            audio,
+          };
+        })
+        .filter(Boolean),
+    [audioAnalysisQueries, recentAudioAssessments]
+  );
+  const latestAudioAnalysis = audioTrend.length ? audioTrend[audioTrend.length - 1].audio : null;
+  const latestTeacherTalkPct = Number(latestAudioAnalysis?.teacher_talk_pct || 0);
   const adminActionTasks = coachingTasks.slice(0, 3);
   const isSuperAdmin = isSuperAdminUser(user);
   const teacherContextCards = [
@@ -265,6 +312,68 @@ export function TeacherProfilePage() {
               <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-700">
                 {summaryInsightsRes?.summary || t("teacherProfile.noSummaryData")}
               </div>
+              {latestAudioAnalysis ? (
+                <div className="mt-4 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+                  <Panel className="h-full">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      Latest lesson talk time
+                    </div>
+                    <div className="mt-3">
+                      <TalkTimeChart
+                        teacherTalkPct={latestAudioAnalysis.teacher_talk_pct}
+                        studentTalkPct={latestAudioAnalysis.student_talk_pct}
+                        silencePct={latestAudioAnalysis.silence_pct}
+                        teacherTalkSeconds={latestAudioAnalysis.teacher_talk_seconds}
+                        studentTalkSeconds={latestAudioAnalysis.student_talk_seconds}
+                        totalDurationSeconds={latestAudioAnalysis.total_duration_seconds}
+                        compact
+                      />
+                    </div>
+                    {latestTeacherTalkPct > 70 ? (
+                      <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                        Consider increasing student participation opportunities
+                      </div>
+                    ) : null}
+                  </Panel>
+                  <Panel className="h-full">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      Talk-time trend
+                    </div>
+                    {audioTrend.length >= 2 ? (
+                      <div className="mt-3 h-40">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart data={audioTrend} margin={{ top: 8, right: 8, bottom: 4, left: -18 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                            <XAxis dataKey="label" tick={{ fontSize: 10 }} />
+                            <YAxis domain={[0, 100]} tick={{ fontSize: 10 }} />
+                            <Tooltip formatter={(value) => `${Math.round(Number(value || 0))}%`} />
+                            <Line
+                              type="monotone"
+                              dataKey="teacher"
+                              name="Teacher"
+                              stroke="#0f766e"
+                              strokeWidth={2}
+                              dot={{ r: 3 }}
+                            />
+                            <Line
+                              type="monotone"
+                              dataKey="student"
+                              name="Student"
+                              stroke="#2563eb"
+                              strokeWidth={2}
+                              dot={{ r: 3 }}
+                            />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                    ) : (
+                      <div className="mt-3 rounded-md border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-500">
+                        Talk-time trend appears after at least two audio-enabled lessons.
+                      </div>
+                    )}
+                  </Panel>
+                </div>
+              ) : null}
               <div className="mt-4 grid gap-4 md:grid-cols-2">
                 <Panel className="h-full">
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-emerald-600">

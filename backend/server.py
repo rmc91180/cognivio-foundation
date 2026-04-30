@@ -2152,6 +2152,36 @@ def _is_paid_analysis_allowed_for_user(user: Optional[dict]) -> bool:
     return email in PAID_ANALYSIS_ALLOWLIST_EMAILS
 
 
+def _is_workspace_audio_analysis_enabled(user: Optional[dict]) -> bool:
+    if not user:
+        return True
+    return (user or {}).get("audio_analysis_enabled", True) is not False
+
+
+def _resolve_audio_workspace_owner_id(user: Optional[dict]) -> Optional[str]:
+    if not user:
+        return None
+    return (
+        user.get("workspace_owner_id")
+        or user.get("manager_user_id")
+        or user.get("created_by")
+        or user.get("id")
+    )
+
+
+async def _is_workspace_audio_analysis_enabled_for_user(user: Optional[dict]) -> bool:
+    if not _is_workspace_audio_analysis_enabled(user):
+        return False
+    owner_id = _resolve_audio_workspace_owner_id(user)
+    if not owner_id or owner_id == (user or {}).get("id"):
+        return True
+    owner_doc = await db.users.find_one(
+        {"id": owner_id},
+        {"_id": 0, "audio_analysis_enabled": 1},
+    )
+    return _is_workspace_audio_analysis_enabled(owner_doc)
+
+
 def _ensure_allowed_extension(filename: str) -> None:
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS:
@@ -3534,6 +3564,71 @@ async def _get_admin_owned_video_or_404(video_id: str, current_user: dict) -> di
     return policy
 
 
+async def _get_visible_video_or_404(video_id: str, current_user: dict) -> dict:
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    return video
+
+
+def _resolve_video_workspace_id(video: dict, teacher: Optional[dict], current_user: dict) -> Optional[str]:
+    teacher = teacher or {}
+    return (
+        video.get("workspace_id")
+        or teacher.get("organization_id")
+        or teacher.get("school_id")
+        or teacher.get("created_by")
+        or video.get("uploaded_by")
+        or current_user.get("id")
+    )
+
+
+def _sanitize_video_comment_doc(doc: dict) -> dict:
+    cleaned = {k: v for k, v in (doc or {}).items() if k != "_id"}
+    cleaned["timestamp_seconds"] = float(cleaned.get("timestamp_seconds") or 0)
+    cleaned["is_private"] = bool(cleaned.get("is_private", False))
+    cleaned.setdefault("updated_at", None)
+    cleaned.setdefault("thread_parent_id", None)
+    return cleaned
+
+
+def _parse_comment_created_at(value: Optional[str]) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        raise HTTPException(status_code=409, detail="Comment creation timestamp is invalid")
+
+
+def _comment_visibility_query(video_id: str, current_user: dict) -> Dict[str, Any]:
+    return {
+        "video_id": video_id,
+        "$or": [
+            {"is_private": {"$ne": True}},
+            {"author_id": current_user["id"]},
+        ],
+    }
+
+
+async def _get_video_comment_or_404(
+    video_id: str,
+    comment_id: str,
+    current_user: dict,
+    *,
+    visible_only: bool = True,
+) -> dict:
+    query: Dict[str, Any] = {"video_id": video_id, "id": comment_id}
+    if visible_only:
+        query = {"$and": [query, _comment_visibility_query(video_id, current_user)]}
+    comment = await db.video_comments.find_one(query, {"_id": 0})
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    return comment
+
+
 async def _get_recording_policy_for_teacher(admin_id: str, teacher: dict) -> Optional[dict]:
     teacher_policy = await db.recording_policies.find_one(
         {"created_by": admin_id, "teacher_id": teacher.get("id")},
@@ -4205,6 +4300,7 @@ async def _ensure_master_admin_user() -> None:
         "role": "super_admin",
         "tenant_role": "super_admin",
         "tenant_status": "approved",
+        "audio_analysis_enabled": True,
         "approval_status": "approved",
         "approval_requested_at": now,
         "approved_at": now,
@@ -5057,6 +5153,7 @@ class UserResponse(BaseModel):
     tenant_role: Optional[str] = None
     tenant_status: Optional[str] = None
     workspace_mode: Optional[str] = None
+    audio_analysis_enabled: bool = True
     teacher_id: Optional[str] = None
     approval_status: Optional[str] = None
     organization_id: Optional[str] = None
@@ -5675,6 +5772,15 @@ class WorkspaceModePreferenceResponse(BaseModel):
     updated_at: Optional[str] = None
 
 
+class WorkspaceAudioAnalysisPreferencePayload(BaseModel):
+    audio_analysis_enabled: bool = True
+
+
+class WorkspaceAudioAnalysisPreferenceResponse(BaseModel):
+    audio_analysis_enabled: bool = True
+    updated_at: Optional[str] = None
+
+
 class AssessmentFeedbackUpsert(BaseModel):
     target_type: str
     target_id: Optional[str] = None
@@ -5764,6 +5870,47 @@ class ObservationCreate(BaseModel):
     admin_comment: Optional[str] = None
     teacher_response: Optional[str] = None
     implementation_status: Optional[str] = None
+
+
+class VideoComment(BaseModel):
+    id: str
+    video_id: str
+    workspace_id: Optional[str] = None
+    author_id: str
+    author_name: str
+    author_role: str
+    timestamp_seconds: float
+    rubric_element_id: Optional[str] = None
+    rubric_element_code: Optional[str] = None
+    rubric_element_name: Optional[str] = None
+    body: str
+    is_private: bool = False
+    thread_parent_id: Optional[str] = None
+    created_at: str
+    updated_at: Optional[str] = None
+
+
+class VideoCommentListResponse(BaseModel):
+    comments: List[VideoComment] = []
+
+
+class VideoCommentCreate(BaseModel):
+    timestamp_seconds: float
+    rubric_element_id: Optional[str] = None
+    rubric_element_code: Optional[str] = None
+    rubric_element_name: Optional[str] = None
+    body: str
+    is_private: bool = False
+    thread_parent_id: Optional[str] = None
+
+
+class VideoCommentUpdate(BaseModel):
+    rubric_element_id: Optional[str] = None
+    rubric_element_code: Optional[str] = None
+    rubric_element_name: Optional[str] = None
+    body: Optional[str] = None
+    is_private: Optional[bool] = None
+
 
 class AssessmentResult(BaseModel):
     id: str
@@ -6000,6 +6147,39 @@ class AudioFeatureResponse(BaseModel):
     transition_markers: int = 0
     modalities_used: List[str] = []
     created_at: str
+
+
+class AudioAnalysisTimelineSegment(BaseModel):
+    start_sec: float
+    end_sec: float
+    speaker: str
+
+
+class AudioAnalysisTranscriptSegment(BaseModel):
+    start_sec: float
+    end_sec: float
+    text: str
+    speaker: str
+
+
+class AudioAnalysisKeyMoment(BaseModel):
+    timestamp_sec: float
+    label: str
+    signal_type: str
+
+
+class VideoAudioAnalysisResponse(BaseModel):
+    transcript_available: bool = False
+    features_available: bool = False
+    teacher_talk_pct: float = 0.0
+    student_talk_pct: float = 0.0
+    silence_pct: float = 0.0
+    teacher_talk_seconds: float = 0.0
+    student_talk_seconds: float = 0.0
+    total_duration_seconds: float = 0.0
+    segments: List[AudioAnalysisTimelineSegment] = []
+    transcript_segments: List[AudioAnalysisTranscriptSegment] = []
+    key_moments: List[AudioAnalysisKeyMoment] = []
 
 
 class RecognitionBadgeResponse(BaseModel):
@@ -6906,6 +7086,7 @@ async def request_access(user: UserCreate, request: Request):
         "role": _legacy_role_for_tenant_role(desired_role),
         "tenant_role": desired_role,
         "tenant_status": "approved" if auto_approved else "pending",
+        "audio_analysis_enabled": True,
         "approval_status": "approved" if auto_approved else "pending",
         "approval_requested_at": now,
         "approved_at": now if auto_approved else None,
@@ -7226,6 +7407,36 @@ async def set_user_workspace_mode(
 
     return WorkspaceModePreferenceResponse(
         **(await set_workspace_mode(current_user, payload.model_dump()))
+    )
+
+
+@api_router.get("/user/audio-analysis", response_model=WorkspaceAudioAnalysisPreferenceResponse)
+async def get_user_audio_analysis_preference(current_user: dict = Depends(get_current_user)):
+    owner_id = _resolve_audio_workspace_owner_id(current_user) or current_user["id"]
+    owner_doc = current_user
+    if owner_id != current_user["id"]:
+        owner_doc = await db.users.find_one({"id": owner_id}, {"_id": 0}) or current_user
+    return WorkspaceAudioAnalysisPreferenceResponse(
+        audio_analysis_enabled=_is_workspace_audio_analysis_enabled(owner_doc),
+        updated_at=owner_doc.get("audio_analysis_updated_at"),
+    )
+
+
+@api_router.post("/user/audio-analysis", response_model=WorkspaceAudioAnalysisPreferenceResponse)
+async def set_user_audio_analysis_preference(
+    payload: WorkspaceAudioAnalysisPreferencePayload,
+    current_user: dict = Depends(get_current_user),
+):
+    updated_at = datetime.now(timezone.utc).isoformat()
+    enabled = bool(payload.audio_analysis_enabled)
+    owner_id = _resolve_audio_workspace_owner_id(current_user) or current_user["id"]
+    await db.users.update_one(
+        {"id": owner_id},
+        {"$set": {"audio_analysis_enabled": enabled, "audio_analysis_updated_at": updated_at}},
+    )
+    return WorkspaceAudioAnalysisPreferenceResponse(
+        audio_analysis_enabled=enabled,
+        updated_at=updated_at,
     )
 
 # ==================== FRAMEWORK ENDPOINTS ====================
@@ -9144,6 +9355,179 @@ async def get_video_status(video_id: str, current_user: dict = Depends(get_curre
     }
 
 
+async def _resolve_video_comment_rubric_fields(
+    video_id: str,
+    element_id: Optional[str],
+    element_code: Optional[str],
+    element_name: Optional[str],
+) -> Dict[str, Optional[str]]:
+    cleaned_element_id = _clean_optional_string(element_id)
+    cleaned_code = _clean_optional_string(element_code) or cleaned_element_id
+    cleaned_name = _clean_optional_string(element_name)
+    if cleaned_element_id and not cleaned_name:
+        assessment = await db.assessments.find_one(
+            {"video_id": video_id},
+            {"_id": 0, "element_scores": 1},
+        )
+        for score in assessment.get("element_scores", []) if assessment else []:
+            if score.get("element_id") == cleaned_element_id:
+                cleaned_name = _clean_optional_string(score.get("element_name"))
+                cleaned_code = cleaned_code or _clean_optional_string(score.get("element_id"))
+                break
+    return {
+        "rubric_element_id": cleaned_element_id,
+        "rubric_element_code": cleaned_code,
+        "rubric_element_name": cleaned_name,
+    }
+
+
+@api_router.get("/videos/{video_id}/comments", response_model=VideoCommentListResponse)
+async def list_video_comments(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_visible_video_or_404(video_id, current_user)
+    docs = await db.video_comments.find(
+        _comment_visibility_query(video_id, current_user),
+        {"_id": 0},
+    ).sort("timestamp_seconds", 1).to_list(1000)
+    docs.sort(
+        key=lambda item: (
+            float(item.get("timestamp_seconds") or 0),
+            str(item.get("created_at") or ""),
+        )
+    )
+    return VideoCommentListResponse(
+        comments=[VideoComment(**_sanitize_video_comment_doc(doc)) for doc in docs]
+    )
+
+
+@api_router.post("/videos/{video_id}/comments", response_model=VideoComment)
+async def create_video_comment(
+    video_id: str,
+    payload: VideoCommentCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    video = await _get_visible_video_or_404(video_id, current_user)
+    teacher = await db.teachers.find_one({"id": video.get("teacher_id")}, {"_id": 0})
+    body = (payload.body or "").strip()
+    if not body:
+        raise HTTPException(status_code=400, detail="Comment text is required")
+    timestamp_seconds = float(payload.timestamp_seconds or 0)
+    if timestamp_seconds < 0:
+        raise HTTPException(status_code=400, detail="Comment timestamp cannot be negative")
+    thread_parent_id = _clean_optional_string(payload.thread_parent_id)
+    if thread_parent_id:
+        parent = await _get_video_comment_or_404(video_id, thread_parent_id, current_user)
+        if parent.get("thread_parent_id"):
+            raise HTTPException(status_code=400, detail="Replies can only be one level deep")
+        timestamp_seconds = float(parent.get("timestamp_seconds") or timestamp_seconds)
+    rubric_fields = await _resolve_video_comment_rubric_fields(
+        video_id,
+        payload.rubric_element_id,
+        payload.rubric_element_code,
+        payload.rubric_element_name,
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "video_id": video_id,
+        "workspace_id": _resolve_video_workspace_id(video, teacher, current_user),
+        "author_id": current_user["id"],
+        "author_name": (
+            _clean_optional_string(current_user.get("name"))
+            or _clean_optional_string(current_user.get("email"))
+            or "Cognivio user"
+        ),
+        "author_role": _get_user_tenant_role(current_user),
+        "timestamp_seconds": timestamp_seconds,
+        **rubric_fields,
+        "body": body,
+        "is_private": bool(payload.is_private),
+        "thread_parent_id": thread_parent_id,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.video_comments.insert_one(doc)
+    return VideoComment(**_sanitize_video_comment_doc(doc))
+
+
+@api_router.patch("/videos/{video_id}/comments/{comment_id}", response_model=VideoComment)
+async def update_video_comment(
+    video_id: str,
+    comment_id: str,
+    payload: VideoCommentUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_visible_video_or_404(video_id, current_user)
+    comment = await _get_video_comment_or_404(video_id, comment_id, current_user)
+    if comment.get("author_id") != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Only the author can edit this comment")
+    created_at = _parse_comment_created_at(comment.get("created_at"))
+    if datetime.now(timezone.utc) - created_at > timedelta(minutes=15):
+        raise HTTPException(status_code=403, detail="Comments can only be edited within 15 minutes")
+    updates = payload.dict(exclude_unset=True)
+    update_fields: Dict[str, Any] = {}
+    if "body" in updates:
+        body = (payload.body or "").strip()
+        if not body:
+            raise HTTPException(status_code=400, detail="Comment text is required")
+        update_fields["body"] = body
+    if "is_private" in updates and payload.is_private is not None:
+        update_fields["is_private"] = bool(payload.is_private)
+    rubric_keys = {"rubric_element_id", "rubric_element_code", "rubric_element_name"}
+    if rubric_keys.intersection(updates.keys()):
+        update_fields.update(
+            await _resolve_video_comment_rubric_fields(
+                video_id,
+                payload.rubric_element_id,
+                payload.rubric_element_code,
+                payload.rubric_element_name,
+            )
+        )
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    update_fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+    updated = await db.video_comments.find_one_and_update(
+        {"id": comment_id, "video_id": video_id},
+        {"$set": update_fields},
+        projection={"_id": 0},
+        return_document=True,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    return VideoComment(**_sanitize_video_comment_doc(updated))
+
+
+@api_router.delete("/videos/{video_id}/comments/{comment_id}")
+async def delete_video_comment(
+    video_id: str,
+    comment_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_visible_video_or_404(video_id, current_user)
+    comment = await _get_video_comment_or_404(video_id, comment_id, current_user)
+    role = _get_user_role(current_user)
+    if comment.get("author_id") != current_user["id"] and role != "admin":
+        raise HTTPException(status_code=403, detail="Only the author or an admin can delete this comment")
+    if comment.get("is_private") and comment.get("author_id") != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Only the author can delete a private comment")
+    if comment.get("thread_parent_id"):
+        result = await db.video_comments.delete_one({"id": comment_id, "video_id": video_id})
+        deleted_count = result.deleted_count
+    else:
+        result = await db.video_comments.delete_many(
+            {
+                "video_id": video_id,
+                "$or": [{"id": comment_id}, {"thread_parent_id": comment_id}],
+            }
+        )
+        deleted_count = result.deleted_count
+    if deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    return {"message": "Comment deleted", "deleted_count": deleted_count}
+
+
 @api_router.post("/videos/{video_id}/retry")
 async def retry_video_processing(video_id: str, current_user: dict = Depends(get_current_user)):
     video = await db.videos.find_one({"id": video_id}, {"_id": 0})
@@ -9338,6 +9722,143 @@ async def get_admin_video_audio_features(
     if not doc:
         raise HTTPException(status_code=404, detail="Audio features not found")
     return AudioFeatureResponse(**doc)
+
+
+def _audio_speaker_bucket(raw_speaker: Optional[Any]) -> str:
+    normalized = str(raw_speaker or "").strip().lower()
+    if any(token in normalized for token in ["student", "pupil", "learner", "class"]):
+        return "student" if AUDIO_ALLOW_STUDENT_VOICE_PROCESSING else "teacher"
+    if any(token in normalized for token in ["silence", "pause", "quiet"]):
+        return "silence"
+    return "teacher"
+
+
+def _build_video_audio_analysis_response(
+    transcript_doc: Optional[dict],
+    feature_doc: Optional[dict],
+) -> VideoAudioAnalysisResponse:
+    raw_segments = list((transcript_doc or {}).get("segments") or [])
+    normalized_segments: List[dict] = []
+    transcript_segments: List[dict] = []
+    key_moments: List[dict] = []
+    teacher_seconds = 0.0
+    student_seconds = 0.0
+    silence_seconds = 0.0
+    previous_end = 0.0
+    total_duration = 0.0
+
+    for index, segment in enumerate(
+        sorted(raw_segments, key=lambda item: float(item.get("start_sec") or 0.0))
+    ):
+        start = max(0.0, float(segment.get("start_sec") or 0.0))
+        end = max(start, float(segment.get("end_sec") or start))
+        if start > previous_end:
+            gap = start - previous_end
+            silence_seconds += gap
+            normalized_segments.append(
+                {
+                    "start_sec": round(previous_end, 2),
+                    "end_sec": round(start, 2),
+                    "speaker": "silence",
+                }
+            )
+            if gap >= 3.0:
+                key_moments.append(
+                    {
+                        "timestamp_sec": round(previous_end, 2),
+                        "label": "Extended pause",
+                        "signal_type": "silence",
+                    }
+                )
+
+        speaker = _audio_speaker_bucket(segment.get("speaker"))
+        duration = max(0.0, end - start)
+        if speaker == "student":
+            student_seconds += duration
+        elif speaker == "silence":
+            silence_seconds += duration
+        else:
+            teacher_seconds += duration
+        normalized_segments.append(
+            {
+                "start_sec": round(start, 2),
+                "end_sec": round(end, 2),
+                "speaker": speaker,
+            }
+        )
+        text = str(segment.get("text") or "").strip()
+        if text:
+            transcript_segments.append(
+                {
+                    "start_sec": round(start, 2),
+                    "end_sec": round(end, 2),
+                    "text": text,
+                    "speaker": speaker,
+                }
+            )
+            if "?" in text:
+                key_moments.append(
+                    {
+                        "timestamp_sec": round(start, 2),
+                        "label": "Question",
+                        "signal_type": "question",
+                    }
+                )
+        if speaker == "student":
+            key_moments.append(
+                {
+                    "timestamp_sec": round(start, 2),
+                    "label": "Student talk",
+                    "signal_type": "student_voice",
+                }
+            )
+        previous_end = max(previous_end, end)
+        total_duration = max(total_duration, end)
+
+    if not normalized_segments and feature_doc:
+        teacher_ratio = max(0.0, min(1.0, float(feature_doc.get("teacher_talk_ratio") or 0.0)))
+        teacher_seconds = teacher_ratio
+        total_duration = 1.0 if teacher_ratio else 0.0
+
+    total_duration = max(total_duration, teacher_seconds + student_seconds + silence_seconds)
+    if total_duration > 0:
+        teacher_pct = round((teacher_seconds / total_duration) * 100, 1)
+        student_pct = round((student_seconds / total_duration) * 100, 1)
+        silence_pct = round(max(0.0, 100.0 - teacher_pct - student_pct), 1)
+    else:
+        teacher_pct = student_pct = silence_pct = 0.0
+
+    return VideoAudioAnalysisResponse(
+        transcript_available=(transcript_doc or {}).get("transcript_status") == "completed",
+        features_available=bool(feature_doc),
+        teacher_talk_pct=teacher_pct,
+        student_talk_pct=student_pct,
+        silence_pct=silence_pct,
+        teacher_talk_seconds=round(teacher_seconds, 2),
+        student_talk_seconds=round(student_seconds, 2),
+        total_duration_seconds=round(total_duration, 2),
+        segments=[AudioAnalysisTimelineSegment(**item) for item in normalized_segments],
+        transcript_segments=[AudioAnalysisTranscriptSegment(**item) for item in transcript_segments],
+        key_moments=[AudioAnalysisKeyMoment(**item) for item in key_moments[:20]],
+    )
+
+
+@api_router.get("/videos/{video_id}/audio-analysis", response_model=VideoAudioAnalysisResponse)
+async def get_video_audio_analysis(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_visible_video_or_404(video_id, current_user)
+    transcript_doc = await db.video_audio_transcripts.find_one(
+        {"video_id": video_id},
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    feature_doc = await db.video_analysis_features.find_one(
+        {"video_id": video_id},
+        {"_id": 0},
+    )
+    return _build_video_audio_analysis_response(transcript_doc, feature_doc)
 
 
 @api_router.post("/videos/{video_id}/privacy/review", response_model=PrivacyReviewDecisionResponse)
@@ -18472,12 +18993,12 @@ def attach_moment_metadata_to_frames(frames: List[dict], moment_manifest: Dict[s
     return enriched
 
 
-def _should_run_audio_analysis(current_user: Optional[dict]) -> bool:
+async def _should_run_audio_analysis(current_user: Optional[dict]) -> bool:
     if not AUDIO_ANALYSIS_ENABLED:
         return False
-    if not AUDIO_ALLOW_STUDENT_VOICE_PROCESSING:
+    if not await _is_workspace_audio_analysis_enabled_for_user(current_user):
         return False
-    return _is_paid_analysis_allowed_for_user(current_user)
+    return AUDIO_TRANSCRIPTION_ENABLED or AUDIO_FEATURES_ENABLED
 
 
 async def build_audio_artifacts(
@@ -18486,7 +19007,7 @@ async def build_audio_artifacts(
     current_user: Optional[dict],
     analysis_language: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-    if not _should_run_audio_analysis(current_user):
+    if not await _should_run_audio_analysis(current_user):
         return None, None
 
     extracted_audio_path = str(UPLOAD_DIR / "audio" / f"{video_id}.wav")
@@ -19004,86 +19525,74 @@ async def _analyze_frames_with_openai(
         return None
 
     system_prompt = (
-        "You are an AI instructional observation assistant supporting experienced human observers. "
-        "Use only provided visual, audio, and lesson-coverage evidence. "
-        "Do not invent unseen behavior. "
-        "Do not judge teachers, assign quality labels, infer intent, or replace human judgment. "
-        "Process evidence using four layers in order: observable actions, student cognitive opportunity, instructional effect signals (correlation only), and pedagogical interpretation framed as leverage. "
-        "If confidence is limited, name ambiguity and defer to human interpretation rather than asserting conclusions. "
-        "Do not mention sampling strategy, extracted frames, or model limitations in the final output. "
-        "Return only valid JSON."
+        "You are a trusted instructional coach writing feedback for a teacher you know well. "
+        "You just watched a recording of their lesson. Your job is to write feedback that feels "
+        "like it came from a colleague who was in the room — specific, warm, and actionable.\n\n"
+        "Voice rules you must follow in every word you write:\n"
+        "1. Address the teacher as 'you' and 'your.' Never say 'the teacher.'\n"
+        "2. Name specific visible moments ('around the four-minute mark,' 'when you moved "
+        "to the board') — never write observations that could apply to any lesson.\n"
+        "3. Never mention rubric codes, scores, or confidence values in text fields. Those "
+        "belong in the numeric fields only.\n"
+        "4. Never use system language: do not write 'evidence,' 'sampled frames,' 'analysis', "
+        "'data points,' 'confidence,' or 'this segment.'\n"
+        "5. When evidence is genuinely limited in the recording, say: 'The clip we had was "
+        "brief — here is what stood out in that window.' Never write 'evidence was limited.'\n"
+        "6. Every recommendation must be completable in the next lesson. Phrase it as "
+        "something a teacher can actually try on Tuesday, not a professional development goal.\n"
+        "7. Lead with what worked before naming what to develop.\n"
+        "8. The summary should sound like the first sentence of a coaching conversation, "
+        "not an observation report header.\n\n"
+        "For Hebrew output: apply all the same voice rules using natural Israeli educational "
+        "language. A trusted מנהל or מדריך speaking with a teacher — not a formal inspection report.\n\n"
+        "Return only valid JSON. The text fields must follow coach voice. The numeric fields "
+        "(score, confidence, start_sec, end_sec) are technical and do not need coach voice."
     )
     if _is_hebrew_language(language):
         system_prompt += (
-            " Write all summaries, observations, rationale, and recommendations in modern Hebrew suitable for Israeli school leaders. "
-            "Use natural Hebrew educational terminology rather than literal translation. "
-            "If the admin's custom observation note or custom rubric wording is already written in Hebrew, preserve it as-is and do not rewrite it into English-style phrasing."
+            "\n\nכתוב את כל שדות הטקסט בעברית טבעית של שיחת ליווי בין מנהל, מדריכה או עמית מקצועי לבין מורה. "
+            "פנה אל המורה ישירות בלשון 'את/אתה' ו'שלך', ולא כאל דמות חיצונית. "
+            "אל תכתוב בניסוח של דוח פיקוח, הערכה קלינית או טופס תצפית. "
+            "התחל במה שעבד בשיעור, תאר רגעים קונקרטיים מההקלטה עם ציון זמן טבעי, ואז הצע מהלך אחד שאפשר לנסות כבר בשיעור הבא. "
+            "אל תזכיר בטקסט קודי רובריקה, ציונים, ביטחון, ניתוח, דאטה, ראיות, פריימים שנדגמו או מגבלות מערכת. "
+            "אם ההקלטה קצרה או חלקית, כתוב בעברית טבעית: 'הקליפ שהיה לנו היה קצר — זה מה שבלט בחלון הזה.' "
+            "אם הערת המיקוד או ניסוח רובריקה מותאם כבר כתובים בעברית, שמור על הכוונה והעבר אותם לשפת ליווי טבעית ולא לתרגום מילולי."
         )
     elements_text = "\n".join(
         f"- {element['id']}: {element['name']} (Domain: {element['domain']}){' [PRIORITY]' if element.get('priority') else ''}"
         for element in elements_to_analyze
     )
     focus_text = focus_instruction.strip() if focus_instruction else ""
-    multimodal_context = ""
-    if multimodal_payload:
-        lesson_timeline = []
-        for moment in (multimodal_payload.get("moments") or [])[:8]:
-            phase = str(moment.get("phase") or "lesson_segment").replace("_", " ")
-            selection_reason = str(moment.get("selection_reason") or "lesson evidence").replace("_", " ")
-            excerpt = str(moment.get("transcript_excerpt") or "").strip().replace("\n", " ")
-            segment_line = (
-                f"- {_format_timestamp(int(float(moment.get('start_sec', 0) or 0)))}"
-                f"–{_format_timestamp(int(float(moment.get('end_sec', 0) or 0)))}"
-                f" | {phase} | {selection_reason}"
-            )
-            if excerpt:
-                segment_line += f" | Transcript: {excerpt[:180]}"
-            lesson_timeline.append(segment_line)
-        audio_features = multimodal_payload.get("audio_features") or {}
-        audio_context = []
-        if audio_features:
-            audio_context.append(
-                "Audio interaction indicators: "
-                f"turns={audio_features.get('turn_count') or 0}, "
-                f"questions={audio_features.get('question_count') or 0}, "
-                f"open_questions={audio_features.get('open_question_count') or 0}."
-            )
-        if lesson_timeline or audio_context:
-            sections = []
-            if lesson_timeline:
-                sections.append("Lesson-wide evidence timeline:\n" + "\n".join(lesson_timeline))
-            if audio_context:
-                sections.append("\n".join(audio_context))
-            multimodal_context = "\n\n".join(sections)
     prompt = f"""
-Analyze the classroom frames below and score the teacher on a 1-10 scale for each rubric element.
+Watch the lesson recording clips below and write coaching feedback for this teacher.
 
-Rubric elements:
+Rubric areas to address:
 {elements_text}
 
 {focus_text}
 
-{multimodal_context}
+Write the feedback as if you are a trusted colleague who just watched this lesson.
+Address the teacher directly. Be specific about what you saw and when.
+For each rubric area, note what you noticed — grounded in a specific moment
+from the recording — and what you would suggest trying next.
 
-Requirements:
-- Use the timestamps provided with each frame.
-- Base every observation on the provided evidence only.
-- Keep observations concrete and specific to what is visible.
-- Treat timeline and transcript context as lesson-wide coverage, not isolated snapshots.
-- Use correlation-only language for effect signals (for example: "co-occurred with", "was followed by").
-- If priority rubric elements are present, lead with them in summary and recommendations.
-- For each element, include 1-2 timestamped evidence segments tied to lesson evidence when possible.
-- Include 2-3 recommendations only when confidence is sufficient.
-- Avoid judgmental labels and compliance tone.
+The summary (2-3 sentences) is the opening of a coaching conversation.
+It should be something you would actually say to this person.
+
+Each recommendation must be one specific, actionable thing to try next lesson.
+Not a general direction — a specific move, with timing if you can.
+
+If priority areas are marked [PRIORITY], center the summary and recommendations
+on those areas first, using the observer's focus note as your lead.
 
 Return JSON with this exact shape:
 {{
-  "summary": "3-5 sentence lesson summary grounded in the lesson evidence.",
+  "summary": "2-3 sentences. First sentence of a coaching conversation. Uses 'you'.",
   "recommendations": [
     {{
       "start_sec": 90,
       "end_sec": 120,
-      "text": "Concrete coaching recommendation grounded in lesson evidence.",
+      "text": "One specific thing to try next lesson. Actionable on Tuesday.",
       "linked_element_id": "2b"
     }}
   ],
@@ -19092,13 +19601,15 @@ Return JSON with this exact shape:
       "element_id": "2b",
       "score": 6.8,
       "confidence": 82,
-      "observations": ["Observation 1", "Observation 2"],
+      "observations": [
+        "What you noticed, addressed to the teacher, grounded in a specific moment."
+      ],
       "evidence_segments": [
         {{
           "start_sec": 90,
           "end_sec": 120,
-          "summary": "What is visible in that moment.",
-          "rationale": "Why it supports the score."
+          "summary": "What happened in this moment, described as a colleague would.",
+          "rationale": "Why this moment matters for this area of their practice."
         }}
       ]
     }}
@@ -21315,6 +21826,10 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.summary_reflection_history, [("teacher_id", 1), ("author_user_id", 1), ("saved_at", -1)])
     await _safe_create_index(db.published_conference_agendas, [("teacher_id", 1), ("published_at", -1)])
     await _safe_create_index(db.observations, [("video_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.video_comments, [("video_id", 1), ("timestamp_seconds", 1), ("created_at", 1)])
+    await _safe_create_index(db.video_comments, [("video_id", 1), ("thread_parent_id", 1), ("created_at", 1)])
+    await _safe_create_index(db.video_comments, [("workspace_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.video_comments, [("author_id", 1), ("created_at", -1)])
     await _safe_create_index(db.observation_sessions, [("observer_id", 1), ("scheduled_date", 1)])
     await _safe_create_index(db.observation_sessions, [("teacher_id", 1), ("scheduled_date", -1)])
     await _safe_create_index(db.observation_sessions, [("status", 1), ("scheduled_date", 1)])

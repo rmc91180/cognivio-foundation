@@ -4,7 +4,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { assessmentApi, evidenceApi, exemplarApi, observationApi, recognitionApi, shareAssetApi, videoApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { AssessmentFeedbackWidget } from "@/components/assessment/AssessmentFeedbackWidget";
+import { AudioTimeline } from "@/components/AudioTimeline";
 import { ObservationFocusPanel } from "@/components/assessment/ObservationFocusPanel";
+import { TalkTimeChart } from "@/components/TalkTimeChart";
+import { VideoCommentThread } from "@/components/VideoCommentThread";
 import { VideoTimeline } from "@/components/VideoTimeline";
 import { useAuth } from "@/hooks/useAuth";
 import { toast } from "sonner";
@@ -64,6 +67,7 @@ export function VideoPlayerPage() {
   const hasSeenkedFromUrl = useRef(false);
   const [videoStatus, setVideoStatus] = useState("processing");
   const [wsConnected, setWsConnected] = useState(false);
+  const [audioPanelTab, setAudioPanelTab] = useState("talk-time");
   const isRtl = i18n.dir() === "rtl";
   const dateTimeFormatter = useMemo(
     () =>
@@ -197,7 +201,7 @@ export function VideoPlayerPage() {
   // Track current video time
   const handleTimeUpdate = useCallback(() => {
     if (videoRef.current) {
-      setCurrentTime(Math.floor(videoRef.current.currentTime));
+      setCurrentTime(videoRef.current.currentTime);
     }
   }, []);
 
@@ -306,6 +310,12 @@ export function VideoPlayerPage() {
       const status = query.state.data?.recognition?.status;
       return status === "pending_admin_review" ? 10000 : false;
     },
+  });
+  const { data: audioAnalysisRes } = useQuery({
+    queryKey: ["video-audio-analysis", videoId],
+    enabled: Boolean(videoId),
+    queryFn: () => videoApi.audioAnalysis(videoId).then((r) => r.data),
+    refetchInterval: videoStatus === "completed" ? false : 10000,
   });
 
   const [summaryNotes, setSummaryNotes] = useState("");
@@ -467,6 +477,11 @@ export function VideoPlayerPage() {
     if (!videoRef.current || typeof seconds !== "number") return;
     videoRef.current.currentTime = seconds;
     videoRef.current.focus();
+  };
+  const handleStartAddComment = () => {
+    if (videoRef.current) {
+      videoRef.current.pause();
+    }
   };
 
   const handleGenerateReport = () => {
@@ -675,6 +690,12 @@ export function VideoPlayerPage() {
       element_id: item.element_id,
     }));
   }, [assessmentEvidence, observations]);
+  const audioAnalysis = audioAnalysisRes || {};
+  const audioAvailable = Boolean(
+    audioAnalysis.transcript_available ||
+    audioAnalysis.features_available ||
+    audioAnalysis.segments?.length
+  );
   const recommendedMomentNoteLines = recommendedMoments.slice(0, 3).map((moment) => {
     const jumpTime =
       typeof moment.representative_frame_sec === "number"
@@ -830,6 +851,19 @@ export function VideoPlayerPage() {
                         />
                       </div>
                     )}
+                    {audioAvailable && (
+                      <div className="mb-3 rounded-md border border-slate-200 bg-white px-3 py-3">
+                        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                          Audio timeline
+                        </div>
+                        <AudioTimeline
+                          duration={duration || audioAnalysis.total_duration_seconds}
+                          segments={audioAnalysis.segments || []}
+                          keyMoments={audioAnalysis.key_moments || []}
+                          onSeek={handleSeek}
+                        />
+                      </div>
+                    )}
                     <div className="flex items-center justify-between">
                       <span className="text-[11px] text-slate-500">
                         {t("videoPlayer.currentTime", {
@@ -871,6 +905,14 @@ export function VideoPlayerPage() {
                 />
               )}
             </Panel>
+
+            <VideoCommentThread
+              videoId={videoId}
+              currentTime={currentTime}
+              duration={duration}
+              onSeekTo={handleSeek}
+              onStartAddComment={handleStartAddComment}
+            />
 
             <Panel className="p-4 text-xs text-slate-700">
               <div className="mb-5 rounded-lg border border-slate-200 bg-slate-50 px-4 py-4">
@@ -1341,6 +1383,85 @@ export function VideoPlayerPage() {
           </section>
 
           <section className="md:col-span-5 space-y-3">
+            {audioAvailable && (
+              <Panel className="p-4 text-xs">
+                <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <h2 className="text-sm font-semibold text-slate-900">
+                      Audio analysis
+                    </h2>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Talk-time balance and transcript signals from this lesson.
+                    </p>
+                  </div>
+                  <Badge variant={audioAnalysis.transcript_available ? "success" : "neutral"}>
+                    {audioAnalysis.transcript_available ? "Transcript ready" : "Features only"}
+                  </Badge>
+                </div>
+                <div className="mb-3 inline-flex rounded-md border border-slate-200 bg-slate-50 p-1">
+                  {[
+                    ["talk-time", "Talk time"],
+                    ["transcript", "Transcript"],
+                  ].map(([tabId, label]) => (
+                    <button
+                      key={tabId}
+                      type="button"
+                      onClick={() => setAudioPanelTab(tabId)}
+                      className={`rounded px-2.5 py-1 text-[11px] font-medium ${
+                        audioPanelTab === tabId
+                          ? "bg-white text-slate-900 shadow-sm"
+                          : "text-slate-500 hover:text-slate-700"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {audioPanelTab === "talk-time" ? (
+                  <TalkTimeChart
+                    teacherTalkPct={audioAnalysis.teacher_talk_pct}
+                    studentTalkPct={audioAnalysis.student_talk_pct}
+                    silencePct={audioAnalysis.silence_pct}
+                    teacherTalkSeconds={audioAnalysis.teacher_talk_seconds}
+                    studentTalkSeconds={audioAnalysis.student_talk_seconds}
+                    totalDurationSeconds={audioAnalysis.total_duration_seconds}
+                  />
+                ) : (
+                  <div className="max-h-80 overflow-y-auto rounded-md border border-slate-200 bg-slate-50">
+                    {(audioAnalysis.transcript_segments || []).length ? (
+                      <ul className="divide-y divide-slate-200">
+                        {audioAnalysis.transcript_segments.map((segment, index) => (
+                          <li key={`${segment.start_sec}-${index}`}>
+                            <button
+                              type="button"
+                              onClick={() => handleSeek(Number(segment.start_sec || 0))}
+                              className={`w-full px-3 py-2 ${isRtl ? "text-right" : "text-left"} hover:bg-white`}
+                            >
+                              <div className="mb-1 flex flex-wrap items-center gap-2 text-[10px] text-slate-500">
+                                <span className="font-semibold text-slate-800">
+                                  {formatClock(segment.start_sec)}
+                                </span>
+                                <span className="rounded-full bg-white px-2 py-0.5 capitalize">
+                                  {segment.speaker}
+                                </span>
+                              </div>
+                              <div className="text-xs leading-5 text-slate-700">
+                                {segment.text}
+                              </div>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="px-3 py-3 text-xs text-slate-500">
+                        No transcript segments are available yet.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </Panel>
+            )}
+
             {analysisMomentsEnabled && (
               <Panel className="p-4 text-xs">
                 <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
