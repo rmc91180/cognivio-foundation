@@ -24,6 +24,7 @@ def test_default_specialist_contracts_are_ordered_and_product_bounded():
         "priority_coach",
         "longitudinal_pattern",
         "recommendation_sequence",
+        "tone_coach",
     ]
     assert all(item.owned_fields for item in contracts)
     assert all(item.guardrails for item in contracts)
@@ -111,8 +112,9 @@ def test_orchestrate_specialists_dedupes_sorts_and_links_active_goal():
     )
 
     assert result["specialist_orchestrator"]["enabled"] is True
-    assert len(result["specialist_trace"]) == 4
+    assert len(result["specialist_trace"]) == 5
     assert result["specialist_trace"][2]["specialist_id"] == "longitudinal_pattern"
+    assert result["specialist_trace"][4]["specialist_id"] == "tone_coach"
     assert result["element_scores"][0]["element_id"] == "2b"
     assert "Teacher asked mostly short recall questions." in result["element_scores"][0]["observations"][0]
     assert len(result["recommendations"]) == 3

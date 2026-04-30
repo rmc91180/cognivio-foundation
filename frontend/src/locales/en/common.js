@@ -1528,7 +1528,8 @@ const en = {
     viewRecording: "View recording",
     observationSummary: "Observation summary",
     summaryAssessment: "Summary assessment",
-    noAssessmentSummary: "No assessment summary yet.",
+    noAssessmentSummary:
+      "Once a lesson recording has been reviewed, the coaching summary will appear here. It will be specific to what happened in that lesson.",
     coachingMoves: "Recommended coaching moves",
     recommendations: "Recommendations",
     noRecommendations: "No recommendations yet.",
@@ -1623,7 +1624,8 @@ const en = {
     observationSummary: "Observation summary",
     observationSummaryDescription: "A concise classroom observation aligned to the selected rubric priorities.",
     scoreSummary: "Score {{score}}/10",
-    noSummaryAvailable: "No summary available yet.",
+    noSummaryAvailable:
+      "Once a lesson recording has been reviewed, the coaching summary will appear here. It will be specific to what happened in that lesson.",
     adminFocus: "Admin focus",
     recommendedMoments: "Recommended lesson moments",
     recommendedMomentsDescription:
@@ -1798,7 +1800,8 @@ const en = {
     observationHighlights: "Highlights from recent observations",
     watchClip: "Watch clip",
     noRecentHighlights: "No highlights from recent videos yet.",
-    noSummaryData: "No summary data yet for this teacher.",
+    noSummaryData:
+      "Once a lesson recording has been reviewed, the coaching summary will appear here. It will be specific to what happened in that lesson.",
     professionalInsights: "Professional insights",
     professionalInsightsDescription: "Teacher and principal reflections (food for thought).",
     sharedRecordsTitle: "Shared coaching records",

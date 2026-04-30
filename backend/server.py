@@ -3123,6 +3123,177 @@ async def _get_assessment_for_video(video_id: str) -> Optional[dict]:
     )
 
 
+def _coaching_summary_pending_text(language: str = "en") -> str:
+    if _is_hebrew_language(language):
+        return "אחרי שהקלטת שיעור תיבחן, סיכום הליווי יופיע כאן. הוא יהיה ספציפי למה שקרה באותו שיעור."
+    return (
+        "Once a lesson recording has been reviewed, the coaching summary will appear here. "
+        "It will be specific to what happened in that lesson."
+    )
+
+
+def _teacher_lesson_reflection_prompt(observer_name: Optional[str], language: str = "en") -> str:
+    observer_label = _clean_optional_string(observer_name) or ("המנהל/ת שלך" if _is_hebrew_language(language) else "your observer")
+    if _is_hebrew_language(language):
+        return (
+            f"השיעור האחרון שלך נצפה. לפני השיחה הבאה עם {observer_label}, "
+            "כדאי להקדיש כמה דקות לצפייה בהקלטה ולכתוב לעצמך: מה לדעתך עבד טוב? "
+            "מה היית מנסה אחרת? הרפלקציה שלך חשובה — היא מעצבת את השיחה."
+        )
+    return (
+        f"Your latest lesson has been reviewed. Before your next conversation with {observer_label}, "
+        "take a few minutes to watch the recording and note: What do you think went well? "
+        "What would you try differently? Your reflection matters — it shapes the conversation."
+    )
+
+
+def _admin_lesson_review_task_summary(
+    *,
+    teacher_name: Optional[str],
+    primary_goal_title: Optional[str],
+    conference_soon: bool,
+    language: str = "en",
+) -> str:
+    teacher_label = _clean_optional_string(teacher_name) or ("המורה" if _is_hebrew_language(language) else "this teacher")
+    goal_label = _clean_optional_string(primary_goal_title)
+    if _is_hebrew_language(language):
+        if conference_soon and goal_label:
+            return (
+                f"שיחת הליווי שלך עם {teacher_label} מתקרבת. "
+                f"ההקלטה הזו היא ההכנה הטובה ביותר — צפו דרך הפוקוס של {goal_label}."
+            )
+        if goal_label:
+            return (
+                f"השיעור האחרון של {teacher_label} מוכן. צפיתם דרך הפוקוס של {goal_label}. "
+                "כדאי לצפות ולשתף מה שמתם לב אליו."
+            )
+        return (
+            f"הקלטה חדשה של {teacher_label} מוכנה לצפייה. "
+            "צפו בה ורשמו מה תרצו להעלות לפני שיחת הליווי הבאה."
+        )
+    if conference_soon and goal_label:
+        return (
+            f"Your coaching conversation with {teacher_label} is coming up. "
+            f"This recording is the best preparation — watch for {goal_label}."
+        )
+    if goal_label:
+        return (
+            f"{teacher_label}'s latest lesson is ready. You were watching for {goal_label}. "
+            "Take a look and share what you noticed."
+        )
+    return (
+        f"New recording from {teacher_label} is ready for your review. "
+        "Watch and note what you want to follow up on before your next conversation."
+    )
+
+
+def _recognition_highlight_from_assessment(assessment: Optional[dict], language: str = "en") -> Tuple[str, str]:
+    element_scores = list((assessment or {}).get("element_scores") or [])
+    best_score = None
+    for item in element_scores:
+        score = item.get("score")
+        if not isinstance(score, (int, float)):
+            continue
+        if best_score is None or score > (best_score.get("score") or 0):
+            best_score = item
+    selected = best_score or (element_scores[0] if element_scores else {})
+    element_name = _clean_optional_string(selected.get("element_name")) or (
+        "מהלך הוראה חזק" if _is_hebrew_language(language) else "a strong teaching move"
+    )
+    segment = None
+    for candidate in list(selected.get("evidence_segments") or []):
+        if isinstance(candidate, dict):
+            segment = candidate
+            break
+    if not segment:
+        for item in element_scores:
+            for candidate in list(item.get("evidence_segments") or []):
+                if isinstance(candidate, dict):
+                    segment = candidate
+                    break
+            if segment:
+                break
+    if segment and segment.get("start_sec") is not None:
+        try:
+            approximate_time = _format_timestamp(int(float(segment.get("start_sec") or 0)))
+        except Exception:
+            approximate_time = "00:00"
+    else:
+        approximate_time = "בדקות הפתיחה" if _is_hebrew_language(language) else "the opening minutes"
+    return element_name, approximate_time
+
+
+def _build_recognition_notification_content(
+    *,
+    teacher: dict,
+    video: dict,
+    observer: dict,
+    assessment: Optional[dict],
+) -> Tuple[str, str]:
+    language = _normalize_app_language(
+        video.get("analysis_language")
+        or teacher.get("preferred_language")
+        or observer.get("preferred_language"),
+        default="en",
+    )
+    school_name = (
+        _clean_optional_string(teacher.get("school_name"))
+        or _clean_optional_string(observer.get("school_name"))
+        or _clean_optional_string(video.get("school_name"))
+        or "Cognivio"
+    )
+    observer_name = _clean_optional_string(observer.get("name")) or _clean_optional_string(observer.get("email")) or (
+        "המנהל/ת שלך" if _is_hebrew_language(language) else "your observer"
+    )
+    specific_element, approximate_time = _recognition_highlight_from_assessment(assessment, language=language)
+    if _is_hebrew_language(language):
+        subject = f"משהו ששווה לחגוג — {school_name}"
+        body = (
+            f"השיעור האחרון שלך בלט. אצל {observer_name} בלט במיוחד {specific_element}, "
+            f"וחשוב לו/לה לומר לך: מה שעשית סביב {approximate_time} הוא בדיוק סוג ההוראה "
+            "שבית הספר עובד לקראתו.\n"
+            "השיעור שלך נוסף לספריית בית הספר של פרקטיקות לדוגמה.\n"
+            "כל הכבוד."
+        )
+    else:
+        subject = f"Something worth celebrating — {school_name}"
+        body = (
+            f"Your recent lesson stood out. {observer_name} noticed {specific_element} and wants you to know: "
+            f"what you did at {approximate_time} is exactly the kind of teaching this school is working toward.\n"
+            "Your lesson has been added to the school's library of exemplar practice.\n"
+            "Well done."
+        )
+    return subject, body
+
+
+async def _notify_teacher_recognition_awarded(video: dict, teacher: dict, current_user: dict) -> None:
+    try:
+        assessment = await _get_assessment_for_video(video.get("id"))
+        subject, body = _build_recognition_notification_content(
+            teacher=teacher,
+            video=video,
+            observer=current_user,
+            assessment=assessment,
+        )
+        teacher_email = str(teacher.get("email") or "").strip().lower()
+        teacher_user = None
+        if teacher_email and hasattr(db, "users"):
+            teacher_user = await db.users.find_one({"email": teacher_email}, {"_id": 0})
+        if teacher_user and teacher_user.get("id") and hasattr(db, "notifications"):
+            await _enqueue_notification(
+                teacher_user,
+                teacher.get("id"),
+                "recognition_awarded",
+                subject,
+                body,
+                channel="in_app",
+            )
+        if teacher_email:
+            _send_platform_email(subject, teacher_email, body)
+    except Exception as exc:
+        logger.warning("Unable to send recognition celebration for video %s: %s", video.get("id"), exc)
+
+
 def _build_teacher_recognition_summary(teacher_id: str, badges: List[dict]) -> "TeacherRecognitionSummaryResponse":
     awarded_badges = [badge for badge in badges if badge.get("status") == "awarded"]
     published_exemplars = [
@@ -10060,7 +10231,7 @@ async def review_video_recognition(
     video = await db.videos.find_one({"id": video_id}, {"_id": 0})
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    teacher = await _get_teacher_or_404(video.get("teacher_id"), current_user)
     event = await _get_or_sync_video_recognition_event(video)
     decision = (payload.decision or "").strip().lower()
     reviewed_at = datetime.now(timezone.utc).isoformat()
@@ -10125,6 +10296,7 @@ async def review_video_recognition(
                 "reason": payload.reason,
             },
         )
+        await _notify_teacher_recognition_awarded(video, teacher, current_user)
         return RecognitionReviewResponse(
             video_id=video_id,
             recognition_status="awarded",
@@ -11721,6 +11893,7 @@ async def get_teacher_summary_insights(
     Aggregate insights across multiple lessons for a teacher.
     Used for monthly/periodic 'Summary AI Insight' on the profile.
     """
+    language = _resolve_request_language(request, default="en")
     await _get_teacher_or_404(teacher_id, current_user)
     assessments = await db.assessments.find(
         {"teacher_id": teacher_id},
@@ -11731,7 +11904,7 @@ async def get_teacher_summary_insights(
         return {
             "teacher_id": teacher_id,
             "overall_trend_score": None,
-            "summary": "",
+            "summary": _coaching_summary_pending_text(language),
             "recommendations": [],
         }
 
@@ -11766,7 +11939,6 @@ async def get_teacher_summary_insights(
             }
         )
 
-    language = _resolve_request_language(request, default="en")
     analysis_context = await build_analysis_context(current_user, teacher_id)
     summary_text = generate_summary(
         synthetic_element_scores,
@@ -12374,12 +12546,18 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
     role = _get_user_role(current_user)
     now = datetime.now(timezone.utc)
     tasks: List[dict] = []
-    adaptive_support = await build_teacher_memory_support(current_user, teacher_id)
+    language = _normalize_app_language(current_user.get("preferred_language"), default="en")
+    adaptive_support = await build_teacher_memory_support(current_user, teacher_id, language=language)
     primary_goal = adaptive_support.get("primary_goal") or {}
     primary_goal_title = primary_goal.get("title")
     primary_goal_signal = primary_goal.get("progress_signal")
     teacher_prompt = adaptive_support.get("teacher_prompt_body")
     admin_prompt = adaptive_support.get("admin_prompt_body")
+    observer_name = (
+        _clean_optional_string(teacher.get("manager_name"))
+        or _clean_optional_string(current_user.get("name"))
+        or _clean_optional_string(current_user.get("email"))
+    )
     next_conference_dt = _parse_iso_datetime(teacher.get("next_coaching_conference"))
     conference_soon = bool(next_conference_dt and next_conference_dt <= now + timedelta(days=10))
 
@@ -12451,11 +12629,11 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
                     "state": "awaiting_admin_review",
                     "priority": priority,
                     "title": "Review new lesson evidence",
-                    "summary": admin_prompt
-                    or (
-                        f"Recent lesson evidence is ready for review with focus on {primary_goal_title}."
-                        if primary_goal_title
-                        else "A newly analyzed lesson is ready for admin review and follow-up."
+                    "summary": _admin_lesson_review_task_summary(
+                        teacher_name=teacher.get("name"),
+                        primary_goal_title=primary_goal_title,
+                        conference_soon=conference_soon,
+                        language=language,
                     ),
                     "due_at": latest_assessment.get("analyzed_at"),
                     "route_hint": "video",
@@ -12485,11 +12663,7 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
                     "priority": priority,
                     "title": "Respond to the latest class evidence",
                     "summary": teacher_prompt
-                    or (
-                        f"A recent lesson review is ready. Connect your next move to {primary_goal_title}."
-                        if primary_goal_title
-                        else "A recent lesson review is ready. Add your reflection and implementation response."
-                    ),
+                    or _teacher_lesson_reflection_prompt(observer_name, language=language),
                     "due_at": latest_assessment.get("analyzed_at"),
                     "route_hint": "reflection",
                     "assessment_id": latest_assessment.get("id"),
@@ -12596,7 +12770,17 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
                 "title": "Upcoming coaching conference",
                 "summary": (
                     teacher_prompt if role == "teacher" else admin_prompt
-                ) or "Prepare for the next coaching conversation and confirm the agenda.",
+                )
+                or (
+                    _teacher_lesson_reflection_prompt(observer_name, language=language)
+                    if role == "teacher"
+                    else _admin_lesson_review_task_summary(
+                        teacher_name=teacher.get("name"),
+                        primary_goal_title=primary_goal_title,
+                        conference_soon=True,
+                        language=language,
+                    )
+                ),
                 "due_at": teacher.get("next_coaching_conference"),
                 "route_hint": "conference",
                 "context_label": primary_goal_title,
@@ -18276,6 +18460,7 @@ async def _enqueue_notification(
     notification_type: str,
     title: str,
     message: str,
+    channel: str = "email",
 ):
     doc = {
         "id": str(uuid.uuid4()),
@@ -18283,7 +18468,7 @@ async def _enqueue_notification(
         "notification_type": notification_type,
         "title": title,
         "message": message,
-        "channel": "email",
+        "channel": channel,
         "status": "queued",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "read_at": None,
@@ -19329,16 +19514,16 @@ def _normalize_analysis_wording(text: Optional[str], language: str = "en") -> st
         return ""
 
     replacements = {
-        "in the sampled frames": "in the lesson evidence reviewed",
-        "in sampled frames": "in the lesson evidence reviewed",
-        "sampled frames": "lesson evidence reviewed",
-        "sampled moments": "recorded lesson evidence",
-        "sampled clips": "lesson evidence reviewed",
-        "sampled windows": "lesson evidence reviewed",
-        "Limited visible evidence was available": "The available lesson evidence was still partial",
-        "Visible evidence was limited": "The available lesson evidence was still partial",
-        "Evidence was limited": "The available lesson evidence was still partial",
-        "Insufficient visible evidence": "The available lesson evidence did not yet support",
+        "in the sampled frames": "in the recording",
+        "in sampled frames": "in the recording",
+        "sampled frames": "recording",
+        "sampled moments": "recorded moments",
+        "sampled clips": "recorded clips",
+        "sampled windows": "recorded windows",
+        "Limited visible evidence was available": "The clip gave us a brief window into your lesson",
+        "Visible evidence was limited": "The clip gave us a brief window into your lesson",
+        "Evidence was limited": "The clip gave us a brief window into your lesson",
+        "Insufficient visible evidence": "The clip gave us a brief window into your lesson",
     }
     normalized = clean_text
     for source, target in replacements.items():
@@ -19403,11 +19588,11 @@ def _normalize_model_recommendations(raw_recommendations: Any, language: str = "
 
 def _build_placeholder_element_score(element: dict, timestamp_sec: float, language: str = "en") -> dict:
     if _is_hebrew_language(language):
-        observation_text = "ראיות השיעור הזמינות לא הספיקו עדיין לקביעה בטוחה יותר."
-        summary_text = f"לגבי {element['name']} נמצאו בשיעור ראיות חלקיות בלבד ולכן נדרש איסוף נוסף של הוכחות."
+        observation_text = "החלון שהיה לנו בסרטון היה קצר — הנה מה שבלט בשיעור שלך."
+        summary_text = "החלון שהיה לנו בסרטון היה קצר — הנה מה שבלט בתוכו."
     else:
-        observation_text = "The available lesson evidence did not yet support a stronger judgment."
-        summary_text = f"The lesson evidence reviewed for {element['name'].lower()} was still partial and needs more corroboration."
+        observation_text = "The clip gave us a brief window into your lesson — here is what stood out."
+        summary_text = "The clip gave us a brief window into this lesson — here is what stood out."
     return {
         "element_id": element["id"],
         "element_name": element["name"],
@@ -19465,9 +19650,9 @@ def _normalize_model_analysis(
             observations = [evidence_segments[0]["summary"]]
         if not observations:
             observations = (
-                ["ראיות השיעור הזמינות עדיין חלקיות."]
+                ["החלון שהיה לנו בסרטון היה קצר — הנה מה שבלט בשיעור שלך."]
                 if _is_hebrew_language(language)
-                else ["The available lesson evidence was still partial."]
+                else ["The clip gave us a brief window into your lesson — here is what stood out."]
             )
         if not evidence_segments:
             evidence_segments = [
@@ -19794,25 +19979,25 @@ def generate_mock_scores(elements: List[dict], language: str = "en") -> List[dic
     scores = []
     if _is_hebrew_language(language):
         fallback_actions = [
-            "נראה מודלינג של המורה, אך בדיקות הבנה עקביות עדיין לא בלטו במידה מספקת בראיות השיעור.",
-            "נראו סימנים להשתתפות תלמידים, אך דפוסי מעורבות רחבים יותר לא היו ברורים די הצורך.",
-            "שגרות הכיתה נראו יציבות, אך המעברים ובדיקות התגובה עדיין דורשים ראיות ברורות יותר.",
-            "קצב ההוראה נראה סדור, אך הזדמנויות לחשיבה מעמיקה של תלמידים לא בלטו באופן מספק.",
+            "המודלינג שלך היה ברור בחלון שראינו, ובשיעור הבא כדאי להוסיף בדיקת הבנה קצרה לפני שהתלמידים ממשיכים.",
+            "יצרת פתחים להשתתפות תלמידים; בשיעור הבא כדאי להרחיב מי מקבל הזדמנות לענות לפני שממשיכים.",
+            "שגרות הכיתה שלך נראו יציבות; בשיעור הבא כדאי להפוך את רמז המעבר ובדיקת התגובה לברורים עוד יותר.",
+            "קצב ההוראה שלך היה מסודר; בשיעור הבא כדאי להוסיף שאלה אחת שמבקשת מהתלמידים להסביר את החשיבה שלהם.",
         ]
     else:
         fallback_actions = [
-            "Teacher modeling was visible, but checks for understanding were not yet consistently evident across the lesson evidence reviewed.",
-            "Student participation cues were visible, though broader engagement routines were not consistently clear.",
-            "Classroom routines appeared stable, but transitions and response checks still need stronger corroborating evidence.",
-            "Instructional pacing looked steady, though opportunities for deeper student thinking were not clearly visible.",
+            "You modeled the task clearly in the window we saw, and next lesson you can add a quick check for understanding before students continue.",
+            "You created a few openings for student participation; next lesson, try widening who responds before moving on.",
+            "Your classroom routines looked steady; next lesson, make the transition cue and response check even more visible.",
+            "Your pacing felt organized; next lesson, build in one prompt that asks students to explain their thinking.",
         ]
     for idx, element in enumerate(elements):
         score = round(random.uniform(5.2, 7.4), 1)
         observation = fallback_actions[idx % len(fallback_actions)]
         primary_observation = (
-            f"נמצאה ראיה חלקית בלבד עבור {element['name']} בראיות השיעור שנבדקו."
+            "החלון שהיה לנו בסרטון היה קצר — הנה מה שבלט בשיעור שלך."
             if _is_hebrew_language(language)
-            else f"The lesson evidence reviewed for {element['name'].lower()} was still partial."
+            else "The clip gave us a brief window into your lesson — here is what stood out."
         )
         scores.append(
             {

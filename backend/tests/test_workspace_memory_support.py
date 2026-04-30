@@ -78,6 +78,7 @@ def test_build_memory_support_snapshot_prioritizes_repeated_challenge():
 
     assert snapshot["primary_goal"]["title"] == "Checks for understanding"
     assert "Checks for understanding" in snapshot["teacher_prompt_title"]
-    assert "repeating as a challenge" in snapshot["teacher_prompt_body"]
+    assert "Your latest lesson has been reviewed" in snapshot["teacher_prompt_body"]
+    assert "your observer" in snapshot["teacher_prompt_body"]
     assert snapshot["conference_continuity_lines"][0].startswith("Recent evidence shows this challenge repeating")
     assert "I plan to add one more quick check" in snapshot["conference_continuity_lines"][2]

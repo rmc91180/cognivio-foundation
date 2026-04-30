@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
 from typing import Any, Dict, List, Optional
@@ -12,10 +14,37 @@ from app.analysis.specialist_contracts import (
 )
 
 
+try:
+    from openai import OpenAI
+except Exception:  # pragma: no cover - optional dependency in some test contexts
+    OpenAI = None
+
+
+logger = logging.getLogger(__name__)
 SPECIALIST_ORCHESTRATOR_ENABLED = os.getenv("SPECIALIST_ORCHESTRATOR_ENABLED", "true").lower() == "true"
 SPECIALIST_ORCHESTRATOR_VERSION = (
     os.getenv("SPECIALIST_ORCHESTRATOR_VERSION", "specialist_orchestrator_v1").strip() or "specialist_orchestrator_v1"
 )
+TONE_COACH_MODEL = os.getenv("TONE_COACH_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+
+
+TONE_COACH_BANNED_PHRASES = [
+    "evidence was limited",
+    "in the sampled frames",
+    "analysis mode",
+    "confidence score",
+    "the teacher demonstrated",
+    "the teacher used",
+    "the teacher showed",
+    "the teacher displayed",
+    "rubric element",
+    "score of",
+    "rated at",
+    "data suggests",
+    "based on the evidence",
+    "this segment",
+    "sampled moment",
+]
 
 
 def _is_hebrew(language: str) -> bool:
@@ -275,6 +304,235 @@ def _apply_longitudinal_pattern(payload: Dict[str, Any], context: SpecialistCont
     )
 
 
+def _tone_text_has_banned_phrase(value: Any) -> bool:
+    text = str(value or "").lower()
+    return any(phrase in text for phrase in TONE_COACH_BANNED_PHRASES)
+
+
+def _tone_observation_has_direct_address(value: Any, context: SpecialistContext) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return True
+    if _is_hebrew(context.language):
+        hebrew_direct_markers = [
+            "את ",
+            "אתה",
+            "אתם",
+            "שלך",
+            "שלכם",
+            "ראית",
+            "עשית",
+            "הובלת",
+            "נתת",
+            "בחרת",
+            "שאלת",
+        ]
+        return any(marker in text for marker in hebrew_direct_markers)
+    return bool(re.search(r"\b(you|your)\b", text))
+
+
+def _tone_field_should_rewrite(value: Any, context: SpecialistContext, *, observation: bool = False) -> bool:
+    if not str(value or "").strip():
+        return False
+    if _tone_text_has_banned_phrase(value):
+        return True
+    if observation and not _tone_observation_has_direct_address(value, context):
+        return True
+    return False
+
+
+def _collect_tone_flagged_fields(payload: Dict[str, Any], context: SpecialistContext) -> Dict[str, Any]:
+    flagged: Dict[str, Any] = {}
+    if _tone_field_should_rewrite(payload.get("summary"), context):
+        flagged["summary"] = payload.get("summary")
+
+    flagged_recommendations: List[dict] = []
+    for rec_index, recommendation in enumerate(payload.get("recommendations") or []):
+        text = recommendation.get("text") if isinstance(recommendation, dict) else None
+        if _tone_field_should_rewrite(text, context):
+            flagged_recommendations.append(
+                {
+                    "index": rec_index,
+                    "linked_element_id": recommendation.get("linked_element_id"),
+                    "start_sec": recommendation.get("start_sec"),
+                    "end_sec": recommendation.get("end_sec"),
+                    "text": text,
+                }
+            )
+    if flagged_recommendations:
+        flagged["recommendations"] = flagged_recommendations
+
+    flagged_scores: List[dict] = []
+    for score_index, score in enumerate(payload.get("element_scores") or []):
+        if not isinstance(score, dict):
+            continue
+        flagged_score: Dict[str, Any] = {
+            "index": score_index,
+            "element_id": score.get("element_id"),
+        }
+        observations = []
+        for observation_index, observation_text in enumerate(score.get("observations") or []):
+            if _tone_field_should_rewrite(observation_text, context, observation=True):
+                observations.append({"index": observation_index, "text": observation_text})
+        if observations:
+            flagged_score["observations"] = observations
+
+        evidence_segments = []
+        for segment_index, segment in enumerate(score.get("evidence_segments") or []):
+            if not isinstance(segment, dict):
+                continue
+            flagged_segment: Dict[str, Any] = {
+                "index": segment_index,
+                "start_sec": segment.get("start_sec"),
+                "end_sec": segment.get("end_sec"),
+            }
+            if _tone_field_should_rewrite(segment.get("summary"), context):
+                flagged_segment["summary"] = segment.get("summary")
+            if _tone_field_should_rewrite(segment.get("rationale"), context):
+                flagged_segment["rationale"] = segment.get("rationale")
+            if "summary" in flagged_segment or "rationale" in flagged_segment:
+                evidence_segments.append(flagged_segment)
+        if evidence_segments:
+            flagged_score["evidence_segments"] = evidence_segments
+
+        if "observations" in flagged_score or "evidence_segments" in flagged_score:
+            flagged_scores.append(flagged_score)
+    if flagged_scores:
+        flagged["element_scores"] = flagged_scores
+    return flagged
+
+
+def _merge_tone_rewrites(payload: Dict[str, Any], rewritten: Dict[str, Any]) -> int:
+    changed = 0
+    if isinstance(rewritten.get("summary"), str):
+        payload["summary"] = rewritten["summary"]
+        changed += 1
+
+    recommendations = payload.get("recommendations") or []
+    for item in rewritten.get("recommendations") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index"))
+        except Exception:
+            continue
+        text = str(item.get("text") or "").strip()
+        if 0 <= index < len(recommendations) and text:
+            recommendations[index]["text"] = text
+            changed += 1
+
+    element_scores = payload.get("element_scores") or []
+    for score_item in rewritten.get("element_scores") or []:
+        if not isinstance(score_item, dict):
+            continue
+        try:
+            score_index = int(score_item.get("index"))
+        except Exception:
+            continue
+        if not 0 <= score_index < len(element_scores):
+            continue
+        score = element_scores[score_index]
+
+        observations = score.get("observations") or []
+        for observation_item in score_item.get("observations") or []:
+            if not isinstance(observation_item, dict):
+                continue
+            try:
+                observation_index = int(observation_item.get("index"))
+            except Exception:
+                continue
+            text = str(observation_item.get("text") or "").strip()
+            if 0 <= observation_index < len(observations) and text:
+                observations[observation_index] = text
+                changed += 1
+        score["observations"] = observations
+
+        evidence_segments = score.get("evidence_segments") or []
+        for segment_item in score_item.get("evidence_segments") or []:
+            if not isinstance(segment_item, dict):
+                continue
+            try:
+                segment_index = int(segment_item.get("index"))
+            except Exception:
+                continue
+            if not 0 <= segment_index < len(evidence_segments):
+                continue
+            segment = evidence_segments[segment_index]
+            summary = str(segment_item.get("summary") or "").strip()
+            rationale = str(segment_item.get("rationale") or "").strip()
+            if summary:
+                segment["summary"] = summary
+                changed += 1
+            if rationale:
+                segment["rationale"] = rationale
+                changed += 1
+        score["evidence_segments"] = evidence_segments
+    return changed
+
+
+def _apply_tone_coach(payload: Dict[str, Any], context: SpecialistContext) -> SpecialistResult:
+    flagged = _collect_tone_flagged_fields(payload, context)
+    flagged_count = (
+        (1 if "summary" in flagged else 0)
+        + len(flagged.get("recommendations") or [])
+        + sum(
+            len(item.get("observations") or []) + len(item.get("evidence_segments") or [])
+            for item in (flagged.get("element_scores") or [])
+        )
+    )
+    if not flagged:
+        return SpecialistResult(
+            specialist_id="tone_coach",
+            notes=[],
+            payload_delta={"flagged_fields": 0, "rewritten_fields": 0},
+        )
+
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key or OpenAI is None:
+        logger.warning("Tone Coach Specialist skipped rewrite because OpenAI is not configured.")
+        return SpecialistResult(
+            specialist_id="tone_coach",
+            notes=["Flagged coach-voice issues, but rewrite was skipped because OpenAI is not configured."],
+            payload_delta={"flagged_fields": flagged_count, "rewritten_fields": 0},
+        )
+
+    system_prompt = (
+        "You are editing AI-generated teacher feedback to ensure it sounds like a "
+        "trusted coaching colleague, not a system report. Address the teacher as "
+        "you/your. Remove all system language (evidence, sampled frames, score of, "
+        "rubric element, the teacher X). Keep all timestamps and element IDs unchanged. "
+        "Keep the same meaning — only improve the voice. Return the same JSON structure."
+    )
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.responses.create(
+            model=TONE_COACH_MODEL,
+            input=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(flagged, ensure_ascii=False)},
+            ],
+            max_output_tokens=1800,
+        )
+        response_text = getattr(response, "output_text", None) or ""
+        rewritten = json.loads(response_text)
+        if not isinstance(rewritten, dict):
+            raise ValueError("Tone rewrite response was not a JSON object")
+        rewritten_count = _merge_tone_rewrites(payload, rewritten)
+    except Exception as exc:
+        logger.warning("Tone Coach Specialist rewrite failed; preserving original payload: %s", exc)
+        return SpecialistResult(
+            specialist_id="tone_coach",
+            notes=["Flagged coach-voice issues, but rewrite failed and the original payload was preserved."],
+            payload_delta={"flagged_fields": flagged_count, "rewritten_fields": 0},
+        )
+
+    return SpecialistResult(
+        specialist_id="tone_coach",
+        notes=[f"Rewrote {rewritten_count} text field(s) to preserve coach voice."] if rewritten_count else [],
+        payload_delta={"flagged_fields": flagged_count, "rewritten_fields": rewritten_count},
+    )
+
+
 def _apply_conference_prep_synthesis(
     payload: Dict[str, Any],
     *,
@@ -381,6 +639,7 @@ def orchestrate_specialists(
         "priority_coach": _apply_priority_coach,
         "longitudinal_pattern": _apply_longitudinal_pattern,
         "recommendation_sequence": _apply_recommendation_sequence,
+        "tone_coach": _apply_tone_coach,
     }
     for contract in sorted(get_default_specialist_contracts(), key=lambda item: item.execution_order):
         apply_fn = specialist_functions.get(contract.specialist_id)

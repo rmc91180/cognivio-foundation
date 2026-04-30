@@ -113,7 +113,7 @@ async def review_video_recognition(
     video = await video_repository.find_video_by_id(video_id)
     if not video:
         raise legacy.HTTPException(status_code=404, detail="Video not found")
-    await teacher_repository.get_teacher_or_404(video.get("teacher_id"), current_user)
+    teacher = await teacher_repository.get_teacher_or_404(video.get("teacher_id"), current_user)
     event = await recognition_repository.get_or_sync_video_recognition_event(video)
     decision = (payload.decision or "").strip().lower()
     reviewed_at = datetime.now(timezone.utc).isoformat()
@@ -173,6 +173,7 @@ async def review_video_recognition(
                 "reason": payload.reason,
             },
         )
+        await legacy._notify_teacher_recognition_awarded(video, teacher, current_user)
         return legacy.RecognitionReviewResponse(
             video_id=video_id,
             recognition_status="awarded",

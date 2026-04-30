@@ -1529,7 +1529,8 @@ const he = {
     viewRecording: "צפייה בהקלטה",
     observationSummary: "סיכום תצפית",
     summaryAssessment: "סיכום הערכה",
-    noAssessmentSummary: "עדיין אין סיכום הערכה.",
+    noAssessmentSummary:
+      "אחרי שהקלטת שיעור תיבחן, סיכום הליווי יופיע כאן. הוא יהיה ספציפי למה שקרה באותו שיעור.",
     coachingMoves: "צעדי אימון מומלצים",
     recommendations: "המלצות",
     noRecommendations: "עדיין אין המלצות.",
@@ -1624,7 +1625,8 @@ const he = {
     observationSummary: "סיכום תצפית הוראה",
     observationSummaryDescription: "סיכום תמציתי של תצפית ההוראה, המיושר למוקדי ההתבוננות שנבחרו.",
     scoreSummary: "ציון {{score}}/10",
-    noSummaryAvailable: "עדיין אין סיכום זמין.",
+    noSummaryAvailable:
+      "אחרי שהקלטת שיעור תיבחן, סיכום הליווי יופיע כאן. הוא יהיה ספציפי למה שקרה באותו שיעור.",
     adminFocus: "מוקדי ההתבוננות שנקבעו",
     recommendedMoments: "רגעי שיעור מומלצים",
     recommendedMomentsDescription:
@@ -1807,7 +1809,8 @@ const he = {
     observationHighlights: "נקודות בולטות מתצפיות אחרונות",
     watchClip: "צפייה בקטע",
     noRecentHighlights: "עדיין אין נקודות בולטות מסרטונים אחרונים.",
-    noSummaryData: "עדיין אין נתוני סיכום עבור המורה הזה.",
+    noSummaryData:
+      "אחרי שהקלטת שיעור תיבחן, סיכום הליווי יופיע כאן. הוא יהיה ספציפי למה שקרה באותו שיעור.",
     professionalInsights: "תובנות מקצועיות",
     professionalInsightsDescription: "רפלקציות של המורה והמנהל.",
     sharedRecordsTitle: "רשומות ליווי משותפות",

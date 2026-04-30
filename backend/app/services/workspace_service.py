@@ -216,9 +216,25 @@ def _goal_signal_priority(signal: Optional[str]) -> int:
     return order.get(signal or "", 0)
 
 
+def _build_teacher_review_prompt_body(observer_name: Optional[str], language: str = "en") -> str:
+    observer_label = str(observer_name or "").strip() or ("המנהל/ת שלך" if str(language or "").lower().startswith("he") else "your observer")
+    if str(language or "").lower().startswith("he"):
+        return (
+            f"השיעור האחרון שלך נצפה. לפני השיחה הבאה עם {observer_label}, "
+            "כדאי להקדיש כמה דקות לצפייה בהקלטה ולכתוב לעצמך: מה לדעתך עבד טוב? "
+            "מה היית מנסה אחרת? הרפלקציה שלך חשובה — היא מעצבת את השיחה."
+        )
+    return (
+        f"Your latest lesson has been reviewed. Before your next conversation with {observer_label}, "
+        "take a few minutes to watch the recording and note: What do you think went well? "
+        "What would you try differently? Your reflection matters — it shapes the conversation."
+    )
+
+
 def _build_memory_support_snapshot_from_inputs(
     *,
     teacher_name: Optional[str],
+    observer_name: Optional[str] = None,
     enriched_goals: List[dict],
     reflection_summary: Dict[str, Any],
     signal_summary: Dict[str, Any],
@@ -246,6 +262,7 @@ def _build_memory_support_snapshot_from_inputs(
     teacher_prompt_body = None
     admin_prompt_title = None
     admin_prompt_body = None
+    review_prompt_body = _build_teacher_review_prompt_body(observer_name, language)
 
     if primary_goal:
         goal_title = primary_goal.get("title")
@@ -254,70 +271,53 @@ def _build_memory_support_snapshot_from_inputs(
         if signal == "repeated_challenge":
             if is_hebrew():
                 teacher_prompt_title = f"פוקוס לשיעור הבא: {goal_title}"
-                teacher_prompt_body = (
-                    f'ראיות אחרונות מראות שהאתגר סביב "{goal_title}" עדיין חוזר. '
-                    "תעדו מה תנסו לעשות אחרת בשיעור הבא וקשרו זאת לראיה האחרונה."
-                )
+                teacher_prompt_body = review_prompt_body
                 admin_prompt_title = f"אתגר חוזר: {goal_title}"
                 admin_prompt_body = (
-                    f'היעד "{goal_title}" עדיין מופיע כאתגר חוזר. '
-                    "עדיף למקד את שיחת הליווי הקרובה ביעד הזה ולבדוק תגובת מורה."
+                    f"השיעור האחרון של {teacher_name or 'המורה'} מוכן. צפיתם דרך הפוקוס של {goal_title}. "
+                    "כדאי לצפות ולכתוב מה תרצו להעלות בשיחה."
                 )
             else:
                 teacher_prompt_title = f"Next class focus: {goal_title}"
-                teacher_prompt_body = (
-                    f'Recent evidence shows that "{goal_title}" is still repeating as a challenge. '
-                    "Log what you will try next and connect it to the latest evidence."
-                )
+                teacher_prompt_body = review_prompt_body
                 admin_prompt_title = f"Recurring challenge: {goal_title}"
                 admin_prompt_body = (
-                    f'"{goal_title}" is still showing up as a repeated challenge. '
-                    "Center the next coaching move on this goal and confirm teacher follow-through."
+                    f"{teacher_name or 'This teacher'}'s latest lesson is ready. You were watching for {goal_title}. "
+                    "Take a look and share what you noticed."
                 )
         elif signal == "reinforcing_progress":
             if is_hebrew():
                 teacher_prompt_title = f"שמרו על התנופה: {goal_title}"
-                teacher_prompt_body = (
-                    f'נראה שהעבודה על "{goal_title}" מתחילה להתחזק. '
-                    "תעדו מה עבד כדי שהמנהל יוכל לחזק את זה בשיחה הבאה."
-                )
+                teacher_prompt_body = review_prompt_body
                 admin_prompt_title = f"מומנטום חיובי: {goal_title}"
                 admin_prompt_body = (
-                    f'היעד "{goal_title}" מקבל חיזוק מראיות אחרונות. ' "שווה לחזק את המהלך שעבד ולשמר אותו."
+                    f"השיעור האחרון של {teacher_name or 'המורה'} מוכן. צפיתם דרך הפוקוס של {goal_title}. "
+                    "כדאי לצפות ולכתוב מה תרצו להעלות בשיחה."
                 )
             else:
                 teacher_prompt_title = f"Keep building: {goal_title}"
-                teacher_prompt_body = (
-                    f'Recent evidence suggests progress on "{goal_title}". '
-                    "Capture what worked so your admin can reinforce it in the next conference."
-                )
+                teacher_prompt_body = review_prompt_body
                 admin_prompt_title = f"Positive momentum: {goal_title}"
                 admin_prompt_body = (
-                    f'Recent evidence is reinforcing progress on "{goal_title}". '
-                    "Use the next conference to reinforce what is starting to work."
+                    f"{teacher_name or 'This teacher'}'s latest lesson is ready. You were watching for {goal_title}. "
+                    "Take a look and share what you noticed."
                 )
         else:
             if is_hebrew():
                 teacher_prompt_title = f"צרו ראיה חדשה עבור: {goal_title}"
-                teacher_prompt_body = (
-                    f'היעד "{goal_title}" עדיין פעיל, אבל אין מספיק ראיות חדשות. '
-                    "אחרי השיעור הבא, הוסיפו רפלקציה קצרה או העלו שיעור חדש."
-                )
+                teacher_prompt_body = review_prompt_body
                 admin_prompt_title = f"נדרשת ראיה חדשה: {goal_title}"
                 admin_prompt_body = (
-                    f'היעד "{goal_title}" עדיין פעיל, אבל חסרות ראיות חדשות. '
-                    "כדאי לוודא שיש שיעור או תגובת מורה חדשים לפני שינוי הכיוון."
+                    f"השיעור האחרון של {teacher_name or 'המורה'} מוכן. צפיתם דרך הפוקוס של {goal_title}. "
+                    "כדאי לצפות ולכתוב מה תרצו להעלות בשיחה."
                 )
             else:
                 teacher_prompt_title = f"Create fresh evidence for: {goal_title}"
-                teacher_prompt_body = (
-                    f'"{goal_title}" is still active, but there is not enough fresh evidence yet. '
-                    "After the next class, add a short reflection or link new lesson evidence."
-                )
+                teacher_prompt_body = review_prompt_body
                 admin_prompt_title = f"Fresh evidence needed: {goal_title}"
                 admin_prompt_body = (
-                    f'"{goal_title}" is still active, but the recent evidence base is thin. '
-                    "Look for a new lesson or teacher response before changing the coaching plan."
+                    f"{teacher_name or 'This teacher'}'s latest lesson is ready. You were watching for {goal_title}. "
+                    "Take a look and share what you noticed."
                 )
         if progress_summary:
             continuity_lines.append(progress_summary)
@@ -408,8 +408,14 @@ async def build_teacher_memory_support(
         evidence_catalog,
     )
     signal_summary = await build_feedback_signal_summary(current_user, teacher_id=teacher_id)
+    observer_name = (
+        legacy._clean_optional_string(teacher.get("manager_name"))
+        or legacy._clean_optional_string(current_user.get("name"))
+        or legacy._clean_optional_string(current_user.get("email"))
+    )
     return _build_memory_support_snapshot_from_inputs(
         teacher_name=teacher.get("name"),
+        observer_name=observer_name,
         enriched_goals=enriched_goals,
         reflection_summary={
             "self_reflection": reflection.get("self_reflection"),
