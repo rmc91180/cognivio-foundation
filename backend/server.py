@@ -3294,6 +3294,248 @@ async def _notify_teacher_recognition_awarded(video: dict, teacher: dict, curren
         logger.warning("Unable to send recognition celebration for video %s: %s", video.get("id"), exc)
 
 
+async def _find_teacher_user_for_notifications(teacher: dict) -> Optional[dict]:
+    teacher_email = str((teacher or {}).get("email") or "").strip().lower()
+    if not teacher_email or not hasattr(db, "users"):
+        return None
+    return await db.users.find_one({"email": {"$regex": f"^{re.escape(teacher_email)}$", "$options": "i"}}, {"_id": 0})
+
+
+async def _find_admin_user_for_teacher(teacher: dict, fallback_user_id: Optional[str] = None) -> Optional[dict]:
+    if not hasattr(db, "users"):
+        return None
+    admin_id = _clean_optional_string((teacher or {}).get("created_by")) or _clean_optional_string(fallback_user_id)
+    if admin_id:
+        admin = await db.users.find_one({"id": admin_id}, {"_id": 0})
+        if admin:
+            return admin
+    manager_email = _clean_optional_string((teacher or {}).get("manager_email"))
+    if manager_email:
+        return await db.users.find_one({"email": {"$regex": f"^{re.escape(manager_email)}$", "$options": "i"}}, {"_id": 0})
+    return None
+
+
+async def _render_recognition_badge_asset(
+    *,
+    teacher: dict,
+    video: dict,
+    badge_type: str,
+    language: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    relative_path = f"share-assets/recognition-badges/{teacher.get('id')}/{video.get('id')}_{uuid.uuid4().hex[:8]}.png"
+    full_path = UPLOAD_DIR / relative_path
+    badge_label = "שיעור 5 כוכבים" if _is_hebrew_language(language) else "5-Star Lesson"
+    await asyncio.to_thread(
+        render_email_signature_badge,
+        str(full_path),
+        teacher_name=teacher.get("name") or "Teacher",
+        badge_label=badge_label,
+        featured_label="Ready for exemplar library" if not _is_hebrew_language(language) else "מוכן לספריית דוגמאות",
+        language=language,
+    )
+    file_url = _resolve_public_asset_url(relative_path)
+    stored_path = relative_path
+    try:
+        stored_path, uploaded_url = _upload_path_to_s3(
+            full_path,
+            "share-assets",
+            f"{video.get('id')}_{badge_type}_badge.png",
+            "image/png",
+        )
+        file_url = uploaded_url or file_url
+    except Exception as exc:
+        logger.warning("Recognition badge upload failed for %s: %s", video.get("id"), exc)
+    return stored_path, file_url
+
+
+def _build_recognition_earned_email(
+    *,
+    school_name: str,
+    element_name: str,
+    badge_url: Optional[str],
+    badge_link: Optional[str],
+) -> Tuple[str, str, str]:
+    subject = f"You've been recognized at {school_name}"
+    text = (
+        f"Your recent lesson demonstrated exceptional {element_name}. "
+        "Your administrator has recognized this achievement."
+    )
+    safe_text = html.escape(text)
+    image_html = (
+        f'<p><img src="{html.escape(badge_url)}" alt="Recognition badge" style="max-width:420px;width:100%;height:auto;border:0;" /></p>'
+        if badge_url
+        else ""
+    )
+    link_html = (
+        f'<p><a href="{html.escape(badge_link)}" style="color:#2563eb;">View your badge</a></p>'
+        if badge_link
+        else ""
+    )
+    html_body = f"<div style=\"font-family:Arial,sans-serif;color:#0f172a;\"><p>{safe_text}</p>{image_html}{link_html}</div>"
+    return subject, text, html_body
+
+
+async def _ensure_recognition_badge_for_eligible_assessment(
+    *,
+    video: dict,
+    teacher: dict,
+    assessment: dict,
+    eligibility: dict,
+    actor_user_id: Optional[str],
+) -> dict:
+    existing_badge = await db.recognition_badges.find_one(
+        {"video_id": video.get("id"), "badge_type": eligibility.get("badge_type") or FIVE_STAR_BADGE},
+        {"_id": 0},
+    )
+    if existing_badge:
+        return existing_badge
+
+    language = _normalize_app_language(video.get("analysis_language") or assessment.get("analysis_language"), default="en")
+    element_name, _ = _recognition_highlight_from_assessment(assessment, language=language)
+    badge_path, badge_url = await _render_recognition_badge_asset(
+        teacher=teacher,
+        video=video,
+        badge_type=eligibility.get("badge_type") or FIVE_STAR_BADGE,
+        language=language,
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    lesson_url = f"{FRONTEND_URL.rstrip('/')}/videos/{video.get('id')}" if FRONTEND_URL and video.get("id") else None
+    badge_doc = {
+        "id": str(uuid.uuid4()),
+        "teacher_id": teacher.get("id"),
+        "video_id": video.get("id"),
+        "assessment_id": assessment.get("id"),
+        "badge_type": eligibility.get("badge_type") or FIVE_STAR_BADGE,
+        "recognition_type": eligibility.get("badge_type") or FIVE_STAR_BADGE,
+        "status": "awarded",
+        "score": (eligibility.get("criteria_snapshot") or {}).get("overall_score") or assessment.get("overall_score"),
+        "badge_path": badge_path,
+        "badge_url": badge_url,
+        "share_url": lesson_url or badge_url,
+        "lesson_url": lesson_url,
+        "awarded_for": f"Exceptional {element_name}",
+        "awarded_at": now,
+        "awarded_by": actor_user_id or "recognition_engine",
+        "criteria_snapshot": eligibility.get("criteria_snapshot") or {},
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.recognition_badges.insert_one(badge_doc)
+    return badge_doc
+
+
+async def _handle_assessment_recognition_completion(
+    *,
+    video: dict,
+    assessment: dict,
+    recognition_event: dict,
+    actor_user: Optional[dict],
+) -> None:
+    eligibility = (recognition_event or {}).get("eligibility") or {}
+    if not eligibility.get("is_eligible"):
+        return
+
+    try:
+        teacher = await db.teachers.find_one({"id": video.get("teacher_id")}, {"_id": 0})
+        if not teacher:
+            return
+        teacher = await _enrich_teacher_with_tenancy_context(teacher)
+        actor_user = actor_user or {"id": video.get("uploaded_by") or teacher.get("created_by")}
+        workspace_id = _resolve_video_workspace_id(video, teacher, actor_user)
+        teacher_user = await _find_teacher_user_for_notifications(teacher)
+        admin_user = await _find_admin_user_for_teacher(teacher, fallback_user_id=video.get("uploaded_by"))
+        badge = await _ensure_recognition_badge_for_eligible_assessment(
+            video=video,
+            teacher=teacher,
+            assessment=assessment,
+            eligibility=eligibility,
+            actor_user_id=(admin_user or actor_user or {}).get("id"),
+        )
+        await db.lesson_recognition_events.update_one(
+            {"id": recognition_event.get("id")},
+            {
+                "$set": {
+                    "recognition_status": "awarded",
+                    "badge_id": badge.get("id"),
+                    "badge_type": badge.get("badge_type"),
+                    "reviewed_at": badge.get("awarded_at"),
+                    "reviewed_by": (admin_user or actor_user or {}).get("id") or "recognition_engine",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            },
+        )
+
+        element_name, _ = _recognition_highlight_from_assessment(assessment, language=assessment.get("analysis_language") or "en")
+        score = badge.get("score")
+        badge_url = badge.get("badge_url")
+        payload = {
+            "recognition_type": badge.get("recognition_type") or badge.get("badge_type"),
+            "score": score,
+            "assessment_id": assessment.get("id"),
+            "video_id": video.get("id"),
+            "badge_id": badge.get("id"),
+            "badge_url": badge_url,
+        }
+        teacher_cta = "/my-badges"
+        should_send_teacher_email = True
+        if teacher_user and teacher_user.get("id"):
+            existing = await db.notifications.find_one(
+                {
+                    "recipient_user_id": teacher_user["id"],
+                    "type": "recognition_earned",
+                    "payload.assessment_id": assessment.get("id"),
+                },
+                {"_id": 0, "id": 1},
+            )
+            should_send_teacher_email = not bool(existing)
+            if not existing:
+                await _create_notification(
+                    recipient_user=teacher_user,
+                    notification_type="recognition_earned",
+                    title="Recognition earned",
+                    message=f"Your recent lesson demonstrated exceptional {element_name}.",
+                    payload=payload,
+                    teacher_id=teacher.get("id"),
+                    workspace_id=workspace_id,
+                    cta_url=teacher_cta,
+                    channel="in_app",
+                )
+        teacher_email = str(teacher.get("email") or (teacher_user or {}).get("email") or "").strip()
+        if should_send_teacher_email and teacher_email:
+            school_name = teacher.get("school_name") or teacher.get("organization_name") or "Cognivio"
+            subject, text, html_body = _build_recognition_earned_email(
+                school_name=school_name,
+                element_name=element_name,
+                badge_url=badge_url,
+                badge_link=(f"{FRONTEND_URL.rstrip('/')}/my-badges" if FRONTEND_URL else badge_url),
+            )
+            _send_platform_email(subject, teacher_email, text, html_body=html_body)
+
+        if admin_user and admin_user.get("id"):
+            existing_admin_notice = await db.notifications.find_one(
+                {
+                    "recipient_user_id": admin_user["id"],
+                    "type": "recognition_exemplar_eligible",
+                    "payload.assessment_id": assessment.get("id"),
+                },
+                {"_id": 0, "id": 1},
+            )
+            if not existing_admin_notice:
+                await _create_notification(
+                    recipient_user=admin_user,
+                    notification_type="recognition_exemplar_eligible",
+                    title=f"{teacher.get('name') or 'A teacher'} is eligible for the exemplar library",
+                    message="A newly reviewed lesson earned recognition and is ready for exemplar follow-up.",
+                    payload={**payload, "teacher_id": teacher.get("id"), "teacher_name": teacher.get("name")},
+                    teacher_id=teacher.get("id"),
+                    workspace_id=workspace_id,
+                    cta_url="/recognition-review",
+                    channel="in_app",
+                )
+    except Exception as exc:
+        logger.warning("Recognition notification flow failed for video %s: %s", video.get("id"), exc)
+
+
 def _build_teacher_recognition_summary(teacher_id: str, badges: List[dict]) -> "TeacherRecognitionSummaryResponse":
     awarded_badges = [badge for badge in badges if badge.get("status") == "awarded"]
     published_exemplars = [
@@ -3303,15 +3545,7 @@ def _build_teacher_recognition_summary(teacher_id: str, badges: List[dict]) -> "
     return TeacherRecognitionSummaryResponse(
         teacher_id=teacher_id,
         badges=[
-            RecognitionBadgeResponse(
-                id=badge["id"],
-                badge_type=badge.get("badge_type") or FIVE_STAR_BADGE,
-                status=badge.get("status") or "awarded",
-                video_id=badge.get("video_id"),
-                awarded_at=badge.get("awarded_at"),
-                awarded_by=badge.get("awarded_by"),
-                criteria_snapshot=badge.get("criteria_snapshot") or {},
-            )
+            _build_recognition_badge_response(badge)
             for badge in badges
         ],
         summary={
@@ -3321,6 +3555,32 @@ def _build_teacher_recognition_summary(teacher_id: str, badges: List[dict]) -> "
             "published_exemplars": len(published_exemplars),
             "active_streak": calculate_active_streak(awarded_badges),
         },
+    )
+
+
+def _build_recognition_badge_response(badge: dict) -> "RecognitionBadgeResponse":
+    video_id = badge.get("video_id")
+    lesson_url = badge.get("lesson_url")
+    if not lesson_url and video_id and FRONTEND_URL:
+        lesson_url = f"{FRONTEND_URL.rstrip('/')}/videos/{video_id}"
+    share_url = badge.get("share_url") or badge.get("share_card_url") or badge.get("badge_url") or lesson_url
+    return RecognitionBadgeResponse(
+        id=badge["id"],
+        badge_type=badge.get("badge_type") or FIVE_STAR_BADGE,
+        status=badge.get("status") or "awarded",
+        video_id=video_id,
+        teacher_id=badge.get("teacher_id"),
+        assessment_id=badge.get("assessment_id"),
+        recognition_type=badge.get("recognition_type") or badge.get("badge_type") or FIVE_STAR_BADGE,
+        score=badge.get("score"),
+        badge_url=badge.get("badge_url") or badge.get("file_url"),
+        share_url=share_url,
+        share_card_url=badge.get("share_card_url"),
+        lesson_url=lesson_url,
+        awarded_for=badge.get("awarded_for"),
+        awarded_at=badge.get("awarded_at"),
+        awarded_by=badge.get("awarded_by"),
+        criteria_snapshot=badge.get("criteria_snapshot") or {},
     )
 
 
@@ -6358,6 +6618,15 @@ class RecognitionBadgeResponse(BaseModel):
     badge_type: str
     status: str
     video_id: str
+    teacher_id: Optional[str] = None
+    assessment_id: Optional[str] = None
+    recognition_type: Optional[str] = None
+    score: Optional[float] = None
+    badge_url: Optional[str] = None
+    share_url: Optional[str] = None
+    share_card_url: Optional[str] = None
+    lesson_url: Optional[str] = None
+    awarded_for: Optional[str] = None
     awarded_at: Optional[str] = None
     awarded_by: Optional[str] = None
     criteria_snapshot: Dict[str, Any] = {}
@@ -6878,14 +7147,25 @@ class TeacherAdaptiveSupportResponse(BaseModel):
 
 class NotificationRecord(BaseModel):
     id: str
+    workspace_id: Optional[str] = None
+    recipient_user_id: Optional[str] = None
+    type: Optional[str] = None
+    payload: Dict[str, Any] = {}
+    read: bool = False
     teacher_id: Optional[str] = None
-    notification_type: str
-    title: str
-    message: str
+    notification_type: Optional[str] = None
+    title: Optional[str] = None
+    message: Optional[str] = None
+    cta_url: Optional[str] = None
     channel: str = "email"
     status: str = "queued"
     created_at: str
     read_at: Optional[str] = None
+
+
+class NotificationListResponse(BaseModel):
+    items: List[NotificationRecord]
+    unread_count: int = 0
 
 
 class GradebookIntegrationCreate(BaseModel):
@@ -10217,6 +10497,96 @@ async def get_recognition_review_queue(current_user: dict = Depends(get_current_
             )
         )
     return RecognitionReviewQueueResponse(items=items)
+
+
+async def _get_current_teacher_for_recognition(current_user: dict) -> dict:
+    if _get_user_tenant_role(current_user) != "teacher" and _get_user_role(current_user) != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher access required")
+    teacher_id = current_user.get("teacher_id")
+    if teacher_id:
+        return await _get_teacher_or_404(teacher_id, current_user)
+    teacher_ids = await _list_teacher_ids_for_user(current_user)
+    if not teacher_ids:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
+    return await _get_teacher_or_404(teacher_ids[0], current_user)
+
+
+@api_router.get("/recognition/my-badges", response_model=TeacherRecognitionSummaryResponse)
+async def get_my_recognition_badges(current_user: dict = Depends(get_current_user)):
+    teacher = await _get_current_teacher_for_recognition(current_user)
+    badges = await db.recognition_badges.find(
+        {"teacher_id": teacher["id"], "status": "awarded"},
+        {"_id": 0},
+    ).sort("awarded_at", -1).to_list(200)
+    return _build_teacher_recognition_summary(teacher["id"], badges)
+
+
+@api_router.get("/recognition/my-badges/{badge_id}/share-card")
+async def get_my_recognition_badge_share_card(
+    badge_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_current_teacher_for_recognition(current_user)
+    badge = await db.recognition_badges.find_one(
+        {"id": badge_id, "teacher_id": teacher["id"], "status": "awarded"},
+        {"_id": 0},
+    )
+    if not badge:
+        raise HTTPException(status_code=404, detail="Badge not found")
+    if badge.get("share_card_url"):
+        return {
+            "badge": _build_recognition_badge_response(badge),
+            "share_card_url": badge.get("share_card_url"),
+            "share_url": badge.get("share_url") or badge.get("share_card_url"),
+        }
+
+    video = await db.videos.find_one({"id": badge.get("video_id")}, {"_id": 0}) or {}
+    assessment = await _get_assessment_for_video(badge.get("video_id")) if badge.get("video_id") else None
+    language = _normalize_app_language(video.get("analysis_language") or (assessment or {}).get("analysis_language"), default="en")
+    relative_path = f"share-assets/social/{teacher['id']}/{badge_id}_{uuid.uuid4().hex[:8]}.png"
+    full_path = UPLOAD_DIR / relative_path
+    await asyncio.to_thread(
+        render_social_share_card,
+        str(full_path),
+        teacher_name=teacher.get("name") or current_user.get("name") or "Teacher",
+        badge_label="שיעור 5 כוכבים" if _is_hebrew_language(language) else "5-Star Lesson",
+        lesson_title=video.get("filename") or ("שיעור שזכה להוקרה" if _is_hebrew_language(language) else "Recognized Lesson"),
+        summary=(assessment or {}).get("summary") or badge.get("awarded_for") or "Recognized classroom practice.",
+        subject=video.get("subject") or teacher.get("subject"),
+        grade_level=teacher.get("grade_level"),
+        language=language,
+    )
+    share_card_url = _resolve_public_asset_url(relative_path)
+    stored_path = relative_path
+    try:
+        stored_path, uploaded_url = _upload_path_to_s3(
+            full_path,
+            "share-assets",
+            f"{badge_id}_social_card.png",
+            "image/png",
+        )
+        share_card_url = uploaded_url or share_card_url
+    except Exception as exc:
+        logger.warning("Recognition share card upload failed for badge %s: %s", badge_id, exc)
+
+    share_url = share_card_url or badge.get("lesson_url") or badge.get("badge_url")
+    await db.recognition_badges.update_one(
+        {"id": badge_id},
+        {
+            "$set": {
+                "share_card_path": stored_path,
+                "share_card_url": share_card_url,
+                "share_url": share_url,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        },
+    )
+    updated_badge = {**badge, "share_card_path": stored_path, "share_card_url": share_card_url, "share_url": share_url}
+    return {
+        "badge": _build_recognition_badge_response(updated_badge),
+        "share_card_url": share_card_url,
+        "share_url": share_url,
+    }
 
 
 @api_router.post("/videos/{video_id}/recognition/review", response_model=RecognitionReviewResponse)
@@ -16180,19 +16550,37 @@ async def send_recording_compliance_reminder(
 
 
 # ==================== NOTIFICATION ENDPOINTS ====================
-@api_router.get("/notifications", response_model=List[NotificationRecord])
+@api_router.get("/notifications", response_model=NotificationListResponse)
 async def list_notifications(
     unread_only: Optional[bool] = None,
+    limit: int = 20,
     current_user: dict = Depends(get_current_user),
 ):
-    query: Dict[str, Any] = {"user_id": current_user["id"]}
+    query: Dict[str, Any] = {
+        "$or": [
+            {"recipient_user_id": current_user["id"]},
+            {"user_id": current_user["id"]},
+        ]
+    }
     if unread_only:
-        query["read_at"] = None
+        query["$and"] = [{"$or": [{"read": False}, {"read": {"$exists": False}}]}, {"read_at": None}]
+    limit = max(1, min(int(limit or 20), 50))
+    unread_query: Dict[str, Any] = {
+        "$or": [
+            {"recipient_user_id": current_user["id"]},
+            {"user_id": current_user["id"]},
+        ],
+        "$and": [{"$or": [{"read": False}, {"read": {"$exists": False}}]}, {"read_at": None}],
+    }
+    unread_count = await db.notifications.count_documents(unread_query)
     notifications = await db.notifications.find(
         query,
         {"_id": 0, "user_id": 0},
-    ).sort("created_at", -1).to_list(200)
-    return [NotificationRecord(**n) for n in notifications]
+    ).sort("created_at", -1).to_list(limit)
+    return NotificationListResponse(
+        items=[NotificationRecord(**_sanitize_notification_doc(n)) for n in notifications],
+        unread_count=unread_count,
+    )
 
 
 @api_router.post("/notifications/{notification_id}/read", response_model=NotificationRecord)
@@ -16200,15 +16588,38 @@ async def mark_notification_read(
     notification_id: str,
     current_user: dict = Depends(get_current_user),
 ):
+    read_at = datetime.now(timezone.utc).isoformat()
     result = await db.notifications.find_one_and_update(
-        {"id": notification_id, "user_id": current_user["id"]},
-        {"$set": {"read_at": datetime.now(timezone.utc).isoformat()}},
+        {
+            "id": notification_id,
+            "$or": [
+                {"recipient_user_id": current_user["id"]},
+                {"user_id": current_user["id"]},
+            ],
+        },
+        {"$set": {"read": True, "read_at": read_at}},
         return_document=True,
         projection={"_id": 0, "user_id": 0},
     )
     if not result:
         raise HTTPException(status_code=404, detail="Notification not found")
-    return NotificationRecord(**result)
+    return NotificationRecord(**_sanitize_notification_doc(result))
+
+
+@api_router.post("/notifications/read-all")
+async def mark_all_notifications_read(current_user: dict = Depends(get_current_user)):
+    read_at = datetime.now(timezone.utc).isoformat()
+    result = await db.notifications.update_many(
+        {
+            "$or": [
+                {"recipient_user_id": current_user["id"]},
+                {"user_id": current_user["id"]},
+            ],
+            "$and": [{"$or": [{"read": False}, {"read": {"$exists": False}}]}, {"read_at": None}],
+        },
+        {"$set": {"read": True, "read_at": read_at}},
+    )
+    return {"updated_count": result.modified_count, "read_at": read_at}
 
 
 # ==================== INTEGRATIONS ====================
@@ -18462,21 +18873,67 @@ async def _enqueue_notification(
     message: str,
     channel: str = "email",
 ):
-    doc = {
-        "id": str(uuid.uuid4()),
-        "teacher_id": teacher_id,
-        "notification_type": notification_type,
-        "title": title,
-        "message": message,
-        "channel": channel,
-        "status": "queued",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "read_at": None,
-        "user_id": current_user["id"],
-    }
-    await db.notifications.insert_one(doc)
+    doc = await _create_notification(
+        recipient_user=current_user,
+        notification_type=notification_type,
+        title=title,
+        message=message,
+        payload={},
+        teacher_id=teacher_id,
+        workspace_id=current_user.get("workspace_id") or current_user.get("organization_id") or current_user.get("id"),
+        channel=channel,
+    )
     # Placeholder for email integration
     logger.info(f"[EmailQueue] {title} -> {current_user.get('email')}")
+    return doc
+
+
+async def _create_notification(
+    *,
+    recipient_user: dict,
+    notification_type: str,
+    title: str,
+    message: str,
+    payload: Optional[Dict[str, Any]] = None,
+    teacher_id: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    cta_url: Optional[str] = None,
+    channel: str = "in_app",
+) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    recipient_user_id = recipient_user.get("id")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "workspace_id": workspace_id,
+        "recipient_user_id": recipient_user_id,
+        "user_id": recipient_user_id,
+        "type": notification_type,
+        "notification_type": notification_type,
+        "payload": payload or {},
+        "teacher_id": teacher_id,
+        "title": title,
+        "message": message,
+        "cta_url": cta_url,
+        "channel": channel,
+        "status": "queued",
+        "read": False,
+        "read_at": None,
+        "created_at": now,
+    }
+    await db.notifications.insert_one(doc)
+    return doc
+
+
+def _sanitize_notification_doc(doc: dict) -> dict:
+    clean = {k: v for k, v in (doc or {}).items() if k not in {"_id", "user_id"}}
+    notification_type = clean.get("type") or clean.get("notification_type") or "notification"
+    clean["type"] = notification_type
+    clean["notification_type"] = notification_type
+    clean["payload"] = clean.get("payload") or {}
+    clean["read"] = bool(clean.get("read") or clean.get("read_at"))
+    clean.setdefault("channel", "in_app")
+    clean.setdefault("status", "queued")
+    return clean
 
 
 async def _persist_assessment_evidence_from_scores(
@@ -18846,7 +19303,13 @@ async def analyze_video(
             )
         updated_video = await db.videos.find_one({"id": video_id}, {"_id": 0})
         if updated_video:
-            await _sync_video_recognition_state(updated_video)
+            recognition_event = await _sync_video_recognition_state(updated_video)
+            await _handle_assessment_recognition_completion(
+                video=updated_video,
+                assessment=assessment_doc,
+                recognition_event=recognition_event,
+                actor_user=analysis_user or {"id": user_id},
+            )
 
         duration_seconds = time.perf_counter() - analysis_started_perf
         record_analysis_run(

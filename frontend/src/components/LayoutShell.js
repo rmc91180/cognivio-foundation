@@ -18,6 +18,7 @@ import { useTranslation } from "react-i18next";
 import { useAuth } from "@/hooks/useAuth";
 import { BrandMark } from "@/components/BrandMark";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { NotificationBell } from "@/components/NotificationBell";
 import { OfflineBanner } from "@/components/OfflineBanner";
 import { Button } from "@/components/ui";
 import { masterAdminApi } from "@/lib/api";
@@ -62,7 +63,7 @@ const ROLE_NAV_ITEMS = {
     { to: "/my-workspace", icon: LayoutDashboard, label: "My Workspace", end: true },
     { to: "/videos", icon: PlayCircle, label: "My Lessons" },
     { to: "/my-workspace/coaching", icon: MessageSquareText, label: "My Coaching" },
-    { to: "/all-star-library", icon: Trophy, label: "My Recognition" },
+    { to: "/my-badges", icon: Trophy, label: "My Recognition" },
     { to: "/my-workspace/settings", icon: Layers, label: "Settings" },
   ],
 };
@@ -259,6 +260,7 @@ export function LayoutShell({ children }) {
               >
                 {t("nav.logout")}
               </button>
+              <NotificationBell />
             </div>
           ) : (
             <span>{t("nav.notAuthenticated")}</span>

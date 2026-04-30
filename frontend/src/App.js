@@ -38,6 +38,7 @@ import { RecognitionReviewPage } from "@/pages/RecognitionReviewPage";
 import { ExemplarLibraryPage } from "@/pages/ExemplarLibraryPage";
 import { OpsMetricsPage } from "@/pages/OpsMetricsPage";
 import { TeacherWorkspacePage } from "@/pages/TeacherWorkspacePage";
+import { TeacherBadgesPage } from "@/pages/TeacherBadgesPage";
 import { ActionPlanRecordPage } from "@/pages/ActionPlanRecordPage";
 import { ReflectionRecordPage } from "@/pages/ReflectionRecordPage";
 import { getHomeRoute } from "@/lib/roleRouter";
@@ -274,6 +275,14 @@ function App() {
           element={
             <ProtectedRoute allowedTenantRoles={["teacher"]}>
               <TeacherWorkspacePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/my-badges"
+          element={
+            <ProtectedRoute allowedTenantRoles={["teacher"]}>
+              <TeacherBadgesPage />
             </ProtectedRoute>
           }
         />

@@ -56,7 +56,7 @@ const COPY = {
     cancel: "Cancel",
     recognitionTitle: "Your recognition",
     recognitionDescription: "Recent badges and moments worth celebrating.",
-    recognitionEmpty: "Recognition you earn will appear here.",
+    recognitionEmpty: "Complete more observations to earn recognition",
     awardedFor: "Awarded for",
     earned: "Earned",
     share: "Share",
@@ -126,7 +126,7 @@ const COPY = {
     cancel: "ביטול",
     recognitionTitle: "ההוקרה שלך",
     recognitionDescription: "תגים ורגעים אחרונים שכדאי לחגוג.",
-    recognitionEmpty: "הוקרות שתקבל/י יופיעו כאן.",
+    recognitionEmpty: "השלימו עוד תצפיות כדי לקבל הוקרה.",
     awardedFor: "הוענק עבור",
     earned: "התקבל בתאריך",
     share: "שיתוף",
@@ -355,9 +355,11 @@ function normalizeActiveGoals(payload, latestLesson, copy) {
 function normalizeBadge(item, index, copy) {
   const assetUrl =
     item?.icon_url ||
+    item?.badge_url ||
     item?.share_asset_url ||
     item?.asset_url ||
     item?.social_card_url ||
+    item?.share_card_url ||
     item?.share_asset?.file_url ||
     item?.latest_share_asset?.file_url ||
     "";
