@@ -19,6 +19,7 @@ const GROUPS = [
     label: "Systems",
     items: [
       { to: "/master-admin/storage", key: "storage", caption: "R2 usage, cleanup, and retention." },
+      { to: "/master-admin/cleanup", key: "cleanup", caption: "Unused profiles, duplicates, and destructive cleanup." },
       { to: "/master-admin/dependencies", key: "dependencies", caption: "Atlas, R2, email, AI, and hosting." },
       { to: "/master-admin/ai-quality", key: "aiQuality", caption: "Overrides, feedback, and specialist traces." },
       { to: "/master-admin/support", key: "support", caption: "Support workflow and diagnostic export." },
@@ -61,7 +62,7 @@ export function MasterAdminSectionNav() {
                 >
                   {({ isActive }) => (
                     <>
-                      <div className="text-sm font-semibold">{t(`masterAdmin.nav.${item.key}`)}</div>
+                      <div className="text-sm font-semibold">{t(`masterAdmin.nav.${item.key}`, { defaultValue: item.key })}</div>
                       <div className={["mt-1 text-xs leading-5", isActive ? "text-slate-300" : "text-slate-500"].join(" ")}>
                         {item.caption}
                       </div>
