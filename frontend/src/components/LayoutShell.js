@@ -11,6 +11,7 @@ import {
   MessageSquareText,
   PlayCircle,
   ShieldCheck,
+  Trash2,
   Trophy,
   Users,
 } from "lucide-react";
@@ -36,6 +37,7 @@ const SUPER_ADMIN_NAV_ITEMS = [
   { to: "/master-admin/organizations", icon: Database, labelKey: "organizationDirectory" },
   { to: "/master-admin/workspaces", icon: LayoutDashboard, labelKey: "workspaces" },
   { to: "/master-admin/videos", icon: PlayCircle, labelKey: "videos" },
+  { to: "/master-admin/cleanup", icon: Trash2, labelKey: "dataCleanup" },
   { to: "/master-admin/incidents", icon: History, labelKey: "incidents" },
   { to: "/master-admin/dependencies", icon: Layers, labelKey: "dependencies" },
 ];
@@ -119,7 +121,7 @@ export function LayoutShell({ children }) {
                   {t("nav.platformBackend")}
                 </div>
                 {SUPER_ADMIN_NAV_ITEMS.map((item) => (
-                  <NavItem key={item.to} to={item.to} icon={item.icon} label={t(`nav.${item.labelKey}`)} />
+                  <NavItem key={item.to} to={item.to} icon={item.icon} label={t(`nav.${item.labelKey}`, { defaultValue: item.labelKey })} />
                 ))}
               </div>
             ) : null}
