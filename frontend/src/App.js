@@ -17,6 +17,7 @@ import { MasterAdminWorkspaceDetailPage } from "@/pages/MasterAdminWorkspaceDeta
 import { MasterAdminVideosPage } from "@/pages/MasterAdminVideosPage";
 import { MasterAdminVideoDetailPage } from "@/pages/MasterAdminVideoDetailPage";
 import { MasterAdminStoragePage } from "@/pages/MasterAdminStoragePage";
+import { MasterAdminCleanupPage } from "@/pages/MasterAdminCleanupPage";
 import { MasterAdminDependenciesPage } from "@/pages/MasterAdminDependenciesPage";
 import { MasterAdminAIQualityPage } from "@/pages/MasterAdminAIQualityPage";
 import { MasterAdminIncidentsPage } from "@/pages/MasterAdminIncidentsPage";
@@ -136,6 +137,14 @@ function App() {
           element={
             <ProtectedRoute superAdminOnly>
               <MasterAdminStoragePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/master-admin/cleanup"
+          element={
+            <ProtectedRoute superAdminOnly>
+              <MasterAdminCleanupPage />
             </ProtectedRoute>
           }
         />
