@@ -106,7 +106,9 @@ export const masterAdminApi = {
   authEvents: (params = {}) => api.get("/api/master-admin/auth-events", { params }),
   auditEvents: (params = {}) => api.get("/api/master-admin/audit-events", { params }),
   approveUser: (userId, payload = {}) => api.post(`/api/master-admin/users/${userId}/approve`, payload),
+  revokeUser: (userId, payload = {}) => api.post(`/api/master-admin/users/${userId}/revoke`, payload),
   deleteUser: (userId, payload = {}) => api.post(`/api/master-admin/users/${userId}/revoke`, payload),
+  hardDeleteUser: (userId, payload = {}) => api.delete(`/api/master-admin/users/${userId}`, { data: payload }),
   reactivateUser: (userId, payload = {}) => api.post(`/api/master-admin/users/${userId}/reactivate`, payload),
   incidents: (params = {}) => api.get("/api/master-admin/incidents", { params }),
   videos: (params = {}) => api.get("/api/master-admin/videos", { params }),
@@ -120,6 +122,10 @@ export const masterAdminApi = {
   support: (params = {}) => api.get("/api/master-admin/support", { params }),
   revokeSessions: (userId, payload = {}) => api.post(`/api/master-admin/users/${userId}/sessions/revoke`, payload),
   exportDiagnosticBundle: (payload) => api.post("/api/master-admin/diagnostic-bundles/export", payload),
+  cleanupCandidates: (params = {}) => api.get("/api/master-admin/cleanup-candidates", { params }),
+  runCleanupAction: (payload) => api.post("/api/master-admin/cleanup-candidates/actions", payload),
+  hardDeleteTeacher: (teacherId, payload = {}) =>
+    api.delete(`/api/master-admin/teachers/${teacherId}`, { data: payload }),
 };
 
 export const opsApi = {
