@@ -6,6 +6,7 @@ from .assessments import router as assessments_router
 from .auth import router as auth_router
 from .exemplars import router as exemplars_router
 from .privacy import router as privacy_router
+from .profile_cleanup import router as profile_cleanup_router
 from .recognition import router as recognition_router
 from .teachers import router as teachers_router
 from .videos import router as videos_router
@@ -58,5 +59,11 @@ REGISTERED_ROUTERS = (
         "prefix": "/api",
         "router": exemplars_router,
         "status": "extracted_unmounted",
+    },
+    {
+        "name": "profile_cleanup_router",
+        "prefix": "/api",
+        "router": profile_cleanup_router,
+        "status": "mounted",
     },
 )
