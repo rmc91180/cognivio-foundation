@@ -58,6 +58,15 @@ def create_app():
         "privacy": privacy_worker,
         "maintenance": maintenance_worker,
     }
+    mounted_routes = getattr(app.state, "mounted_extracted_routes", set())
+    for router_info in REGISTERED_ROUTERS:
+        route_name = router_info.get("name")
+        if router_info.get("status") != "mounted" or route_name in mounted_routes:
+            continue
+        app.include_router(router_info["router"], prefix=router_info.get("prefix") or "")
+        mounted_routes = set(mounted_routes)
+        mounted_routes.add(route_name)
+    app.state.mounted_extracted_routes = mounted_routes
     metrics_routes = getattr(app.state, "metrics_routes_registered", set())
     if "metrics_endpoint" not in metrics_routes:
         @app.get("/metrics", include_in_schema=False)
