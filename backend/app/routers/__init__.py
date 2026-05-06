@@ -21,7 +21,7 @@ REGISTERED_ROUTERS = (
         "name": "auth_router",
         "prefix": "/api",
         "router": auth_router,
-        "status": "extracted_unmounted",
+        "status": "mounted",
     },
     {
         "name": "teachers_router",

@@ -7182,122 +7182,51 @@ class GradebookIntegrationResponse(BaseModel):
     updated_at: Optional[str] = None
 
 # ==================== AUTH HELPERS ====================
-def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+from app.middleware.auth_middleware import get_current_user, security
+from app.services import auth_service as _auth_service
 
-def verify_password(password: str, hashed: str) -> bool:
-    return bcrypt.checkpw(password.encode(), hashed.encode())
-
-async def _create_user_session(*, user: dict, role: str, request: Optional[Request]) -> str:
-    session_id = str(uuid.uuid4())
-    request_meta = _extract_request_metadata(request)
-    now = datetime.now(timezone.utc).isoformat()
-    await db.user_sessions.insert_one(
-        {
-            "id": session_id,
-            "user_id": user.get("id"),
-            "email": user.get("email"),
-            "role": role,
-            "ip_address": request_meta.get("ip_address"),
-            "user_agent": request_meta.get("user_agent"),
-            "created_at": now,
-            "last_seen_at": now,
-            "revoked_at": None,
-            "revoked_by": None,
-            "revoke_reason": None,
-        }
-    )
-    return session_id
+hash_password = _auth_service.hash_password
+verify_password = _auth_service.verify_password
+_create_user_session = _auth_service.create_user_session
+_build_csrf_token = _auth_service.build_csrf_token
+_set_auth_cookies = _auth_service.set_auth_cookies
+_clear_auth_cookies = _auth_service.clear_auth_cookies
+_extract_bearer_token_from_authorization_header = _auth_service.extract_bearer_token_from_authorization_header
+_resolve_auth_token = _auth_service.resolve_auth_token
+_csrf_is_valid = _auth_service.csrf_is_valid
+_is_admin_role = _auth_service.is_admin_role
 
 
 def create_token(user_id: str, *, session_id: Optional[str] = None) -> str:
-    issued_at = datetime.now(timezone.utc)
-    payload = {
-        "user_id": user_id,
-        "exp": issued_at + timedelta(hours=JWT_EXPIRATION_HOURS),
-        "iat": issued_at,
-    }
-    if session_id:
-        payload["sid"] = session_id
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return _auth_service.create_access_token(user_id, session_id=session_id)
 
 
-def _build_csrf_token() -> str:
-    return secrets.token_urlsafe(32)
+async def register(user: "UserCreate", request: Request, response: Response = None):
+    return await _auth_service.register_user(user, request, response)
 
 
-def _set_auth_cookies(
-    response: Response,
-    *,
-    token: str,
-    csrf_token: Optional[str] = None,
-) -> str:
-    csrf_value = str(csrf_token or _build_csrf_token())
-    response.set_cookie(
-        key=SESSION_COOKIE_NAME,
-        value=token,
-        max_age=SESSION_COOKIE_MAX_AGE_SECONDS,
-        httponly=True,
-        secure=COOKIE_SECURE,
-        samesite=SESSION_COOKIE_SAMESITE,
-        path="/",
-    )
-    response.set_cookie(
-        key=CSRF_COOKIE_NAME,
-        value=csrf_value,
-        max_age=SESSION_COOKIE_MAX_AGE_SECONDS,
-        httponly=False,
-        secure=COOKIE_SECURE,
-        samesite=SESSION_COOKIE_SAMESITE,
-        path="/",
-    )
-    return csrf_value
+async def request_access(user: "UserCreate", request: Request):
+    return await _auth_service.request_access(user, request)
 
 
-def _clear_auth_cookies(response: Response) -> None:
-    response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
-    response.delete_cookie(key=CSRF_COOKIE_NAME, path="/")
+async def login(user: "UserLogin", request: Request, response: Response = None):
+    return await _auth_service.login_user(user, request, response)
 
 
-def _extract_bearer_token_from_authorization_header(authorization_header: Optional[str]) -> Optional[str]:
-    parts = str(authorization_header or "").strip().split(" ", 1)
-    if len(parts) != 2:
-        return None
-    scheme, value = parts
-    if scheme.lower() != "bearer":
-        return None
-    token = value.strip()
-    return token or None
+async def logout(request: Request, response: Response):
+    return await _auth_service.logout_user(request, response)
 
 
-def _resolve_auth_token(
-    request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = None,
-) -> Optional[str]:
-    cookies = getattr(request, "cookies", None) or {}
-    headers = getattr(request, "headers", None) or {}
-    cookie_token = str(cookies.get(SESSION_COOKIE_NAME) or "").strip()
-    if cookie_token:
-        return cookie_token
-    credential_value = str(getattr(credentials, "credentials", "") or "").strip() if credentials else ""
-    credential_scheme = str(getattr(credentials, "scheme", "bearer") or "bearer").lower() if credentials else ""
-    if credential_value and credential_scheme == "bearer":
-        return credential_value
-    return _extract_bearer_token_from_authorization_header(headers.get("Authorization"))
+async def request_password_reset(payload: "PasswordResetRequestPayload", request: Request):
+    return await _auth_service.request_password_reset(payload, request)
 
 
-def _csrf_is_valid(request: Request) -> bool:
-    cookies = getattr(request, "cookies", None) or {}
-    headers = getattr(request, "headers", None) or {}
-    csrf_cookie = str(cookies.get(CSRF_COOKIE_NAME) or "").strip()
-    csrf_header = str(headers.get("X-CSRF-Token") or "").strip()
-    if not csrf_cookie or not csrf_header:
-        return False
-    return hmac.compare_digest(csrf_cookie, csrf_header)
+async def confirm_password_reset(payload: "PasswordResetConfirmPayload", request: Request):
+    return await _auth_service.confirm_password_reset(payload, request)
 
 
-def _is_admin_role(role: Optional[str]) -> bool:
-    return role in {"admin", "principal", "super_admin"}
+async def get_me(request: Request, response: Response, current_user: dict = Depends(get_current_user)):
+    return await _auth_service.get_current_user_profile(current_user, request, response)
 
 
 def _require_school_admin_user(current_user: dict) -> dict:
@@ -7323,275 +7252,6 @@ def _requested_role_matches_user(requested_role: Optional[str], user_doc: dict) 
         return True
     return requested_role == _get_user_tenant_role(user_doc)
 
-async def get_current_user(
-    request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
-):
-    try:
-        token = _resolve_auth_token(request, credentials)
-        if not token:
-            raise HTTPException(status_code=401, detail="Not authenticated")
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        user_id = payload.get("user_id")
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        user = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
-        if not user:
-            raise HTTPException(status_code=401, detail="User not found")
-        session_id = payload.get("sid")
-        if session_id:
-            session = await db.user_sessions.find_one({"id": session_id}, {"_id": 0})
-            if not session or session.get("revoked_at"):
-                raise HTTPException(status_code=401, detail="Session expired")
-        if _get_user_approval_status(user) == "pending":
-            raise HTTPException(status_code=403, detail="Account pending approval")
-        if _get_user_approval_status(user) == "revoked" or not _is_user_access_active(user):
-            raise HTTPException(status_code=403, detail="Account access removed")
-        preview_target_id = str(request.headers.get("X-Cognivio-Preview-User") or "").strip()
-        if preview_target_id and _get_user_tenant_role(user) == "super_admin":
-            preview_target = await db.users.find_one(
-                {"id": preview_target_id},
-                {"_id": 0, "password": 0},
-            )
-            if preview_target and _get_user_approval_status(preview_target) == "approved" and _is_user_access_active(preview_target):
-                preview_payload = _build_user_response_payload(preview_target)
-                preview_payload["is_preview_mode"] = True
-                preview_payload["preview_source_user_id"] = user.get("id")
-                preview_payload["preview_source_email"] = user.get("email")
-                preview_payload["preview_source_name"] = user.get("name")
-                preview_payload["preview_source_tenant_role"] = _get_user_tenant_role(user)
-                if session_id:
-                    preview_payload["session_id"] = session_id
-                return preview_payload
-        user["role"] = _get_user_role(user)
-        user["approval_status"] = _get_user_approval_status(user)
-        user["is_preview_mode"] = False
-        user["preview_source_user_id"] = None
-        user["preview_source_email"] = None
-        user["preview_source_name"] = None
-        user["preview_source_tenant_role"] = None
-        if session_id:
-            user["session_id"] = session_id
-        return user
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-# ==================== AUTH ENDPOINTS ====================
-@api_router.post("/auth/register", response_model=AuthSessionResponse)
-async def register(user: UserCreate, request: Request, response: Response = None):
-    from app.services.workspace_service import enrich_user_with_workspace_mode
-
-    if DEMO_MODE:
-        raise HTTPException(status_code=403, detail="Registration is disabled for demo mode")
-    if ACCESS_APPROVAL_REQUIRED and not _is_access_auto_approved_email(user.email.lower()):
-        raise HTTPException(status_code=403, detail="Self-registration is disabled. Request access approval.")
-    existing = await db.users.find_one({"email": user.email})
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    desired_role = _normalize_requested_role(user.role)
-    tenancy_fields = _normalize_access_request_tenancy_fields(user, desired_role)
-    user_id = str(uuid.uuid4())
-    user_doc = {
-        "id": user_id,
-        "email": user.email,
-        "name": user.name,
-        "password": hash_password(user.password),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "role": _legacy_role_for_tenant_role(desired_role),
-        "tenant_role": desired_role,
-        "tenant_status": "approved",
-        "approval_status": "approved",
-        "approved_at": datetime.now(timezone.utc).isoformat(),
-        "is_active": True,
-        **tenancy_fields,
-    }
-    await db.users.insert_one(user_doc)
-    enriched_user = await enrich_user_with_workspace_mode(user_doc)
-    
-    session_id = await _create_user_session(user=enriched_user, role=_get_user_role(enriched_user), request=request)
-    token = create_token(user_id, session_id=session_id)
-    response_user = UserResponse(**enriched_user)
-    if response is not None:
-        _set_auth_cookies(response, token=token)
-        return AuthSessionResponse(user=response_user)
-    return TokenResponse(token=token, user=response_user)
-
-
-@api_router.post("/auth/request-access", response_model=AccessRequestResponse)
-async def request_access(user: UserCreate, request: Request):
-    from app.services.workspace_service import enrich_user_with_workspace_mode
-
-    if DEMO_MODE:
-        raise HTTPException(status_code=403, detail="Access requests are disabled for demo mode")
-
-    email = user.email.lower()
-    request_meta = _extract_request_metadata(request)
-    existing = await db.users.find_one({"email": email})
-    now = datetime.now(timezone.utc).isoformat()
-    auto_approved = _is_access_auto_approved_email(email)
-    desired_role = _normalize_requested_role(user.role)
-    tenancy_fields = _normalize_access_request_tenancy_fields(user, desired_role)
-
-    if existing:
-        existing_status = _get_user_approval_status(existing)
-        if existing_status == "approved" and _is_user_access_active(existing):
-            raise HTTPException(status_code=400, detail="Email already registered")
-        if existing_status == "revoked":
-            raise HTTPException(status_code=403, detail="Access has been removed for this account")
-        update_fields = {
-            "name": user.name,
-            "password": hash_password(user.password),
-            "updated_at": now,
-            **tenancy_fields,
-        }
-        if auto_approved:
-            update_fields.update(
-                {
-                    "approval_status": "approved",
-                    "approved_at": now,
-                    "approved_by": "system:auto_admin_allowlist",
-                    "revoked_at": None,
-                    "revoked_by": None,
-                    "is_active": True,
-                    "role": _legacy_role_for_tenant_role(desired_role),
-                    "tenant_role": desired_role,
-                    "tenant_status": "approved",
-                }
-            )
-        else:
-            update_fields.update(
-                {
-                    "approval_status": "pending",
-                    "approval_requested_at": now,
-                    "approved_at": None,
-                    "approved_by": None,
-                    "revoked_at": None,
-                    "revoked_by": None,
-                    "is_active": False,
-                    "role": _legacy_role_for_tenant_role(desired_role),
-                    "tenant_role": desired_role,
-                    "tenant_status": "pending",
-                }
-            )
-        await db.users.update_one({"id": existing["id"]}, {"$set": update_fields})
-        refreshed = await db.users.find_one({"id": existing["id"]}, {"_id": 0})
-        if auto_approved:
-            enriched_user = await enrich_user_with_workspace_mode(refreshed)
-            await _log_auth_event(
-                "approval_granted",
-                email=email,
-                user_id=refreshed.get("id"),
-                role_selected=desired_role,
-                result="success",
-                reason="system:auto_admin_allowlist",
-                ip_address=request_meta["ip_address"],
-                user_agent=request_meta["user_agent"],
-            )
-            logger.info("Auto-approved access request for allowlisted admin email %s", email)
-            return AccessRequestResponse(
-                status="approved",
-                email=email,
-                message="Access is approved. You can now log in.",
-                approval_status=_get_user_approval_status(enriched_user),
-                tenant_role=_get_user_tenant_role(enriched_user),
-                organization_type=enriched_user.get("organization_type"),
-                organization_name=enriched_user.get("organization_name") or enriched_user.get("requested_organization_name"),
-                school_name=enriched_user.get("school_name") or enriched_user.get("requested_school_name"),
-            )
-        await _log_auth_event(
-            "request_access",
-            email=email,
-            user_id=refreshed.get("id"),
-            role_selected=desired_role,
-            result="pending",
-            ip_address=request_meta["ip_address"],
-            user_agent=request_meta["user_agent"],
-        )
-        _send_access_request_notification(refreshed)
-        _send_access_request_received_confirmation(refreshed)
-        return AccessRequestResponse(
-            status="pending",
-            email=email,
-            message=(
-                "Access request updated. Approval is still required before login."
-                if existing_status == "pending"
-                else "Access request submitted. Approval is required before login."
-            ),
-            approval_status="pending",
-            tenant_role=desired_role,
-            organization_type=tenancy_fields.get("organization_type"),
-            organization_name=tenancy_fields.get("requested_organization_name"),
-            school_name=tenancy_fields.get("requested_school_name"),
-        )
-
-    user_id = str(uuid.uuid4())
-    user_doc = {
-        "id": user_id,
-        "email": email,
-        "name": user.name,
-        "password": hash_password(user.password),
-        "created_at": now,
-        "role": _legacy_role_for_tenant_role(desired_role),
-        "tenant_role": desired_role,
-        "tenant_status": "approved" if auto_approved else "pending",
-        "audio_analysis_enabled": True,
-        "approval_status": "approved" if auto_approved else "pending",
-        "approval_requested_at": now,
-        "approved_at": now if auto_approved else None,
-        "approved_by": "system:auto_admin_allowlist" if auto_approved else None,
-        "is_active": True if auto_approved else False,
-        **tenancy_fields,
-    }
-    await db.users.insert_one(user_doc)
-    if auto_approved:
-        enriched_user = await enrich_user_with_workspace_mode(user_doc)
-        await _log_auth_event(
-            "approval_granted",
-            email=email,
-            user_id=user_id,
-            role_selected=desired_role,
-            result="success",
-            reason="system:auto_admin_allowlist",
-            ip_address=request_meta["ip_address"],
-            user_agent=request_meta["user_agent"],
-        )
-        logger.info("Auto-approved access request for allowlisted admin email %s", email)
-        return AccessRequestResponse(
-            status="approved",
-            email=email,
-            message="Access is approved. You can now log in.",
-            approval_status=_get_user_approval_status(enriched_user),
-            tenant_role=_get_user_tenant_role(enriched_user),
-            organization_type=enriched_user.get("organization_type"),
-            organization_name=enriched_user.get("organization_name") or enriched_user.get("requested_organization_name"),
-            school_name=enriched_user.get("school_name") or enriched_user.get("requested_school_name"),
-        )
-    await _log_auth_event(
-        "request_access",
-        email=email,
-        user_id=user_id,
-        role_selected=desired_role,
-        result="pending",
-        ip_address=request_meta["ip_address"],
-        user_agent=request_meta["user_agent"],
-    )
-    _send_access_request_notification(user_doc)
-    _send_access_request_received_confirmation(user_doc)
-    return AccessRequestResponse(
-        status="pending",
-        email=email,
-        message="Access request submitted. Approval is required before login.",
-        approval_status="pending",
-        tenant_role=desired_role,
-        organization_type=tenancy_fields.get("organization_type"),
-        organization_name=tenancy_fields.get("requested_organization_name"),
-        school_name=tenancy_fields.get("requested_school_name"),
-    )
-
-
 @api_router.get("/institutions/lookup", response_model=InstitutionLookupResponse)
 async def lookup_institutions(
     organization_type: str,
@@ -7610,237 +7270,6 @@ async def lookup_institutions(
         organization_type=normalized_type,
         suggestions=suggestions,
     )
-
-@api_router.post("/auth/login", response_model=AuthSessionResponse)
-@limiter.limit("5/minute")
-async def login(user: UserLogin, request: Request, response: Response = None):
-    from app.services.workspace_service import enrich_user_with_workspace_mode
-
-    email = str(user.email or "").lower()
-    request_meta = _extract_request_metadata(request)
-    db_user = await db.users.find_one({"email": email})
-    requested_role = _normalize_requested_role(user.role) if user.role else None
-    if not db_user or not verify_password(user.password, db_user["password"]):
-        await _log_auth_event(
-            "login_failed",
-            email=email,
-            role_selected=requested_role,
-            result="failure",
-            reason="invalid_credentials",
-            ip_address=request_meta["ip_address"],
-            user_agent=request_meta["user_agent"],
-        )
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    approval_status = _get_user_approval_status(db_user)
-    if approval_status == "pending":
-        await _log_auth_event(
-            "login_failed",
-            email=email,
-            user_id=db_user.get("id"),
-            role_selected=requested_role,
-            result="failure",
-            reason="pending_approval",
-            ip_address=request_meta["ip_address"],
-            user_agent=request_meta["user_agent"],
-        )
-        raise HTTPException(status_code=403, detail="Account pending approval")
-    if approval_status == "revoked" or not _is_user_access_active(db_user):
-        await _log_auth_event(
-            "login_failed",
-            email=email,
-            user_id=db_user.get("id"),
-            role_selected=requested_role,
-            result="failure",
-            reason="access_removed",
-            ip_address=request_meta["ip_address"],
-            user_agent=request_meta["user_agent"],
-        )
-        raise HTTPException(status_code=403, detail="Account access removed")
-    actual_role = _get_user_role(db_user)
-    actual_tenant_role = _get_user_tenant_role(db_user)
-    if (
-        requested_role
-        and actual_tenant_role != "super_admin"
-        and not _requested_role_matches_user(requested_role, db_user)
-    ):
-        expected_label = _format_tenant_role_label(actual_tenant_role)
-        await _log_auth_event(
-            "login_failed",
-            email=email,
-            user_id=db_user.get("id"),
-            role_selected=requested_role,
-            result="failure",
-            reason="role_mismatch",
-            ip_address=request_meta["ip_address"],
-            user_agent=request_meta["user_agent"],
-        )
-        raise HTTPException(
-            status_code=403,
-            detail=f"This account is registered as a {expected_label}. Choose the correct role and try again.",
-        )
-    now = datetime.now(timezone.utc).isoformat()
-    await db.users.update_one(
-        {"id": db_user["id"]},
-        {"$set": {"last_login_at": now, "last_seen_at": now}},
-    )
-    db_user["last_login_at"] = now
-    db_user["last_seen_at"] = now
-    db_user.pop("_id", None)
-    db_user.pop("password", None)
-    db_user["role"] = actual_role
-    db_user["tenant_role"] = actual_tenant_role
-    db_user["tenant_status"] = approval_status
-    db_user["approval_status"] = approval_status
-    enriched_user = await enrich_user_with_workspace_mode(db_user)
-
-    await _log_auth_event(
-        "login_success",
-        email=email,
-        user_id=db_user.get("id"),
-        role_selected=requested_role or actual_role,
-        result="success",
-        ip_address=request_meta["ip_address"],
-        user_agent=request_meta["user_agent"],
-    )
-
-    session_id = await _create_user_session(user=db_user, role=actual_role, request=request)
-    token = create_token(db_user["id"], session_id=session_id)
-    response_user = UserResponse(**enriched_user)
-    if response is not None:
-        _set_auth_cookies(response, token=token)
-        return AuthSessionResponse(user=response_user)
-    return TokenResponse(token=token, user=response_user)
-
-
-login = login.__wrapped__
-
-
-@api_router.post("/auth/logout")
-async def logout(request: Request, response: Response):
-    token = _resolve_auth_token(request)
-    now = datetime.now(timezone.utc).isoformat()
-    if token:
-        try:
-            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-            session_id = payload.get("sid")
-            if session_id:
-                await db.user_sessions.update_one(
-                    {"id": session_id, "revoked_at": None},
-                    {"$set": {"revoked_at": now, "revoke_reason": "logout"}},
-                )
-        except jwt.PyJWTError:
-            pass
-    _clear_auth_cookies(response)
-    return {"status": "ok"}
-
-
-@api_router.post("/auth/password-reset/request")
-async def request_password_reset(
-    payload: PasswordResetRequestPayload,
-    request: Request,
-):
-    email = str(payload.email or "").strip().lower()
-    request_meta = _extract_request_metadata(request)
-    db_user = await db.users.find_one({"email": email}, {"_id": 0})
-    if db_user and _get_user_approval_status(db_user) == "approved" and _is_user_access_active(db_user):
-        _send_password_reset_email(db_user)
-        await _log_auth_event(
-            "password_reset_requested",
-            email=email,
-            user_id=db_user.get("id"),
-            result="success",
-            ip_address=request_meta["ip_address"],
-            user_agent=request_meta["user_agent"],
-        )
-    else:
-        await _log_auth_event(
-            "password_reset_requested",
-            email=email,
-            result="ignored",
-            reason="user_not_resettable",
-            ip_address=request_meta["ip_address"],
-            user_agent=request_meta["user_agent"],
-        )
-    return {
-        "status": "ok",
-        "message": "If this email is an approved Cognivio account, a password reset link has been sent.",
-    }
-
-
-@api_router.post("/auth/password-reset/confirm")
-async def confirm_password_reset(
-    payload: PasswordResetConfirmPayload,
-    request: Request,
-):
-    try:
-        token_payload = jwt.decode(payload.token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    except jwt.ExpiredSignatureError as exc:
-        raise HTTPException(status_code=400, detail="This password reset link has expired") from exc
-    except jwt.PyJWTError as exc:
-        raise HTTPException(status_code=400, detail="This password reset link is invalid") from exc
-
-    if token_payload.get("purpose") != "password_reset":
-        raise HTTPException(status_code=400, detail="This password reset link is invalid")
-
-    user_id = token_payload.get("sub")
-    email = str(token_payload.get("email") or "").strip().lower()
-    if not user_id or not email:
-        raise HTTPException(status_code=400, detail="This password reset link is invalid")
-
-    db_user = await db.users.find_one({"id": user_id, "email": email}, {"_id": 0})
-    if not db_user or _get_user_approval_status(db_user) != "approved" or not _is_user_access_active(db_user):
-        raise HTTPException(status_code=400, detail="Password reset is unavailable for this account")
-
-    if len(str(payload.password or "")) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters long")
-
-    now = datetime.now(timezone.utc).isoformat()
-    await db.users.update_one(
-        {"id": user_id},
-        {
-            "$set": {
-                "password": hash_password(payload.password),
-                "password_reset_at": now,
-                "last_seen_at": now,
-            }
-        },
-    )
-    if hasattr(db, "user_sessions"):
-        await db.user_sessions.delete_many({"user_id": user_id})
-    refreshed_user = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
-    _send_password_reset_success_email(refreshed_user or {"email": email})
-    request_meta = _extract_request_metadata(request)
-    await _log_auth_event(
-        "password_reset_completed",
-        email=email,
-        user_id=user_id,
-        result="success",
-        ip_address=request_meta["ip_address"],
-        user_agent=request_meta["user_agent"],
-    )
-    return {"status": "ok", "message": "Password updated successfully. You can now sign in."}
-
-@api_router.get("/auth/me", response_model=UserResponse)
-async def get_me(
-    request: Request,
-    response: Response,
-    current_user: dict = Depends(get_current_user),
-):
-    from app.services.workspace_service import enrich_user_with_workspace_mode
-
-    if not str(request.cookies.get(CSRF_COOKIE_NAME) or "").strip():
-        response.set_cookie(
-            key=CSRF_COOKIE_NAME,
-            value=_build_csrf_token(),
-            max_age=SESSION_COOKIE_MAX_AGE_SECONDS,
-            httponly=False,
-            secure=COOKIE_SECURE,
-            samesite=SESSION_COOKIE_SAMESITE,
-            path="/",
-        )
-
-    return UserResponse(**(await enrich_user_with_workspace_mode(current_user)))
-
 
 @api_router.get("/user/workspace-mode", response_model=WorkspaceModePreferenceResponse)
 async def get_user_workspace_mode(current_user: dict = Depends(get_current_user)):
@@ -22412,6 +21841,9 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
     }
 
 # Include the router in the main app
+from app.routers.auth import router as auth_router
+
+app.include_router(auth_router, prefix="/api")
 app.include_router(api_router)
 app.add_api_route(
     "/api/admin/access-request-actions/{action}",

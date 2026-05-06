@@ -443,7 +443,7 @@ def test_generate_mock_scores_supports_hebrew_fallback_output():
     )
 
     assert scores
-    assert "נמצאה ראיה חלקית בלבד" in scores[0]["observations"][0]
+    assert "החלון שהיה לנו בסרטון היה קצר" in scores[0]["observations"][0]
 
 
 def test_generate_recommendations_prioritizes_admin_pressure_points_when_model_output_exists():

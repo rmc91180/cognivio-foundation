@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import os
 import sys
@@ -122,14 +123,17 @@ def test_transcribe_audio_file_falls_back_to_json_and_builds_segment(tmp_path, m
 
 def test_should_run_audio_analysis_requires_flags_and_policy(monkeypatch):
     monkeypatch.setattr(server, "AUDIO_ANALYSIS_ENABLED", True)
+    monkeypatch.setattr(server, "AUDIO_TRANSCRIPTION_ENABLED", True)
+    monkeypatch.setattr(server, "AUDIO_FEATURES_ENABLED", True)
     monkeypatch.setattr(server, "AUDIO_ALLOW_STUDENT_VOICE_PROCESSING", True)
     monkeypatch.setattr(server, "PAID_ANALYSIS_ENABLED", True)
     monkeypatch.setattr(server, "PAID_ANALYSIS_ALLOWLIST_EMAILS", {"teacher@example.com"})
 
-    assert server._should_run_audio_analysis({"email": "teacher@example.com"}) is True
+    assert asyncio.run(server._should_run_audio_analysis({"email": "teacher@example.com"})) is True
 
-    monkeypatch.setattr(server, "AUDIO_ALLOW_STUDENT_VOICE_PROCESSING", False)
-    assert server._should_run_audio_analysis({"email": "teacher@example.com"}) is False
+    monkeypatch.setattr(server, "AUDIO_TRANSCRIPTION_ENABLED", False)
+    monkeypatch.setattr(server, "AUDIO_FEATURES_ENABLED", False)
+    assert asyncio.run(server._should_run_audio_analysis({"email": "teacher@example.com"})) is False
 
 
 @pytest.mark.asyncio
