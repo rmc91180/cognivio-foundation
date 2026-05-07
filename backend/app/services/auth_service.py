@@ -72,6 +72,58 @@ def normalize_requested_role(role: Optional[str]) -> str:
     return "teacher"
 
 
+def derive_access_request_tenancy(user: Any) -> tuple[str, dict]:
+    user_type = str(getattr(user, "user_type", "") or "").strip().lower()
+    institution_type = str(getattr(user, "institution_type", "") or "").strip().lower()
+    if user_type or institution_type:
+        normalized_user_type = "administrator" if user_type in {"administrator", "admin", "school_admin", "training_admin"} else "teacher"
+        normalized_institution = "training" if institution_type in {"training", "teacher_training", "teacher-training"} else "k12"
+        desired_role = (
+            "training_admin"
+            if normalized_user_type == "administrator" and normalized_institution == "training"
+            else "school_admin"
+            if normalized_user_type == "administrator"
+            else "teacher"
+        )
+        organization_type = "training" if normalized_institution == "training" else "school"
+        training_provider_name = legacy._clean_optional_string(getattr(user, "training_provider_name", None))
+        school_name = legacy._clean_optional_string(getattr(user, "school_name", None))
+        district_or_network = legacy._clean_optional_string(getattr(user, "district_or_network", None))
+        program_or_cohort_name = legacy._clean_optional_string(getattr(user, "program_or_cohort_name", None))
+        program_or_department = legacy._clean_optional_string(getattr(user, "program_or_department", None))
+        linked_admin_email = legacy._clean_optional_string(getattr(user, "linked_admin_email", None))
+        if linked_admin_email:
+            linked_admin_email = linked_admin_email.lower()
+
+        user.role = desired_role
+        user.organization_type = organization_type
+        if normalized_institution == "training":
+            user.organization_name = training_provider_name or legacy._clean_optional_string(getattr(user, "organization_name", None))
+            user.school_name = program_or_cohort_name or program_or_department or legacy._clean_optional_string(getattr(user, "school_name", None))
+        else:
+            user.organization_name = district_or_network or school_name or legacy._clean_optional_string(getattr(user, "organization_name", None))
+            user.school_name = school_name
+        user.requested_manager_email = linked_admin_email or legacy._clean_optional_string(getattr(user, "requested_manager_email", None))
+        tenancy_fields = legacy._normalize_access_request_tenancy_fields(user, desired_role)
+        tenancy_fields.update(
+            {
+                "user_type": normalized_user_type,
+                "institution_type": normalized_institution,
+                "org_type": normalized_institution,
+                "role_requested": desired_role,
+                "training_provider_name": training_provider_name,
+                "district_or_network": district_or_network,
+                "program_or_cohort_name": program_or_cohort_name,
+                "program_or_department": program_or_department,
+                "linked_admin_email": linked_admin_email,
+            }
+        )
+        return desired_role, tenancy_fields
+
+    desired_role = normalize_requested_role(getattr(user, "role", None))
+    return desired_role, legacy._normalize_access_request_tenancy_fields(user, desired_role)
+
+
 def legacy_role_for_tenant_role(tenant_role: Optional[str]) -> str:
     normalized = str(tenant_role or "").strip().lower()
     if normalized == "super_admin":
@@ -263,8 +315,7 @@ async def register_user(user: Any, request: Request, response: Optional[Response
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    desired_role = normalize_requested_role(user.role)
-    tenancy_fields = legacy._normalize_access_request_tenancy_fields(user, desired_role)
+    desired_role, tenancy_fields = derive_access_request_tenancy(user)
     user_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     user_doc = {
@@ -300,8 +351,7 @@ async def request_access(user: Any, request: Request):
     existing = await legacy.db.users.find_one({"email": email})
     now = datetime.now(timezone.utc).isoformat()
     auto_approved = is_access_auto_approved_email(email)
-    desired_role = normalize_requested_role(user.role)
-    tenancy_fields = legacy._normalize_access_request_tenancy_fields(user, desired_role)
+    desired_role, tenancy_fields = derive_access_request_tenancy(user)
     if existing:
         return await _update_existing_access_request(
             existing, user, email, desired_role, tenancy_fields, auto_approved, now, request_meta
@@ -449,6 +499,14 @@ def _access_response(status: str, email: str, message: str, user_doc: dict):
         organization_type=user_doc.get("organization_type"),
         organization_name=user_doc.get("organization_name") or user_doc.get("requested_organization_name"),
         school_name=user_doc.get("school_name") or user_doc.get("requested_school_name"),
+        institution_type=user_doc.get("institution_type"),
+        org_type=user_doc.get("org_type"),
+        role_requested=user_doc.get("role_requested"),
+        training_provider_name=user_doc.get("training_provider_name"),
+        district_or_network=user_doc.get("district_or_network"),
+        program_or_cohort_name=user_doc.get("program_or_cohort_name"),
+        program_or_department=user_doc.get("program_or_department"),
+        linked_admin_email=user_doc.get("linked_admin_email"),
     )
 
 

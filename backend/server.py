@@ -5678,9 +5678,17 @@ class UserCreate(BaseModel):
     password: str
     name: str
     role: Optional[str] = "teacher"
+    user_type: Optional[str] = None
+    institution_type: Optional[str] = None
+    role_requested: Optional[str] = None
     organization_type: Optional[str] = None
     organization_name: Optional[str] = None
     school_name: Optional[str] = None
+    training_provider_name: Optional[str] = None
+    district_or_network: Optional[str] = None
+    program_or_cohort_name: Optional[str] = None
+    program_or_department: Optional[str] = None
+    linked_admin_email: Optional[EmailStr] = None
     requested_manager_email: Optional[EmailStr] = None
 
 class UserLogin(BaseModel):
@@ -5744,6 +5752,14 @@ class AccessRequestResponse(BaseModel):
     organization_type: Optional[str] = None
     organization_name: Optional[str] = None
     school_name: Optional[str] = None
+    institution_type: Optional[str] = None
+    org_type: Optional[str] = None
+    role_requested: Optional[str] = None
+    training_provider_name: Optional[str] = None
+    district_or_network: Optional[str] = None
+    program_or_cohort_name: Optional[str] = None
+    program_or_department: Optional[str] = None
+    linked_admin_email: Optional[str] = None
 
 
 class AccessUserRecord(BaseModel):
@@ -6540,6 +6556,8 @@ class ObservationSession(BaseModel):
     linked_video_id: Optional[str] = None
     linked_assessment_id: Optional[str] = None
     placement_id: Optional[str] = None
+    recurrence_rule: Optional[str] = None
+    recurrence_parent_id: Optional[str] = None
     created_at: str
     updated_at: Optional[str] = None
     teacher_name: Optional[str] = None
@@ -6553,6 +6571,8 @@ class ObservationSessionCreate(BaseModel):
     focus_note: Optional[str] = None
     personal_goals: List[str] = []
     placement_id: Optional[str] = None
+    recurrence_rule: Optional[str] = None
+    recurrence_parent_id: Optional[str] = None
 
 
 class ObservationSessionUpdate(BaseModel):
@@ -6564,6 +6584,8 @@ class ObservationSessionUpdate(BaseModel):
     linked_video_id: Optional[str] = None
     linked_assessment_id: Optional[str] = None
     placement_id: Optional[str] = None
+    recurrence_rule: Optional[str] = None
+    recurrence_parent_id: Optional[str] = None
 
 
 class ObserverGoalProgressSignal(BaseModel):
@@ -7055,6 +7077,27 @@ class ScheduleUpdate(BaseModel):
     recording_status: Optional[ScheduleStatus] = None
     join_url: Optional[str] = None
     reminder_note: Optional[str] = None
+
+
+class ScheduleBulkCreate(BaseModel):
+    teacher_ids: List[str]
+    start_date: datetime
+    frequency: str = "monthly"
+    count: int = 1
+    duration_minutes: int = 45
+    observer_id: Optional[str] = None
+    focus_elements: List[str] = []
+    focus_note: Optional[str] = None
+    personal_goals: List[str] = []
+    placement_id: Optional[str] = None
+    recurrence_rule: Optional[str] = None
+
+
+class ScheduleComplianceRule(BaseModel):
+    required_observations_per_cycle: int = 6
+    cycle_start_month: int = 9
+    cycle_end_month: int = 6
+    warning_threshold_pct: float = 0.5
 
 
 class RecordingPolicy(BaseModel):
@@ -11951,6 +11994,74 @@ async def export_summary_report(
             duration_seconds=time.perf_counter() - report_started_perf,
         )
         raise
+
+
+@api_router.post("/reports/teacher/{teacher_id}")
+async def generate_teacher_pdf_report(
+    teacher_id: str,
+    cycle_year: Optional[int] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    from app.services import report_service
+
+    pdf = await report_service.generate_teacher_report(teacher_id, current_user, cycle_year=cycle_year)
+    return Response(
+        pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="teacher-{teacher_id}-report.pdf"'},
+    )
+
+
+@api_router.post("/reports/school/summary")
+async def generate_school_summary_pdf_report(
+    cycle_year: Optional[int] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    from app.services import report_service
+
+    pdf = await report_service.generate_school_summary(current_user, cycle_year=cycle_year)
+    return Response(
+        pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="school-summary-report.pdf"'},
+    )
+
+
+@api_router.post("/reports/export/csv")
+async def export_reports_csv(
+    type: str = Query("assessments"),
+    current_user: dict = Depends(get_current_user),
+):
+    from app.services import report_service
+
+    body, filename = await report_service.export_csv(type, current_user)
+    return Response(
+        body,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@api_router.post("/reports/teachers/bulk")
+async def generate_all_teacher_reports(
+    cycle_year: Optional[int] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    from app.services import report_service
+
+    body = await report_service.generate_all_teacher_reports_zip(current_user, cycle_year=cycle_year)
+    return Response(
+        body,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="teacher-reports.zip"'},
+    )
+
+
+@api_router.get("/reports/history")
+async def list_generated_report_history(current_user: dict = Depends(get_current_user)):
+    from app.services import report_service
+
+    return {"items": await report_service.list_report_history(current_user)}
 
 
 @api_router.get("/qa/smoke")
@@ -17163,6 +17274,8 @@ async def create_observation_session(
         "linked_video_id": None,
         "linked_assessment_id": None,
         "placement_id": (payload.placement_id or "").strip() or None,
+        "recurrence_rule": (payload.recurrence_rule or "").strip() or None,
+        "recurrence_parent_id": (payload.recurrence_parent_id or "").strip() or None,
         "created_at": now,
         "updated_at": now,
     }
@@ -17329,6 +17442,10 @@ async def update_observation_session(
         update_fields["linked_assessment_id"] = payload.linked_assessment_id
     if "placement_id" in updates:
         update_fields["placement_id"] = (payload.placement_id or "").strip() or None
+    if "recurrence_rule" in updates:
+        update_fields["recurrence_rule"] = (payload.recurrence_rule or "").strip() or None
+    if "recurrence_parent_id" in updates:
+        update_fields["recurrence_parent_id"] = (payload.recurrence_parent_id or "").strip() or None
 
     if not update_fields:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -17432,6 +17549,316 @@ async def update_observation(
 
 
 # ==================== SCHEDULE ENDPOINTS ====================
+def _parse_iso_datetime(value: Optional[Any]) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _add_schedule_interval(start: datetime, frequency: str, index: int) -> datetime:
+    frequency = str(frequency or "monthly").lower()
+    if frequency.startswith("week"):
+        return start + timedelta(weeks=index)
+    if frequency.startswith("biweek"):
+        return start + timedelta(weeks=index * 2)
+    if frequency.startswith("day"):
+        return start + timedelta(days=index)
+    if frequency.startswith("month"):
+        month_zero = start.month - 1 + index
+        year = start.year + month_zero // 12
+        month = month_zero % 12 + 1
+        max_day = [31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]
+        return start.replace(year=year, month=month, day=min(start.day, max_day))
+    return start + timedelta(days=index * 30)
+
+
+def _parse_recurrence_count(rule: Optional[str], fallback: int) -> int:
+    count = max(1, min(int(fallback or 1), 48))
+    for part in str(rule or "").split(";"):
+        if part.upper().startswith("COUNT="):
+            try:
+                return max(1, min(int(part.split("=", 1)[1]), 48))
+            except ValueError:
+                return count
+    return count
+
+
+def _parse_recurrence_frequency(rule: Optional[str], fallback: str) -> str:
+    for part in str(rule or "").split(";"):
+        if part.upper().startswith("FREQ="):
+            return part.split("=", 1)[1].strip().lower()
+    return fallback
+
+
+async def _get_schedule_compliance_rules(current_user: dict) -> dict:
+    workspace_id = _get_dashboard_workspace_id(current_user)
+    doc = await db.observation_compliance_rules.find_one(
+        {"workspace_id": workspace_id},
+        {"_id": 0},
+    )
+    defaults = ScheduleComplianceRule().dict()
+    if not doc:
+        return defaults
+    for key in defaults:
+        if doc.get(key) is not None:
+            defaults[key] = doc[key]
+    defaults["required_observations_per_cycle"] = max(1, int(defaults["required_observations_per_cycle"]))
+    defaults["cycle_start_month"] = min(12, max(1, int(defaults["cycle_start_month"])))
+    defaults["cycle_end_month"] = min(12, max(1, int(defaults["cycle_end_month"])))
+    defaults["warning_threshold_pct"] = min(1.0, max(0.0, float(defaults["warning_threshold_pct"])))
+    return defaults
+
+
+def _schedule_cycle_window(now: datetime, rules: dict) -> Tuple[datetime, datetime]:
+    start_month = int(rules.get("cycle_start_month") or 9)
+    end_month = int(rules.get("cycle_end_month") or 6)
+    if start_month <= end_month:
+        start_year = now.year
+        if now.month < start_month:
+            start_year -= 1
+        end_year = start_year
+    else:
+        start_year = now.year if now.month >= start_month else now.year - 1
+        end_year = start_year + 1
+    start = datetime(start_year, start_month, 1, tzinfo=timezone.utc)
+    if end_month == 12:
+        end = datetime(end_year + 1, 1, 1, tzinfo=timezone.utc) - timedelta(seconds=1)
+    else:
+        end = datetime(end_year, end_month + 1, 1, tzinfo=timezone.utc) - timedelta(seconds=1)
+    return start, end
+
+
+async def _build_schedule_compliance_payload(current_user: dict) -> dict:
+    _require_observation_planner(current_user)
+    rules = await _get_schedule_compliance_rules(current_user)
+    now = datetime.now(timezone.utc)
+    cycle_start, cycle_end = _schedule_cycle_window(now, rules)
+    midpoint = cycle_start + ((cycle_end - cycle_start) / 2)
+    visible_teacher_ids = await _list_teacher_ids_for_user(current_user)
+    if not visible_teacher_ids:
+        return {
+            "rules": rules,
+            "cycle": {"start": cycle_start.isoformat(), "end": cycle_end.isoformat()},
+            "items": [],
+            "summary": {"total": 0, "on_track": 0, "at_risk": 0, "non_compliant": 0},
+        }
+
+    teachers = await db.teachers.find(
+        {"id": {"$in": visible_teacher_ids}},
+        {"_id": 0},
+    ).sort("name", 1).to_list(5000)
+    sessions = await db.observation_sessions.find(
+        {
+            "teacher_id": {"$in": visible_teacher_ids},
+            "scheduled_date": {"$gte": cycle_start.isoformat(), "$lte": cycle_end.isoformat()},
+        },
+        {"_id": 0},
+    ).to_list(10000)
+    sessions_by_teacher: Dict[str, List[dict]] = {}
+    for session in sessions:
+        sessions_by_teacher.setdefault(session.get("teacher_id"), []).append(session)
+
+    required = int(rules["required_observations_per_cycle"])
+    warning_pct = float(rules["warning_threshold_pct"])
+    items = []
+    summary = {"total": 0, "on_track": 0, "at_risk": 0, "non_compliant": 0}
+    for teacher in teachers:
+        teacher_sessions = sessions_by_teacher.get(teacher.get("id"), [])
+        completed = sum(
+            1
+            for session in teacher_sessions
+            if session.get("status") in {
+                ObservationSessionStatus.ANALYSIS_COMPLETE.value,
+                ObservationSessionStatus.FEEDBACK_GIVEN.value,
+            }
+        )
+        planned_sessions = [
+            session
+            for session in teacher_sessions
+            if session.get("status") == ObservationSessionStatus.PLANNED.value
+            and (_parse_iso_datetime(session.get("scheduled_date")) or cycle_start) >= now
+        ]
+        planned = len(planned_sessions)
+        next_dates = sorted(
+            [
+                parsed
+                for parsed in (_parse_iso_datetime(session.get("scheduled_date")) for session in planned_sessions)
+                if parsed is not None
+            ]
+        )
+        progress_pct = completed / required if required else 1
+        if completed >= required:
+            status = "on_track"
+        elif now >= midpoint and progress_pct < warning_pct:
+            status = "non_compliant"
+        elif completed + planned < required or (now >= midpoint and progress_pct < 0.75):
+            status = "at_risk"
+        else:
+            status = "on_track"
+        summary["total"] += 1
+        summary[status] += 1
+        items.append(
+            {
+                "teacher_id": teacher["id"],
+                "teacher_name": teacher.get("name") or teacher.get("email") or "Teacher",
+                "required_observations": required,
+                "completed": completed,
+                "planned": planned,
+                "remaining": max(0, required - completed - planned),
+                "compliance_status": status,
+                "next_observation": next_dates[0].isoformat() if next_dates else None,
+            }
+        )
+    return {
+        "rules": rules,
+        "cycle": {"start": cycle_start.isoformat(), "end": cycle_end.isoformat()},
+        "items": items,
+        "summary": summary,
+    }
+
+
+@api_router.get("/schedules/compliance")
+async def get_schedule_compliance(current_user: dict = Depends(get_current_user)):
+    return await _build_schedule_compliance_payload(current_user)
+
+
+@api_router.post("/schedules/bulk")
+async def create_bulk_schedules(
+    payload: ScheduleBulkCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_observation_planner(current_user)
+    teacher_ids = [str(value or "").strip() for value in payload.teacher_ids if str(value or "").strip()]
+    if not teacher_ids:
+        raise HTTPException(status_code=400, detail="Select at least one teacher")
+    focus_elements = _normalize_observation_focus_elements(payload.focus_elements, strict=False)
+    if not focus_elements:
+        focus_elements = ["1b"]
+    recurrence_rule = (payload.recurrence_rule or "").strip() or None
+    count = _parse_recurrence_count(recurrence_rule, payload.count)
+    frequency = _parse_recurrence_frequency(recurrence_rule, payload.frequency)
+    now = datetime.now(timezone.utc).isoformat()
+    docs: List[dict] = []
+    parent_id = str(uuid.uuid4())
+    for teacher_id in teacher_ids:
+        teacher = await _get_teacher_or_404(teacher_id, current_user)
+        teacher_parent_id = parent_id if len(teacher_ids) == 1 else str(uuid.uuid4())
+        for index in range(count):
+            session_id = teacher_parent_id if index == 0 else str(uuid.uuid4())
+            scheduled_date = _add_schedule_interval(payload.start_date, frequency, index)
+            docs.append(
+                {
+                    "id": session_id,
+                    "workspace_id": _resolve_observation_workspace_id(current_user, teacher),
+                    "observer_id": payload.observer_id or current_user["id"],
+                    "teacher_id": teacher_id,
+                    "scheduled_date": scheduled_date.isoformat(),
+                    "duration_minutes": max(15, min(int(payload.duration_minutes or 45), 240)),
+                    "focus_elements": focus_elements,
+                    "focus_note": (payload.focus_note or "").strip(),
+                    "personal_goals": _normalize_observation_personal_goals(payload.personal_goals),
+                    "status": ObservationSessionStatus.PLANNED.value,
+                    "linked_video_id": None,
+                    "linked_assessment_id": None,
+                    "placement_id": (payload.placement_id or "").strip() or None,
+                    "recurrence_rule": recurrence_rule if index == 0 else None,
+                    "recurrence_parent_id": None if index == 0 else teacher_parent_id,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+    await db.observation_sessions.insert_many(docs)
+    return {
+        "created": len(docs),
+        "sessions": [await _serialize_observation_session(doc) for doc in docs],
+    }
+
+
+@api_router.get("/schedules/calendar")
+async def get_schedule_calendar(
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_observation_planner(current_user)
+    now = datetime.now(timezone.utc)
+    start_dt = start or datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+    end_dt = end or (start_dt + timedelta(days=45))
+    teacher_ids = await _list_teacher_ids_for_user(current_user)
+    query = {
+        "teacher_id": {"$in": teacher_ids or ["__none__"]},
+        "scheduled_date": {"$gte": start_dt.isoformat(), "$lte": end_dt.isoformat()},
+    }
+    docs = await db.observation_sessions.find(query, {"_id": 0}).sort("scheduled_date", 1).to_list(2000)
+    events = []
+    for doc in docs:
+        session = await _serialize_observation_session(doc)
+        events.append(
+            {
+                "id": session["id"],
+                "title": f"{session.get('teacher_name') or 'Teacher'} observation",
+                "start": session.get("scheduled_date"),
+                "end": (
+                    (_parse_iso_datetime(session.get("scheduled_date")) or start_dt)
+                    + timedelta(minutes=int(doc.get("duration_minutes") or 45))
+                ).isoformat() if session.get("scheduled_date") else None,
+                "teacher_id": session.get("teacher_id"),
+                "teacher_name": session.get("teacher_name"),
+                "observer_id": session.get("observer_id"),
+                "status": session.get("status"),
+                "focus_elements": session.get("focus_elements") or [],
+                "color_key": session.get("observer_id") or "default",
+            }
+        )
+    return {"events": events, "start": start_dt.isoformat(), "end": end_dt.isoformat()}
+
+
+@api_router.get("/schedules/conflicts")
+async def get_schedule_conflicts(
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_observation_planner(current_user)
+    now = datetime.now(timezone.utc)
+    start_dt = start or now
+    end_dt = end or (now + timedelta(days=90))
+    teacher_ids = await _list_teacher_ids_for_user(current_user)
+    docs = await db.observation_sessions.find(
+        {
+            "teacher_id": {"$in": teacher_ids or ["__none__"]},
+            "status": ObservationSessionStatus.PLANNED.value,
+            "scheduled_date": {"$gte": start_dt.isoformat(), "$lte": end_dt.isoformat()},
+        },
+        {"_id": 0},
+    ).sort("scheduled_date", 1).to_list(5000)
+    buckets: Dict[str, List[dict]] = {}
+    for doc in docs:
+        parsed = _parse_iso_datetime(doc.get("scheduled_date"))
+        if not parsed:
+            continue
+        key = f"{doc.get('observer_id')}|{parsed.strftime('%Y-%m-%dT%H:%M')}"
+        buckets.setdefault(key, []).append(doc)
+    conflicts = []
+    for key, rows in buckets.items():
+        if len(rows) < 2:
+            continue
+        conflicts.append(
+            {
+                "observer_id": rows[0].get("observer_id"),
+                "scheduled_date": rows[0].get("scheduled_date"),
+                "sessions": [await _serialize_observation_session(row) for row in rows],
+            }
+        )
+    return {"conflicts": conflicts, "count": len(conflicts)}
+
+
 @api_router.post("/schedules", response_model=Schedule)
 async def create_schedule(
     payload: ScheduleCreate,

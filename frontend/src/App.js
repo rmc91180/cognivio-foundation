@@ -32,6 +32,7 @@ import { CohortManagementPage } from "@/pages/CohortManagementPage";
 import { MasterSchedulePage } from "@/pages/MasterSchedulePage";
 import { ObservationSetupPage } from "@/pages/ObservationSetupPage";
 import { ObserverInsightsPage } from "@/pages/ObserverInsightsPage";
+import { ReportsPage } from "@/pages/ReportsPage";
 import { VideoPlayerPage } from "@/pages/VideoPlayerPage";
 import { VideoRecorderPage } from "@/pages/VideoRecorderPage";
 import { FrameworksPage } from "@/pages/FrameworksPage";
@@ -373,6 +374,14 @@ function App() {
           element={
             <ProtectedRoute allowedTenantRoles={["school_admin"]}>
               <OpsMetricsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/reports"
+          element={
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
+              <ReportsPage />
             </ProtectedRoute>
           }
         />

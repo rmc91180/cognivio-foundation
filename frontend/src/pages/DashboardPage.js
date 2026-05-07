@@ -12,6 +12,7 @@ import {
   recognitionApi,
   opsApi,
   observerApi,
+  scheduleApi,
 } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { LeadershipInsightsCard } from "@/components/dashboard/LeadershipInsightsCard";
@@ -566,6 +567,12 @@ function SchoolDashboardPage({ forcedWorkspaceMode = null }) {
     queryFn: () => observerApi.insights().then((res) => res.data),
     staleTime: 5 * 60 * 1000,
   });
+  const { data: scheduleComplianceRes } = useQuery({
+    queryKey: ["dashboard-schedule-compliance"],
+    enabled: isAdmin,
+    queryFn: () => scheduleApi.compliance().then((res) => res.data),
+    staleTime: 5 * 60 * 1000,
+  });
   const coachingQueueSummary = useMemo(() => {
     const activeTasks = (coachingTasksRes?.tasks || []).filter(
       (task) => task.status !== "completed"
@@ -581,6 +588,12 @@ function SchoolDashboardPage({ forcedWorkspaceMode = null }) {
     () => observerGoalsRes?.goals || observerInsightsRes?.active_goals || [],
     [observerGoalsRes, observerInsightsRes]
   );
+  const scheduleComplianceSummary = scheduleComplianceRes?.summary || {
+    total: 0,
+    on_track: 0,
+    at_risk: 0,
+    non_compliant: 0,
+  };
 
   const roster = useMemo(() => currentData?.roster ?? [], [currentData]);
   const previousRoster = useMemo(
@@ -1448,6 +1461,37 @@ function SchoolDashboardPage({ forcedWorkspaceMode = null }) {
                     {label}
                   </div>
                   <div className={`mt-1 text-2xl font-semibold ${className}`}>{value}</div>
+                </div>
+              ))}
+            </div>
+          </Panel>
+        ) : null}
+
+        {isAdmin ? (
+          <Panel className="mb-6 border border-slate-200 bg-white">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-950">Observation compliance</h2>
+                <p className="mt-1 text-xs text-slate-500">
+                  {scheduleComplianceSummary.on_track} of {scheduleComplianceSummary.total} teachers on track this cycle.
+                </p>
+              </div>
+              <Link
+                to="/master-schedule?tab=compliance"
+                className="inline-flex items-center rounded-md bg-teal-600 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-700"
+              >
+                Open compliance view
+              </Link>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
+              {[
+                ["On track", scheduleComplianceSummary.on_track, "border-emerald-200 bg-emerald-50 text-emerald-700"],
+                ["At risk", scheduleComplianceSummary.at_risk, "border-amber-200 bg-amber-50 text-amber-700"],
+                ["Non-compliant", scheduleComplianceSummary.non_compliant, "border-rose-200 bg-rose-50 text-rose-700"],
+              ].map(([label, value, classes]) => (
+                <div key={label} className={`rounded-lg border px-4 py-3 ${classes}`}>
+                  <div className="text-[11px] font-semibold uppercase tracking-wide">{label}</div>
+                  <div className="mt-1 text-2xl font-semibold">{value}</div>
                 </div>
               ))}
             </div>

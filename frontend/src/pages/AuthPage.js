@@ -10,6 +10,7 @@ import { Button, Field, Input, Panel } from "@/components/ui";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 import { authApi } from "@/lib/api";
 import { getHomeRoute } from "@/lib/roleRouter";
+import { CheckCircle2, ClipboardList, GraduationCap, School } from "lucide-react";
 
 function SegmentButton({ active, onClick, children }) {
   return (
@@ -26,6 +27,37 @@ function SegmentButton({ active, onClick, children }) {
       {children}
     </button>
   );
+}
+
+function ChoiceCard({ active, icon: Icon, title, subtext, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={[
+        "flex min-h-36 flex-col items-start gap-3 rounded-xl border bg-white p-4 text-left transition",
+        active ? "border-teal-500 ring-2 ring-teal-100" : "border-slate-200 hover:border-slate-300",
+      ].join(" ")}
+    >
+      <span className={`rounded-lg p-2 ${active ? "bg-teal-50 text-teal-700" : "bg-slate-50 text-slate-600"}`}>
+        <Icon className="h-5 w-5" />
+      </span>
+      <span className="text-sm font-semibold text-slate-950">{title}</span>
+      <span className="text-xs leading-5 text-slate-500">{subtext}</span>
+      {active ? <CheckCircle2 className="mt-auto h-4 w-4 text-teal-600" /> : null}
+    </button>
+  );
+}
+
+function getPasswordStrength(password) {
+  let score = 0;
+  if ((password || "").length >= 8) score += 1;
+  if (/[A-Z]/.test(password || "")) score += 1;
+  if (/[0-9]/.test(password || "")) score += 1;
+  if (/[^A-Za-z0-9]/.test(password || "")) score += 1;
+  const labels = ["Too short", "Weak", "Fair", "Good", "Strong"];
+  const colors = ["bg-slate-200", "bg-rose-500", "bg-amber-500", "bg-teal-500", "bg-emerald-600"];
+  return { score, label: labels[score], color: colors[score] };
 }
 
 export function AuthPage() {
@@ -50,7 +82,7 @@ export function AuthPage() {
   const [mode, setMode] = useState("login");
   const [showPasswordResetRequest, setShowPasswordResetRequest] = useState(false);
   const [accessType, setAccessType] = useState("teacher");
-  const [institutionType, setInstitutionType] = useState("school");
+  const [institutionType, setInstitutionType] = useState("k12");
   const [form, setForm] = useState({
     email: "",
     password: "",
@@ -99,8 +131,8 @@ export function AuthPage() {
   const isSchoolAdminRole = derivedRole === "school_admin";
   const isTrainingAdminRole = derivedRole === "training_admin";
   const requiresOrganizationFields = mode === "signup" && !isDemo;
-  const showInstitutionTypeRubric = !isDemo && (mode === "signup" || accessType === "administrator");
-  const requiresSubgroupName = requiresOrganizationFields && institutionType === "school";
+  const showInstitutionTypeRubric = !isDemo && mode === "login" && accessType === "administrator";
+  const requiresSubgroupName = requiresOrganizationFields && institutionType === "k12";
   const showsSubgroupField = requiresOrganizationFields;
   const requiresManagerEmail = requiresOrganizationFields && isTeacherRole;
 
@@ -135,17 +167,21 @@ export function AuthPage() {
   }, [accessType, institutionType, t]);
 
   const organizationFieldLabel = institutionType === "training"
-    ? t("auth.trainingOrganizationName")
-    : t("auth.schoolOrganizationName");
+    ? "Training provider / college name"
+    : accessType === "administrator"
+      ? "District or network"
+      : "District or network";
   const organizationFieldHint = institutionType === "training"
-    ? t("auth.trainingOrganizationHint")
-    : t("auth.schoolOrganizationHint");
+    ? "University, college, or teacher preparation program."
+    : "Optional district, charter network, or school system.";
   const subgroupFieldLabel = institutionType === "training"
-    ? t("auth.programOrCohortName")
-    : t("auth.schoolName");
+    ? accessType === "administrator"
+      ? "Program or department"
+      : "Program / cohort name"
+    : "School name";
   const subgroupFieldHint = institutionType === "training"
-    ? t("auth.programOrCohortHint")
-    : t("auth.schoolNameHint");
+    ? "Optional program, department, or cohort label."
+    : "Primary or secondary school where observations will happen.";
   const managerFieldLabel = institutionType === "training"
     ? t("auth.requestedTrainingManagerEmail")
     : t("auth.requestedSchoolManagerEmail");
@@ -153,27 +189,18 @@ export function AuthPage() {
     ? t("auth.requestedTrainingManagerEmailHint")
     : t("auth.requestedSchoolManagerEmailHint");
 
-  const summaryItems = [
-    { label: t("auth.signupSummaryAccess"), value: t(`auth.signupAccessMap.${accessType}`) },
-    { label: t("auth.signupSummaryInstitutionType"), value: t(`auth.institutionTypeMap.${institutionType}`) },
-    { label: t("auth.signupSummaryDashboard"), value: t(`auth.derivedRoleMap.${derivedRole}`) },
-    { label: t("auth.signupSummaryOrganization"), value: form.organization_name || "—" },
-    {
-      label: institutionType === "training" ? t("auth.signupSummaryProgram") : t("auth.signupSummarySchool"),
-      value: form.school_name || "—",
-    },
-    {
-      label: t("auth.signupSummaryLinkedAdministrator"),
-      value: form.requested_manager_email || "—",
-    },
-  ];
+  const passwordStrength = getPasswordStrength(form.password);
+  const institutionDisplay = institutionType === "training" ? "Teacher Training Program" : "K-12 School";
+  const roleDisplay = accessType === "administrator" ? "Administrator" : "Teacher";
+  const primaryPlaceName = institutionType === "training" ? form.organization_name : form.school_name;
+  const summarySentence = `You are requesting access as a ${roleDisplay} at ${primaryPlaceName || institutionDisplay}.`;
 
   const { data: institutionLookupRes } = useQuery({
     queryKey: ["signup-institution-lookup", institutionType, form.organization_name],
     queryFn: () =>
       authApi
         .institutionLookup({
-          organization_type: institutionType,
+          organization_type: institutionType === "training" ? "training" : "school",
           q: form.organization_name.trim(),
           limit: 6,
         })
@@ -230,9 +257,28 @@ export function AuthPage() {
       email: form.email,
       password: form.password,
       name: form.name || form.email,
-      organization_type: institutionType,
-      organization_name: form.organization_name,
-      school_name: form.school_name || undefined,
+      user_type: accessType,
+      institution_type: institutionType,
+      role_requested: derivedRole,
+      organization_type: institutionType === "training" ? "training" : "school",
+      organization_name:
+        institutionType === "training"
+          ? form.organization_name
+          : form.organization_name || form.school_name,
+      school_name: institutionType === "k12" ? form.school_name : undefined,
+      training_provider_name: institutionType === "training" ? form.organization_name : undefined,
+      district_or_network: institutionType === "k12" ? form.organization_name || undefined : undefined,
+      program_or_cohort_name:
+        institutionType === "training" && accessType === "teacher"
+          ? form.school_name || undefined
+          : undefined,
+      program_or_department:
+        institutionType === "training" && accessType === "administrator"
+          ? form.school_name || undefined
+          : undefined,
+      linked_admin_email: isTeacherRole && form.requested_manager_email
+        ? form.requested_manager_email
+        : undefined,
       requested_manager_email: isTeacherRole && form.requested_manager_email
         ? form.requested_manager_email
         : undefined,
@@ -355,6 +401,52 @@ export function AuthPage() {
 
         {!isDemo && !isResetRequestMode && !isResetConfirmMode ? (
           <div className="mb-4 space-y-4">
+            {mode === "signup" ? (
+              <>
+                <div>
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                    Step 1
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <ChoiceCard
+                      active={accessType === "teacher"}
+                      icon={GraduationCap}
+                      title="I am a Teacher"
+                      subtext="I want to view my observations, coaching goals, and feedback"
+                      onClick={() => setAccessType("teacher")}
+                    />
+                    <ChoiceCard
+                      active={accessType === "administrator"}
+                      icon={ClipboardList}
+                      title="I am an Administrator"
+                      subtext="I manage teachers and run observations at my school or program"
+                      onClick={() => setAccessType("administrator")}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                    Step 2
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <ChoiceCard
+                      active={institutionType === "k12"}
+                      icon={School}
+                      title="K-12 School"
+                      subtext="A primary or secondary school"
+                      onClick={() => setInstitutionType("k12")}
+                    />
+                    <ChoiceCard
+                      active={institutionType === "training"}
+                      icon={GraduationCap}
+                      title="Teacher Training Program"
+                      subtext="A university, college, or teacher preparation program"
+                      onClick={() => setInstitutionType("training")}
+                    />
+                  </div>
+                </div>
+              </>
+            ) : (
             <div>
               <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
                 {roleLabel}
@@ -368,6 +460,7 @@ export function AuthPage() {
                 </SegmentButton>
               </div>
             </div>
+            )}
 
             {showInstitutionTypeRubric ? (
               <div>
@@ -375,7 +468,7 @@ export function AuthPage() {
                   {institutionTypeLabel}
                 </div>
                 <div className="grid grid-cols-1 gap-2 rounded-xl bg-slate-100 p-1 text-sm sm:grid-cols-2">
-                  <SegmentButton active={institutionType === "school"} onClick={() => setInstitutionType("school")}>
+                  <SegmentButton active={institutionType === "k12"} onClick={() => setInstitutionType("k12")}>
                     {t("auth.institutionTypeSchool")}
                   </SegmentButton>
                   <SegmentButton active={institutionType === "training"} onClick={() => setInstitutionType("training")}>
@@ -386,7 +479,7 @@ export function AuthPage() {
               </div>
             ) : null}
 
-            <p className="text-xs text-slate-500">{roleHint}</p>
+            {mode === "login" ? <p className="text-xs text-slate-500">{roleHint}</p> : null}
           </div>
         ) : null}
 
@@ -419,7 +512,7 @@ export function AuthPage() {
                   <Input
                     id={organizationInputId}
                     type="text"
-                    required
+                    required={institutionType === "training"}
                     value={form.organization_name}
                     onChange={(e) => setForm((f) => ({ ...f, organization_name: e.target.value }))}
                   />
@@ -470,18 +563,16 @@ export function AuthPage() {
 
               <Panel className="space-y-3 border-slate-200 bg-white">
                 <div>
-                  <div className="text-sm font-semibold text-slate-900">{t("auth.signupSummaryTitle")}</div>
-                  <p className="mt-1 text-xs text-slate-500">{t("auth.signupSummaryDescription")}</p>
+                  <div className="text-sm font-semibold text-slate-900">Step 4</div>
+                  <p className="mt-1 text-xs text-slate-500">Review your access request before submitting.</p>
                 </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {summaryItems.map((item) => (
-                    <div key={item.label} className="rounded-xl bg-slate-50 p-3">
-                      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                        {item.label}
-                      </div>
-                      <div className="mt-1 text-sm text-slate-700">{item.value || "—"}</div>
-                    </div>
-                  ))}
+                <div className="rounded-xl border border-teal-300 bg-teal-50/40 p-4 text-sm text-slate-800">
+                  <p className="font-semibold text-slate-950">{summarySentence}</p>
+                  {isTeacherRole && form.requested_manager_email ? (
+                    <p className="mt-2">Your administrator: {form.requested_manager_email}</p>
+                  ) : null}
+                  <p className="mt-2">Institution type: {institutionDisplay}</p>
+                  <p className="mt-2 text-xs font-semibold text-teal-800">Access is subject to approval.</p>
                 </div>
               </Panel>
             </>
@@ -492,6 +583,7 @@ export function AuthPage() {
               <Input
                 id={nameInputId}
                 type="text"
+                required
                 value={form.name}
                 onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
               />
@@ -527,6 +619,21 @@ export function AuthPage() {
               value={form.password}
               onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
             />
+            {mode === "signup" && !isDemo ? (
+              <div className="mt-2">
+                <div className="flex gap-1">
+                  {[0, 1, 2, 3].map((index) => (
+                    <span
+                      key={index}
+                      className={`h-1.5 flex-1 rounded-full ${
+                        index < passwordStrength.score ? passwordStrength.color : "bg-slate-200"
+                      }`}
+                    />
+                  ))}
+                </div>
+                <p className="mt-1 text-xs text-slate-500">Password strength: {passwordStrength.label}</p>
+              </div>
+            ) : null}
             </Field>
           ) : null}
 

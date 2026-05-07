@@ -202,7 +202,10 @@ export function TeacherProfilePage() {
 
   const handleExportReport = async (format) => {
     try {
-      const res = await reportApi.export(format, { teacher_id: teacherId });
+      const res =
+        format === "csv"
+          ? await reportApi.csv("assessments")
+          : await reportApi.teacherReport(teacherId);
       const blob = new Blob([res.data], { type: res.headers["content-type"] });
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -210,8 +213,8 @@ export function TeacherProfilePage() {
       link.download =
         format === "csv"
           ? i18n.language === "he"
-            ? "teacher-summary-he.csv"
-            : "teacher-summary.csv"
+            ? "teacher-assessments-he.csv"
+            : "teacher-assessments.csv"
           : i18n.language === "he"
             ? "teacher-summary-he.pdf"
             : "teacher-summary.pdf";

@@ -64,6 +64,10 @@ export const scheduleApi = {
   list: (params) => api.get("/api/schedules", { params }),
   create: (payload) => api.post("/api/schedules", payload),
   update: (id, payload) => api.patch(`/api/schedules/${id}`, payload),
+  compliance: () => api.get("/api/schedules/compliance"),
+  bulk: (payload) => api.post("/api/schedules/bulk", payload),
+  calendar: (params = {}) => api.get("/api/schedules/calendar", { params }),
+  conflicts: (params = {}) => api.get("/api/schedules/conflicts", { params }),
 };
 
 export const observationSessionApi = {
@@ -103,6 +107,15 @@ export const reportApi = {
         responseType: "blob",
       }
     ),
+  teacherReport: (teacherId, params = {}) =>
+    api.post(`/api/reports/teacher/${teacherId}`, null, { params, responseType: "blob" }),
+  schoolSummary: (params = {}) =>
+    api.post("/api/reports/school/summary", null, { params, responseType: "blob" }),
+  csv: (type) =>
+    api.post("/api/reports/export/csv", null, { params: { type }, responseType: "blob" }),
+  bulkTeacherReports: (params = {}) =>
+    api.post("/api/reports/teachers/bulk", null, { params, responseType: "blob" }),
+  history: () => api.get("/api/reports/history"),
 };
 
 export const gradebookApi = {
