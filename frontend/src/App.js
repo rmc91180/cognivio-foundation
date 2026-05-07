@@ -28,6 +28,7 @@ import { TeacherLatestLessonPage } from "@/pages/TeacherLatestLessonPage";
 import { TeacherHistoryPage } from "@/pages/TeacherHistoryPage";
 import { TeacherOperationsPage } from "@/pages/TeacherOperationsPage";
 import { CoachingHubPage } from "@/pages/CoachingHubPage";
+import { CohortManagementPage } from "@/pages/CohortManagementPage";
 import { MasterSchedulePage } from "@/pages/MasterSchedulePage";
 import { ObservationSetupPage } from "@/pages/ObservationSetupPage";
 import { ObserverInsightsPage } from "@/pages/ObserverInsightsPage";
@@ -212,6 +213,14 @@ function App() {
           element={
             <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
               <TeachersPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/cohorts"
+          element={
+            <ProtectedRoute allowedTenantRoles={["training_admin"]}>
+              <CohortManagementPage />
             </ProtectedRoute>
           }
         />

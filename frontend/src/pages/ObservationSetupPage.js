@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { LayoutShell } from "@/components/LayoutShell";
+import { useAuth } from "@/hooks/useAuth";
 import {
   Button,
   Field,
@@ -29,8 +30,10 @@ import {
   frameworkApi,
   observationSessionApi,
   observerApi,
+  traineeApi,
   teacherApi,
 } from "@/lib/api";
+import { getUserTenantRole } from "@/lib/userRoutes";
 import { HEBREW_FRAMEWORK_LABELS } from "@/features/school-setup/constants";
 
 const COPY = {
@@ -61,6 +64,8 @@ const COPY = {
     scheduleTitle: "Schedule or start now",
     scheduleDescription: "Create the planned session, then come back later or record right away.",
     scheduledDate: "Scheduled date",
+    placementLabel: "Placement",
+    choosePlacement: "Choose placement",
     scheduleLater: "Schedule for later",
     uploadNow: "Upload video now",
     continue: "Continue",
@@ -108,6 +113,8 @@ const COPY = {
     scheduleTitle: "תזמון או התחלה עכשיו",
     scheduleDescription: "צרו תצפית מתוכננת וחזרו אליה מאוחר יותר או העלו הקלטה עכשיו.",
     scheduledDate: "מועד מתוכנן",
+    placementLabel: "שיבוץ",
+    choosePlacement: "בחרו שיבוץ",
     scheduleLater: "תזמון להמשך",
     uploadNow: "העלאת וידאו עכשיו",
     continue: "המשך",
@@ -162,6 +169,7 @@ function scoreText(value, copy) {
 
 export function ObservationSetupPage() {
   const { i18n } = useTranslation();
+  const { user } = useAuth();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
@@ -174,6 +182,8 @@ export function ObservationSetupPage() {
   const [focusNote, setFocusNote] = useState("");
   const [personalGoalsText, setPersonalGoalsText] = useState("");
   const [scheduledDate, setScheduledDate] = useState(defaultScheduleValue);
+  const [placementId, setPlacementId] = useState("");
+  const isTrainingAdmin = getUserTenantRole(user) === "training_admin";
 
   useEffect(() => {
     if (initialTeacherId) {
@@ -218,6 +228,12 @@ export function ObservationSetupPage() {
   const { data: observerGoalsRes } = useQuery({
     queryKey: ["observer-goals"],
     queryFn: () => observerApi.goals().then((res) => res.data),
+  });
+
+  const { data: placementsRes } = useQuery({
+    queryKey: ["trainee-placements", selectedTeacherId, "observation-setup"],
+    enabled: Boolean(selectedTeacherId) && isTrainingAdmin,
+    queryFn: () => traineeApi.placements(selectedTeacherId).then((res) => res.data),
   });
 
   const selectedTeacher = useMemo(
@@ -385,6 +401,7 @@ export function ObservationSetupPage() {
         focus_elements: focusElements,
         focus_note: focusNote,
         personal_goals: splitGoals(personalGoalsText),
+        placement_id: placementId || null,
       });
       if (mode === "upload-now") {
         toast.success(copy.createdForUpload);
@@ -412,6 +429,7 @@ export function ObservationSetupPage() {
             onChange={(event) => {
               setSelectedTeacherId(event.target.value);
               setFocusElements([]);
+              setPlacementId("");
             }}
           >
             <option value="">{copy.chooseTeacher}</option>
@@ -527,6 +545,18 @@ export function ObservationSetupPage() {
             onChange={(event) => setScheduledDate(event.target.value)}
           />
         </Field>
+        {isTrainingAdmin && (placementsRes?.placements || []).length ? (
+          <Field label={copy.placementLabel}>
+            <Select value={placementId} onChange={(event) => setPlacementId(event.target.value)}>
+              <option value="">{copy.choosePlacement}</option>
+              {(placementsRes?.placements || []).map((placement) => (
+                <option key={placement.id} value={placement.id}>
+                  {placement.school_site}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        ) : null}
         <div className="rounded-md border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-700">
           <div className="font-semibold text-slate-900">{copy.selectedTeacher}</div>
           <div className="mt-1">{selectedTeacher?.name || selectedTeacher?.email || copy.chooseTeacher}</div>

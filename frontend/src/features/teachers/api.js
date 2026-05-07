@@ -19,6 +19,8 @@ export const teacherApi = {
     api.post(`/api/coaching/tasks/${id}/complete`, payload),
   overdueCoachingTasks: () => api.get("/api/coaching/tasks/overdue"),
   coachingHistory: (id) => api.get(`/api/teachers/${id}/coaching-history`),
+  placements: (id) => api.get(`/api/trainees/${id}/placements`),
+  createPlacement: (id, payload) => api.post(`/api/trainees/${id}/placements`, payload),
   getPeerRecommendations: (id) =>
     api.get(`/api/teachers/${id}/peer-recommendations`),
 };

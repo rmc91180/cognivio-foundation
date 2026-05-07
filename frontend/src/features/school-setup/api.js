@@ -10,6 +10,11 @@ export const frameworkApi = {
   get: (frameworkType) => api.get(`/api/frameworks/${frameworkType}`),
   currentSelection: () => api.get("/api/frameworks/selection/current"),
   saveSelection: (payload) => api.post("/api/frameworks/selection", payload),
+  standards: () => api.get("/api/frameworks/standards"),
+  importFramework: (formData) =>
+    api.post("/api/frameworks/import", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+    }),
   uploadRubric: (formData) =>
     api.post("/api/frameworks/upload-rubric", formData, {
       headers: { "Content-Type": "multipart/form-data" },

@@ -81,6 +81,18 @@ export const observerApi = {
   insights: () => api.get("/api/observer/insights"),
 };
 
+export const cohortApi = {
+  list: () => api.get("/api/cohorts"),
+  create: (payload) => api.post("/api/cohorts", payload),
+  trainees: (id) => api.get(`/api/cohorts/${id}/trainees`),
+  summary: (id) => api.get(`/api/cohorts/${id}/summary`),
+};
+
+export const traineeApi = {
+  placements: (id) => api.get(`/api/trainees/${id}/placements`),
+  createPlacement: (id, payload) => api.post(`/api/trainees/${id}/placements`, payload),
+};
+
 export const reportApi = {
   export: (format, params = {}) =>
     api.post(

@@ -10,12 +10,12 @@ import {
   SkeletonCard,
   SkeletonText,
 } from "@/components/ui";
-import { observationSessionApi, reportApi, teacherApi, videoApi } from "@/lib/api";
+import { observationSessionApi, reportApi, teacherApi, traineeApi, videoApi } from "@/lib/api";
 import { useAdminTeacherDeepDiveData } from "@/pages/teacher-deep-dive/useAdminTeacherDeepDiveData";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
-import { isSuperAdminUser } from "@/lib/userRoutes";
+import { getUserTenantRole, isSuperAdminUser } from "@/lib/userRoutes";
 import {
   CartesianGrid,
   Line,
@@ -57,10 +57,27 @@ function observationSessionOutcomeLabel(status) {
   return "Planned";
 }
 
+function formatTrainingProficiency(value) {
+  if (typeof value !== "number") return "No evidence";
+  const scaled = value <= 4 ? value : value / 2.5;
+  return `${Math.max(1, Math.min(4, scaled)).toFixed(1)} / 4`;
+}
+
+function trainingReadinessLabel(value) {
+  if (typeof value !== "number") return "Not enough evidence";
+  const scaled = value <= 4 ? value : value / 2.5;
+  if (scaled >= 3.5) return "Distinguished readiness";
+  if (scaled >= 2.75) return "Ready for lead teaching";
+  if (scaled >= 2) return "Developing readiness";
+  return "Emerging readiness";
+}
+
 export function TeacherProfilePage() {
   const { teacherId } = useParams();
   const { t, i18n } = useTranslation();
   const { user } = useAuth();
+  const tenantRole = getUserTenantRole(user);
+  const isTrainingAdmin = tenantRole === "training_admin";
   const {
     isLoading,
     teacherRes,
@@ -95,6 +112,11 @@ export function TeacherProfilePage() {
     queryKey: ["teacher-coaching-history", teacherId],
     enabled: Boolean(teacherId),
     queryFn: () => teacherApi.coachingHistory(teacherId).then((res) => res.data),
+  });
+  const { data: placementsRes } = useQuery({
+    queryKey: ["trainee-placements", teacherId],
+    enabled: Boolean(teacherId) && isTrainingAdmin,
+    queryFn: () => traineeApi.placements(teacherId).then((res) => res.data),
   });
 
   const latestVideoLink = latestAssessment?.video_id
@@ -140,6 +162,28 @@ export function TeacherProfilePage() {
   const completedCoachingTasks = coachingHistoryRes?.history || coachingTasks.filter((task) => task.status === "completed");
   const adminActionTasks = openCoachingTasks.slice(0, 3);
   const isSuperAdmin = isSuperAdminUser(user);
+  const placements = placementsRes?.placements || [];
+  const latestTrainingScore = latestAssessment?.overall_score;
+  const latestTrainingProficiency = formatTrainingProficiency(latestTrainingScore);
+  const readinessRating = trainingReadinessLabel(latestTrainingScore);
+  const trainingDomainRows = useMemo(() => {
+    const buckets = {};
+    (dashboardRes?.assessments || []).forEach((assessment) => {
+      (assessment.element_scores || []).forEach((score) => {
+        const domain = score.domain || "Competency";
+        buckets[domain] = buckets[domain] || [];
+        if (typeof score.score === "number") {
+          buckets[domain].push(score.score <= 4 ? score.score : score.score / 2.5);
+        }
+      });
+    });
+    return Object.entries(buckets).map(([domain, values]) => ({
+      domain,
+      proficiency: values.length
+        ? Math.max(1, Math.min(4, values.reduce((sum, value) => sum + value, 0) / values.length))
+        : null,
+    }));
+  }, [dashboardRes]);
   const teacherContextCards = [
     {
       label: t("teacherProfile.contextSchoolLabel"),
@@ -273,6 +317,110 @@ export function TeacherProfilePage() {
             ))}
           </div>
         </section>
+
+        {isTrainingAdmin ? (
+          <section className="mt-6 rounded-xl border border-teal-100 bg-teal-50 p-5">
+            <SectionHeader
+              eyebrow="Teacher training"
+              title="Trainee readiness profile"
+              description="Training-program view uses the 1-4 competency scale for accreditation and supervision decisions."
+            />
+            <div className="mt-4 grid gap-4 md:grid-cols-3">
+              <Panel className="h-full bg-white">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  Overall proficiency
+                </div>
+                <div className="mt-2 text-2xl font-semibold text-slate-950">
+                  {latestTrainingProficiency}
+                </div>
+              </Panel>
+              <Panel className="h-full bg-white">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  Readiness assessment
+                </div>
+                <div className="mt-2 text-sm font-semibold text-slate-950">
+                  {readinessRating}
+                </div>
+              </Panel>
+              <Panel className="h-full bg-white">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  Active placement
+                </div>
+                <div className="mt-2 text-sm font-semibold text-slate-950">
+                  {placements.find((placement) => placement.status === "active")?.school_site ||
+                    teacherRes?.placement_site ||
+                    "Unassigned"}
+                </div>
+              </Panel>
+            </div>
+            <div className="mt-4 grid gap-4 lg:grid-cols-2">
+              <Panel className="bg-white">
+                <div className="text-sm font-semibold text-slate-950">Proficiency by domain</div>
+                <div className="mt-4 space-y-3">
+                  {trainingDomainRows.length ? (
+                    trainingDomainRows.map((row) => (
+                      <div key={row.domain}>
+                        <div className="mb-1 flex justify-between gap-2 text-xs text-slate-600">
+                          <span>{row.domain}</span>
+                          <span>{formatTrainingProficiency(row.proficiency)}</span>
+                        </div>
+                        <div className="h-2 overflow-hidden rounded-full bg-slate-200">
+                          <div
+                            className="h-full rounded-full bg-teal-600"
+                            style={{ width: `${Math.min(100, Math.max(0, ((row.proficiency || 0) / 4) * 100))}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-xs text-slate-500">Competency evidence will appear after observations are assessed.</div>
+                  )}
+                </div>
+              </Panel>
+              <Panel className="bg-white">
+                <div className="text-sm font-semibold text-slate-950">Placement history</div>
+                <div className="mt-4 space-y-3">
+                  {placements.length ? (
+                    placements.map((placement) => (
+                      <div key={placement.id} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                        <div className="text-sm font-semibold text-slate-900">{placement.school_site}</div>
+                        <div className="mt-1 text-xs text-slate-500">
+                          {placement.mentor_teacher || "Mentor not set"} - {placement.status}
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-xs text-slate-500">No placement history has been recorded.</div>
+                  )}
+                </div>
+              </Panel>
+            </div>
+            <Panel className="mt-4 bg-white">
+              <div className="text-sm font-semibold text-slate-950">Supervision observation log</div>
+              <div className="mt-4 space-y-3">
+                {observationSessions.length ? (
+                  observationSessions.slice(0, 6).map((session) => (
+                    <div key={session.id} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-sm font-semibold text-slate-900">
+                          {session.scheduled_date ? formatDateTime(session.scheduled_date) : "Date not set"}
+                        </span>
+                        <span className="rounded-full bg-white px-2.5 py-1 text-[11px] text-slate-600">
+                          {observationSessionOutcomeLabel(session.status)}
+                        </span>
+                      </div>
+                      {session.focus_note ? (
+                        <p className="mt-2 text-xs text-slate-600">{session.focus_note}</p>
+                      ) : null}
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-xs text-slate-500">No supervision visits have been logged yet.</div>
+                )}
+              </div>
+            </Panel>
+          </section>
+        ) : null}
 
         <section className="mt-6 rounded-xl border border-slate-200 bg-white p-5">
           <SectionHeader

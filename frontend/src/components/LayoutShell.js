@@ -55,7 +55,7 @@ const ROLE_NAV_ITEMS = {
   ],
   training: [
     { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard", end: true },
-    { to: "/teachers?view=cohorts", icon: Layers, label: "Cohorts" },
+    { to: "/cohorts", icon: Layers, label: "Cohorts" },
     { to: "/teachers", icon: Users, label: "Trainees" },
     { to: "/master-schedule", icon: ClipboardList, label: "Schedule" },
     { to: "/my-insights", icon: Target, label: "My Insights" },

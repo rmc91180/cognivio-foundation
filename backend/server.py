@@ -5010,6 +5010,7 @@ class FrameworkType(str, Enum):
     MARSHALL = "marshall"
     DANIELSON = "danielson"
     CUSTOM = "custom"
+    TRAINING_COMPETENCY = "training_competency"
 
 class PerformanceLevel(str, Enum):
     EXCELLENT = "excellent"  # Green - score >= 3
@@ -5144,8 +5145,73 @@ MARSHALL_FRAMEWORK = {
     ]
 }
 
+TRAINING_COMPETENCY_SCALE = [
+    {"score": 1, "label": "Emerging"},
+    {"score": 2, "label": "Developing"},
+    {"score": 3, "label": "Proficient"},
+    {"score": 4, "label": "Distinguished"},
+]
+
+TRAINING_COMPETENCY_STANDARDS = [
+    {
+        "key": "intasc",
+        "name": "InTASC Model Core Teaching Standards",
+        "description": "Learner-centered competencies for teacher candidates and residency programs.",
+    },
+    {
+        "key": "caep",
+        "name": "CAEP Initial-Level Standards",
+        "description": "Accreditation-aligned standards for educator preparation evidence.",
+    },
+    {
+        "key": "program_custom",
+        "name": "Program Custom Competencies",
+        "description": "A local competency map imported from CSV or JSON.",
+    },
+]
+
+TRAINING_COMPETENCY_FRAMEWORK = {
+    "name": "Training Competency Framework",
+    "type": "training_competency",
+    "scale": TRAINING_COMPETENCY_SCALE,
+    "domains": [
+        {
+            "id": "tc1",
+            "name": "Learner Development and Differences",
+            "standard_key": "intasc",
+            "elements": [
+                {"id": "tc1a", "name": "Learner development"},
+                {"id": "tc1b", "name": "Learning differences"},
+                {"id": "tc1c", "name": "Inclusive learning environments"},
+            ],
+        },
+        {
+            "id": "tc2",
+            "name": "Instructional Practice",
+            "standard_key": "intasc",
+            "elements": [
+                {"id": "tc2a", "name": "Planning for instruction"},
+                {"id": "tc2b", "name": "Instructional strategies"},
+                {"id": "tc2c", "name": "Assessment-driven instruction"},
+            ],
+        },
+        {
+            "id": "tc3",
+            "name": "Professional Responsibility",
+            "standard_key": "caep",
+            "elements": [
+                {"id": "tc3a", "name": "Professional learning and ethical practice"},
+                {"id": "tc3b", "name": "Leadership and collaboration"},
+                {"id": "tc3c", "name": "Clinical readiness"},
+            ],
+        },
+    ],
+}
+
 
 def _get_framework_by_type(framework_type: str) -> dict:
+    if framework_type == "training_competency":
+        return TRAINING_COMPETENCY_FRAMEWORK
     if framework_type == "marshall":
         return MARSHALL_FRAMEWORK
     if framework_type == "danielson":
@@ -5544,6 +5610,59 @@ def _parse_uploaded_rubric_file(filename: str, content: bytes) -> Tuple[str, Lis
         return default_rubric_name, normalized_domains
 
     raise HTTPException(status_code=400, detail="Uploaded rubric must be a .json or .csv file")
+
+
+def _training_score_to_proficiency(score: Optional[float]) -> Optional[float]:
+    if not isinstance(score, (int, float)):
+        return None
+    if score <= 4:
+        return round(max(1, min(4, float(score))), 1)
+    return round(max(1, min(4, float(score) / 2.5)), 1)
+
+
+def _training_readiness_label(score: Optional[float]) -> str:
+    if score is None:
+        return "Not enough evidence"
+    if score >= 3.5:
+        return "Distinguished readiness"
+    if score >= 2.75:
+        return "Ready for lead teaching"
+    if score >= 2:
+        return "Developing readiness"
+    return "Emerging readiness"
+
+
+def _training_domain_progress_from_assessments(assessments: List[dict]) -> List[dict]:
+    buckets: Dict[str, Dict[str, Any]] = {}
+    for assessment in assessments:
+        for score in assessment.get("element_scores") or []:
+            domain = score.get("domain") or score.get("domain_id") or "Competency"
+            bucket = buckets.setdefault(domain, {"domain": domain, "scores": []})
+            proficiency = _training_score_to_proficiency(score.get("score"))
+            if proficiency is not None:
+                bucket["scores"].append(proficiency)
+    rows = []
+    for bucket in buckets.values():
+        values = bucket["scores"]
+        avg = round(sum(values) / len(values), 1) if values else None
+        rows.append(
+            {
+                "domain": bucket["domain"],
+                "proficiency": avg,
+                "label": _training_readiness_label(avg),
+            }
+        )
+    return sorted(rows, key=lambda row: row["domain"])
+
+
+def _normalize_training_framework_domains(domains: List[Dict[str, Any]], standard_key: str) -> List[Dict[str, Any]]:
+    normalized = _normalize_uploaded_rubric_domains(domains)
+    for domain in normalized:
+        domain["framework_type"] = FrameworkType.TRAINING_COMPETENCY.value
+        domain["standard_key"] = standard_key
+        domain["proficiency_scale"] = TRAINING_COMPETENCY_SCALE
+        domain["source_type"] = "training_competency_import"
+    return normalized
 
 
 def _find_domain_for_element(framework: dict, element_id: str) -> Optional[dict]:
@@ -6083,6 +6202,24 @@ class TeacherUpdate(BaseModel):
     next_coaching_conference: Optional[str] = None
 
 
+class TrainingCohortCreate(BaseModel):
+    name: str
+    program_name: Optional[str] = None
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    trainee_ids: List[str] = []
+
+
+class TraineePlacementCreate(BaseModel):
+    school_site: str
+    mentor_teacher: Optional[str] = None
+    grade_level: Optional[str] = None
+    subject: Optional[str] = None
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    status: Optional[str] = "active"
+
+
 class SchoolCreate(BaseModel):
     name: str
     district_name: Optional[str] = None
@@ -6402,6 +6539,7 @@ class ObservationSession(BaseModel):
     status: ObservationSessionStatus = ObservationSessionStatus.PLANNED
     linked_video_id: Optional[str] = None
     linked_assessment_id: Optional[str] = None
+    placement_id: Optional[str] = None
     created_at: str
     updated_at: Optional[str] = None
     teacher_name: Optional[str] = None
@@ -6414,6 +6552,7 @@ class ObservationSessionCreate(BaseModel):
     focus_elements: List[str]
     focus_note: Optional[str] = None
     personal_goals: List[str] = []
+    placement_id: Optional[str] = None
 
 
 class ObservationSessionUpdate(BaseModel):
@@ -6424,6 +6563,7 @@ class ObservationSessionUpdate(BaseModel):
     status: Optional[ObservationSessionStatus] = None
     linked_video_id: Optional[str] = None
     linked_assessment_id: Optional[str] = None
+    placement_id: Optional[str] = None
 
 
 class ObserverGoalProgressSignal(BaseModel):
@@ -7397,16 +7537,36 @@ async def get_frameworks(current_user: dict = Depends(get_current_user)):
     custom_domain_count = await db.custom_domains.count_documents(
         {"user_id": current_user["id"]}
     )
+    training_domain_count = await db.custom_domains.count_documents(
+        {
+            "user_id": current_user["id"],
+            "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
+        }
+    )
     return {
         "frameworks": [
             {"type": "danielson", "name": "Danielson Framework", "domain_count": 4},
             {"type": "marshall", "name": "Marshall Rubrics", "domain_count": 6},
+            {
+                "type": "training_competency",
+                "name": "Training Competency Framework",
+                "domain_count": len(TRAINING_COMPETENCY_FRAMEWORK["domains"]) + training_domain_count,
+                "scale": TRAINING_COMPETENCY_SCALE,
+            },
             {
                 "type": "custom",
                 "name": "Custom Focus Rubric",
                 "domain_count": 10 + custom_domain_count,
             },
         ]
+    }
+
+
+@api_router.get("/frameworks/standards")
+async def get_training_framework_standards(current_user: dict = Depends(get_current_user)):
+    return {
+        "standards": TRAINING_COMPETENCY_STANDARDS,
+        "scale": TRAINING_COMPETENCY_SCALE,
     }
 
 @api_router.get("/frameworks/custom-domains")
@@ -7468,6 +7628,67 @@ async def upload_focus_rubric(
     }
 
 
+@api_router.post("/frameworks/import")
+async def import_training_competency_framework(
+    file: UploadFile = File(...),
+    standard_key: str = Form("program_custom"),
+    current_user: dict = Depends(get_current_user),
+):
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Imported framework file is empty")
+    rubric_name, parsed_domains = _parse_uploaded_rubric_file(file.filename or "", content)
+    normalized_standard = str(standard_key or "program_custom").strip().lower()
+    known_standards = {standard["key"] for standard in TRAINING_COMPETENCY_STANDARDS}
+    if normalized_standard not in known_standards:
+        normalized_standard = "program_custom"
+    training_domains = _normalize_training_framework_domains(parsed_domains, normalized_standard)
+    if not training_domains:
+        raise HTTPException(status_code=400, detail="Imported framework did not contain competency domains")
+    created_at = datetime.now(timezone.utc).isoformat()
+    created_domains = []
+    for domain in training_domains:
+        domain_doc = {
+            **domain,
+            "rubric_set_name": rubric_name,
+            "user_id": current_user["id"],
+            "created_at": created_at,
+        }
+        await db.custom_domains.insert_one(domain_doc)
+        created_domains.append({k: v for k, v in domain_doc.items() if k != "user_id"})
+
+    selected_elements = [
+        element["id"]
+        for domain in (TRAINING_COMPETENCY_FRAMEWORK["domains"] + created_domains)
+        for element in domain.get("elements", [])
+    ]
+    await db.framework_selections.update_one(
+        {"user_id": current_user["id"]},
+        {
+            "$set": {
+                "id": str(uuid.uuid4()),
+                "user_id": current_user["id"],
+                "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
+                "selected_elements": selected_elements,
+                "priority_elements": [],
+                "focus_note": None,
+                "created_at": created_at,
+            }
+        },
+        upsert=True,
+    )
+    return {
+        "message": "Training competency framework imported",
+        "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
+        "standard_key": normalized_standard,
+        "rubric_name": rubric_name,
+        "domains_created": len(created_domains),
+        "elements_created": sum(len(domain.get("elements") or []) for domain in created_domains),
+        "scale": TRAINING_COMPETENCY_SCALE,
+        "domains": created_domains,
+    }
+
+
 @api_router.post("/frameworks/custom-domains/{domain_id}/elements")
 async def add_custom_element(
     domain_id: str,
@@ -7513,9 +7734,25 @@ async def get_framework_details(
         return DANIELSON_FRAMEWORK
     elif framework_type == FrameworkType.MARSHALL:
         return MARSHALL_FRAMEWORK
+    elif framework_type == FrameworkType.TRAINING_COMPETENCY:
+        custom_domains = await db.custom_domains.find(
+            {
+                "user_id": current_user["id"],
+                "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
+            },
+            {"_id": 0, "user_id": 0},
+        ).to_list(1000)
+        return {
+            **TRAINING_COMPETENCY_FRAMEWORK,
+            "domains": TRAINING_COMPETENCY_FRAMEWORK["domains"] + custom_domains,
+        }
     else:
         custom_domains = await db.custom_domains.find(
-            {"user_id": current_user["id"]}, {"_id": 0, "user_id": 0}
+            {
+                "user_id": current_user["id"],
+                "framework_type": {"$ne": FrameworkType.TRAINING_COMPETENCY.value},
+            },
+            {"_id": 0, "user_id": 0},
         ).to_list(1000)
         domains = (
             DANIELSON_FRAMEWORK["domains"]
@@ -7568,6 +7805,18 @@ async def get_current_selection(current_user: dict = Depends(get_current_user)):
         {"_id": 0}
     )
     if not selection:
+        if _get_user_tenant_role(current_user) == "training_admin":
+            all_training_elements = [
+                element["id"]
+                for domain in TRAINING_COMPETENCY_FRAMEWORK["domains"]
+                for element in domain["elements"]
+            ]
+            return {
+                "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
+                "selected_elements": all_training_elements,
+                "priority_elements": [],
+                "focus_note": None,
+            }
         # Return default with all Danielson elements selected
         all_elements = []
         for domain in DANIELSON_FRAMEWORK["domains"]:
@@ -7595,6 +7844,20 @@ async def get_current_selection(current_user: dict = Depends(get_current_user)):
             el["id"] for domain in domains for el in domain.get("elements", [])
         ]
         selection["selected_elements"] = element_ids
+    if selection.get("framework_type") == FrameworkType.TRAINING_COMPETENCY.value and not selection.get(
+        "selected_elements"
+    ):
+        custom_domains = await db.custom_domains.find(
+            {
+                "user_id": current_user["id"],
+                "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
+            },
+            {"_id": 0, "user_id": 0},
+        ).to_list(1000)
+        domains = TRAINING_COMPETENCY_FRAMEWORK["domains"] + custom_domains
+        selection["selected_elements"] = [
+            el["id"] for domain in domains for el in domain.get("elements", [])
+        ]
     selection.setdefault("priority_elements", [])
     selection.setdefault("focus_note", None)
     return selection
@@ -13224,6 +13487,18 @@ async def _resolve_framework_context(
             "type": "custom",
             "domains": DANIELSON_FRAMEWORK["domains"] + MARSHALL_FRAMEWORK["domains"] + custom_domains,
         }
+    elif resolved_type == FrameworkType.TRAINING_COMPETENCY.value:
+        custom_domains = await db.custom_domains.find(
+            {
+                "user_id": current_user["id"],
+                "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
+            },
+            {"_id": 0, "user_id": 0},
+        ).to_list(1000)
+        framework = {
+            **TRAINING_COMPETENCY_FRAMEWORK,
+            "domains": TRAINING_COMPETENCY_FRAMEWORK["domains"] + custom_domains,
+        }
     else:
         framework = _get_framework_by_type(resolved_type)
 
@@ -14607,6 +14882,287 @@ async def _training_required_per_trainee(current_user: dict) -> int:
         return max(1, int((policy or {}).get("min_recordings_per_period") or 2))
     except (TypeError, ValueError):
         return 2
+
+
+def _training_workspace_id(current_user: dict) -> str:
+    return str(current_user.get("organization_id") or current_user.get("id"))
+
+
+async def _list_training_trainees(current_user: dict) -> List[dict]:
+    teacher_ids = await _list_teacher_ids_for_user(current_user)
+    return await db.teachers.find(
+        {"id": {"$in": teacher_ids or ["__none__"]}},
+        {"_id": 0},
+    ).sort("name", 1).to_list(5000)
+
+
+async def _latest_training_placement(trainee_id: str) -> Optional[dict]:
+    placement = await db.trainee_placements.find_one(
+        {"trainee_id": trainee_id, "status": "active"},
+        {"_id": 0},
+        sort=[("start_date", -1), ("created_at", -1)],
+    )
+    if placement:
+        return placement
+    return await db.trainee_placements.find_one(
+        {"trainee_id": trainee_id},
+        {"_id": 0},
+        sort=[("start_date", -1), ("created_at", -1)],
+    )
+
+
+async def _build_training_trainee_progress(trainee: dict) -> dict:
+    trainee_id = trainee.get("id")
+    assessments = await db.assessments.find(
+        {"teacher_id": trainee_id},
+        {"_id": 0, "user_id": 0},
+    ).sort("analyzed_at", 1).to_list(500)
+    latest = assessments[-1] if assessments else None
+    latest_score = _training_score_to_proficiency((latest or {}).get("overall_score"))
+    domain_progress = _training_domain_progress_from_assessments(assessments)
+    placement = await _latest_training_placement(trainee_id)
+    sessions = await db.observation_sessions.find(
+        {"teacher_id": trainee_id},
+        {"_id": 0},
+    ).sort("scheduled_date", -1).to_list(100)
+    completed_sessions = [
+        session for session in sessions
+        if session.get("status") in {
+            ObservationSessionStatus.ANALYSIS_COMPLETE.value,
+            ObservationSessionStatus.FEEDBACK_GIVEN.value,
+        }
+    ]
+    upcoming_sessions = [
+        session for session in sessions
+        if session.get("status") == ObservationSessionStatus.PLANNED.value
+    ]
+    return {
+        "trainee_id": trainee_id,
+        "trainee_name": trainee.get("name") or trainee.get("email") or "Trainee",
+        "email": trainee.get("email"),
+        "cohort": trainee.get("category_custom") or trainee.get("category") or "Unassigned",
+        "placement_school": (placement or {}).get("school_site") or _training_placement_site(trainee),
+        "placement": placement,
+        "competency_progress": latest_score,
+        "competency_progress_pct": round(((latest_score or 0) / 4) * 100, 1),
+        "readiness_rating": _training_readiness_label(latest_score),
+        "domain_progress": domain_progress,
+        "assessment_count": len(assessments),
+        "observation_count": len(completed_sessions),
+        "last_observation": (completed_sessions[0].get("updated_at") or completed_sessions[0].get("scheduled_date")) if completed_sessions else None,
+        "next_due": (upcoming_sessions[-1].get("scheduled_date") if upcoming_sessions else None),
+    }
+
+
+async def _serialize_training_cohort(cohort: dict, trainee_docs: Optional[List[dict]] = None) -> dict:
+    payload = dict(cohort or {})
+    payload.pop("_id", None)
+    trainee_ids = payload.get("trainee_ids") or []
+    if trainee_docs is None:
+        trainee_docs = await db.teachers.find(
+            {"id": {"$in": trainee_ids or ["__none__"]}},
+            {"_id": 0},
+        ).to_list(1000)
+    progress_rows = [await _build_training_trainee_progress(trainee) for trainee in trainee_docs]
+    progress_values = [
+        row["competency_progress"]
+        for row in progress_rows
+        if isinstance(row.get("competency_progress"), (int, float))
+    ]
+    payload["trainee_count"] = len(trainee_docs)
+    payload["avg_progress"] = round(sum(progress_values) / len(progress_values), 1) if progress_values else None
+    payload["trainees"] = progress_rows
+    return payload
+
+
+@api_router.get("/cohorts")
+async def list_training_cohorts(current_user: dict = Depends(get_current_user)):
+    _require_training_admin_user(current_user)
+    workspace_id = _training_workspace_id(current_user)
+    cohorts = await db.training_cohorts.find(
+        {"workspace_id": workspace_id},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(100)
+    trainees = await _list_training_trainees(current_user)
+    if not cohorts:
+        cohorts = [
+            {
+                "id": "default",
+                "workspace_id": workspace_id,
+                "name": current_user.get("organization_name") or "Training Cohort",
+                "program_name": current_user.get("organization_name"),
+                "start_date": None,
+                "end_date": None,
+                "trainee_ids": [trainee.get("id") for trainee in trainees if trainee.get("id")],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": None,
+                "virtual": True,
+            }
+        ]
+    serialized = []
+    for cohort in cohorts:
+        cohort_ids = set(cohort.get("trainee_ids") or [])
+        cohort_trainees = [trainee for trainee in trainees if trainee.get("id") in cohort_ids]
+        serialized.append(await _serialize_training_cohort(cohort, cohort_trainees))
+    return {"cohorts": serialized}
+
+
+@api_router.post("/cohorts")
+async def create_training_cohort(
+    payload: TrainingCohortCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_training_admin_user(current_user)
+    name = str(payload.name or "").strip()
+    if len(name) < 2:
+        raise HTTPException(status_code=400, detail="Cohort name is required")
+    visible_ids = set(await _list_teacher_ids_for_user(current_user))
+    trainee_ids = [trainee_id for trainee_id in payload.trainee_ids if trainee_id in visible_ids]
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "workspace_id": _training_workspace_id(current_user),
+        "name": name,
+        "program_name": (payload.program_name or "").strip() or None,
+        "start_date": payload.start_date.isoformat() if payload.start_date else None,
+        "end_date": payload.end_date.isoformat() if payload.end_date else None,
+        "trainee_ids": trainee_ids,
+        "created_by": current_user["id"],
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.training_cohorts.insert_one(doc)
+    for trainee_id in trainee_ids:
+        await db.teachers.update_one(
+            {"id": trainee_id},
+            {"$set": {"category": None, "category_custom": name}},
+        )
+    return {"cohort": await _serialize_training_cohort(doc)}
+
+
+async def _get_training_cohort_or_404(cohort_id: str, current_user: dict) -> dict:
+    _require_training_admin_user(current_user)
+    if cohort_id == "default":
+        trainees = await _list_training_trainees(current_user)
+        return {
+            "id": "default",
+            "workspace_id": _training_workspace_id(current_user),
+            "name": current_user.get("organization_name") or "Training Cohort",
+            "program_name": current_user.get("organization_name"),
+            "trainee_ids": [trainee.get("id") for trainee in trainees if trainee.get("id")],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": None,
+            "virtual": True,
+        }
+    cohort = await db.training_cohorts.find_one(
+        {"id": cohort_id, "workspace_id": _training_workspace_id(current_user)},
+        {"_id": 0},
+    )
+    if not cohort:
+        raise HTTPException(status_code=404, detail="Cohort not found")
+    return cohort
+
+
+@api_router.get("/cohorts/{cohort_id}/trainees")
+async def list_training_cohort_trainees(
+    cohort_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    cohort = await _get_training_cohort_or_404(cohort_id, current_user)
+    trainees = await db.teachers.find(
+        {"id": {"$in": cohort.get("trainee_ids") or ["__none__"]}},
+        {"_id": 0},
+    ).sort("name", 1).to_list(1000)
+    return {
+        "cohort": {k: v for k, v in cohort.items() if k != "trainee_ids"},
+        "trainees": [await _build_training_trainee_progress(trainee) for trainee in trainees],
+    }
+
+
+@api_router.get("/cohorts/{cohort_id}/summary")
+async def get_training_cohort_summary(
+    cohort_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    cohort = await _get_training_cohort_or_404(cohort_id, current_user)
+    trainees = await db.teachers.find(
+        {"id": {"$in": cohort.get("trainee_ids") or ["__none__"]}},
+        {"_id": 0},
+    ).sort("name", 1).to_list(1000)
+    serialized = await _serialize_training_cohort(cohort, trainees)
+    readiness_counts = {"Emerging": 0, "Developing": 0, "Proficient": 0, "Distinguished": 0, "No evidence": 0}
+    for trainee in serialized.get("trainees") or []:
+        score = trainee.get("competency_progress")
+        if score is None:
+            readiness_counts["No evidence"] += 1
+        elif score >= 3.5:
+            readiness_counts["Distinguished"] += 1
+        elif score >= 2.75:
+            readiness_counts["Proficient"] += 1
+        elif score >= 2:
+            readiness_counts["Developing"] += 1
+        else:
+            readiness_counts["Emerging"] += 1
+    return {
+        "cohort": serialized,
+        "readiness_counts": readiness_counts,
+        "scale": TRAINING_COMPETENCY_SCALE,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@api_router.get("/trainees/{trainee_id}/placements")
+async def list_trainee_placements(
+    trainee_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_training_admin_user(current_user)
+    await _get_teacher_or_404(trainee_id, current_user)
+    placements = await db.trainee_placements.find(
+        {"trainee_id": trainee_id},
+        {"_id": 0},
+    ).sort("start_date", -1).to_list(100)
+    return {"placements": placements}
+
+
+@api_router.post("/trainees/{trainee_id}/placements")
+async def create_trainee_placement(
+    trainee_id: str,
+    payload: TraineePlacementCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_training_admin_user(current_user)
+    await _get_teacher_or_404(trainee_id, current_user)
+    school_site = str(payload.school_site or "").strip()
+    if not school_site:
+        raise HTTPException(status_code=400, detail="Placement school site is required")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "workspace_id": _training_workspace_id(current_user),
+        "trainee_id": trainee_id,
+        "school_site": school_site,
+        "mentor_teacher": (payload.mentor_teacher or "").strip() or None,
+        "grade_level": (payload.grade_level or "").strip() or None,
+        "subject": (payload.subject or "").strip() or None,
+        "start_date": payload.start_date.isoformat() if payload.start_date else now,
+        "end_date": payload.end_date.isoformat() if payload.end_date else None,
+        "status": payload.status or "active",
+        "created_by": current_user["id"],
+        "created_at": now,
+        "updated_at": now,
+    }
+    if doc["status"] == "active":
+        await db.trainee_placements.update_many(
+            {"trainee_id": trainee_id, "status": "active"},
+            {"$set": {"status": "completed", "updated_at": now}},
+        )
+    await db.trainee_placements.insert_one(doc)
+    await db.teachers.update_one(
+        {"id": trainee_id},
+        {"$set": {"placement_site": school_site, "school_site": school_site}},
+    )
+    return {"placement": {k: v for k, v in doc.items() if k != "_id"}}
 
 
 @api_router.get("/training/supervisor-summary", response_model=TrainingSupervisorSummaryResponse)
@@ -16606,6 +17162,7 @@ async def create_observation_session(
         "status": ObservationSessionStatus.PLANNED.value,
         "linked_video_id": None,
         "linked_assessment_id": None,
+        "placement_id": (payload.placement_id or "").strip() or None,
         "created_at": now,
         "updated_at": now,
     }
@@ -16770,6 +17327,8 @@ async def update_observation_session(
         update_fields["linked_video_id"] = payload.linked_video_id
     if "linked_assessment_id" in updates:
         update_fields["linked_assessment_id"] = payload.linked_assessment_id
+    if "placement_id" in updates:
+        update_fields["placement_id"] = (payload.placement_id or "").strip() or None
 
     if not update_fields:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -23128,6 +23687,9 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.observation_sessions, [("linked_video_id", 1)])
     await _safe_create_index(db.observer_goals, [("observer_id", 1), ("achieved", 1), ("created_at", -1)])
     await _safe_create_index(db.observer_goals, [("workspace_id", 1), ("goal_type", 1)])
+    await _safe_create_index(db.training_cohorts, [("workspace_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.trainee_placements, [("trainee_id", 1), ("start_date", -1)])
+    await _safe_create_index(db.trainee_placements, [("workspace_id", 1), ("status", 1)])
     await _safe_create_index(db.video_processing_jobs, [("video_id", 1)], unique=True)
     await _safe_create_index(db.video_processing_jobs, [("status", 1), ("updated_at", -1)])
     await _safe_create_index(db.video_transcode_jobs, [("video_id", 1)], unique=True)
