@@ -27,6 +27,7 @@ import re
 import shutil
 import sys
 import time
+import types
 import html
 import hmac
 import secrets
@@ -58,8 +59,32 @@ except Exception:
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
+
+
+class _ServerModuleProxy(types.ModuleType):
+    def __init__(self, namespace: Dict[str, Any]):
+        super().__init__("server")
+        object.__setattr__(self, "_namespace", namespace)
+
+    def __getattr__(self, name: str) -> Any:
+        namespace = object.__getattribute__(self, "_namespace")
+        try:
+            return namespace[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "_namespace":
+            object.__setattr__(self, name, value)
+            return
+        object.__getattribute__(self, "_namespace")[name] = value
+
+
+if "server" not in sys.modules:
+    sys.modules["server"] = _ServerModuleProxy(globals())
 if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
+from app.config import Settings
 from privacy_pipeline import analyze_video_privacy, render_redacted_video, get_privacy_runtime_status
 from frame_selection import scan_video_candidates, score_frame_candidates, select_diverse_frames
 from moment_sampler import segment_video_windows, score_windows, select_lesson_moments
@@ -87,23 +112,6 @@ from share_assets import (
     render_email_signature_badge,
     render_social_share_card,
 )
-
-
-def _get_required_env(name: str) -> str:
-    """Fetch required env var or raise a clear runtime error."""
-    value = os.getenv(name)
-    if not value:
-        raise RuntimeError(f"Environment variable {name} must be set")
-    return value
-
-
-def _get_optional_env_list(name: str) -> List[str]:
-    """Fetch optional comma-separated env var as list, ignoring empties."""
-    raw = os.getenv(name, "")
-    if not raw:
-        return []
-    return [item.strip() for item in raw.split(",") if item.strip()]
-
 
 def _to_json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
@@ -1382,7 +1390,7 @@ async def _build_dependency_health_snapshot() -> List["MasterAdminDependencyReco
             latest_probe_at=now_iso,
             latest_failure_note=None if dependency_values.get("mongodb") else "Latest Atlas ping probe failed.",
             remediation="Verify Atlas credentials, cluster availability, and network access.",
-            metadata={"database_name": os.getenv("DB_NAME")},
+            metadata={"database_name": APP_SETTINGS.database.db_name},
         ),
         MasterAdminDependencyRecord(
             id="r2",
@@ -1422,7 +1430,7 @@ async def _build_dependency_health_snapshot() -> List["MasterAdminDependencyReco
             latest_probe_at=now_iso,
             latest_failure_note=None,
             remediation="Check Railway deploy logs and service restart state.",
-            metadata={"environment": os.getenv("RAILWAY_ENVIRONMENT_NAME")},
+            metadata={"environment": APP_SETTINGS.operations.railway_environment_name},
         ),
     ]
 
@@ -2442,8 +2450,8 @@ def _get_s3_client():
     if not S3_BUCKET:
         raise RuntimeError("S3_BUCKET must be set for file uploads")
     session = boto3.session.Session(
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
         region_name=S3_REGION or None,
     )
     return session.client("s3", endpoint_url=S3_ENDPOINT or None)
@@ -2468,7 +2476,7 @@ def _validate_s3_config() -> None:
     if not S3_BUCKET:
         logger.warning("S3_BUCKET not set; using local upload storage fallback.")
         return
-    if not os.getenv("AWS_ACCESS_KEY_ID") or not os.getenv("AWS_SECRET_ACCESS_KEY"):
+    if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
         logger.error("AWS credentials missing; S3 uploads will fail.")
     if not (S3_PUBLIC_BASE_URL or S3_REGION or S3_ENDPOINT):
         logger.warning("S3 public URL/region/endpoint not set; URLs may be incorrect.")
@@ -4206,44 +4214,44 @@ async def _refresh_recording_reminders(
             await db.schedules.insert_one(reminder)
 
 
+# Centralized settings
+APP_SETTINGS = Settings.from_env()
+APP_SETTINGS.validate_startup()
+print(APP_SETTINGS.startup_summary())
+
 # MongoDB connection
-mongo_url = _get_required_env("MONGO_URL")
+mongo_url = APP_SETTINGS.database.mongo_url
 client = AsyncIOMotorClient(mongo_url)
-db = client[_get_required_env("DB_NAME")]
+db = client[APP_SETTINGS.database.db_name]
 
 # JWT Configuration
-JWT_SECRET = _get_required_env("JWT_SECRET")
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_HOURS = 24
-SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "cognivio_session").strip() or "cognivio_session"
-CSRF_COOKIE_NAME = os.getenv("CSRF_COOKIE_NAME", "cognivio_csrf").strip() or "cognivio_csrf"
-COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() == "true"
-SESSION_COOKIE_MAX_AGE_SECONDS = max(300, int(os.getenv("SESSION_COOKIE_MAX_AGE_SECONDS", "86400")))
-SESSION_COOKIE_SAMESITE = "strict"
+JWT_SECRET = APP_SETTINGS.auth.jwt_secret
+JWT_ALGORITHM = APP_SETTINGS.auth.jwt_algorithm
+JWT_EXPIRATION_HOURS = APP_SETTINGS.auth.jwt_expiration_hours
+SESSION_COOKIE_NAME = APP_SETTINGS.auth.session_cookie_name
+CSRF_COOKIE_NAME = APP_SETTINGS.auth.csrf_cookie_name
+COOKIE_SECURE = APP_SETTINGS.auth.cookie_secure
+SESSION_COOKIE_MAX_AGE_SECONDS = APP_SETTINGS.auth.session_cookie_max_age_seconds
+SESSION_COOKIE_SAMESITE = APP_SETTINGS.auth.session_cookie_samesite
 
 # Demo mode (fixed demo users, registration disabled)
-DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
-ADMIN_EMAILS = set(email.lower() for email in _get_optional_env_list("ADMIN_EMAILS"))
-SUPER_ADMIN_EMAILS = set(email.lower() for email in _get_optional_env_list("SUPER_ADMIN_EMAILS"))
-MASTER_ADMIN_EMAIL = os.getenv("MASTER_ADMIN_EMAIL", "").strip().lower()
-MASTER_ADMIN_PASSWORD = os.getenv("MASTER_ADMIN_PASSWORD", "").strip()
-MASTER_ADMIN_NAME = os.getenv("MASTER_ADMIN_NAME", "Cognivio Master Admin").strip() or "Cognivio Master Admin"
-if MASTER_ADMIN_EMAIL:
-    ADMIN_EMAILS.add(MASTER_ADMIN_EMAIL)
-    SUPER_ADMIN_EMAILS.add(MASTER_ADMIN_EMAIL)
-ACCESS_APPROVAL_REQUIRED = os.getenv("ACCESS_APPROVAL_REQUIRED", "true").lower() == "true"
-ACCESS_APPROVAL_NOTIFY_EMAIL = (
-    os.getenv("ACCESS_APPROVAL_NOTIFY_EMAIL", "rmc91180@gmail.com").strip()
-)
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
-RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "").strip()
-RESEND_API_BASE_URL = os.getenv("RESEND_API_BASE_URL", "https://api.resend.com").rstrip("/")
-SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587") or "587")
-SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
-SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", "").strip() or SMTP_USERNAME or ACCESS_APPROVAL_NOTIFY_EMAIL
-SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() != "false"
+DEMO_MODE = APP_SETTINGS.operations.demo_mode
+ADMIN_EMAILS = APP_SETTINGS.auth.admin_email_set()
+SUPER_ADMIN_EMAILS = APP_SETTINGS.auth.super_admin_email_set()
+MASTER_ADMIN_EMAIL = APP_SETTINGS.auth.master_admin_email
+MASTER_ADMIN_PASSWORD = APP_SETTINGS.auth.master_admin_password.strip()
+MASTER_ADMIN_NAME = APP_SETTINGS.auth.master_admin_name.strip() or "Cognivio Master Admin"
+ACCESS_APPROVAL_REQUIRED = APP_SETTINGS.auth.access_approval_required
+ACCESS_APPROVAL_NOTIFY_EMAIL = APP_SETTINGS.auth.access_approval_notify_email.strip()
+RESEND_API_KEY = APP_SETTINGS.email.resend_api_key.strip()
+RESEND_FROM_EMAIL = APP_SETTINGS.email.resend_from_email.strip()
+RESEND_API_BASE_URL = APP_SETTINGS.email.resend_api_base_url
+SMTP_HOST = APP_SETTINGS.email.smtp_host.strip()
+SMTP_PORT = APP_SETTINGS.email.smtp_port
+SMTP_USERNAME = APP_SETTINGS.email.smtp_username.strip()
+SMTP_PASSWORD = APP_SETTINGS.email.smtp_password.strip()
+SMTP_FROM_EMAIL = APP_SETTINGS.email.smtp_from_email.strip() or SMTP_USERNAME or ACCESS_APPROVAL_NOTIFY_EMAIL
+SMTP_USE_TLS = APP_SETTINGS.email.smtp_use_tls
 DEMO_USERS = [
     {
         "email": "principal@demo.cognivio.app",
@@ -4552,90 +4560,85 @@ PRIVACY_REFERENCE_ALLOWED_CONTENT_TYPES = {
     "image/png",
     "image/webp",
 }
-VIDEO_MAX_UPLOAD_BYTES = int(os.getenv("MAX_VIDEO_BYTES", str(2 * 1024 * 1024 * 1024)))
-WORKSPACE_VIDEO_QUOTA = max(1, int(os.getenv("WORKSPACE_VIDEO_QUOTA", "500")))
+VIDEO_MAX_UPLOAD_BYTES = APP_SETTINGS.video.max_video_bytes
+WORKSPACE_VIDEO_QUOTA = APP_SETTINGS.video.workspace_video_quota
 POST_RATE_LIMIT_WINDOW_SECONDS = 60
 POST_RATE_LIMIT_MAX_REQUESTS = 30
 POST_RATE_LIMIT_EXEMPT_PATHS = {"/api/auth/login", "/api/videos/upload"}
 POST_RATE_LIMIT_BUCKETS: Dict[Tuple[str, str], Tuple[int, float]] = {}
-VIDEO_WORKER_COUNT = max(1, int(os.getenv("VIDEO_WORKER_COUNT", "1")))
-VIDEO_TRANSCODE_PIPELINE_ENABLED = os.getenv("VIDEO_TRANSCODE_PIPELINE_ENABLED", "false").lower() == "true"
-VIDEO_TRANSCODE_PROFILE = os.getenv("VIDEO_TRANSCODE_PROFILE", "analysis_master_v1").strip() or "analysis_master_v1"
-VIDEO_TRANSCODE_WORKER_COUNT = max(1, int(os.getenv("VIDEO_TRANSCODE_WORKER_COUNT", "1")))
-VIDEO_TRANSCODE_RAW_CLEANUP_ENABLED = os.getenv("VIDEO_TRANSCODE_RAW_CLEANUP_ENABLED", "true").lower() == "true"
-VIDEO_TRANSCODE_RAW_RETENTION_HOURS = max(1, int(os.getenv("VIDEO_TRANSCODE_RAW_RETENTION_HOURS", "24")))
-CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS = os.getenv("CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS", "false").lower() == "true"
-ADHERENCE_WEIGHT = float(os.getenv("ADHERENCE_WEIGHT", "0.15"))
-PRIVACY_REQUIRE_PROFILE = os.getenv("PRIVACY_REQUIRE_PROFILE", "true").lower() == "true"
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4.1-mini").strip()
-OPENAI_ANALYSIS_INPUT_COST_PER_MILLION_USD = float(
-    os.getenv("OPENAI_ANALYSIS_INPUT_COST_PER_MILLION_USD", "0.40")
+VIDEO_WORKER_COUNT = APP_SETTINGS.video.video_worker_count
+VIDEO_TRANSCODE_PIPELINE_ENABLED = APP_SETTINGS.video.video_transcode_pipeline_enabled
+VIDEO_TRANSCODE_PROFILE = APP_SETTINGS.video.video_transcode_profile.strip() or "analysis_master_v1"
+VIDEO_TRANSCODE_WORKER_COUNT = APP_SETTINGS.video.video_transcode_worker_count
+VIDEO_TRANSCODE_RAW_CLEANUP_ENABLED = APP_SETTINGS.video.video_transcode_raw_cleanup_enabled
+VIDEO_TRANSCODE_RAW_RETENTION_HOURS = APP_SETTINGS.video.video_transcode_raw_retention_hours
+CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS = APP_SETTINGS.video.cleanup_video_source_after_analysis
+ADHERENCE_WEIGHT = APP_SETTINGS.operations.adherence_weight
+PRIVACY_REQUIRE_PROFILE = APP_SETTINGS.privacy.privacy_require_profile
+OPENAI_API_KEY = APP_SETTINGS.ai.openai_api_key.strip()
+OPENAI_VISION_MODEL = APP_SETTINGS.ai.openai_vision_model.strip()
+OPENAI_ANALYSIS_INPUT_COST_PER_MILLION_USD = APP_SETTINGS.ai.openai_analysis_input_cost_per_million_usd
+OPENAI_ANALYSIS_OUTPUT_COST_PER_MILLION_USD = APP_SETTINGS.ai.openai_analysis_output_cost_per_million_usd
+VIDEO_ANALYSIS_MAX_FRAMES = APP_SETTINGS.ai.video_analysis_max_frames
+SMART_FRAME_SELECTION_ENABLED = APP_SETTINGS.ai.smart_frame_selection_enabled
+SMART_FRAME_SELECTION_VERSION = APP_SETTINGS.ai.smart_frame_selection_version.strip() or "smart_frames_v2"
+VIDEO_ANALYSIS_FRAME_SCAN_FPS = APP_SETTINGS.ai.video_analysis_frame_scan_fps
+VIDEO_ANALYSIS_MIN_FRAME_GAP_SEC = APP_SETTINGS.ai.video_analysis_min_frame_gap_sec
+VIDEO_ANALYSIS_ENABLE_OCR_SIGNALS = APP_SETTINGS.ai.video_analysis_enable_ocr_signals
+SMART_MOMENT_SAMPLING_ENABLED = APP_SETTINGS.ai.smart_moment_sampling_enabled
+SMART_MOMENT_SAMPLING_VERSION = APP_SETTINGS.ai.smart_moment_sampling_version.strip() or "lesson_moments_v2"
+VIDEO_ANALYSIS_WINDOW_SEC = APP_SETTINGS.ai.video_analysis_window_sec
+VIDEO_ANALYSIS_MAX_MOMENTS = APP_SETTINGS.ai.video_analysis_max_moments
+AUDIO_ANALYSIS_ENABLED = APP_SETTINGS.ai.audio_analysis_enabled
+AUDIO_TRANSCRIPTION_ENABLED = APP_SETTINGS.ai.audio_transcription_enabled
+AUDIO_FEATURES_ENABLED = APP_SETTINGS.ai.audio_features_enabled
+AUDIO_TRANSCRIPTION_MODEL = APP_SETTINGS.ai.audio_transcription_model.strip() or "gpt-4o-mini-transcribe"
+AUDIO_TRANSCRIPTION_LANGUAGE = APP_SETTINGS.ai.audio_transcription_language
+AUDIO_TRANSCRIPT_RETENTION_DAYS = APP_SETTINGS.ai.audio_transcript_retention_days
+AUDIO_TRANSCRIPTION_MAX_SECONDS = APP_SETTINGS.ai.audio_transcription_max_seconds
+AUDIO_ALLOW_STUDENT_VOICE_PROCESSING = APP_SETTINGS.ai.audio_allow_student_voice_processing
+PAID_ANALYSIS_ENABLED = APP_SETTINGS.ai.paid_analysis_enabled
+PAID_ANALYSIS_ALLOWLIST_EMAILS = set(APP_SETTINGS.ai.paid_analysis_allowlist_emails)
+MASTER_OBSERVER_PIPELINE_ENABLED = APP_SETTINGS.ai.master_observer_pipeline_enabled
+MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS = APP_SETTINGS.ai.master_observer_require_voice_gate_pass
+VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED = APP_SETTINGS.ai.voice_gate_release_enforcement_enabled
+VOICE_GATE_REGEN_MAX_ATTEMPTS = APP_SETTINGS.ai.voice_gate_regen_max_attempts
+VOICE_GATE_HUMAN_ESCALATION_ENABLED = APP_SETTINGS.ai.voice_gate_human_escalation_enabled
+FEEDBACK_GOVERNANCE_QUEUE_AGE_WARNING_MINUTES = APP_SETTINGS.operations.feedback_governance_queue_age_warning_minutes
+FEEDBACK_GOVERNANCE_QUEUE_AGE_BLOCKING_MINUTES = APP_SETTINGS.operations.feedback_governance_queue_age_blocking_minutes
+PRIVACY_PROFILE_MIN_REFERENCES = APP_SETTINGS.privacy.privacy_profile_min_references
+PRIVACY_PROFILE_MAX_REFERENCES = APP_SETTINGS.privacy.privacy_profile_max_references
+PRIVACY_MANUAL_REVIEW_ENABLED = APP_SETTINGS.privacy.privacy_manual_review_enabled
+PRIVACY_ALLOW_BLUR_ALL_FALLBACK = APP_SETTINGS.privacy.privacy_allow_blur_all_fallback
+PRIVACY_WORKER_COUNT = APP_SETTINGS.privacy.privacy_worker_count
+PRIVACY_MAX_RETRIES = APP_SETTINGS.privacy.privacy_max_retries
+PRIVACY_TEACHER_MATCH_THRESHOLD = APP_SETTINGS.privacy.privacy_teacher_match_threshold
+PRIVACY_AMBIGUOUS_MATCH_THRESHOLD = APP_SETTINGS.privacy.privacy_ambiguous_match_threshold
+PRIVACY_RAW_VIDEO_RETENTION_DAYS = APP_SETTINGS.privacy.privacy_raw_video_retention_days
+PRIVACY_PROFILE_IMAGE_RETENTION_DAYS = APP_SETTINGS.privacy.privacy_profile_image_retention_days
+PRIVACY_PURGE_INTERVAL_MINUTES = APP_SETTINGS.privacy.privacy_purge_interval_minutes
+RECOGNITION_FIVE_STAR_SCORE_MIN = (
+    APP_SETTINGS.operations.recognition_five_star_score_min
+    if APP_SETTINGS.operations.recognition_five_star_score_min is not None
+    else DEFAULT_FIVE_STAR_SCORE_MIN
 )
-OPENAI_ANALYSIS_OUTPUT_COST_PER_MILLION_USD = float(
-    os.getenv("OPENAI_ANALYSIS_OUTPUT_COST_PER_MILLION_USD", "1.60")
-)
-VIDEO_ANALYSIS_MAX_FRAMES = max(6, int(os.getenv("VIDEO_ANALYSIS_MAX_FRAMES", "18")))
-SMART_FRAME_SELECTION_ENABLED = os.getenv("SMART_FRAME_SELECTION_ENABLED", "false").lower() == "true"
-SMART_FRAME_SELECTION_VERSION = os.getenv("SMART_FRAME_SELECTION_VERSION", "smart_frames_v2").strip() or "smart_frames_v2"
-VIDEO_ANALYSIS_FRAME_SCAN_FPS = max(0.25, float(os.getenv("VIDEO_ANALYSIS_FRAME_SCAN_FPS", "2")))
-VIDEO_ANALYSIS_MIN_FRAME_GAP_SEC = max(1.0, float(os.getenv("VIDEO_ANALYSIS_MIN_FRAME_GAP_SEC", "8")))
-VIDEO_ANALYSIS_ENABLE_OCR_SIGNALS = os.getenv("VIDEO_ANALYSIS_ENABLE_OCR_SIGNALS", "false").lower() == "true"
-SMART_MOMENT_SAMPLING_ENABLED = os.getenv("SMART_MOMENT_SAMPLING_ENABLED", "true").lower() == "true"
-SMART_MOMENT_SAMPLING_VERSION = os.getenv("SMART_MOMENT_SAMPLING_VERSION", "lesson_moments_v2").strip() or "lesson_moments_v2"
-VIDEO_ANALYSIS_WINDOW_SEC = max(10.0, float(os.getenv("VIDEO_ANALYSIS_WINDOW_SEC", "20")))
-VIDEO_ANALYSIS_MAX_MOMENTS = max(4, int(os.getenv("VIDEO_ANALYSIS_MAX_MOMENTS", "10")))
-AUDIO_ANALYSIS_ENABLED = os.getenv("AUDIO_ANALYSIS_ENABLED", "false").lower() == "true"
-AUDIO_TRANSCRIPTION_ENABLED = os.getenv("AUDIO_TRANSCRIPTION_ENABLED", "false").lower() == "true"
-AUDIO_FEATURES_ENABLED = os.getenv("AUDIO_FEATURES_ENABLED", "false").lower() == "true"
-AUDIO_TRANSCRIPTION_MODEL = os.getenv("AUDIO_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe").strip() or "gpt-4o-mini-transcribe"
-AUDIO_TRANSCRIPTION_LANGUAGE = os.getenv("AUDIO_TRANSCRIPTION_LANGUAGE", "").strip() or None
-AUDIO_TRANSCRIPT_RETENTION_DAYS = max(1, int(os.getenv("AUDIO_TRANSCRIPT_RETENTION_DAYS", "30")))
-AUDIO_TRANSCRIPTION_MAX_SECONDS = max(15, int(os.getenv("AUDIO_TRANSCRIPTION_MAX_SECONDS", "120")))
-AUDIO_ALLOW_STUDENT_VOICE_PROCESSING = os.getenv("AUDIO_ALLOW_STUDENT_VOICE_PROCESSING", "false").lower() == "true"
-PAID_ANALYSIS_ENABLED = os.getenv("PAID_ANALYSIS_ENABLED", "false").lower() == "true"
-PAID_ANALYSIS_ALLOWLIST_EMAILS = {
-    email.lower() for email in _get_optional_env_list("PAID_ANALYSIS_ALLOWLIST_EMAILS")
-}
-MASTER_OBSERVER_PIPELINE_ENABLED = os.getenv("MASTER_OBSERVER_PIPELINE_ENABLED", "false").lower() == "true"
-MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS = os.getenv("MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS", "true").lower() == "true"
-VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED = os.getenv("VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED", "false").lower() == "true"
-VOICE_GATE_REGEN_MAX_ATTEMPTS = max(1, int(os.getenv("VOICE_GATE_REGEN_MAX_ATTEMPTS", "2")))
-VOICE_GATE_HUMAN_ESCALATION_ENABLED = os.getenv("VOICE_GATE_HUMAN_ESCALATION_ENABLED", "true").lower() == "true"
-FEEDBACK_GOVERNANCE_QUEUE_AGE_WARNING_MINUTES = max(
-    30, int(os.getenv("FEEDBACK_GOVERNANCE_QUEUE_AGE_WARNING_MINUTES", "120"))
-)
-FEEDBACK_GOVERNANCE_QUEUE_AGE_BLOCKING_MINUTES = max(
-    FEEDBACK_GOVERNANCE_QUEUE_AGE_WARNING_MINUTES,
-    int(os.getenv("FEEDBACK_GOVERNANCE_QUEUE_AGE_BLOCKING_MINUTES", "480")),
-)
-PRIVACY_PROFILE_MIN_REFERENCES = max(1, int(os.getenv("PRIVACY_PROFILE_MIN_REFERENCES", "3")))
-PRIVACY_PROFILE_MAX_REFERENCES = max(PRIVACY_PROFILE_MIN_REFERENCES, int(os.getenv("PRIVACY_PROFILE_MAX_REFERENCES", "5")))
-PRIVACY_MANUAL_REVIEW_ENABLED = os.getenv("PRIVACY_MANUAL_REVIEW_ENABLED", "true").lower() == "true"
-PRIVACY_ALLOW_BLUR_ALL_FALLBACK = os.getenv("PRIVACY_ALLOW_BLUR_ALL_FALLBACK", "true").lower() == "true"
-PRIVACY_WORKER_COUNT = max(1, int(os.getenv("PRIVACY_WORKER_COUNT", "1")))
-PRIVACY_MAX_RETRIES = max(1, int(os.getenv("PRIVACY_MAX_RETRIES", "3")))
-PRIVACY_TEACHER_MATCH_THRESHOLD = float(os.getenv("PRIVACY_TEACHER_MATCH_THRESHOLD", "0.9"))
-PRIVACY_AMBIGUOUS_MATCH_THRESHOLD = float(os.getenv("PRIVACY_AMBIGUOUS_MATCH_THRESHOLD", "0.8"))
-PRIVACY_RAW_VIDEO_RETENTION_DAYS = max(1, int(os.getenv("PRIVACY_RAW_VIDEO_RETENTION_DAYS", "30")))
-PRIVACY_PROFILE_IMAGE_RETENTION_DAYS = max(1, int(os.getenv("PRIVACY_PROFILE_IMAGE_RETENTION_DAYS", "30")))
-PRIVACY_PURGE_INTERVAL_MINUTES = max(5, int(os.getenv("PRIVACY_PURGE_INTERVAL_MINUTES", "60")))
-RECOGNITION_FIVE_STAR_SCORE_MIN = float(os.getenv("RECOGNITION_FIVE_STAR_SCORE_MIN", str(DEFAULT_FIVE_STAR_SCORE_MIN)))
-PRIVACY_ALLOW_DEGRADED_RUNTIME = os.getenv("PRIVACY_ALLOW_DEGRADED_RUNTIME", "false").lower() == "true"
+PRIVACY_ALLOW_DEGRADED_RUNTIME = APP_SETTINGS.privacy.privacy_allow_degraded_runtime
 
 # S3 configuration (required for file uploads)
-S3_BUCKET = os.getenv("S3_BUCKET")
-S3_REGION = os.getenv("S3_REGION")
-S3_ENDPOINT = os.getenv("S3_ENDPOINT")
-S3_PUBLIC_BASE_URL = os.getenv("S3_PUBLIC_BASE_URL")
-FRONTEND_URL = os.getenv("FRONTEND_URL")
-BACKEND_PUBLIC_BASE_URL = os.getenv("BACKEND_PUBLIC_BASE_URL", "").rstrip("/")
-LEADERSHIP_INSIGHTS_CACHE_TTL_SECONDS = max(
-    0, int(os.getenv("LEADERSHIP_INSIGHTS_CACHE_TTL_SECONDS", "1800"))
-)
+S3_BUCKET = APP_SETTINGS.storage.s3_bucket
+S3_REGION = APP_SETTINGS.storage.s3_region
+S3_ENDPOINT = APP_SETTINGS.storage.s3_endpoint
+S3_PUBLIC_BASE_URL = APP_SETTINGS.storage.s3_public_base_url
+S3_PRESIGNED_URL_EXPIRES_SECONDS = APP_SETTINGS.storage.s3_presigned_url_expires_seconds
+AWS_ACCESS_KEY_ID = APP_SETTINGS.storage.aws_access_key_id
+AWS_SECRET_ACCESS_KEY = APP_SETTINGS.storage.aws_secret_access_key
+FRONTEND_URL = APP_SETTINGS.storage.frontend_url
+BACKEND_PUBLIC_BASE_URL = APP_SETTINGS.storage.backend_public_base_url
+LEADERSHIP_INSIGHTS_CACHE_TTL_SECONDS = APP_SETTINGS.operations.leadership_insights_cache_ttl_seconds
+DASHBOARD_INTELLIGENCE_CACHE_TTL_SECONDS = 30 * 60
 
 # Create uploads directory (used for temp storage or mounted persistent storage)
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(ROOT_DIR / "uploads"))).expanduser()
+UPLOAD_DIR = APP_SETTINGS.storage.upload_dir
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # Create a router with the /api prefix
@@ -8914,8 +8917,6 @@ async def _start_privacy_maintenance_tasks() -> None:
     PRIVACY_MAINTENANCE_TASKS.append(task)
 
 
-@api_router.post("/videos/upload", response_model=VideoUploadResponse)
-@limiter.limit("10/minute")
 async def upload_video(
     request: Request,
     file: UploadFile = File(...),
@@ -9158,10 +9159,6 @@ async def upload_video(
         raise
 
 
-upload_video = upload_video.__wrapped__
-
-
-@api_router.get("/videos")
 async def get_videos(teacher_id: Optional[str] = None, current_user: dict = Depends(get_current_user)):
     query: Dict[str, Any] = {}
     if teacher_id:
@@ -9176,7 +9173,6 @@ async def get_videos(teacher_id: Optional[str] = None, current_user: dict = Depe
     return [_sanitize_video_response(video) for video in videos]
 
 
-@api_router.get("/videos/{video_id}")
 async def get_video_detail(video_id: str, current_user: dict = Depends(get_current_user)):
     """Get full video metadata including stored filename for playback."""
     video = await db.videos.find_one({"id": video_id}, {"_id": 0})
@@ -9186,7 +9182,6 @@ async def get_video_detail(video_id: str, current_user: dict = Depends(get_curre
     return _sanitize_video_response(_apply_video_response_defaults(video))
 
 
-@api_router.get("/videos/{video_id}/raw-access")
 async def get_video_raw_access(video_id: str, current_user: dict = Depends(get_current_user)):
     role = _get_user_role(current_user)
     if role != "admin":
@@ -9217,7 +9212,6 @@ async def get_video_raw_access(video_id: str, current_user: dict = Depends(get_c
         "retention_expires_at": video.get("raw_retention_expires_at"),
     }
 
-@api_router.get("/videos/{video_id}/status")
 async def get_video_status(video_id: str, current_user: dict = Depends(get_current_user)):
     video = await db.videos.find_one({"id": video_id}, {"_id": 0})
     if not video:
@@ -9261,7 +9255,6 @@ async def _resolve_video_comment_rubric_fields(
     }
 
 
-@api_router.get("/videos/{video_id}/comments", response_model=VideoCommentListResponse)
 async def list_video_comments(
     video_id: str,
     current_user: dict = Depends(get_current_user),
@@ -9282,7 +9275,6 @@ async def list_video_comments(
     )
 
 
-@api_router.post("/videos/{video_id}/comments", response_model=VideoComment)
 async def create_video_comment(
     video_id: str,
     payload: VideoCommentCreate,
@@ -9332,7 +9324,6 @@ async def create_video_comment(
     return VideoComment(**_sanitize_video_comment_doc(doc))
 
 
-@api_router.patch("/videos/{video_id}/comments/{comment_id}", response_model=VideoComment)
 async def update_video_comment(
     video_id: str,
     comment_id: str,
@@ -9379,7 +9370,6 @@ async def update_video_comment(
     return VideoComment(**_sanitize_video_comment_doc(updated))
 
 
-@api_router.delete("/videos/{video_id}/comments/{comment_id}")
 async def delete_video_comment(
     video_id: str,
     comment_id: str,
@@ -9408,7 +9398,6 @@ async def delete_video_comment(
     return {"message": "Comment deleted", "deleted_count": deleted_count}
 
 
-@api_router.post("/videos/{video_id}/retry")
 async def retry_video_processing(video_id: str, current_user: dict = Depends(get_current_user)):
     video = await db.videos.find_one({"id": video_id}, {"_id": 0})
     if not video:
@@ -9450,7 +9439,6 @@ async def retry_video_processing(video_id: str, current_user: dict = Depends(get
     return {"video_id": video_id, "status": VideoProcessingStatus.QUEUED.value}
 
 
-@api_router.post("/videos/{video_id}/privacy/retry")
 async def retry_video_privacy(video_id: str, current_user: dict = Depends(get_current_user)):
     video = await db.videos.find_one({"id": video_id}, {"_id": 0})
     if not video:
@@ -9505,7 +9493,6 @@ async def retry_video_privacy(video_id: str, current_user: dict = Depends(get_cu
     }
 
 
-@api_router.get("/privacy/review-queue", response_model=PrivacyReviewQueueResponse)
 async def get_privacy_review_queue(current_user: dict = Depends(get_current_user)):
     role = _get_user_role(current_user)
     if role != "admin":
@@ -9537,7 +9524,6 @@ async def get_privacy_review_queue(current_user: dict = Depends(get_current_user
     return PrivacyReviewQueueResponse(items=items)
 
 
-@api_router.get("/privacy/audit", response_model=List[PrivacyAuditEvent])
 async def get_privacy_audit_events(
     target_type: Optional[str] = None,
     target_id: Optional[str] = None,
@@ -9556,7 +9542,6 @@ async def get_privacy_audit_events(
     return [PrivacyAuditEvent(**doc) for doc in docs]
 
 
-@api_router.get("/admin/videos/{video_id}/sampling-manifest", response_model=SamplingManifestResponse)
 async def get_admin_video_sampling_manifest(
     video_id: str,
     current_user: dict = Depends(get_current_user),
@@ -9568,7 +9553,6 @@ async def get_admin_video_sampling_manifest(
     return SamplingManifestResponse(**doc)
 
 
-@api_router.get("/admin/videos/{video_id}/analysis-moments", response_model=AnalysisMomentManifestResponse)
 async def get_admin_video_analysis_moments(
     video_id: str,
     current_user: dict = Depends(get_current_user),
@@ -9580,7 +9564,6 @@ async def get_admin_video_analysis_moments(
     return AnalysisMomentManifestResponse(**doc)
 
 
-@api_router.get("/admin/videos/{video_id}/audio-transcript", response_model=AudioTranscriptResponse)
 async def get_admin_video_audio_transcript(
     video_id: str,
     current_user: dict = Depends(get_current_user),
@@ -9592,7 +9575,6 @@ async def get_admin_video_audio_transcript(
     return AudioTranscriptResponse(**doc)
 
 
-@api_router.get("/admin/videos/{video_id}/audio-features", response_model=AudioFeatureResponse)
 async def get_admin_video_audio_features(
     video_id: str,
     current_user: dict = Depends(get_current_user),
@@ -9723,7 +9705,6 @@ def _build_video_audio_analysis_response(
     )
 
 
-@api_router.get("/videos/{video_id}/audio-analysis", response_model=VideoAudioAnalysisResponse)
 async def get_video_audio_analysis(
     video_id: str,
     current_user: dict = Depends(get_current_user),
@@ -9741,7 +9722,6 @@ async def get_video_audio_analysis(
     return _build_video_audio_analysis_response(transcript_doc, feature_doc)
 
 
-@api_router.post("/videos/{video_id}/privacy/review", response_model=PrivacyReviewDecisionResponse)
 async def resolve_video_privacy_review(
     video_id: str,
     payload: PrivacyReviewDecisionRequest,
@@ -13364,6 +13344,418 @@ async def _store_leadership_insights_cache(
     )
 
 
+def _get_dashboard_workspace_id(current_user: dict) -> str:
+    return str(
+        current_user.get("organization_id")
+        or current_user.get("school_id")
+        or current_user.get("id")
+    )
+
+
+def _current_observation_cycle_window(now_utc: datetime) -> Tuple[datetime, datetime]:
+    quarter_start_month = ((now_utc.month - 1) // 3) * 3 + 1
+    cycle_start = datetime(now_utc.year, quarter_start_month, 1, tzinfo=timezone.utc)
+    if quarter_start_month == 10:
+        cycle_end = datetime(now_utc.year + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        cycle_end = datetime(now_utc.year, quarter_start_month + 3, 1, tzinfo=timezone.utc)
+    return cycle_start, cycle_end
+
+
+def _dashboard_assessment_date(assessment: dict) -> Optional[datetime]:
+    analyzed_at = assessment.get("analyzed_at")
+    if isinstance(analyzed_at, datetime):
+        return analyzed_at.astimezone(timezone.utc)
+    return _parse_iso_datetime(analyzed_at)
+
+
+def _dashboard_score_bucket(score: Optional[float]) -> str:
+    if score is None:
+        return "unknown"
+    if score >= 8:
+        return "excellent"
+    if score >= 6:
+        return "proficient"
+    if score >= 4:
+        return "developing"
+    return "critical"
+
+
+def _dashboard_recommended_action_for_element(element_code: Optional[str], element_name: Optional[str]) -> str:
+    label = f"{element_code} {element_name}".strip() if element_code else (element_name or "this element")
+    return f"Open a targeted coaching cycle for {label}"
+
+
+async def _get_cached_dashboard_intelligence(workspace_id: str) -> Optional[dict]:
+    if DASHBOARD_INTELLIGENCE_CACHE_TTL_SECONDS <= 0:
+        return None
+
+    doc = await db.dashboard_intelligence_cache.find_one(
+        {"workspace_id": workspace_id},
+        {"_id": 0, "payload": 1, "expires_at": 1},
+    )
+    if not doc:
+        return None
+
+    expires_at = _parse_iso_datetime(doc.get("expires_at"))
+    now_utc = datetime.now(timezone.utc)
+    if not expires_at or expires_at <= now_utc:
+        await db.dashboard_intelligence_cache.delete_one({"workspace_id": workspace_id})
+        return None
+
+    payload = doc.get("payload")
+    if not isinstance(payload, dict):
+        return None
+
+    return {
+        **payload,
+        "cache": {
+            "hit": True,
+            "expires_at": doc.get("expires_at"),
+        },
+    }
+
+
+async def _store_dashboard_intelligence_cache(workspace_id: str, payload: dict) -> None:
+    if DASHBOARD_INTELLIGENCE_CACHE_TTL_SECONDS <= 0:
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    expires_at = now_utc + timedelta(seconds=DASHBOARD_INTELLIGENCE_CACHE_TTL_SECONDS)
+    await db.dashboard_intelligence_cache.update_one(
+        {"workspace_id": workspace_id},
+        {
+            "$set": {
+                "workspace_id": workspace_id,
+                "payload": payload,
+                "updated_at": now_utc.isoformat(),
+                "expires_at": expires_at.isoformat(),
+            }
+        },
+        upsert=True,
+    )
+
+
+async def _build_dashboard_intelligence(current_user: dict) -> dict:
+    now_utc = datetime.now(timezone.utc)
+    recent_start = now_utc - timedelta(days=90)
+    cycle_start, cycle_end = _current_observation_cycle_window(now_utc)
+
+    visible_teacher_ids = await _list_teacher_ids_for_user(current_user)
+    teachers = await db.teachers.find(
+        {"id": {"$in": visible_teacher_ids or ["__none__"]}},
+        {
+            "_id": 0,
+            "id": 1,
+            "name": 1,
+            "subject": 1,
+            "department": 1,
+        },
+    ).to_list(5000)
+    teacher_by_id = {teacher.get("id"): teacher for teacher in teachers if teacher.get("id")}
+    teacher_ids = list(teacher_by_id.keys())
+
+    if not teacher_ids:
+        return {
+            "patterns": [],
+            "highlights": [],
+            "observation_gaps": [],
+            "cycle_summary": {
+                "total_observations": 0,
+                "avg_score": None,
+                "score_distribution": {
+                    "excellent": 0,
+                    "proficient": 0,
+                    "developing": 0,
+                    "critical": 0,
+                    "unknown": 0,
+                },
+                "coverage_pct": 0,
+                "observed_teacher_count": 0,
+                "total_teachers": 0,
+                "days_remaining_in_cycle": max(0, (cycle_end - now_utc).days),
+            },
+        }
+
+    assessments = await db.assessments.find(
+        {
+            "teacher_id": {"$in": teacher_ids},
+            "analyzed_at": {"$gte": recent_start.isoformat()},
+        },
+        {"_id": 0},
+    ).sort("analyzed_at", 1).to_list(10000)
+    assessments = [
+        assessment
+        for assessment in assessments
+        if _dashboard_assessment_date(assessment) is not None
+    ]
+    assessments.sort(key=lambda assessment: _dashboard_assessment_date(assessment) or datetime.min.replace(tzinfo=timezone.utc))
+
+    observations = await db.observations.find(
+        {
+            "teacher_id": {"$in": teacher_ids},
+            "created_at": {"$gte": recent_start.isoformat()},
+        },
+        {"_id": 0, "teacher_id": 1, "created_at": 1},
+    ).to_list(10000)
+
+    assessments_by_teacher: Dict[str, List[dict]] = {}
+    cycle_assessments: List[dict] = []
+    latest_activity_by_teacher: Dict[str, datetime] = {}
+    observation_counts_this_cycle: Dict[str, int] = {teacher_id: 0 for teacher_id in teacher_ids}
+
+    for assessment in assessments:
+        teacher_id = assessment.get("teacher_id")
+        assessed_at = _dashboard_assessment_date(assessment)
+        if not teacher_id or not assessed_at:
+            continue
+        assessments_by_teacher.setdefault(teacher_id, []).append(assessment)
+        latest_activity_by_teacher[teacher_id] = max(
+            latest_activity_by_teacher.get(teacher_id, assessed_at),
+            assessed_at,
+        )
+        if cycle_start <= assessed_at < cycle_end:
+            cycle_assessments.append(assessment)
+            observation_counts_this_cycle[teacher_id] = observation_counts_this_cycle.get(teacher_id, 0) + 1
+
+    for observation in observations:
+        teacher_id = observation.get("teacher_id")
+        observed_at = _dashboard_assessment_date({"analyzed_at": observation.get("created_at")})
+        if not teacher_id or not observed_at:
+            continue
+        latest_activity_by_teacher[teacher_id] = max(
+            latest_activity_by_teacher.get(teacher_id, observed_at),
+            observed_at,
+        )
+        if cycle_start <= observed_at < cycle_end:
+            observation_counts_this_cycle[teacher_id] = observation_counts_this_cycle.get(teacher_id, 0) + 1
+
+    patterns: List[dict] = []
+    highlights: List[dict] = []
+
+    element_low: Dict[str, dict] = {}
+    element_totals: Dict[str, int] = {}
+    for assessment in assessments:
+        teacher_id = assessment.get("teacher_id")
+        if teacher_id not in teacher_by_id:
+            continue
+        for element_score in assessment.get("element_scores", []):
+            element_code = element_score.get("element_id") or element_score.get("element_code")
+            if not element_code:
+                continue
+            score = element_score.get("adjusted_score", element_score.get("score"))
+            if score is None:
+                continue
+            element_totals[element_code] = element_totals.get(element_code, 0) + 1
+            if score >= 6:
+                continue
+            low_record = element_low.setdefault(
+                element_code,
+                {
+                    "element_code": element_code,
+                    "element_name": element_score.get("element_name") or element_code,
+                    "teacher_ids": set(),
+                    "evidence_count": 0,
+                    "departments": {},
+                },
+            )
+            low_record["teacher_ids"].add(teacher_id)
+            low_record["evidence_count"] += 1
+            department = teacher_by_id.get(teacher_id, {}).get("department")
+            if department:
+                low_record["departments"][department] = low_record["departments"].get(department, 0) + 1
+
+    for low_record in element_low.values():
+        affected_ids = sorted(low_record["teacher_ids"])
+        if len(affected_ids) < 3:
+            continue
+        department_label = "Schoolwide"
+        if low_record["departments"]:
+            department_label = max(low_record["departments"].items(), key=lambda item: item[1])[0]
+        affected_names = [teacher_by_id[teacher_id].get("name", "Unknown") for teacher_id in affected_ids]
+        total_observations = element_totals.get(low_record["element_code"], low_record["evidence_count"])
+        severity = "critical" if len(affected_ids) >= 5 or low_record["evidence_count"] >= 6 else "warning"
+        patterns.append(
+            {
+                "type": "cluster",
+                "title": f"{department_label} shows pattern of low {low_record['element_name']} ({low_record['element_code']})",
+                "description": (
+                    f"{len(affected_ids)} of {len(teacher_ids)} teachers have recent low evidence on "
+                    f"{low_record['element_name']} across {low_record['evidence_count']} of "
+                    f"{total_observations} observations."
+                ),
+                "affected_teacher_ids": affected_ids,
+                "affected_teacher_names": affected_names,
+                "element_code": low_record["element_code"],
+                "element_name": low_record["element_name"],
+                "severity": severity,
+                "recommended_action": _dashboard_recommended_action_for_element(
+                    low_record["element_code"],
+                    low_record["element_name"],
+                ),
+                "evidence_count": low_record["evidence_count"],
+            }
+        )
+
+    for teacher_id, teacher_assessments in assessments_by_teacher.items():
+        if len(teacher_assessments) >= 3:
+            recent = teacher_assessments[-3:]
+            recent_scores = [assessment.get("overall_score") for assessment in recent]
+            if all(score is not None for score in recent_scores) and recent_scores[0] > recent_scores[1] > recent_scores[2]:
+                teacher_name = teacher_by_id.get(teacher_id, {}).get("name", "Unknown")
+                drop = round(recent_scores[0] - recent_scores[-1], 2)
+                patterns.append(
+                    {
+                        "type": "trend",
+                        "title": f"{teacher_name}'s classroom performance is declining for 3 consecutive sessions",
+                        "description": f"Overall score moved from {recent_scores[0]:.1f} to {recent_scores[-1]:.1f} across the last three observations.",
+                        "affected_teacher_ids": [teacher_id],
+                        "affected_teacher_names": [teacher_name],
+                        "element_code": None,
+                        "element_name": None,
+                        "severity": "critical" if drop >= 2 else "warning",
+                        "recommended_action": "Schedule a coaching conference and review the last three observations",
+                        "evidence_count": 3,
+                    }
+                )
+
+        if len(teacher_assessments) >= 2:
+            first = teacher_assessments[0]
+            latest = teacher_assessments[-1]
+            first_score = first.get("overall_score")
+            latest_score = latest.get("overall_score")
+            if first_score is not None and latest_score is not None and latest_score - first_score >= 1.5:
+                teacher_name = teacher_by_id.get(teacher_id, {}).get("name", "Unknown")
+                delta = round((latest_score - first_score) * 10, 1)
+                highlights.append(
+                    {
+                        "type": "improvement",
+                        "teacher_id": teacher_id,
+                        "teacher_name": teacher_name,
+                        "description": f"{teacher_name} improved significantly after targeted coaching.",
+                        "element_code": None,
+                        "delta": delta,
+                    }
+                )
+
+            first_elements = {
+                (score.get("element_id") or score.get("element_code")): score
+                for score in first.get("element_scores", [])
+                if score.get("element_id") or score.get("element_code")
+            }
+            for latest_element in latest.get("element_scores", []):
+                element_code = latest_element.get("element_id") or latest_element.get("element_code")
+                first_element = first_elements.get(element_code)
+                if not element_code or not first_element:
+                    continue
+                first_element_score = first_element.get("adjusted_score", first_element.get("score"))
+                latest_element_score = latest_element.get("adjusted_score", latest_element.get("score"))
+                if (
+                    first_element_score is not None
+                    and latest_element_score is not None
+                    and latest_element_score - first_element_score >= 1.5
+                ):
+                    teacher_name = teacher_by_id.get(teacher_id, {}).get("name", "Unknown")
+                    delta = round((latest_element_score - first_element_score) * 10, 1)
+                    highlights.append(
+                        {
+                            "type": "improvement",
+                            "teacher_id": teacher_id,
+                            "teacher_name": teacher_name,
+                            "description": (
+                                f"{teacher_name} improved significantly in "
+                                f"{latest_element.get('element_name') or element_code} after targeted coaching."
+                            ),
+                            "element_code": element_code,
+                            "delta": delta,
+                        }
+                    )
+                    break
+
+    observation_gaps = []
+    for teacher_id, teacher in teacher_by_id.items():
+        latest_activity = latest_activity_by_teacher.get(teacher_id)
+        days_since = (now_utc - latest_activity).days if latest_activity else 999
+        if days_since >= 60:
+            observation_gaps.append(
+                {
+                    "teacher_id": teacher_id,
+                    "teacher_name": teacher.get("name", "Unknown"),
+                    "days_since_last_observation": days_since,
+                    "observation_count_this_cycle": observation_counts_this_cycle.get(teacher_id, 0),
+                }
+            )
+    observation_gaps.sort(key=lambda item: item["days_since_last_observation"], reverse=True)
+
+    if observation_gaps:
+        severity = "critical" if len(observation_gaps) >= 5 else "warning"
+        title = (
+            f"{len(observation_gaps)} teachers haven't been observed this cycle"
+            if len(observation_gaps) > 1
+            else f"{observation_gaps[0]['teacher_name']} hasn't been observed this cycle"
+        )
+        patterns.append(
+            {
+                "type": "risk",
+                "title": title,
+                "description": (
+                    f"{len(observation_gaps)} teachers are at least 60 days from their last observation "
+                    "or have not yet been observed."
+                ),
+                "affected_teacher_ids": [item["teacher_id"] for item in observation_gaps],
+                "affected_teacher_names": [item["teacher_name"] for item in observation_gaps],
+                "element_code": None,
+                "element_name": None,
+                "severity": severity,
+                "recommended_action": "Plan observations for overdue teachers this week",
+                "evidence_count": len(observation_gaps),
+            }
+        )
+
+    score_distribution = {
+        "excellent": 0,
+        "proficient": 0,
+        "developing": 0,
+        "critical": 0,
+        "unknown": 0,
+    }
+    cycle_scores: List[float] = []
+    for assessment in cycle_assessments:
+        score = assessment.get("overall_score")
+        if score is not None:
+            cycle_scores.append(score)
+        score_distribution[_dashboard_score_bucket(score)] += 1
+
+    observed_teacher_ids = {
+        teacher_id
+        for teacher_id, count in observation_counts_this_cycle.items()
+        if count > 0
+    }
+    coverage_pct = round((len(observed_teacher_ids) / len(teacher_ids)) * 100, 1) if teacher_ids else 0
+    patterns.sort(
+        key=lambda item: (
+            {"critical": 0, "warning": 1, "info": 2}.get(item.get("severity"), 3),
+            -int(item.get("evidence_count") or 0),
+        )
+    )
+    highlights.sort(key=lambda item: item.get("delta") or 0, reverse=True)
+
+    return {
+        "patterns": patterns[:8],
+        "highlights": highlights[:8],
+        "observation_gaps": observation_gaps[:12],
+        "cycle_summary": {
+            "total_observations": len(cycle_assessments),
+            "avg_score": _average(cycle_scores),
+            "score_distribution": score_distribution,
+            "coverage_pct": coverage_pct,
+            "observed_teacher_count": len(observed_teacher_ids),
+            "total_teachers": len(teacher_ids),
+            "days_remaining_in_cycle": max(0, (cycle_end - now_utc).days),
+        },
+    }
+
+
 def _coerce_insight_priority(value: Any) -> str:
     normalized = str(value or "").strip().lower()
     return normalized if normalized in {"high", "medium", "low"} else "medium"
@@ -13653,7 +14045,7 @@ def _build_rule_based_leadership_insights(trend_payload: dict) -> dict:
 
 
 async def _generate_ai_leadership_insights(trend_payload: dict, fallback_payload: dict) -> Optional[dict]:
-    api_key = os.getenv("EMERGENT_LLM_KEY")
+    api_key = APP_SETTINGS.ai.emergent_llm_key
     if not api_key:
         return None
     try:
@@ -13846,6 +14238,19 @@ async def get_dashboard_leadership_insights(
     final_payload["cache"] = {"hit": False}
     await _store_leadership_insights_cache(current_user["id"], cache_key, final_payload)
     return final_payload
+
+
+@api_router.get("/dashboard/intelligence")
+async def get_dashboard_intelligence(current_user: dict = Depends(get_current_user)):
+    workspace_id = _get_dashboard_workspace_id(current_user)
+    cached_payload = await _get_cached_dashboard_intelligence(workspace_id)
+    if cached_payload:
+        return cached_payload
+
+    payload = await _build_dashboard_intelligence(current_user)
+    payload["cache"] = {"hit": False}
+    await _store_dashboard_intelligence_cache(workspace_id, payload)
+    return payload
 
 
 def _training_cycle_window(now: datetime) -> Tuple[datetime, datetime, datetime]:
@@ -16188,7 +16593,7 @@ async def _build_db_index_health() -> Dict[str, Any]:
     total_missing = sum(len(item["missing_indexes"]) for item in collections.values())
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "database": os.getenv("DB_NAME"),
+        "database": APP_SETTINGS.database.db_name,
         "healthy": total_missing == 0,
         "summary": {
             "collections": len(collections),
@@ -21842,8 +22247,10 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
 
 # Include the router in the main app
 from app.routers.auth import router as auth_router
+from app.routers.videos import router as videos_router
 
 app.include_router(auth_router, prefix="/api")
+app.include_router(videos_router, prefix="/api")
 app.include_router(api_router)
 app.add_api_route(
     "/api/admin/access-request-actions/{action}",
@@ -21851,7 +22258,7 @@ app.add_api_route(
     methods=["GET"],
 )
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
-origins = _get_optional_env_list("CORS_ORIGINS")
+origins = APP_SETTINGS.auth.cors_origins
 if not origins:
     logger.warning("CORS_ORIGINS not set; defaulting to no external origins")
 app.add_middleware(
@@ -21894,6 +22301,8 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.videos, [("privacy_status", 1), ("upload_date", -1)])
     await _safe_create_index(db.assessments, [("teacher_id", 1), ("analyzed_at", -1)])
     await _safe_create_index(db.assessments, [("user_id", 1), ("feedback_release_status", 1), ("analyzed_at", -1)])
+    await _safe_create_index(db.dashboard_intelligence_cache, [("workspace_id", 1)], unique=True)
+    await _safe_create_index(db.dashboard_intelligence_cache, [("expires_at", 1)])
     await _safe_create_index(
         db.assessment_report_feedback,
         [("assessment_id", 1), ("user_id", 1), ("target_type", 1), ("target_id", 1)],

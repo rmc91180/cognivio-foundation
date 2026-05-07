@@ -7,7 +7,7 @@ from fastapi import Response
 import server as legacy_server
 
 from . import metrics, observability
-from .config import get_settings
+from .dependencies import get_settings
 from .routers import REGISTERED_ROUTERS
 from .workers import (
     maintenance_worker,

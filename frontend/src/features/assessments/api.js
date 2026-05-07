@@ -8,6 +8,7 @@ export const assessmentApi = {
     api.get("/api/dashboard/domain-trends", { params }),
   dashboardLeadershipInsights: (params) =>
     api.get("/api/dashboard/leadership-insights", { params }),
+  dashboardIntelligence: () => api.get("/api/dashboard/intelligence"),
   cohortAnalytics: (params) =>
     api.get("/api/dashboard/cohort-analytics", { params }),
   supervisorCalibration: () =>

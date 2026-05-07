@@ -33,7 +33,7 @@ REGISTERED_ROUTERS = (
         "name": "videos_router",
         "prefix": "/api",
         "router": videos_router,
-        "status": "extracted_unmounted",
+        "status": "mounted",
     },
     {
         "name": "assessments_router",

@@ -17,6 +17,9 @@ import { LeadershipInsightsCard } from "@/components/dashboard/LeadershipInsight
 import { DomainTrendsChart } from "@/components/dashboard/DomainTrendsChart";
 import { TrainingDashboard } from "@/components/dashboard/TrainingDashboard";
 import { UpcomingObservationsWidget } from "@/components/dashboard/UpcomingObservationsWidget";
+import { PatternCard } from "@/components/dashboard/PatternCard";
+import { ObservationCoverageRing } from "@/components/dashboard/ObservationCoverageRing";
+import { CalendarPlus, CheckCircle2, Lightbulb, TrendingUp } from "lucide-react";
 import {
   Bar,
   BarChart,
@@ -99,6 +102,196 @@ function buildGroupedTeacherLabel(tasks, t) {
         ? t("dashboard.taskQueueTeacherOverflow", { count: remainingCount })
         : "",
   });
+}
+
+function formatIntelligenceScore(value) {
+  return typeof value === "number" ? value.toFixed(1) : "N/A";
+}
+
+function LeadershipIntelligenceView({ intelligence, isLoading }) {
+  const patterns = intelligence?.patterns || [];
+  const highlights = intelligence?.highlights || [];
+  const observationGaps = intelligence?.observation_gaps || [];
+  const summary = intelligence?.cycle_summary || {};
+  const observedCount = summary.observed_teacher_count || 0;
+  const totalTeachers = summary.total_teachers || 0;
+  const coveragePct = summary.coverage_pct || 0;
+
+  if (isLoading && !intelligence) {
+    return (
+      <section className="mb-6 space-y-4">
+        <div className="grid gap-3 md:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <SkeletonStat key={index} />
+          ))}
+        </div>
+        <SkeletonCard />
+      </section>
+    );
+  }
+
+  const statCards = [
+    {
+      label: "Total observations",
+      value: summary.total_observations ?? 0,
+      detail: "This cycle",
+    },
+    {
+      label: "Average score",
+      value: formatIntelligenceScore(summary.avg_score),
+      detail: "Across completed observations",
+    },
+    {
+      label: "Coverage",
+      value: `${Math.round(coveragePct)}%`,
+      detail: `${observedCount} of ${totalTeachers} teachers`,
+    },
+    {
+      label: "Days remaining",
+      value: summary.days_remaining_in_cycle ?? 0,
+      detail: "Current observation cycle",
+    },
+  ];
+
+  return (
+    <section className="mb-6 space-y-5">
+      <div className="grid gap-3 md:grid-cols-4">
+        {statCards.map((card) => (
+          <div key={card.label} className="rounded-lg border border-slate-200 bg-white px-4 py-4 shadow-sm">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              {card.label}
+            </div>
+            <div className="mt-2 text-3xl font-semibold text-slate-950">
+              {card.value}
+            </div>
+            <div className="mt-1 text-xs text-slate-500">
+              {card.detail}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <Panel className="border border-slate-200 bg-white">
+        <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
+          <div className="flex justify-center lg:w-56">
+            <ObservationCoverageRing
+              coveragePct={coveragePct}
+              observedCount={observedCount}
+              totalCount={totalTeachers}
+            />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-teal-700">
+                  <Lightbulb className="h-4 w-4" />
+                  Leadership intelligence
+                </div>
+                <h2 className="mt-1 text-lg font-semibold text-slate-950">
+                  Patterns that need action
+                </h2>
+              </div>
+              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
+                {intelligence?.cache?.hit ? "Cached" : "Fresh"} signal
+              </span>
+            </div>
+
+            <div className="mt-4 grid gap-3 xl:grid-cols-2">
+              {patterns.length ? (
+                patterns.map((pattern, index) => (
+                  <PatternCard key={`${pattern.type}-${pattern.element_code || "none"}-${index}`} pattern={pattern} />
+                ))
+              ) : (
+                <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500 xl:col-span-2">
+                  No urgent schoolwide patterns detected in the current window.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </Panel>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Panel className="border border-slate-200 bg-white">
+          <div className="flex items-center gap-2">
+            <div className="rounded-md bg-emerald-50 p-2 text-emerald-700">
+              <TrendingUp className="h-4 w-4" />
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold text-slate-950">Highlights</h2>
+              <p className="text-xs text-slate-500">Teacher wins and measurable improvements</p>
+            </div>
+          </div>
+          <div className="mt-4 space-y-3">
+            {highlights.length ? (
+              highlights.slice(0, 4).map((highlight) => (
+                <div key={`${highlight.teacher_id}-${highlight.element_code || "overall"}`} className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-slate-950">
+                        {highlight.teacher_name}
+                      </div>
+                      <p className="mt-1 text-sm text-slate-600">
+                        {highlight.description}
+                      </p>
+                    </div>
+                    <div className="shrink-0 rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-semibold text-emerald-700">
+                      +{highlight.delta}
+                    </div>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <EmptyState
+                title="No improvement highlights yet"
+                description="Highlights appear once teachers improve by 15+ points across recent evidence."
+              />
+            )}
+          </div>
+        </Panel>
+
+        <Panel className="border border-slate-200 bg-white">
+          <div className="flex items-center gap-2">
+            <div className="rounded-md bg-amber-50 p-2 text-amber-700">
+              <CalendarPlus className="h-4 w-4" />
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold text-slate-950">Observation gaps</h2>
+              <p className="text-xs text-slate-500">Overdue teachers to schedule next</p>
+            </div>
+          </div>
+          <div className="mt-4 space-y-3">
+            {observationGaps.length ? (
+              observationGaps.slice(0, 5).map((gap) => (
+                <div key={gap.teacher_id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-950">
+                      {gap.teacher_name}
+                    </div>
+                    <div className="text-xs text-slate-500">
+                      {gap.days_since_last_observation} days since last observation - {gap.observation_count_this_cycle} this cycle
+                    </div>
+                  </div>
+                  <Link
+                    to={`/observation/new?teacher_id=${encodeURIComponent(gap.teacher_id)}`}
+                    className="inline-flex items-center rounded-md bg-slate-900 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-700"
+                  >
+                    <CalendarPlus className="mr-2 h-4 w-4" />
+                    Plan observation
+                  </Link>
+                </div>
+              ))
+            ) : (
+              <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-4 text-sm text-emerald-800">
+                <CheckCircle2 className="mr-2 inline h-4 w-4" />
+                Observation coverage is current for this cycle.
+              </div>
+            )}
+          </div>
+        </Panel>
+      </div>
+    </section>
+  );
 }
 
 export function DashboardPage({ forcedWorkspaceMode = null }) {
@@ -237,6 +430,13 @@ function SchoolDashboardPage({ forcedWorkspaceMode = null }) {
     queryFn: () =>
       assessmentApi.dashboardLeadershipInsights(trendQueryParams).then((res) => res.data),
     enabled: isDashboardV2Enabled && Boolean(currentData?.roster?.length),
+  });
+  const { data: dashboardIntelligenceRes, isLoading: dashboardIntelligenceLoading } = useQuery({
+    queryKey: ["dashboard-intelligence"],
+    queryFn: () => assessmentApi.dashboardIntelligence().then((res) => res.data),
+    enabled: isAdmin && Boolean(currentData?.roster?.length),
+    staleTime: 30 * 60 * 1000,
+    cacheTime: 30 * 60 * 1000,
   });
   const { data: opsReadinessRes } = useQuery({
     queryKey: ["ops-readiness"],
@@ -1109,6 +1309,13 @@ function SchoolDashboardPage({ forcedWorkspaceMode = null }) {
         />
 
         {isAdmin ? <UpcomingObservationsWidget className="mb-6" /> : null}
+
+        {isAdmin ? (
+          <LeadershipIntelligenceView
+            intelligence={dashboardIntelligenceRes}
+            isLoading={dashboardIntelligenceLoading}
+          />
+        ) : null}
 
         {dashboardRoleShellEnabled && (
           <Panel className="mb-6 border border-slate-200 bg-white">
