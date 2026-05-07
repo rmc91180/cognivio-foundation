@@ -74,6 +74,13 @@ export const observationSessionApi = {
   update: (id, payload) => api.patch(`/api/observation-sessions/${id}`, payload),
 };
 
+export const observerApi = {
+  goals: () => api.get("/api/observer/goals"),
+  createGoal: (payload) => api.post("/api/observer/goals", payload),
+  addGoalProgress: (id, payload) => api.post(`/api/observer/goals/${id}/progress`, payload),
+  insights: () => api.get("/api/observer/insights"),
+};
+
 export const reportApi = {
   export: (format, params = {}) =>
     api.post(

@@ -11,6 +11,7 @@ import {
   recordingComplianceApi,
   recognitionApi,
   opsApi,
+  observerApi,
 } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { LeadershipInsightsCard } from "@/components/dashboard/LeadershipInsightsCard";
@@ -19,7 +20,7 @@ import { TrainingDashboard } from "@/components/dashboard/TrainingDashboard";
 import { UpcomingObservationsWidget } from "@/components/dashboard/UpcomingObservationsWidget";
 import { PatternCard } from "@/components/dashboard/PatternCard";
 import { ObservationCoverageRing } from "@/components/dashboard/ObservationCoverageRing";
-import { CalendarPlus, CheckCircle2, Lightbulb, TrendingUp } from "lucide-react";
+import { CalendarPlus, CheckCircle2, Lightbulb, Target, TrendingUp } from "lucide-react";
 import {
   Bar,
   BarChart,
@@ -293,6 +294,85 @@ function LeadershipIntelligenceView({ intelligence, isLoading }) {
   );
 }
 
+function ObserverJourneySection({ goals = [], insights }) {
+  const visibleGoals = goals.slice(0, 3);
+  const frequency = insights?.observation_frequency || {};
+  const suggestedGoal = insights?.suggested_goal;
+
+  return (
+    <Panel className="mb-6 border border-slate-200 bg-white">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-teal-700">
+            <Target className="h-4 w-4" />
+            Your observer journey
+          </div>
+          <h2 className="mt-1 text-sm font-semibold text-slate-950">
+            Personal growth as an instructional leader
+          </h2>
+          <p className="mt-1 text-xs text-slate-500">
+            {frequency.this_cycle || 0} completed observations this cycle, {frequency.trend >= 0 ? "+" : ""}
+            {frequency.trend || 0} versus last cycle.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Link
+            to="/my-insights"
+            className="inline-flex items-center rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+          >
+            Set a new goal
+          </Link>
+          <Link
+            to="/my-insights"
+            className="inline-flex items-center rounded-md bg-slate-900 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-700"
+          >
+            Open insights
+          </Link>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3 lg:grid-cols-3">
+        {visibleGoals.length ? (
+          visibleGoals.map((goal) => (
+            <div key={goal.id} className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-slate-950">{goal.goal_text}</div>
+                  <div className="mt-1 text-xs text-slate-500">{goal.target_metric}</div>
+                </div>
+                <span className="shrink-0 rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-700">
+                  {Math.round(goal.progress_pct || 0)}%
+                </span>
+              </div>
+              <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-200">
+                <div
+                  className="h-full rounded-full bg-teal-600 transition-all duration-700"
+                  style={{ width: `${Math.min(100, Math.max(0, goal.progress_pct || 0))}%` }}
+                />
+              </div>
+              <div className="mt-3 text-xs text-slate-500">
+                {(goal.progress_signals || []).length} progress signals captured
+              </div>
+            </div>
+          ))
+        ) : (
+          <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-600 lg:col-span-2">
+            No active observer goals yet. Use your insights page to set the next growth target.
+          </div>
+        )}
+        <div className="rounded-lg border border-teal-100 bg-teal-50 px-4 py-4">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-teal-700">
+            AI reflection
+          </div>
+          <p className="mt-2 text-sm text-teal-950">
+            {suggestedGoal || "Complete a few observations this cycle to unlock a suggested growth goal."}
+          </p>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
 export function DashboardPage({ forcedWorkspaceMode = null }) {
   const { user } = useAuth();
   const tenantRole = getUserTenantRole(user);
@@ -475,6 +555,17 @@ function SchoolDashboardPage({ forcedWorkspaceMode = null }) {
     enabled: isAdmin,
     queryFn: () => teacherApi.coachingTasks().then((res) => res.data),
   });
+  const { data: observerGoalsRes } = useQuery({
+    queryKey: ["observer-goals"],
+    enabled: isAdmin,
+    queryFn: () => observerApi.goals().then((res) => res.data),
+  });
+  const { data: observerInsightsRes } = useQuery({
+    queryKey: ["observer-insights"],
+    enabled: isAdmin,
+    queryFn: () => observerApi.insights().then((res) => res.data),
+    staleTime: 5 * 60 * 1000,
+  });
   const coachingQueueSummary = useMemo(() => {
     const activeTasks = (coachingTasksRes?.tasks || []).filter(
       (task) => task.status !== "completed"
@@ -486,6 +577,10 @@ function SchoolDashboardPage({ forcedWorkspaceMode = null }) {
       low: activeTasks.filter((task) => task.priority === "low").length,
     };
   }, [coachingTasksRes]);
+  const observerGoals = useMemo(
+    () => observerGoalsRes?.goals || observerInsightsRes?.active_goals || [],
+    [observerGoalsRes, observerInsightsRes]
+  );
 
   const roster = useMemo(() => currentData?.roster ?? [], [currentData]);
   const previousRoster = useMemo(
@@ -1357,6 +1452,13 @@ function SchoolDashboardPage({ forcedWorkspaceMode = null }) {
               ))}
             </div>
           </Panel>
+        ) : null}
+
+        {isAdmin ? (
+          <ObserverJourneySection
+            goals={observerGoals}
+            insights={observerInsightsRes}
+          />
         ) : null}
 
         {dashboardRoleShellEnabled && (

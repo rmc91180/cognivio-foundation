@@ -28,6 +28,7 @@ import {
   assessmentApi,
   frameworkApi,
   observationSessionApi,
+  observerApi,
   teacherApi,
 } from "@/lib/api";
 import { HEBREW_FRAMEWORK_LABELS } from "@/features/school-setup/constants";
@@ -75,6 +76,10 @@ const COPY = {
     noFocusYet: "Focus choices will appear after this teacher has lesson history. Use a general focus for now.",
     generalFocus: "General lesson focus",
     selectedTeacher: "Selected teacher",
+    observerGoalsTitle: "Your active goals",
+    observerGoalsDescription: "Keep your own observer growth targets visible while you plan this session.",
+    goalAlignment: "This aligns with your goal:",
+    noObserverGoals: "No active observer goals yet.",
   },
   he: {
     title: "תכנון תצפית",
@@ -118,6 +123,10 @@ const COPY = {
     noFocusYet: "מוקדי תצפית יופיעו לאחר שתצטבר היסטוריית שיעורים. בינתיים אפשר לבחור מוקד כללי.",
     generalFocus: "מוקד שיעור כללי",
     selectedTeacher: "המורה שנבחר",
+    observerGoalsTitle: "המטרות הפעילות שלך",
+    observerGoalsDescription: "שמרו את יעדי ההתפתחות שלכם כצופים מול העיניים בזמן תכנון התצפית.",
+    goalAlignment: "זה תואם למטרה שלך:",
+    noObserverGoals: "אין עדיין מטרות פעילות לצופה.",
   },
 };
 
@@ -206,6 +215,11 @@ export function ObservationSetupPage() {
     },
   });
 
+  const { data: observerGoalsRes } = useQuery({
+    queryKey: ["observer-goals"],
+    queryFn: () => observerApi.goals().then((res) => res.data),
+  });
+
   const selectedTeacher = useMemo(
     () => teachers.find((teacher) => teacher.id === selectedTeacherId) || null,
     [selectedTeacherId, teachers]
@@ -276,6 +290,19 @@ export function ObservationSetupPage() {
     }
     return options;
   }, [copy.generalFocus, dashboardRes, frameworkDetailRes, frameworkType, i18n.resolvedLanguage, selectedTeacherId, selectionRes]);
+
+  const activeObserverGoals = useMemo(
+    () => observerGoalsRes?.goals || [],
+    [observerGoalsRes]
+  );
+
+  const goalsAlignedToElement = (elementId) => {
+    const normalizedElement = String(elementId || "").toLowerCase();
+    return activeObserverGoals.filter((goal) => {
+      const haystack = `${goal.goal_text || ""} ${goal.target_metric || ""}`.toLowerCase();
+      return goal.goal_type === "element_focus" || haystack.includes(normalizedElement);
+    });
+  };
 
   const createSessionMutation = useMutation({
     mutationFn: (payload) => observationSessionApi.create(payload).then((res) => res.data),
@@ -411,6 +438,7 @@ export function ObservationSetupPage() {
         <div className="mt-5 grid gap-3 md:grid-cols-2">
           {focusOptions.map((option) => {
             const selected = focusElements.includes(option.id);
+            const alignedGoals = goalsAlignedToElement(option.id);
             return (
               <button
                 key={option.id}
@@ -444,6 +472,11 @@ export function ObservationSetupPage() {
                 {option.declining ? (
                   <div className="mt-3 inline-flex rounded-full border border-amber-200 bg-white px-2.5 py-1 text-xs font-medium text-amber-700">
                     {copy.declining}
+                  </div>
+                ) : null}
+                {alignedGoals.length ? (
+                  <div className="mt-3 rounded-md border border-teal-100 bg-white px-3 py-2 text-xs text-teal-800">
+                    {copy.goalAlignment} {alignedGoals[0].goal_text}
                   </div>
                 ) : null}
               </button>
@@ -545,6 +578,35 @@ export function ObservationSetupPage() {
           <h1 className="font-heading text-2xl font-semibold text-slate-950">{copy.title}</h1>
           <p className="mt-2 max-w-3xl text-sm text-slate-600">{copy.description}</p>
         </header>
+
+        <Panel className="mb-6 border border-teal-100 bg-teal-50">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-teal-700">
+                <Target className="h-4 w-4" />
+                {copy.observerGoalsTitle}
+              </div>
+              <p className="mt-1 text-sm text-teal-950">{copy.observerGoalsDescription}</p>
+            </div>
+            <Link
+              to="/my-insights"
+              className="inline-flex items-center rounded-md bg-white px-3 py-2 text-xs font-semibold text-teal-800 ring-1 ring-teal-200 hover:bg-teal-50"
+            >
+              {copy.observerGoalsTitle}
+            </Link>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            {activeObserverGoals.length ? (
+              activeObserverGoals.slice(0, 3).map((goal) => (
+                <span key={goal.id} className="rounded-full bg-white px-3 py-1.5 text-xs font-medium text-teal-900 ring-1 ring-teal-100">
+                  {goal.goal_text}
+                </span>
+              ))
+            ) : (
+              <span className="text-sm text-teal-800">{copy.noObserverGoals}</span>
+            )}
+          </div>
+        </Panel>
 
         <div className="grid gap-6 lg:grid-cols-12">
           <aside className="lg:col-span-4">

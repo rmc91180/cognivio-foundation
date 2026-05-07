@@ -30,6 +30,7 @@ import { TeacherOperationsPage } from "@/pages/TeacherOperationsPage";
 import { CoachingHubPage } from "@/pages/CoachingHubPage";
 import { MasterSchedulePage } from "@/pages/MasterSchedulePage";
 import { ObservationSetupPage } from "@/pages/ObservationSetupPage";
+import { ObserverInsightsPage } from "@/pages/ObserverInsightsPage";
 import { VideoPlayerPage } from "@/pages/VideoPlayerPage";
 import { VideoRecorderPage } from "@/pages/VideoRecorderPage";
 import { FrameworksPage } from "@/pages/FrameworksPage";
@@ -388,6 +389,14 @@ function App() {
           element={
             <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
               <MasterSchedulePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/my-insights"
+          element={
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin", "super_admin"]}>
+              <ObserverInsightsPage />
             </ProtectedRoute>
           }
         />

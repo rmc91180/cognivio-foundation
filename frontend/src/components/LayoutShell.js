@@ -11,6 +11,7 @@ import {
   MessageSquareText,
   PlayCircle,
   ShieldCheck,
+  Target,
   Trophy,
   Users,
 } from "lucide-react";
@@ -47,6 +48,7 @@ const ROLE_NAV_ITEMS = {
     { to: "/teachers", icon: Users, label: "Teachers" },
     { to: "/master-schedule", icon: ClipboardList, label: "Schedule" },
     { to: "/teachers?focus=coaching", icon: MessageSquareText, label: "Coaching" },
+    { to: "/my-insights", icon: Target, label: "My Insights" },
     { to: "/recognition-review", icon: Trophy, label: "Recognition" },
     { to: "/ops/metrics", icon: BookOpen, label: "Reports" },
     { to: "/school-setup", icon: Layers, label: "Settings" },
@@ -56,6 +58,7 @@ const ROLE_NAV_ITEMS = {
     { to: "/teachers?view=cohorts", icon: Layers, label: "Cohorts" },
     { to: "/teachers", icon: Users, label: "Trainees" },
     { to: "/master-schedule", icon: ClipboardList, label: "Schedule" },
+    { to: "/my-insights", icon: Target, label: "My Insights" },
     { to: "/dashboard?view=reports", icon: BookOpen, label: "Reports" },
     { to: "/dashboard?view=settings", icon: Layers, label: "Settings" },
   ],

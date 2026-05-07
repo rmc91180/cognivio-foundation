@@ -6426,6 +6426,40 @@ class ObservationSessionUpdate(BaseModel):
     linked_assessment_id: Optional[str] = None
 
 
+class ObserverGoalProgressSignal(BaseModel):
+    session_id: Optional[str] = None
+    signal_type: str
+    note: str
+    recorded_at: str
+
+
+class ObserverGoal(BaseModel):
+    id: str
+    workspace_id: Optional[str] = None
+    observer_id: str
+    goal_text: str
+    goal_type: str
+    target_metric: str
+    progress_signals: List[ObserverGoalProgressSignal] = []
+    achieved: bool = False
+    achieved_at: Optional[str] = None
+    created_at: str
+    updated_at: Optional[str] = None
+    progress_pct: float = 0
+
+
+class ObserverGoalCreate(BaseModel):
+    goal_text: str
+    goal_type: str
+    target_metric: str
+
+
+class ObserverGoalProgressCreate(BaseModel):
+    session_id: Optional[str] = None
+    signal_type: str
+    note: Optional[str] = None
+
+
 class VideoProcessingStatus(str, Enum):
     QUEUED = "queued"
     PROCESSING = "processing"
@@ -16251,6 +16285,295 @@ async def _serialize_observation_session(session: dict) -> dict:
     return payload
 
 
+OBSERVER_GOAL_TYPES = {
+    "feedback_quality",
+    "observation_frequency",
+    "element_focus",
+    "coaching_action",
+}
+
+
+def _normalize_observer_goal_type(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized not in OBSERVER_GOAL_TYPES:
+        raise HTTPException(status_code=400, detail="Unsupported observer goal type")
+    return normalized
+
+
+def _observer_goal_target_count(goal: dict) -> int:
+    target_metric = str(goal.get("target_metric") or "")
+    match = re.search(r"\d+", target_metric)
+    if match:
+        try:
+            return max(1, int(match.group(0)))
+        except ValueError:
+            pass
+    return 4
+
+
+def _serialize_observer_goal(goal: dict) -> dict:
+    payload = dict(goal or {})
+    payload.pop("_id", None)
+    signals = [
+        {
+            "session_id": signal.get("session_id"),
+            "signal_type": str(signal.get("signal_type") or "progress"),
+            "note": str(signal.get("note") or ""),
+            "recorded_at": signal.get("recorded_at") or payload.get("updated_at") or payload.get("created_at") or "",
+        }
+        for signal in payload.get("progress_signals") or []
+        if isinstance(signal, dict)
+    ]
+    payload["progress_signals"] = signals
+    payload["achieved"] = bool(payload.get("achieved"))
+    target_count = _observer_goal_target_count(payload)
+    progress_pct = 100 if payload["achieved"] else min(100, round((len(signals) / target_count) * 100, 1))
+    payload["progress_pct"] = progress_pct
+    payload["goal_text"] = str(payload.get("goal_text") or "").strip()
+    payload["goal_type"] = _normalize_observer_goal_type(payload.get("goal_type"))
+    payload["target_metric"] = str(payload.get("target_metric") or "").strip()
+    payload["updated_at"] = payload.get("updated_at")
+    payload["workspace_id"] = payload.get("workspace_id")
+    payload["achieved_at"] = payload.get("achieved_at")
+    return payload
+
+
+def _observer_goal_matches_focus(goal: dict, session: dict) -> bool:
+    goal_text = f"{goal.get('goal_text') or ''} {goal.get('target_metric') or ''}".lower()
+    focus_elements = [str(item or "").strip().lower() for item in session.get("focus_elements") or []]
+    if not focus_elements:
+        return False
+    if any(element and element in goal_text for element in focus_elements):
+        return True
+    return goal.get("goal_type") == "element_focus"
+
+
+async def _append_observer_goal_progress_signal(goal: dict, signal: dict) -> bool:
+    session_id = signal.get("session_id")
+    signal_type = signal.get("signal_type")
+    for existing in goal.get("progress_signals") or []:
+        if existing.get("session_id") == session_id and existing.get("signal_type") == signal_type:
+            return False
+
+    now = datetime.now(timezone.utc).isoformat()
+    next_count = len(goal.get("progress_signals") or []) + 1
+    target_count = _observer_goal_target_count(goal)
+    set_fields = {"updated_at": now}
+    if not goal.get("achieved") and next_count >= target_count:
+        set_fields["achieved"] = True
+        set_fields["achieved_at"] = now
+    await db.observer_goals.update_one(
+        {"id": goal["id"], "observer_id": goal["observer_id"]},
+        {"$push": {"progress_signals": signal}, "$set": set_fields},
+    )
+    return True
+
+
+async def _auto_update_observer_goal_progress_for_session(
+    session: Optional[dict],
+    *,
+    assessment: Optional[dict] = None,
+    video: Optional[dict] = None,
+) -> int:
+    if not session or not session.get("observer_id"):
+        return 0
+
+    completed_statuses = {
+        ObservationSessionStatus.ANALYSIS_COMPLETE.value,
+        ObservationSessionStatus.FEEDBACK_GIVEN.value,
+    }
+    if session.get("status") not in completed_statuses:
+        return 0
+
+    goals = await db.observer_goals.find(
+        {"observer_id": session["observer_id"], "achieved": {"$ne": True}},
+        {"_id": 0},
+    ).to_list(100)
+    if not goals:
+        return 0
+
+    teacher = await db.teachers.find_one({"id": session.get("teacher_id")}, {"_id": 0, "name": 1})
+    teacher_name = teacher.get("name") if teacher else "the observed teacher"
+    focus_label = ", ".join(session.get("focus_elements") or []) or "the planned focus"
+    assessment_summary = str((assessment or {}).get("summary") or "")
+    recommendation_count = len((assessment or {}).get("recommendations") or [])
+    linked_assessment_id = (assessment or {}).get("id") or session.get("linked_assessment_id")
+    linked_video_id = (video or {}).get("id") or session.get("linked_video_id")
+
+    signal_templates = {
+        "observation_frequency": f"Completed an observation cycle with {teacher_name}.",
+        "element_focus": f"Focused on {focus_label} during the observation of {teacher_name}.",
+        "feedback_quality": (
+            f"Generated feedback for {teacher_name}"
+            f" with {recommendation_count} recommendation(s)."
+        ),
+        "coaching_action": f"Created or reviewed coaching follow-up from the observation of {teacher_name}.",
+    }
+    created = 0
+    now = datetime.now(timezone.utc).isoformat()
+    for goal in goals:
+        goal_type = goal.get("goal_type")
+        should_record = False
+        if goal_type == "observation_frequency":
+            should_record = True
+        elif goal_type == "element_focus":
+            should_record = _observer_goal_matches_focus(goal, session)
+        elif goal_type == "feedback_quality":
+            should_record = bool(linked_assessment_id or assessment_summary or recommendation_count)
+        elif goal_type == "coaching_action":
+            task_count = await db.coaching_tasks.count_documents(
+                {
+                    "observer_id": session["observer_id"],
+                    "$or": [
+                        {"linked_observation_session_id": session.get("id")},
+                        {"assessment_id": linked_assessment_id},
+                    ],
+                }
+            )
+            should_record = task_count > 0
+
+        if not should_record:
+            continue
+        signal = {
+            "session_id": session.get("id"),
+            "signal_type": f"auto_{goal_type}",
+            "note": signal_templates.get(goal_type, "Progress recorded from a completed observation."),
+            "recorded_at": now,
+            "assessment_id": linked_assessment_id,
+            "video_id": linked_video_id,
+        }
+        if await _append_observer_goal_progress_signal(goal, signal):
+            created += 1
+    return created
+
+
+async def _build_observer_element_catalog(current_user: dict) -> Dict[str, str]:
+    selection = await db.framework_selections.find_one({"user_id": current_user["id"]}, {"_id": 0})
+    framework_type = selection.get("framework_type") if selection else FrameworkType.DANIELSON.value
+    if framework_type == FrameworkType.CUSTOM.value:
+        domains = await db.custom_domains.find({"user_id": current_user["id"]}, {"_id": 0}).to_list(1000)
+    else:
+        domains = _get_framework_by_type(framework_type).get("domains", [])
+    catalog: Dict[str, str] = {}
+    for domain in domains or []:
+        for element in domain.get("elements") or []:
+            element_id = str(element.get("id") or "").strip()
+            if element_id:
+                catalog[element_id] = element.get("name") or element_id
+    return catalog
+
+
+async def _build_observer_insights(current_user: dict) -> dict:
+    observer_id = current_user["id"]
+    now = datetime.now(timezone.utc)
+    cycle_start, cycle_end = _current_observation_cycle_window(now)
+    cycle_length = cycle_end - cycle_start
+    previous_start = cycle_start - cycle_length
+    previous_end = cycle_start
+
+    completed_statuses = [
+        ObservationSessionStatus.ANALYSIS_COMPLETE.value,
+        ObservationSessionStatus.FEEDBACK_GIVEN.value,
+    ]
+    base_query = {"observer_id": observer_id, "status": {"$in": completed_statuses}}
+    this_sessions = await db.observation_sessions.find(
+        {**base_query, "updated_at": {"$gte": cycle_start.isoformat(), "$lt": cycle_end.isoformat()}},
+        {"_id": 0},
+    ).to_list(1000)
+    last_sessions = await db.observation_sessions.find(
+        {**base_query, "updated_at": {"$gte": previous_start.isoformat(), "$lt": previous_end.isoformat()}},
+        {"_id": 0},
+    ).to_list(1000)
+
+    current_observations = await db.observations.find(
+        {"user_id": observer_id, "created_at": {"$gte": cycle_start.isoformat(), "$lt": cycle_end.isoformat()}},
+        {"_id": 0},
+    ).to_list(1000)
+    previous_observations = await db.observations.find(
+        {"user_id": observer_id, "created_at": {"$gte": previous_start.isoformat(), "$lt": previous_end.isoformat()}},
+        {"_id": 0},
+    ).to_list(1000)
+
+    def avg_feedback_length(rows: List[dict]) -> float:
+        values = [
+            len(str(row.get("admin_comment") or row.get("teacher_response") or "").strip())
+            for row in rows
+            if str(row.get("admin_comment") or row.get("teacher_response") or "").strip()
+        ]
+        return round(sum(values) / len(values), 1) if values else 0
+
+    element_counts: Dict[str, int] = {}
+    last_observed_by_element: Dict[str, str] = {}
+    for session in this_sessions:
+        observed_at = session.get("updated_at") or session.get("scheduled_date") or session.get("created_at")
+        for element_id in session.get("focus_elements") or []:
+            element_counts[element_id] = element_counts.get(element_id, 0) + 1
+            if observed_at and observed_at > last_observed_by_element.get(element_id, ""):
+                last_observed_by_element[element_id] = observed_at
+    for observation in current_observations:
+        element_id = observation.get("element_id")
+        if not element_id:
+            continue
+        element_counts[element_id] = element_counts.get(element_id, 0) + 1
+        created_at = observation.get("created_at")
+        if created_at and created_at > last_observed_by_element.get(element_id, ""):
+            last_observed_by_element[element_id] = created_at
+
+    element_catalog = await _build_observer_element_catalog(current_user)
+    most_observed = sorted(element_counts.items(), key=lambda item: item[1], reverse=True)[:6]
+    most_observed_elements = [
+        {"code": code, "name": element_catalog.get(code, code), "count": count}
+        for code, count in most_observed
+    ]
+    underobserved_elements = [
+        {
+            "code": code,
+            "name": name,
+            "last_observed": last_observed_by_element.get(code),
+        }
+        for code, name in element_catalog.items()
+        if element_counts.get(code, 0) == 0
+    ][:6]
+
+    total_coaching_tasks = await db.coaching_tasks.count_documents({"observer_id": observer_id})
+    completed_coaching_tasks = await db.coaching_tasks.count_documents(
+        {"observer_id": observer_id, "status": "completed"}
+    )
+    coaching_completion_rate = (
+        round((completed_coaching_tasks / total_coaching_tasks) * 100, 1)
+        if total_coaching_tasks
+        else 0
+    )
+
+    focus_phrase = most_observed_elements[0]["code"] if most_observed_elements else "observation cadence"
+    gap_phrase = underobserved_elements[0]["code"] if underobserved_elements else "follow-through evidence"
+    suggested_goal = (
+        f"You've been prioritizing {focus_phrase} this cycle; consider setting a goal to expand evidence around "
+        f"{gap_phrase} before the cycle closes."
+    )
+    active_goals = await db.observer_goals.find(
+        {"observer_id": observer_id, "achieved": {"$ne": True}},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(10)
+
+    return {
+        "observation_frequency": {
+            "this_cycle": len(this_sessions),
+            "last_cycle": len(last_sessions),
+            "trend": len(this_sessions) - len(last_sessions),
+        },
+        "avg_feedback_length": {
+            "this_cycle": avg_feedback_length(current_observations),
+            "trend": round(avg_feedback_length(current_observations) - avg_feedback_length(previous_observations), 1),
+        },
+        "most_observed_elements": most_observed_elements,
+        "underobserved_elements": underobserved_elements,
+        "coaching_completion_rate": coaching_completion_rate,
+        "suggested_goal": suggested_goal,
+        "active_goals": [_serialize_observer_goal(goal) for goal in active_goals],
+    }
+
+
 async def _get_observation_session_or_404(session_id: str, current_user: dict) -> dict:
     session = await db.observation_sessions.find_one({"id": session_id}, {"_id": 0})
     if not session:
@@ -16344,6 +16667,83 @@ async def get_observation_session(
     return ObservationSession(**(await _serialize_observation_session(session)))
 
 
+@api_router.get("/observer/goals")
+async def list_observer_goals(current_user: dict = Depends(get_current_user)):
+    _require_observation_planner(current_user)
+    docs = await db.observer_goals.find(
+        {"observer_id": current_user["id"], "achieved": {"$ne": True}},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(100)
+    return {"goals": [_serialize_observer_goal(doc) for doc in docs]}
+
+
+@api_router.post("/observer/goals", response_model=ObserverGoal)
+async def create_observer_goal(
+    payload: ObserverGoalCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_observation_planner(current_user)
+    goal_text = str(payload.goal_text or "").strip()
+    target_metric = str(payload.target_metric or "").strip()
+    goal_type = _normalize_observer_goal_type(payload.goal_type)
+    if len(goal_text) < 5:
+        raise HTTPException(status_code=400, detail="Goal text must be at least 5 characters")
+    if not target_metric:
+        raise HTTPException(status_code=400, detail="Target metric is required")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "workspace_id": _get_dashboard_workspace_id(current_user),
+        "observer_id": current_user["id"],
+        "goal_text": goal_text,
+        "goal_type": goal_type,
+        "target_metric": target_metric,
+        "progress_signals": [],
+        "achieved": False,
+        "achieved_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.observer_goals.insert_one(doc)
+    return ObserverGoal(**_serialize_observer_goal(doc))
+
+
+@api_router.post("/observer/goals/{goal_id}/progress", response_model=ObserverGoal)
+async def add_observer_goal_progress(
+    goal_id: str,
+    payload: ObserverGoalProgressCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_observation_planner(current_user)
+    goal = await db.observer_goals.find_one({"id": goal_id, "observer_id": current_user["id"]}, {"_id": 0})
+    if not goal:
+        raise HTTPException(status_code=404, detail="Observer goal not found")
+    if goal.get("achieved"):
+        raise HTTPException(status_code=400, detail="Goal is already achieved")
+    session_id = str(payload.session_id or "").strip() or None
+    if session_id:
+        session = await _get_observation_session_or_404(session_id, current_user)
+        if session.get("observer_id") != current_user["id"]:
+            raise HTTPException(status_code=403, detail="Cannot add progress for another observer's session")
+    signal_type = str(payload.signal_type or "manual_progress").strip() or "manual_progress"
+    now = datetime.now(timezone.utc).isoformat()
+    signal = {
+        "session_id": session_id,
+        "signal_type": signal_type,
+        "note": str(payload.note or "Progress recorded by observer.").strip(),
+        "recorded_at": now,
+    }
+    await _append_observer_goal_progress_signal(goal, signal)
+    updated = await db.observer_goals.find_one({"id": goal_id, "observer_id": current_user["id"]}, {"_id": 0})
+    return ObserverGoal(**_serialize_observer_goal(updated or goal))
+
+
+@api_router.get("/observer/insights")
+async def get_observer_insights(current_user: dict = Depends(get_current_user)):
+    _require_observation_planner(current_user)
+    return await _build_observer_insights(current_user)
+
+
 @api_router.patch("/observation-sessions/{session_id}", response_model=ObservationSession)
 async def update_observation_session(
     session_id: str,
@@ -16383,6 +16783,7 @@ async def update_observation_session(
     if not updated:
         raise HTTPException(status_code=404, detail="Observation session not found")
     updated.pop("_id", None)
+    await _auto_update_observer_goal_progress_for_session(updated)
     return ObservationSession(**(await _serialize_observation_session(updated)))
 
 
@@ -19502,6 +19903,12 @@ async def analyze_video(
                     }
                 },
             )
+            observation_session = {
+                **observation_session,
+                "status": ObservationSessionStatus.ANALYSIS_COMPLETE.value,
+                "linked_assessment_id": assessment_doc["id"],
+                "updated_at": completed_at,
+            }
         assessment_teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
         await _create_coaching_tasks_for_assessment(
             assessment_doc,
@@ -19509,6 +19916,11 @@ async def analyze_video(
             teacher=assessment_teacher,
             observer_user=analysis_user or {"id": user_id},
             observation_session=observation_session,
+        )
+        await _auto_update_observer_goal_progress_for_session(
+            observation_session,
+            assessment=assessment_doc,
+            video=video,
         )
         updated_video = await db.videos.find_one({"id": video_id}, {"_id": 0})
         if updated_video:
@@ -22714,6 +23126,8 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.observation_sessions, [("teacher_id", 1), ("scheduled_date", -1)])
     await _safe_create_index(db.observation_sessions, [("status", 1), ("scheduled_date", 1)])
     await _safe_create_index(db.observation_sessions, [("linked_video_id", 1)])
+    await _safe_create_index(db.observer_goals, [("observer_id", 1), ("achieved", 1), ("created_at", -1)])
+    await _safe_create_index(db.observer_goals, [("workspace_id", 1), ("goal_type", 1)])
     await _safe_create_index(db.video_processing_jobs, [("video_id", 1)], unique=True)
     await _safe_create_index(db.video_processing_jobs, [("status", 1), ("updated_at", -1)])
     await _safe_create_index(db.video_transcode_jobs, [("video_id", 1)], unique=True)
