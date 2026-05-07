@@ -231,6 +231,14 @@ function App() {
           }
         />
         <Route
+          path="/coaching"
+          element={
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
+              <CoachingHubPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
           path="/teachers/:teacherId/coaching"
           element={
             <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>

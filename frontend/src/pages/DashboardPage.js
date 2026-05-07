@@ -45,7 +45,6 @@ import {
 } from "@/components/ui";
 import { Link } from "react-router-dom";
 import { runtimeConfig } from "@/lib/runtimeConfig";
-import { resolveCoachingLink } from "@/lib/coachingRoutes";
 import { getDefaultHomeRoute, getUserTenantRole } from "@/lib/userRoutes";
 
 const DASHBOARD_SIGNAL_WINDOW_DAYS = 14;
@@ -476,6 +475,17 @@ function SchoolDashboardPage({ forcedWorkspaceMode = null }) {
     enabled: isAdmin,
     queryFn: () => teacherApi.coachingTasks().then((res) => res.data),
   });
+  const coachingQueueSummary = useMemo(() => {
+    const activeTasks = (coachingTasksRes?.tasks || []).filter(
+      (task) => task.status !== "completed"
+    );
+    return {
+      total: activeTasks.length,
+      high: activeTasks.filter((task) => task.priority === "high").length,
+      medium: activeTasks.filter((task) => task.priority === "medium").length,
+      low: activeTasks.filter((task) => task.priority === "low").length,
+    };
+  }, [coachingTasksRes]);
 
   const roster = useMemo(() => currentData?.roster ?? [], [currentData]);
   const previousRoster = useMemo(
@@ -1205,23 +1215,21 @@ function SchoolDashboardPage({ forcedWorkspaceMode = null }) {
         });
       }
       const specificSharedTasks = (coachingTasksRes?.tasks || [])
-        .filter((task) => task.state !== "privacy_blocker")
+        .filter((task) => task.status !== "completed" && task.state !== "privacy_blocker")
         .slice(0, 4)
         .map((task) => ({
           id: task.id,
           title: task.title,
-          description: task.support_prompt || task.summary,
+          description: task.support_prompt || task.summary || task.suggested_action,
           contextLabel: task.context_label || task.teacher_name,
           actionLabel: t("coachingTasks.openTask"),
-          to: resolveCoachingLink(user, task.teacher_id, task.route_hint, {
-            videoId: task.video_id,
-          }),
+          to: `/coaching?teacher_id=${task.teacher_id}`,
           tone:
-            task.state === "conference_upcoming"
-              ? "emerald"
-              : task.state === "goal_checkpoint_due"
-                ? "sky"
-                : "rose",
+            task.priority === "high"
+              ? "rose"
+              : task.priority === "medium"
+                ? "amber"
+                : "sky",
         }));
       const sharedTasks = [...groupedSharedTasks, ...specificSharedTasks].slice(0, 4);
       if (sharedTasks.length) {
@@ -1315,6 +1323,40 @@ function SchoolDashboardPage({ forcedWorkspaceMode = null }) {
             intelligence={dashboardIntelligenceRes}
             isLoading={dashboardIntelligenceLoading}
           />
+        ) : null}
+
+        {isAdmin ? (
+          <Panel className="mb-6 border border-slate-200 bg-white">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-950">Your coaching queue</h2>
+                <p className="mt-1 text-xs text-slate-500">
+                  Assessment-generated follow-up tasks by priority.
+                </p>
+              </div>
+              <Link
+                to="/coaching"
+                className="inline-flex items-center rounded-md bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-700"
+              >
+                Open coaching hub
+              </Link>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-4">
+              {[
+                ["Total", coachingQueueSummary.total, "text-slate-950"],
+                ["High", coachingQueueSummary.high, "text-red-700"],
+                ["Medium", coachingQueueSummary.medium, "text-amber-700"],
+                ["Low", coachingQueueSummary.low, "text-teal-700"],
+              ].map(([label, value, className]) => (
+                <div key={label} className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {label}
+                  </div>
+                  <div className={`mt-1 text-2xl font-semibold ${className}`}>{value}</div>
+                </div>
+              ))}
+            </div>
+          </Panel>
         ) : null}
 
         {dashboardRoleShellEnabled && (

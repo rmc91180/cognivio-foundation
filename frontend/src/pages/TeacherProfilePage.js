@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { LayoutShell } from "@/components/LayoutShell";
@@ -10,8 +10,7 @@ import {
   SkeletonCard,
   SkeletonText,
 } from "@/components/ui";
-import { resolveCoachingLink } from "@/lib/coachingRoutes";
-import { observationSessionApi, reportApi, videoApi } from "@/lib/api";
+import { observationSessionApi, reportApi, teacherApi, videoApi } from "@/lib/api";
 import { useAdminTeacherDeepDiveData } from "@/pages/teacher-deep-dive/useAdminTeacherDeepDiveData";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -82,6 +81,7 @@ export function TeacherProfilePage() {
     formatDateTime,
     formatScore,
   } = useAdminTeacherDeepDiveData({ teacherId });
+  const [showCoachingHistory, setShowCoachingHistory] = useState(false);
 
   const { data: observationSessions = [] } = useQuery({
     queryKey: ["observation-sessions", teacherId],
@@ -90,6 +90,11 @@ export function TeacherProfilePage() {
       observationSessionApi
         .list({ teacher_id: teacherId })
         .then((res) => res.data),
+  });
+  const { data: coachingHistoryRes } = useQuery({
+    queryKey: ["teacher-coaching-history", teacherId],
+    enabled: Boolean(teacherId),
+    queryFn: () => teacherApi.coachingHistory(teacherId).then((res) => res.data),
   });
 
   const latestVideoLink = latestAssessment?.video_id
@@ -131,7 +136,9 @@ export function TeacherProfilePage() {
   );
   const latestAudioAnalysis = audioTrend.length ? audioTrend[audioTrend.length - 1].audio : null;
   const latestTeacherTalkPct = Number(latestAudioAnalysis?.teacher_talk_pct || 0);
-  const adminActionTasks = coachingTasks.slice(0, 3);
+  const openCoachingTasks = coachingHistoryRes?.open_tasks || coachingTasks.filter((task) => task.status !== "completed");
+  const completedCoachingTasks = coachingHistoryRes?.history || coachingTasks.filter((task) => task.status === "completed");
+  const adminActionTasks = openCoachingTasks.slice(0, 3);
   const isSuperAdmin = isSuperAdminUser(user);
   const teacherContextCards = [
     {
@@ -519,9 +526,9 @@ export function TeacherProfilePage() {
           <div className="space-y-6 lg:col-span-4">
             <section className="rounded-xl border border-slate-200 bg-white p-5">
               <SectionHeader
-                eyebrow={t("teacherProfile.adminActionLane")}
-                title={t("teacherProfile.adminActionLane")}
-                description={t("teacherProfile.adminActionLaneDescription")}
+                eyebrow="Coaching workflow"
+                title="Open coaching tasks"
+                description="Assessment-generated follow-up tasks tied to low-scoring rubric elements."
               />
               <div className="mt-4 space-y-3">
                 {adminActionTasks.length ? (
@@ -531,12 +538,16 @@ export function TeacherProfilePage() {
                       className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-4"
                     >
                       <div className="text-sm font-semibold text-slate-900">{task.title}</div>
-                      <div className="mt-2 text-xs uppercase tracking-wide text-slate-500">
-                        {t(`coachingTasks.states.${task.state}`)}
+                      <div className="mt-2 flex flex-wrap gap-2 text-xs uppercase tracking-wide text-slate-500">
+                        <span>{task.status || task.state}</span>
+                        <span>{task.priority}</span>
+                        {task.due_date ? <span>Due {formatDateTime(task.due_date)}</span> : null}
                       </div>
-                      <div className="mt-2 text-sm text-slate-700">{task.description}</div>
+                      <div className="mt-2 text-sm text-slate-700">
+                        {task.suggested_action || task.description || task.summary}
+                      </div>
                       <Link
-                        to={resolveCoachingLink(user, teacherId, task.route_hint, task.payload)}
+                        to={`/coaching?teacher_id=${teacherId}`}
                         className="mt-3 inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
                       >
                         {t("coachingTasks.openTask")}
@@ -549,12 +560,48 @@ export function TeacherProfilePage() {
                   </div>
                 )}
               </div>
+              <div className="mt-5 border-t border-slate-100 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setShowCoachingHistory((value) => !value)}
+                  className="flex w-full items-center justify-between rounded-md border border-slate-200 bg-white px-3 py-2 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  All coaching history
+                  <span>{completedCoachingTasks.length} completed</span>
+                </button>
+                {showCoachingHistory ? (
+                  <div className="mt-3 space-y-3">
+                    {completedCoachingTasks.length ? (
+                      completedCoachingTasks.map((task) => (
+                        <div
+                          key={task.id}
+                          className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3"
+                        >
+                          <div className="text-sm font-semibold text-slate-900">{task.title}</div>
+                          <div className="mt-1 text-xs text-slate-500">
+                            Completed {task.completed_at ? formatDateTime(task.completed_at) : "recently"}
+                          </div>
+                          {task.completion_note ? (
+                            <div className="mt-2 rounded-md bg-white px-3 py-2 text-xs text-slate-700">
+                              {task.completion_note}
+                            </div>
+                          ) : null}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="rounded-md border border-dashed border-slate-200 px-3 py-3 text-xs text-slate-500">
+                        Completed coaching tasks will appear here.
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+              </div>
               <div className="mt-4 flex flex-wrap gap-2">
                 <Link
-                  to="/master-schedule"
+                  to={`/coaching?teacher_id=${teacherId}`}
                   className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-white hover:bg-primary/90"
                 >
-                  {t("teacherProfile.viewMasterSchedule")}
+                  Open coaching queue
                 </Link>
                 <button
                   type="button"

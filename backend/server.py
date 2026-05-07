@@ -7076,19 +7076,34 @@ class CoachingTimelineResponse(BaseModel):
 
 class CoachingTask(BaseModel):
     id: str
+    workspace_id: Optional[str] = None
+    observer_id: Optional[str] = None
     teacher_id: str
     teacher_name: Optional[str] = None
-    state: str
-    priority: int
-    title: str
-    summary: str
-    due_at: Optional[str] = None
-    route_hint: Optional[str] = None
     assessment_id: Optional[str] = None
     video_id: Optional[str] = None
+    element_id: Optional[str] = None
+    element_code: Optional[str] = None
+    element_name: Optional[str] = None
+    score: Optional[float] = None
+    priority: str = "medium"
+    title: str
+    suggested_action: Optional[str] = None
+    due_date: Optional[str] = None
+    status: str = "open"
+    notes: str = ""
+    linked_observation_session_id: Optional[str] = None
+    created_at: str
+    updated_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    completion_note: Optional[str] = None
+    snoozed_until: Optional[str] = None
+    priority_rank: int = 50
+    state: Optional[str] = None
+    summary: Optional[str] = None
+    due_at: Optional[str] = None
+    route_hint: Optional[str] = None
     observation_id: Optional[str] = None
-    goal_id: Optional[str] = None
-    schedule_id: Optional[str] = None
     context_label: Optional[str] = None
     support_prompt: Optional[str] = None
     rank_reason: Optional[str] = None
@@ -7096,6 +7111,26 @@ class CoachingTask(BaseModel):
 
 class CoachingTaskListResponse(BaseModel):
     tasks: List[CoachingTask]
+
+
+class CoachingTaskUpdate(BaseModel):
+    priority: Optional[str] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+    due_date: Optional[str] = None
+    suggested_action: Optional[str] = None
+    linked_observation_session_id: Optional[str] = None
+
+
+class CoachingTaskCompleteRequest(BaseModel):
+    completion_note: Optional[str] = None
+
+
+class CoachingHistoryResponse(BaseModel):
+    teacher_id: str
+    teacher_name: Optional[str] = None
+    open_tasks: List[CoachingTask] = []
+    history: List[CoachingTask] = []
 
 
 class TrainingSupervisorTraineeStatus(BaseModel):
@@ -12577,6 +12612,238 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
     return tasks
 
 
+COACHING_TASK_YELLOW_THRESHOLD = 6.0
+COACHING_TASK_STATUSES = {"open", "in_progress", "completed", "snoozed"}
+COACHING_TASK_PRIORITIES = {"high", "medium", "low"}
+
+
+def _coaching_task_priority_for_score(score: float) -> str:
+    if score < 4:
+        return "high"
+    if score < 5:
+        return "medium"
+    return "low"
+
+
+def _coaching_task_priority_rank(priority: Optional[str]) -> int:
+    return {"high": 90, "medium": 60, "low": 30}.get(str(priority or "").lower(), 50)
+
+
+def _normalize_coaching_task_status(status: Optional[str]) -> str:
+    normalized = str(status or "open").strip().lower()
+    if normalized not in COACHING_TASK_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid coaching task status")
+    return normalized
+
+
+def _normalize_coaching_task_priority(priority: Optional[str]) -> str:
+    normalized = str(priority or "medium").strip().lower()
+    if normalized not in COACHING_TASK_PRIORITIES:
+        raise HTTPException(status_code=400, detail="Invalid coaching task priority")
+    return normalized
+
+
+def _coaching_task_title(teacher_name: str, element_code: str, element_name: str, score: float) -> str:
+    return f"{teacher_name}: coach {element_code} {element_name} after {score:.1f} evidence"
+
+
+def _suggested_action_for_element(
+    element_score: dict,
+    recommendations: List[str],
+    focus_note: Optional[str],
+) -> str:
+    element_code = element_score.get("element_id") or element_score.get("element_code") or ""
+    element_name = element_score.get("element_name") or element_code or "this rubric element"
+    lowered_code = str(element_code).lower()
+    lowered_name = str(element_name).lower()
+    for recommendation in recommendations or []:
+        text = str(recommendation or "").strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered_code and lowered_code in lowered:
+            return text
+        if lowered_name and any(part for part in lowered_name.split() if len(part) > 4 and part in lowered):
+            return text
+    if focus_note:
+        return f"Use the observation focus note to plan a targeted coaching conversation: {focus_note}"
+    return f"Plan a targeted coaching cycle for {element_code} {element_name}".strip()
+
+
+def _serialize_coaching_task_doc(doc: dict) -> dict:
+    payload = dict(doc or {})
+    payload.pop("_id", None)
+    status = payload.get("status") or "open"
+    priority = payload.get("priority") or "medium"
+    due_date = payload.get("due_date")
+    suggested_action = payload.get("suggested_action") or payload.get("summary") or ""
+    payload["status"] = status
+    payload["state"] = status
+    payload["priority"] = priority
+    payload["priority_rank"] = _coaching_task_priority_rank(priority)
+    payload["summary"] = suggested_action
+    payload["support_prompt"] = suggested_action
+    payload["due_at"] = due_date
+    payload["route_hint"] = payload.get("route_hint") or "coaching_task"
+    payload["context_label"] = payload.get("context_label") or payload.get("element_code") or payload.get("element_name")
+    payload["observation_id"] = payload.get("linked_observation_session_id")
+    payload.setdefault("notes", "")
+    payload.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    return payload
+
+
+async def _notify_observer_of_coaching_tasks(
+    observer_user: Optional[dict],
+    teacher: dict,
+    tasks: List[dict],
+    workspace_id: Optional[str],
+) -> None:
+    if not observer_user or not observer_user.get("id") or not tasks:
+        return
+    await _create_notification(
+        recipient_user=observer_user,
+        notification_type="coaching_tasks_created",
+        title=f"{len(tasks)} coaching task{'s' if len(tasks) != 1 else ''} created",
+        message=f"{teacher.get('name') or 'A teacher'} has new coaching follow-up tasks from the latest assessment.",
+        payload={
+            "teacher_id": teacher.get("id"),
+            "teacher_name": teacher.get("name"),
+            "task_ids": [task["id"] for task in tasks],
+            "assessment_id": tasks[0].get("assessment_id"),
+            "video_id": tasks[0].get("video_id"),
+        },
+        teacher_id=teacher.get("id"),
+        workspace_id=workspace_id,
+        cta_url=f"/coaching?teacher_id={teacher.get('id')}",
+        channel="in_app",
+    )
+
+
+async def _create_coaching_tasks_for_assessment(
+    assessment: dict,
+    *,
+    video: Optional[dict],
+    teacher: Optional[dict],
+    observer_user: Optional[dict],
+    observation_session: Optional[dict] = None,
+) -> List[dict]:
+    teacher = teacher or await db.teachers.find_one({"id": assessment.get("teacher_id")}, {"_id": 0})
+    if not teacher:
+        return []
+    video = video or await db.videos.find_one({"id": assessment.get("video_id")}, {"_id": 0})
+    observer_id = (
+        (observer_user or {}).get("id")
+        or assessment.get("user_id")
+        or (video or {}).get("uploaded_by")
+        or teacher.get("created_by")
+    )
+    workspace_id = _resolve_video_workspace_id(video or {}, teacher, observer_user or {"id": observer_id})
+    now_dt = datetime.now(timezone.utc)
+    now_iso = now_dt.isoformat()
+    due_date = (now_dt + timedelta(days=14)).isoformat()
+    recommendations = [str(item) for item in (assessment.get("recommendations") or []) if str(item or "").strip()]
+    created_tasks: List[dict] = []
+
+    for element_score in assessment.get("element_scores") or []:
+        try:
+            score = float(element_score.get("adjusted_score", element_score.get("score")))
+        except (TypeError, ValueError):
+            continue
+        if score >= COACHING_TASK_YELLOW_THRESHOLD:
+            continue
+
+        element_id = element_score.get("element_id") or element_score.get("element_code")
+        if not element_id:
+            continue
+        existing = await db.coaching_tasks.find_one(
+            {
+                "assessment_id": assessment.get("id"),
+                "teacher_id": teacher.get("id"),
+                "element_id": element_id,
+            },
+            {"_id": 0},
+        )
+        if existing:
+            continue
+
+        priority = _coaching_task_priority_for_score(score)
+        element_name = element_score.get("element_name") or element_id
+        suggested_action = _suggested_action_for_element(
+            element_score,
+            recommendations,
+            assessment.get("focus_note"),
+        )
+        task_doc = {
+            "id": str(uuid.uuid4()),
+            "workspace_id": workspace_id,
+            "observer_id": observer_id,
+            "teacher_id": teacher.get("id"),
+            "teacher_name": teacher.get("name") or teacher.get("email") or "Teacher",
+            "assessment_id": assessment.get("id"),
+            "video_id": assessment.get("video_id"),
+            "element_id": element_id,
+            "element_code": element_score.get("element_code") or element_id,
+            "element_name": element_name,
+            "score": score,
+            "priority": priority,
+            "priority_rank": _coaching_task_priority_rank(priority),
+            "title": _coaching_task_title(teacher.get("name") or "Teacher", element_id, element_name, score),
+            "suggested_action": suggested_action,
+            "due_date": due_date,
+            "status": "open",
+            "notes": "",
+            "linked_observation_session_id": (observation_session or {}).get("id") or (video or {}).get("observation_session_id"),
+            "created_at": now_iso,
+            "updated_at": now_iso,
+        }
+        await db.coaching_tasks.insert_one(task_doc)
+        created_tasks.append(_serialize_coaching_task_doc(task_doc))
+
+    if created_tasks:
+        await _notify_observer_of_coaching_tasks(observer_user, teacher, created_tasks, workspace_id)
+    return created_tasks
+
+
+async def _get_visible_coaching_task_or_404(task_id: str, current_user: dict) -> dict:
+    task = await db.coaching_tasks.find_one({"id": task_id}, {"_id": 0})
+    if not task:
+        raise HTTPException(status_code=404, detail="Coaching task not found")
+    await _get_teacher_or_404(task.get("teacher_id"), current_user)
+    return task
+
+
+async def _list_persisted_coaching_tasks(
+    current_user: dict,
+    *,
+    teacher_id: Optional[str] = None,
+    priority: Optional[str] = None,
+    status: Optional[str] = None,
+    overdue_only: bool = False,
+    include_completed: bool = True,
+    limit: int = 200,
+) -> List[dict]:
+    if teacher_id:
+        await _get_teacher_or_404(teacher_id, current_user)
+        visible_teacher_ids = [teacher_id]
+    else:
+        visible_teacher_ids = await _list_teacher_ids_for_user(current_user)
+    query: Dict[str, Any] = {"teacher_id": {"$in": visible_teacher_ids or ["__none__"]}}
+    if priority:
+        query["priority"] = _normalize_coaching_task_priority(priority)
+    if status:
+        query["status"] = _normalize_coaching_task_status(status)
+    elif not include_completed:
+        query["status"] = {"$ne": "completed"}
+    if overdue_only:
+        query["due_date"] = {"$lt": datetime.now(timezone.utc).isoformat()}
+        query["status"] = {"$in": ["open", "in_progress", "snoozed"]}
+
+    docs = await db.coaching_tasks.find(query, {"_id": 0}).sort(
+        [("priority_rank", -1), ("due_date", 1), ("created_at", -1)]
+    ).to_list(limit)
+    return [_serialize_coaching_task_doc(doc) for doc in docs]
+
+
 async def _list_visible_teachers_for_user(
     current_user: dict,
     teacher_id: Optional[str] = None,
@@ -15282,16 +15549,116 @@ async def get_teacher_coaching_timeline(
 @api_router.get("/coaching/tasks", response_model=CoachingTaskListResponse)
 async def list_coaching_tasks(
     teacher_id: Optional[str] = None,
+    priority: Optional[str] = None,
+    status: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    teachers = await _list_visible_teachers_for_user(current_user, teacher_id=teacher_id)
-    all_tasks: List[dict] = []
-    for teacher in teachers:
-        all_tasks.extend(await _build_coaching_tasks_for_teacher(teacher, current_user))
-    all_tasks.sort(
-        key=lambda item: (-(item.get("priority") or 0), _sort_key_for_iso(item.get("due_at"))),
+    tasks = await _list_persisted_coaching_tasks(
+        current_user,
+        teacher_id=teacher_id,
+        priority=priority,
+        status=status,
     )
-    return CoachingTaskListResponse(tasks=[CoachingTask(**task) for task in all_tasks[:50]])
+    return CoachingTaskListResponse(tasks=[CoachingTask(**task) for task in tasks])
+
+
+@api_router.get("/coaching/tasks/overdue", response_model=CoachingTaskListResponse)
+async def list_overdue_coaching_tasks(current_user: dict = Depends(get_current_user)):
+    tasks = await _list_persisted_coaching_tasks(
+        current_user,
+        overdue_only=True,
+        include_completed=False,
+    )
+    return CoachingTaskListResponse(tasks=[CoachingTask(**task) for task in tasks])
+
+
+@api_router.patch("/coaching/tasks/{task_id}", response_model=CoachingTask)
+async def update_coaching_task(
+    task_id: str,
+    payload: CoachingTaskUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    task = await _get_visible_coaching_task_or_404(task_id, current_user)
+    updates = payload.dict(exclude_unset=True)
+    update_fields: Dict[str, Any] = {}
+    if "priority" in updates and payload.priority is not None:
+        priority = _normalize_coaching_task_priority(payload.priority)
+        update_fields["priority"] = priority
+        update_fields["priority_rank"] = _coaching_task_priority_rank(priority)
+    if "status" in updates and payload.status is not None:
+        update_fields["status"] = _normalize_coaching_task_status(payload.status)
+        if update_fields["status"] == "snoozed" and not task.get("snoozed_until"):
+            update_fields["snoozed_until"] = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    if "notes" in updates and payload.notes is not None:
+        update_fields["notes"] = payload.notes
+    if "due_date" in updates and payload.due_date is not None:
+        update_fields["due_date"] = payload.due_date
+    if "suggested_action" in updates and payload.suggested_action is not None:
+        update_fields["suggested_action"] = payload.suggested_action
+    if "linked_observation_session_id" in updates:
+        if payload.linked_observation_session_id:
+            session = await _get_observation_session_or_404(payload.linked_observation_session_id, current_user)
+            if session.get("teacher_id") != task.get("teacher_id"):
+                raise HTTPException(status_code=400, detail="Observation session belongs to a different teacher")
+        update_fields["linked_observation_session_id"] = payload.linked_observation_session_id
+    if not update_fields:
+        return CoachingTask(**_serialize_coaching_task_doc(task))
+    update_fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+    updated = await db.coaching_tasks.find_one_and_update(
+        {"id": task_id},
+        {"$set": update_fields},
+        return_document=True,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Coaching task not found")
+    return CoachingTask(**_serialize_coaching_task_doc(updated))
+
+
+@api_router.post("/coaching/tasks/{task_id}/complete", response_model=CoachingTask)
+async def complete_coaching_task(
+    task_id: str,
+    payload: CoachingTaskCompleteRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_visible_coaching_task_or_404(task_id, current_user)
+    now = datetime.now(timezone.utc).isoformat()
+    updated = await db.coaching_tasks.find_one_and_update(
+        {"id": task_id},
+        {
+            "$set": {
+                "status": "completed",
+                "completion_note": (payload.completion_note or "").strip() or None,
+                "completed_at": now,
+                "updated_at": now,
+            }
+        },
+        return_document=True,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Coaching task not found")
+    return CoachingTask(**_serialize_coaching_task_doc(updated))
+
+
+@api_router.get("/teachers/{teacher_id}/coaching-history", response_model=CoachingHistoryResponse)
+async def get_teacher_coaching_history(
+    teacher_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    tasks = await _list_persisted_coaching_tasks(
+        current_user,
+        teacher_id=teacher_id,
+        include_completed=True,
+        limit=500,
+    )
+    open_tasks = [task for task in tasks if task.get("status") != "completed"]
+    history = [task for task in tasks if task.get("status") == "completed"]
+    return CoachingHistoryResponse(
+        teacher_id=teacher_id,
+        teacher_name=teacher.get("name"),
+        open_tasks=[CoachingTask(**task) for task in open_tasks],
+        history=[CoachingTask(**task) for task in history],
+    )
 
 
 @api_router.post("/teachers/{teacher_id}/action-plan", response_model=ActionPlan)
@@ -19135,6 +19502,14 @@ async def analyze_video(
                     }
                 },
             )
+        assessment_teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
+        await _create_coaching_tasks_for_assessment(
+            assessment_doc,
+            video=video,
+            teacher=assessment_teacher,
+            observer_user=analysis_user or {"id": user_id},
+            observation_session=observation_session,
+        )
         updated_video = await db.videos.find_one({"id": video_id}, {"_id": 0})
         if updated_video:
             recognition_event = await _sync_video_recognition_state(updated_video)
@@ -22019,6 +22394,9 @@ async def reset_demo_data(current_user: dict = Depends(get_current_user)):
     deleted["schedules"] = (await db.schedules.delete_many(
         {"teacher_id": {"$in": teacher_ids}, "user_id": current_user["id"]}
     )).deleted_count
+    deleted["coaching_tasks"] = (await db.coaching_tasks.delete_many(
+        {"teacher_id": {"$in": teacher_ids}, "observer_id": current_user["id"]}
+    )).deleted_count
 
     return {"message": "Demo data reset", "deleted": deleted}
 
@@ -22200,6 +22578,12 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
             await db.assessments.insert_one(assessment_doc)
             created_assessments += 1
             await _ensure_mock_evidence(assessment_doc, current_user)
+            await _create_coaching_tasks_for_assessment(
+                assessment_doc,
+                video=video_doc,
+                teacher=teacher,
+                observer_user=current_user,
+            )
             await db.observations.insert_one({
                 "id": str(uuid.uuid4()),
                 "user_id": current_user["id"],
@@ -22314,6 +22698,13 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.summary_reflections, [("teacher_id", 1), ("user_id", 1)], unique=True)
     await _safe_create_index(db.summary_reflection_history, [("teacher_id", 1), ("author_user_id", 1), ("saved_at", -1)])
     await _safe_create_index(db.published_conference_agendas, [("teacher_id", 1), ("published_at", -1)])
+    await _safe_create_index(db.coaching_tasks, [("teacher_id", 1), ("status", 1), ("due_date", 1)])
+    await _safe_create_index(db.coaching_tasks, [("workspace_id", 1), ("status", 1), ("priority_rank", -1)])
+    await _safe_create_index(
+        db.coaching_tasks,
+        [("assessment_id", 1), ("teacher_id", 1), ("element_id", 1)],
+        unique=True,
+    )
     await _safe_create_index(db.observations, [("video_id", 1), ("created_at", -1)])
     await _safe_create_index(db.video_comments, [("video_id", 1), ("timestamp_seconds", 1), ("created_at", 1)])
     await _safe_create_index(db.video_comments, [("video_id", 1), ("thread_parent_id", 1), ("created_at", 1)])
