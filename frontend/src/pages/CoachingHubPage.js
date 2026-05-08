@@ -7,13 +7,14 @@ import {
   CheckCircle2,
   ChevronDown,
   Clock3,
+  Printer,
   Minus,
 } from "lucide-react";
 import { toast } from "sonner";
 import { LayoutShell } from "@/components/LayoutShell";
 import { Button, EmptyState, PageContextHeader, Panel } from "@/components/ui";
 import { useAuth } from "@/hooks/useAuth";
-import { teacherApi } from "@/lib/api";
+import { reportApi, teacherApi } from "@/lib/api";
 import { isAdminUser } from "@/lib/userRoutes";
 
 const COLUMNS = [
@@ -148,6 +149,143 @@ function TaskCard({ task, onComplete, onSnooze, isBusy }) {
   );
 }
 
+function TalkTimeBar({ value }) {
+  const pct = Math.max(0, Math.min(100, Number(value || 0)));
+  return (
+    <div>
+      <div className="mb-1 flex justify-between text-xs text-slate-500">
+        <span>Teacher talk time</span>
+        <span>{pct.toFixed(0)}%</span>
+      </div>
+      <div className="h-2 rounded-full bg-slate-100">
+        <div className="h-2 rounded-full bg-teal-500" style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function ConferencePrepTab({ teacherId }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ["conference-prep", teacherId],
+    enabled: Boolean(teacherId),
+    queryFn: () => teacherApi.conferencePrep(teacherId).then((res) => res.data),
+  });
+
+  const exportPdf = async () => {
+    const response = await reportApi.teacherReport(teacherId);
+    const url = URL.createObjectURL(response.data);
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
+
+  if (!teacherId) {
+    return (
+      <Panel>
+        <EmptyState title="Choose a teacher" description="Open conference prep from a teacher or add ?teacher_id= to this page." />
+      </Panel>
+    );
+  }
+  if (isLoading) {
+    return <Panel className="text-sm text-slate-500">Preparing conference sheet...</Panel>;
+  }
+  const snapshot = data?.last_observation || {};
+  const stats = data?.since_last_conversation || {};
+
+  return (
+    <div className="conference-prep-sheet space-y-6">
+      <style>{`
+        @media print {
+          nav, aside, header, .print-hide { display: none !important; }
+          .conference-prep-sheet { padding: 0 !important; color: #0f172a; }
+          .conference-prep-sheet section { break-inside: avoid; box-shadow: none !important; }
+          body { background: white !important; }
+        }
+      `}</style>
+      <Panel>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-xl font-semibold text-slate-950">Conference prep: {data?.teacher_name || "Teacher"}</h2>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">{data?.coaching_thread}</p>
+          </div>
+          <div className="print-hide flex gap-2">
+            <Button variant="secondary" onClick={() => window.print()}>
+              <Printer className="mr-2 h-4 w-4" />
+              Print prep sheet
+            </Button>
+            <Button onClick={exportPdf}>Export to PDF</Button>
+          </div>
+        </div>
+      </Panel>
+      <section className="grid gap-3 md:grid-cols-4">
+        {[
+          ["Observations completed", stats.observations_completed || 0],
+          ["Goals tried", stats.goals_tried || 0],
+          ["Goals completed", stats.goals_completed || 0],
+          ["Recognition earned", stats.recognition_earned || 0],
+        ].map(([label, value]) => (
+          <div key={label} className="rounded-lg border border-slate-200 bg-white px-4 py-3">
+            <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
+            <div className="mt-1 text-2xl font-semibold text-slate-950">{value}</div>
+          </div>
+        ))}
+      </section>
+      <Panel as="section">
+        <h3 className="text-base font-semibold text-slate-950">Latest lesson snapshot</h3>
+        <div className="mt-4 grid gap-4 lg:grid-cols-[1fr,220px]">
+          <div className="space-y-3 text-sm leading-6 text-slate-700">
+            <div className="font-medium text-slate-900">{formatDate(snapshot.date)}</div>
+            <p>{snapshot.summary}</p>
+            <p><span className="font-semibold">Top strength: </span>{snapshot.top_strength}</p>
+            <p><span className="font-semibold">Top growth area: </span>{snapshot.top_growth_area}</p>
+            {snapshot.video_id ? <Link className="font-medium text-primary" to={`/videos/${snapshot.video_id}`}>Watch the lesson</Link> : null}
+          </div>
+          <TalkTimeBar value={snapshot.talk_time_pct} />
+        </div>
+      </Panel>
+      <Panel as="section">
+        <h3 className="text-base font-semibold text-slate-950">Open goals and what they said</h3>
+        <div className="mt-4 space-y-3">
+          {(data?.open_goals || []).map((goal) => (
+            <div key={goal.id} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="font-semibold text-slate-900">{goal.goal_text}</div>
+                {goal.teacher_marked_tried_at ? <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-700">Tried</span> : null}
+              </div>
+              <p className="mt-2 text-sm text-slate-700">{goal.recommended_action}</p>
+              <p className="mt-2 text-sm text-slate-500">{goal.teacher_notes || "Teacher hasn't added a note yet"}</p>
+            </div>
+          ))}
+          {!data?.open_goals?.length ? <div className="text-sm text-slate-500">No open goals right now.</div> : null}
+        </div>
+      </Panel>
+      <Panel as="section">
+        <h3 className="text-base font-semibold text-slate-950">Their reflection</h3>
+        <p className="mt-2 text-sm leading-6 text-slate-700">{data?.teacher_reflection || "Teacher hasn't written a reflection yet"}</p>
+      </Panel>
+      <Panel as="section">
+        <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+          Suggested based on this teacher's recent lessons and goals
+        </div>
+        <h3 className="mt-1 text-base font-semibold text-slate-950">Conversation starters</h3>
+        <div className="mt-4 flex flex-wrap gap-2">
+          {(data?.suggested_conversation_starters || []).map((question) => (
+            <button
+              key={question}
+              type="button"
+              onClick={async () => {
+                await navigator.clipboard.writeText(question);
+                toast.success("Copied to clipboard");
+              }}
+              className="rounded-full border border-teal-200 bg-teal-50 px-3 py-2 text-sm font-medium text-teal-800"
+            >
+              {question}
+            </button>
+          ))}
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
 export function CoachingHubPage() {
   const { user } = useAuth();
   const { teacherId: routeTeacherId } = useParams();
@@ -156,6 +294,7 @@ export function CoachingHubPage() {
   const isAdmin = isAdminUser(user);
   const scopedTeacherId = routeTeacherId || searchParams.get("teacher_id") || (!isAdmin ? user?.teacher_id : null);
   const [mobileColumn, setMobileColumn] = useState("needs_attention");
+  const activeTab = searchParams.get("tab") || "queue";
 
   const { data: tasksRes, isLoading } = useQuery({
     queryKey: ["coaching-tasks", scopedTeacherId || "all"],
@@ -260,6 +399,31 @@ export function CoachingHubPage() {
           ]}
         />
 
+        <div className="mb-5 flex gap-2 print-hide">
+          {[
+            ["queue", "Task queue"],
+            ["conference", "Conference prep"],
+          ].map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => {
+                const next = new URLSearchParams(searchParams);
+                next.set("tab", id);
+                setSearchParams(next);
+              }}
+              className={`rounded-md border px-3 py-2 text-sm font-semibold ${
+                activeTab === id ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-700"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {activeTab === "conference" ? <ConferencePrepTab teacherId={scopedTeacherId} /> : (
+          <>
+
         <div className="mb-4 flex gap-2 md:hidden">
           {COLUMNS.map((column) => (
             <button
@@ -314,6 +478,8 @@ export function CoachingHubPage() {
             </Panel>
           ))}
         </div>
+          </>
+        )}
       </div>
     </LayoutShell>
   );

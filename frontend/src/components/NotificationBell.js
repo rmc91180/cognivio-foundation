@@ -1,10 +1,10 @@
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Award, Bell, CheckCheck, ClipboardList, ExternalLink } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import api from "@/lib/apiClient";
+import { notificationApi } from "@/lib/api";
 
 function getItems(payload) {
   if (Array.isArray(payload)) return payload;
@@ -68,31 +68,61 @@ export function NotificationBell() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const previousUnreadRef = useRef(null);
+  const [showPermissionPrompt, setShowPermissionPrompt] = useState(false);
 
   const { data } = useQuery({
     queryKey: ["notifications"],
-    queryFn: () => api.get("/api/notifications", { params: { limit: 10 } }).then((res) => res.data),
+    queryFn: () => notificationApi.list({ limit: 10 }).then((res) => res.data),
+    refetchInterval: 60_000,
+  });
+
+  const { data: unreadData } = useQuery({
+    queryKey: ["notifications-unread-count"],
+    queryFn: () => notificationApi.unreadCount().then((res) => res.data),
     refetchInterval: 60_000,
   });
 
   const items = useMemo(() => getItems(data), [data]);
-  const unreadCount = getUnreadCount(data, items);
+  const unreadCount = Number.isFinite(Number(unreadData?.count))
+    ? Number(unreadData.count)
+    : getUnreadCount(data, items);
+
+  useEffect(() => {
+    if (
+      typeof window !== "undefined" &&
+      "Notification" in window &&
+      Notification.permission === "default" &&
+      !localStorage.getItem("cognivio-notification-permission-prompted")
+    ) {
+      setShowPermissionPrompt(true);
+    }
+  }, []);
 
   useEffect(() => {
     if (previousUnreadRef.current !== null && unreadCount > previousUnreadRef.current) {
       toast("You have a new notification");
+      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+        const newest = items.find((item) => !item.read && !item.read_at);
+        if (newest) new Notification(getNotificationTitle(newest), { body: newest.body || newest.message || "" });
+      }
     }
     previousUnreadRef.current = unreadCount;
-  }, [unreadCount]);
+  }, [unreadCount, items]);
 
   const markReadMutation = useMutation({
-    mutationFn: (id) => api.post(`/api/notifications/${id}/read`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["notifications"] }),
+    mutationFn: (id) => notificationApi.markRead(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      queryClient.invalidateQueries({ queryKey: ["notifications-unread-count"] });
+    },
   });
 
   const markAllReadMutation = useMutation({
-    mutationFn: () => api.post("/api/notifications/read-all"),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["notifications"] }),
+    mutationFn: () => notificationApi.markAllRead(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      queryClient.invalidateQueries({ queryKey: ["notifications-unread-count"] });
+    },
   });
 
   const openNotification = (item) => {
@@ -104,6 +134,35 @@ export function NotificationBell() {
   };
 
   return (
+    <>
+    {showPermissionPrompt ? (
+      <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-lg border border-teal-200 bg-white p-4 shadow-xl">
+        <div className="text-sm font-semibold text-slate-900">Allow Cognivio to notify you when new feedback arrives?</div>
+        <div className="mt-3 flex gap-2">
+          <button
+            type="button"
+            onClick={async () => {
+              localStorage.setItem("cognivio-notification-permission-prompted", "true");
+              setShowPermissionPrompt(false);
+              if ("Notification" in window) await Notification.requestPermission();
+            }}
+            className="rounded-md bg-teal-600 px-3 py-2 text-xs font-semibold text-white"
+          >
+            Allow
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              localStorage.setItem("cognivio-notification-permission-prompted", "true");
+              setShowPermissionPrompt(false);
+            }}
+            className="rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700"
+          >
+            Not now
+          </button>
+        </div>
+      </div>
+    ) : null}
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
         <button
@@ -178,5 +237,6 @@ export function NotificationBell() {
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
+    </>
   );
 }

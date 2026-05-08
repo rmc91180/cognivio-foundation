@@ -131,6 +131,18 @@ export const adminApi = {
   accessUsers: () => api.get("/api/admin/access-users"),
   approveAccessUser: (userId, payload = {}) => api.post(`/api/admin/access-users/${userId}/approve`, payload),
   revokeAccessUser: (userId, payload = {}) => api.post(`/api/admin/access-users/${userId}/revoke`, payload),
+  linkTeacher: (teacherId, payload = {}) => api.post(`/api/admin/teachers/${teacherId}/link`, payload),
+  unlinkTeacher: (teacherId) => api.post(`/api/admin/teachers/${teacherId}/unlink`),
+};
+
+export const notificationApi = {
+  list: (params = {}) => api.get("/api/notifications", { params }),
+  unreadCount: () => api.get("/api/notifications/unread-count"),
+  markRead: (id) => api.post(`/api/notifications/${id}/read`),
+  markAllRead: () => api.post("/api/notifications/mark-all-read"),
+  dismiss: (id) => api.delete(`/api/notifications/${id}`),
+  preferences: () => api.get("/api/user/notification-preferences"),
+  updatePreferences: (payload) => api.patch("/api/user/notification-preferences", payload),
 };
 
 export const masterAdminApi = {

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { assessmentApi, reportApi, scheduleApi, schoolApi, teacherApi } from "@/lib/api";
+import { adminApi, assessmentApi, reportApi, scheduleApi, schoolApi, teacherApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { toast } from "sonner";
 import { Link } from "react-router-dom";
@@ -35,7 +35,7 @@ export function TeachersPage() {
   const { user } = useAuth();
   const tenantRole = getUserTenantRole(user);
   const isSchoolAdmin = tenantRole === "school_admin";
-  const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
+  const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role) || ["school_admin", "training_admin", "super_admin"].includes(tenantRole);
   const isRtl = i18n.dir() === "rtl";
   const locale = i18n.language?.startsWith("he") ? "he-IL" : "en-US";
   const teacherCreationModalEnabled = runtimeConfig.teacherCreationModalEnabled;
@@ -125,6 +125,15 @@ export function TeachersPage() {
     onError: (error) => {
       toast.error(error?.response?.data?.detail || t("teachersPage.categoryUpdateFailed"));
     },
+  });
+
+  const linkTeacherMutation = useMutation({
+    mutationFn: (teacherId) => adminApi.linkTeacher(teacherId).then((res) => res.data),
+    onSuccess: () => {
+      toast.success("Teacher linked to your workspace");
+      queryClient.invalidateQueries({ queryKey: ["teachers"] });
+    },
+    onError: (error) => toast.error(error?.response?.data?.detail || "Unable to link teacher"),
   });
 
   const teachers = useMemo(() => teachersData ?? [], [teachersData]);
@@ -721,6 +730,8 @@ export function TeachersPage() {
                           category_custom: teacher.category_custom || "",
                         };
                         const isCustomCategory = categoryEdit.category === "custom";
+                        const linkedToCurrentAdmin = teacher.linked_admin_user_id && teacher.linked_admin_user_id === user?.id;
+                        const hasLinkedAdmin = Boolean(teacher.linked_admin_user_id);
 
                         return (
                           <React.Fragment key={teacher.id}>
@@ -752,6 +763,23 @@ export function TeachersPage() {
                                       {teacher.category_custom || teacher.category?.replace(/_/g, " ")}
                                     </span>
                                   ) : null}
+                                  {linkedToCurrentAdmin ? (
+                                    <span className="rounded-full bg-teal-100 px-2 py-0.5 text-[10px] font-semibold text-teal-700">
+                                      Linked
+                                    </span>
+                                  ) : hasLinkedAdmin ? (
+                                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600">
+                                      Linked elsewhere
+                                    </span>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => linkTeacherMutation.mutate(teacher.id)}
+                                      className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700 hover:bg-amber-200"
+                                    >
+                                      Unlinked · Link
+                                    </button>
+                                  )}
                                 </div>
                                 <div className="text-[11px] text-slate-500">{teacher.subject} • {teacher.grade_level}</div>
                               </td>

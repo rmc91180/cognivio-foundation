@@ -3,6 +3,7 @@ import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NavLink, useNavigate } from "react-router-dom";
 import {
   BookOpen,
+  Bell,
   ClipboardList,
   Database,
   History,
@@ -41,6 +42,7 @@ const ROLE_NAV_ITEMS = {
     { to: "/master-admin/incidents", icon: History, label: "Incidents" },
     { to: "/master-admin/storage", icon: Database, label: "Storage" },
     { to: "/master-admin/support", icon: MessageSquareText, label: "Support" },
+    { to: "/settings/notifications", icon: Bell, label: "Notifications" },
     { to: "/master-admin", icon: ShieldCheck, label: "Ops", end: true },
   ],
   admin: [
@@ -51,6 +53,7 @@ const ROLE_NAV_ITEMS = {
     { to: "/my-insights", icon: Target, label: "My Insights" },
     { to: "/recognition-review", icon: Trophy, label: "Recognition" },
     { to: "/reports", icon: BookOpen, label: "Reports" },
+    { to: "/settings/notifications", icon: Bell, label: "Notifications" },
     { to: "/school-setup", icon: Layers, label: "Settings" },
   ],
   training: [
@@ -60,6 +63,7 @@ const ROLE_NAV_ITEMS = {
     { to: "/master-schedule", icon: ClipboardList, label: "Schedule" },
     { to: "/my-insights", icon: Target, label: "My Insights" },
     { to: "/reports", icon: BookOpen, label: "Reports" },
+    { to: "/settings/notifications", icon: Bell, label: "Notifications" },
     { to: "/dashboard?view=settings", icon: Layers, label: "Settings" },
   ],
   teacher: [
@@ -67,6 +71,7 @@ const ROLE_NAV_ITEMS = {
     { to: "/videos", icon: PlayCircle, label: "My Lessons" },
     { to: "/my-workspace/coaching", icon: MessageSquareText, label: "My Coaching" },
     { to: "/my-badges", icon: Trophy, label: "My Recognition" },
+    { to: "/settings/notifications", icon: Bell, label: "Notifications" },
     { to: "/my-workspace/settings", icon: Layers, label: "Settings" },
   ],
 };

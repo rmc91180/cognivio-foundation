@@ -33,6 +33,8 @@ import { MasterSchedulePage } from "@/pages/MasterSchedulePage";
 import { ObservationSetupPage } from "@/pages/ObservationSetupPage";
 import { ObserverInsightsPage } from "@/pages/ObserverInsightsPage";
 import { ReportsPage } from "@/pages/ReportsPage";
+import { NotificationsPage } from "@/pages/NotificationsPage";
+import { NotificationPreferencesPage } from "@/pages/NotificationPreferencesPage";
 import { VideoPlayerPage } from "@/pages/VideoPlayerPage";
 import { VideoRecorderPage } from "@/pages/VideoRecorderPage";
 import { FrameworksPage } from "@/pages/FrameworksPage";
@@ -382,6 +384,22 @@ function App() {
           element={
             <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
               <ReportsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/notifications"
+          element={
+            <ProtectedRoute allowedTenantRoles={["teacher", "school_admin", "training_admin", "super_admin"]}>
+              <NotificationsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/settings/notifications"
+          element={
+            <ProtectedRoute allowedTenantRoles={["teacher", "school_admin", "training_admin", "super_admin"]}>
+              <NotificationPreferencesPage />
             </ProtectedRoute>
           }
         />

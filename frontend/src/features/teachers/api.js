@@ -23,6 +23,8 @@ export const teacherApi = {
   createPlacement: (id, payload) => api.post(`/api/trainees/${id}/placements`, payload),
   getPeerRecommendations: (id) =>
     api.get(`/api/teachers/${id}/peer-recommendations`),
+  myAdmin: () => api.get("/api/teacher/my-admin"),
+  requestLinkage: (payload) => api.post("/api/teacher/request-linkage", payload),
 };
 
 export const privacyProfileApi = {
@@ -45,8 +47,18 @@ export const observationApi = {
 };
 
 export const actionPlanApi = {
-  get: (teacherId) => api.get(`/api/teachers/${teacherId}/action-plan`),
+  get: (teacherId) => api.get(`/api/action-plan/${teacherId}`),
+  legacyGet: (teacherId) => api.get(`/api/teachers/${teacherId}/action-plan`),
   history: (teacherId) => api.get(`/api/teachers/${teacherId}/action-plan/history`),
   save: (teacherId, payload) =>
     api.post(`/api/teachers/${teacherId}/action-plan`, payload),
+  update: (teacherId, payload) => api.patch(`/api/action-plan/${teacherId}`, payload),
+  addTeacherNote: (teacherId, goalId, payload) =>
+    api.post(`/api/action-plan/${teacherId}/goals/${goalId}/teacher-note`, payload),
+  markTried: (teacherId, goalId) =>
+    api.post(`/api/action-plan/${teacherId}/goals/${goalId}/mark-tried`),
+  completeGoal: (teacherId, goalId, payload) =>
+    api.post(`/api/action-plan/${teacherId}/goals/${goalId}/complete`, payload),
+  reflection: (teacherId, payload) =>
+    api.post(`/api/action-plan/${teacherId}/reflection`, payload),
 };

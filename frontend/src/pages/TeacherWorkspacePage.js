@@ -323,7 +323,11 @@ function normalizeGoal(item, index, latestLesson, copy) {
   return {
     id: item?.goal_id || item?.id || `goal-${index}`,
     taskId: item?.task_id || item?.coaching_task_id || (String(item?.id || "").startsWith("goal-") ? item.id : null),
+    isActionPlanGoal: Boolean(item?.goal_text || item?.recommended_action || item?.teacher_notes),
     text: getCoachText(title, "", 2),
+    recommendedAction: getCoachText(item?.recommended_action || item?.suggested_action || "", "", 2),
+    teacherNotes: item?.teacher_notes || "",
+    triedAt: item?.teacher_marked_tried_at || null,
     sourceLabel: stripRubricAndScores(source?.label || item?.lesson_title || item?.source_lesson_title || copy.lessonFallback),
     sourceDate: source?.date || item?.lesson_date || item?.due_at || latestLesson?.date || null,
     videoId,
@@ -532,6 +536,8 @@ export function TeacherWorkspacePage() {
   const [reflectionsOpen, setReflectionsOpen] = useState(false);
   const [addingReflection, setAddingReflection] = useState(false);
   const [freeReflectionText, setFreeReflectionText] = useState("");
+  const [teacherReflectionText, setTeacherReflectionText] = useState("");
+  const [adminEmail, setAdminEmail] = useState("");
 
   const linkedSchoolName = user?.school_name || null;
   const linkedOrganizationName = user?.organization_name || null;
@@ -548,6 +554,11 @@ export function TeacherWorkspacePage() {
     queryKey: ["teacher", teacherId],
     enabled: Boolean(teacherId),
     queryFn: () => teacherApi.get(teacherId).then((response) => response.data),
+  });
+
+  const { data: linkedAdmin } = useQuery({
+    queryKey: ["teacher-my-admin"],
+    queryFn: () => teacherApi.myAdmin().then((response) => response.data),
   });
 
   const { data: latestLessonPayload, isLoading: latestLessonLoading } = useQuery({
@@ -606,9 +617,14 @@ export function TeacherWorkspacePage() {
     () => normalizeReflections(reflectionPayload, copy),
     [reflectionPayload, copy]
   );
+  const actionPlanReflection = activeGoalPayload?.actionPlan?.teacher_reflection || "";
 
   const markActionTriedMutation = useMutation({
     mutationFn: async (action) => {
+      if (action.isActionPlanGoal) {
+        await actionPlanApi.markTried(teacherId, action.id);
+        return action;
+      }
       if (!action.taskId) return action;
       await api.post(`/api/coaching/tasks/${action.taskId}/reflection`, {
         teacher_id: teacherId,
@@ -635,6 +651,9 @@ export function TeacherWorkspacePage() {
 
   const goalReflectionMutation = useMutation({
     mutationFn: async ({ goal, reflection }) => {
+      if (goal.isActionPlanGoal) {
+        return actionPlanApi.addTeacherNote(teacherId, goal.id, { teacher_notes: reflection });
+      }
       if (goal.taskId) {
         return api.post(`/api/coaching/tasks/${goal.taskId}/reflection`, {
           teacher_id: teacherId,
@@ -664,6 +683,15 @@ export function TeacherWorkspacePage() {
     onError: () => toast.error(copy.saveFailed),
   });
 
+  const requestLinkageMutation = useMutation({
+    mutationFn: (email) => teacherApi.requestLinkage({ admin_email: email }).then((response) => response.data),
+    onSuccess: () => {
+      toast.success("Linkage request sent");
+      setAdminEmail("");
+    },
+    onError: () => toast.error(copy.saveFailed),
+  });
+
   const addReflectionMutation = useMutation({
     mutationFn: (reflection) =>
       assessmentApi.saveTeacherSummaryReflection(teacherId, {
@@ -677,6 +705,16 @@ export function TeacherWorkspacePage() {
       setFreeReflectionText("");
       queryClient.invalidateQueries({ queryKey: ["teacher-reflection-history", teacherId] });
       queryClient.invalidateQueries({ queryKey: ["teacher-summary-reflection", teacherId] });
+    },
+    onError: () => toast.error(copy.saveFailed),
+  });
+
+  const saveActionPlanReflectionMutation = useMutation({
+    mutationFn: (reflection) =>
+      actionPlanApi.reflection(teacherId, { teacher_reflection: reflection }).then((response) => response.data),
+    onSuccess: () => {
+      toast.success(copy.saved);
+      queryClient.invalidateQueries({ queryKey: ["teacher-active-goals", teacherId] });
     },
     onError: () => toast.error(copy.saveFailed),
   });
@@ -798,6 +836,51 @@ export function TeacherWorkspacePage() {
         />
 
         <div className="space-y-6">
+          {linkedAdmin ? (
+            <Panel className="border-teal-200 bg-teal-50/60">
+              <div className="flex flex-wrap items-center gap-4">
+                <div className="flex h-12 w-12 items-center justify-center rounded-full border-2 border-teal-500 bg-white text-sm font-bold text-teal-700">
+                  {(linkedAdmin.admin_name || linkedAdmin.admin_email || "A").slice(0, 1)}
+                </div>
+                <div>
+                  <div className="text-sm font-semibold text-slate-900">
+                    Your school: {linkedAdmin.school_name || copy.linkedAdminNotAssigned}
+                  </div>
+                  <div className="text-sm text-slate-600">
+                    Your administrator: {linkedAdmin.admin_name || linkedAdmin.admin_email}
+                  </div>
+                </div>
+              </div>
+            </Panel>
+          ) : (
+            <Panel className="border-amber-200 bg-amber-50/70">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+                <div>
+                  <div className="text-sm font-semibold text-slate-900">Your account isn't linked to a school yet.</div>
+                  <div className="text-sm text-slate-600">Enter your administrator's email to request linkage.</div>
+                </div>
+                <form
+                  className="flex flex-col gap-2 sm:flex-row"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (adminEmail.trim()) requestLinkageMutation.mutate(adminEmail.trim());
+                  }}
+                >
+                  <input
+                    type="email"
+                    value={adminEmail}
+                    onChange={(event) => setAdminEmail(event.target.value)}
+                    placeholder="administrator@school.edu"
+                    className="rounded-md border border-amber-200 bg-white px-3 py-2 text-sm"
+                  />
+                  <Button type="submit" disabled={!adminEmail.trim() || requestLinkageMutation.isPending}>
+                    Send request
+                  </Button>
+                </form>
+              </div>
+            </Panel>
+          )}
+
           <WorkspacePanel
             title={copy.latestLessonTitle}
             description={copy.latestLessonDescription}
@@ -878,7 +961,23 @@ export function TeacherWorkspacePage() {
               <div className="grid gap-4 lg:grid-cols-3">
                 {activeGoals.map((goal) => (
                   <div key={goal.id} className="rounded-md border border-slate-200 bg-slate-50 px-4 py-4">
-                    <p className="text-sm font-semibold leading-6 text-slate-900">{goal.text}</p>
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-sm font-semibold leading-6 text-slate-900">{goal.text}</p>
+                      {goal.triedAt ? (
+                        <span className="rounded-full bg-emerald-100 px-2 py-1 text-[11px] font-semibold text-emerald-700">
+                          Tried
+                        </span>
+                      ) : null}
+                    </div>
+                    {goal.recommendedAction ? (
+                      <p className="mt-2 text-sm leading-6 text-slate-700">{goal.recommendedAction}</p>
+                    ) : null}
+                    {goal.teacherNotes ? (
+                      <div className="mt-3 rounded-md border border-teal-100 bg-white px-3 py-2 text-xs text-slate-600">
+                        <span className="font-semibold text-slate-800">Your note: </span>
+                        {goal.teacherNotes}
+                      </div>
+                    ) : null}
                     <div className="mt-3 text-xs text-slate-500">
                       {copy.fromLesson}{" "}
                       {goal.videoId ? (
@@ -1007,6 +1106,31 @@ export function TeacherWorkspacePage() {
           </WorkspacePanel>
 
           <WorkspacePanel title={copy.reflectionsTitle} description={copy.reflectionsDescription} icon={MessageSquareText}>
+            <form
+              className="rounded-md border border-teal-100 bg-teal-50/60 px-4 py-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                saveActionPlanReflectionMutation.mutate(teacherReflectionText || actionPlanReflection);
+              }}
+            >
+              <label className="text-sm font-semibold text-slate-900">Your action plan reflection</label>
+              <textarea
+                rows={4}
+                value={teacherReflectionText || actionPlanReflection}
+                onChange={(event) => setTeacherReflectionText(event.target.value)}
+                placeholder="What are you noticing about your progress?"
+                className="mt-2 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none ring-primary/40 focus:ring"
+              />
+              <Button
+                type="submit"
+                size="sm"
+                disabled={saveActionPlanReflectionMutation.isPending || !(teacherReflectionText || actionPlanReflection).trim()}
+                className="mt-3"
+              >
+                {copy.saveReflection}
+              </Button>
+            </form>
+
             <div className="flex flex-wrap items-center gap-3">
               <button
                 type="button"

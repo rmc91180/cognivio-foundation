@@ -670,6 +670,42 @@ async def _assign_user_to_tenant_on_approval(
     return updates
 
 
+async def _sync_teacher_admin_link_for_user(user_doc: dict) -> Optional[dict]:
+    if _get_user_tenant_role(user_doc) != "teacher":
+        return None
+    email = str(user_doc.get("email") or "").strip().lower()
+    clauses: List[Dict[str, Any]] = []
+    if user_doc.get("teacher_id"):
+        clauses.append({"id": user_doc["teacher_id"]})
+    if email:
+        clauses.append({"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
+    if not clauses:
+        return None
+    query = clauses[0] if len(clauses) == 1 else {"$or": clauses}
+    teacher = await db.teachers.find_one(query, {"_id": 0})
+    if not teacher:
+        return None
+    admin_doc = None
+    if user_doc.get("manager_user_id"):
+        admin_doc = await db.users.find_one({"id": user_doc["manager_user_id"]}, {"_id": 0, "password": 0})
+    if not admin_doc and user_doc.get("manager_email"):
+        admin_doc = await _find_user_by_email(user_doc.get("manager_email"))
+    updates = {
+        "organization_id": user_doc.get("organization_id"),
+        "organization_name": user_doc.get("organization_name"),
+        "school_id": user_doc.get("school_id"),
+        "school_name": user_doc.get("school_name"),
+        "linked_admin_user_id": (admin_doc or {}).get("id") or user_doc.get("manager_user_id"),
+        "linked_admin_name": (admin_doc or {}).get("name") or user_doc.get("manager_name"),
+        "linked_admin_email": (admin_doc or {}).get("email") or user_doc.get("manager_email"),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.teachers.update_one({"id": teacher["id"]}, {"$set": updates})
+    if user_doc.get("teacher_id") != teacher["id"]:
+        await db.users.update_one({"id": user_doc["id"]}, {"$set": {"teacher_id": teacher["id"]}})
+    return {**teacher, **updates}
+
+
 async def _ensure_school_organization_for_user(
     *,
     current_user: dict,
@@ -959,6 +995,10 @@ async def _build_institution_lookup_suggestions(
 
 def _to_access_user_record(user_doc: dict) -> "AccessUserRecord":
     payload = _build_user_response_payload(user_doc)
+    requested_at = _parse_master_admin_iso(user_doc.get("approval_requested_at") or user_doc.get("created_at"))
+    days_waiting = 0
+    if requested_at:
+        days_waiting = max(0, (datetime.now(timezone.utc) - requested_at.astimezone(timezone.utc)).days)
     return AccessUserRecord(
         id=payload["id"],
         email=payload["email"],
@@ -983,6 +1023,11 @@ def _to_access_user_record(user_doc: dict) -> "AccessUserRecord":
         school_name=user_doc.get("school_name") or user_doc.get("requested_school_name"),
         manager_user_id=user_doc.get("manager_user_id"),
         manager_email=user_doc.get("manager_email") or user_doc.get("requested_manager_email"),
+        institution_type=user_doc.get("institution_type") or user_doc.get("org_type"),
+        training_provider_name=user_doc.get("training_provider_name"),
+        linked_admin_email=user_doc.get("linked_admin_email") or user_doc.get("requested_manager_email"),
+        suggested_organization_id=user_doc.get("suggested_organization_id"),
+        days_waiting=days_waiting,
     )
 
 
@@ -1519,18 +1564,37 @@ async def _approve_user_access(
     *,
     actor_label: str,
     reason: Optional[str] = None,
+    organization_id: Optional[str] = None,
     organization_name: Optional[str] = None,
     organization_type: Optional[str] = None,
     school_name: Optional[str] = None,
     manager_email: Optional[str] = None,
+    tenant_role: Optional[str] = None,
+    approval_note: Optional[str] = None,
 ) -> dict:
+    from app.services.notification_service import NotificationService
+
     user_id = target["id"]
     now = datetime.now(timezone.utc).isoformat()
+    target_for_assignment = dict(target)
+    if tenant_role:
+        target_for_assignment["tenant_role"] = _clean_optional_string(tenant_role)
+    resolved_org_name = organization_name
+    resolved_org_type = organization_type
+    if organization_id and organization_id != "__create_new__":
+        organization_doc = await db.organizations.find_one({"id": organization_id}, {"_id": 0})
+        if organization_doc:
+            resolved_org_name = organization_doc.get("name")
+            resolved_org_type = organization_doc.get("organization_type")
+        else:
+            resolved_org_name = organization_name or _access_request_workspace_name(target)
+    if organization_id == "__create_new__" and not resolved_org_name:
+        resolved_org_name = _access_request_workspace_name(target)
     tenancy_updates = await _assign_user_to_tenant_on_approval(
-        target=target,
-        organization_name=organization_name,
-        organization_type=organization_type,
-        school_name=school_name,
+        target=target_for_assignment,
+        organization_name=resolved_org_name,
+        organization_type=resolved_org_type,
+        school_name=school_name or target.get("school_name") or target.get("requested_school_name"),
         manager_email=manager_email,
         actor_label=actor_label,
     )
@@ -1543,18 +1607,24 @@ async def _approve_user_access(
         "is_active": True,
         **tenancy_updates,
     }
-    if reason:
-        updates["approval_note"] = reason
+    note = approval_note if approval_note is not None else reason
+    if note:
+        updates["approval_note"] = note
     await db.users.update_one({"id": user_id}, {"$set": updates})
     updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    await _sync_teacher_admin_link_for_user(updated)
     await _log_auth_event(
         "approval_granted",
         email=updated.get("email"),
         user_id=updated.get("id"),
         result="success",
-        reason=reason,
+        reason=note,
     )
-    _send_access_approved_confirmation(updated)
+    await NotificationService().send_access_approved(
+        updated,
+        updated.get("school_name") or updated.get("organization_name") or resolved_org_name,
+        approval_note=note,
+    )
     return updated
 
 
@@ -1564,6 +1634,8 @@ async def _revoke_user_access(
     actor_label: str,
     reason: Optional[str] = None,
 ) -> dict:
+    from app.services.notification_service import NotificationService
+
     user_id = target["id"]
     now = datetime.now(timezone.utc).isoformat()
     updates = {
@@ -1585,7 +1657,7 @@ async def _revoke_user_access(
         reason=reason,
     )
     if _get_user_approval_status(target) == "pending":
-        _send_access_denied_confirmation(updated)
+        await NotificationService().send_access_rejected(updated, reason)
     return updated
 
 
@@ -3277,6 +3349,7 @@ def _build_recognition_notification_content(
 async def _notify_teacher_recognition_awarded(video: dict, teacher: dict, current_user: dict) -> None:
     try:
         assessment = await _get_assessment_for_video(video.get("id"))
+        from app.services.notification_service import NotificationService
         subject, body = _build_recognition_notification_content(
             teacher=teacher,
             video=video,
@@ -3297,7 +3370,12 @@ async def _notify_teacher_recognition_awarded(video: dict, teacher: dict, curren
                 channel="in_app",
             )
         if teacher_email:
-            _send_platform_email(subject, teacher_email, body)
+            recognition_doc = {
+                "id": video.get("recognition_id") or video.get("id"),
+                "element_name": (assessment or {}).get("element_name") or "your recent lesson",
+                "badge_url": f"{FRONTEND_URL.rstrip('/')}/my-badges" if FRONTEND_URL else None,
+            }
+            await NotificationService().send_recognition_earned(teacher_user or teacher, recognition_doc, current_user)
     except Exception as exc:
         logger.warning("Unable to send recognition celebration for video %s: %s", video.get("id"), exc)
 
@@ -3510,14 +3588,8 @@ async def _handle_assessment_recognition_completion(
                 )
         teacher_email = str(teacher.get("email") or (teacher_user or {}).get("email") or "").strip()
         if should_send_teacher_email and teacher_email:
-            school_name = teacher.get("school_name") or teacher.get("organization_name") or "Cognivio"
-            subject, text, html_body = _build_recognition_earned_email(
-                school_name=school_name,
-                element_name=element_name,
-                badge_url=badge_url,
-                badge_link=(f"{FRONTEND_URL.rstrip('/')}/my-badges" if FRONTEND_URL else badge_url),
-            )
-            _send_platform_email(subject, teacher_email, text, html_body=html_body)
+            from app.services.notification_service import NotificationService
+            await NotificationService().send_recognition_earned(teacher_user or teacher, badge, admin_user or actor_user or {})
 
         if admin_user and admin_user.get("id"):
             existing_admin_notice = await db.notifications.find_one(
@@ -3529,17 +3601,8 @@ async def _handle_assessment_recognition_completion(
                 {"_id": 0, "id": 1},
             )
             if not existing_admin_notice:
-                await _create_notification(
-                    recipient_user=admin_user,
-                    notification_type="recognition_exemplar_eligible",
-                    title=f"{teacher.get('name') or 'A teacher'} is eligible for the exemplar library",
-                    message="A newly reviewed lesson earned recognition and is ready for exemplar follow-up.",
-                    payload={**payload, "teacher_id": teacher.get("id"), "teacher_name": teacher.get("name")},
-                    teacher_id=teacher.get("id"),
-                    workspace_id=workspace_id,
-                    cta_url="/recognition-review",
-                    channel="in_app",
-                )
+                from app.services.notification_service import NotificationService
+                await NotificationService().send_recognition_nominated(admin_user, teacher, badge)
     except Exception as exc:
         logger.warning("Recognition notification flow failed for video %s: %s", video.get("id"), exc)
 
@@ -5786,6 +5849,11 @@ class AccessUserRecord(BaseModel):
     school_name: Optional[str] = None
     manager_user_id: Optional[str] = None
     manager_email: Optional[str] = None
+    institution_type: Optional[str] = None
+    training_provider_name: Optional[str] = None
+    linked_admin_email: Optional[str] = None
+    suggested_organization_id: Optional[str] = None
+    days_waiting: int = 0
 
 
 class AccessUserListResponse(BaseModel):
@@ -5796,6 +5864,23 @@ class AccessUserListResponse(BaseModel):
 
 class AccessDecisionPayload(BaseModel):
     reason: Optional[str] = None
+    organization_id: Optional[str] = None
+    organization_name: Optional[str] = None
+    organization_type: Optional[str] = None
+    school_name: Optional[str] = None
+    manager_email: Optional[str] = None
+    tenant_role: Optional[str] = None
+    approval_note: Optional[str] = None
+
+
+class TeacherLinkageRequestPayload(BaseModel):
+    admin_email: EmailStr
+
+
+class TeacherAdminLinkPayload(BaseModel):
+    organization_id: Optional[str] = None
+    school_id: Optional[str] = None
+    admin_user_id: Optional[str] = None
 
 
 class MasterAdminOverviewCard(BaseModel):
@@ -6206,6 +6291,9 @@ class TeacherResponse(BaseModel):
     organization_name: Optional[str] = None
     manager_name: Optional[str] = None
     manager_email: Optional[str] = None
+    linked_admin_user_id: Optional[str] = None
+    linked_admin_name: Optional[str] = None
+    linked_admin_email: Optional[str] = None
     category: Optional[str] = None
     category_custom: Optional[str] = None
     next_coaching_conference: Optional[str] = None
@@ -7171,6 +7259,39 @@ class ActionPlanHistoryResponse(BaseModel):
     history: List[ActionPlanHistoryEntry]
 
 
+class UnifiedActionPlanGoalPayload(BaseModel):
+    id: Optional[str] = None
+    element_code: Optional[str] = None
+    element_name: Optional[str] = None
+    goal_text: str
+    recommended_action: Optional[str] = None
+    due_date: Optional[str] = None
+    priority: str = "medium"
+    status: str = "open"
+    created_from_assessment_id: Optional[str] = None
+    teacher_notes: Optional[str] = None
+    teacher_marked_tried_at: Optional[str] = None
+    completion_note: Optional[str] = None
+    completed_at: Optional[str] = None
+
+
+class UnifiedActionPlanPatch(BaseModel):
+    goals: Optional[List[UnifiedActionPlanGoalPayload]] = None
+    admin_summary: Optional[str] = None
+
+
+class TeacherGoalNotePayload(BaseModel):
+    teacher_notes: str
+
+
+class GoalCompletionPayload(BaseModel):
+    completion_note: str
+
+
+class TeacherReflectionPayload(BaseModel):
+    teacher_reflection: str
+
+
 class SummaryReflection(BaseModel):
     id: str
     teacher_id: str
@@ -7411,16 +7532,27 @@ class NotificationRecord(BaseModel):
     notification_type: Optional[str] = None
     title: Optional[str] = None
     message: Optional[str] = None
+    body: Optional[str] = None
     cta_url: Optional[str] = None
+    action_url: Optional[str] = None
     channel: str = "email"
     status: str = "queued"
     created_at: str
     read_at: Optional[str] = None
+    emailed: bool = False
 
 
 class NotificationListResponse(BaseModel):
     items: List[NotificationRecord]
     unread_count: int = 0
+
+
+class NotificationPreferencesPayload(BaseModel):
+    email_observation_complete: bool = True
+    email_goal_added: bool = True
+    email_recognition: bool = True
+    email_conference_reminder: bool = True
+    email_frequency: str = "immediate"
 
 
 class GradebookIntegrationCreate(BaseModel):
@@ -8063,6 +8195,153 @@ async def get_teachers(request: Request, current_user: dict = Depends(get_curren
     ).to_list(1000)
     language = _resolve_request_language(request, default="en")
     return [TeacherResponse(**_localize_teacher_payload(t, language)) for t in teachers]
+
+
+@api_router.get("/teacher/my-admin")
+async def get_my_linked_admin(current_user: dict = Depends(get_current_user)):
+    if _get_user_tenant_role(current_user) != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher account required")
+    teacher = None
+    if current_user.get("teacher_id"):
+        teacher = await db.teachers.find_one({"id": current_user["teacher_id"]}, {"_id": 0})
+    if not teacher and current_user.get("email"):
+        teacher = await db.teachers.find_one(
+            {"email": {"$regex": f"^{re.escape(str(current_user.get('email')).strip())}$", "$options": "i"}},
+            {"_id": 0},
+        )
+    admin_doc = None
+    admin_id = (teacher or {}).get("linked_admin_user_id") or current_user.get("manager_user_id")
+    admin_email = (teacher or {}).get("linked_admin_email") or current_user.get("manager_email")
+    if admin_id:
+        admin_doc = await db.users.find_one({"id": admin_id}, {"_id": 0, "password": 0})
+    if not admin_doc and admin_email:
+        admin_doc = await _find_user_by_email(admin_email)
+    if not admin_doc and not admin_email:
+        return None
+    return {
+        "admin_name": (admin_doc or {}).get("name") or (teacher or {}).get("linked_admin_name"),
+        "admin_email": (admin_doc or {}).get("email") or admin_email,
+        "school_name": (teacher or {}).get("school_name") or current_user.get("school_name"),
+        "admin_avatar_url": (admin_doc or {}).get("avatar_url"),
+    }
+
+
+@api_router.post("/teacher/request-linkage")
+async def request_teacher_linkage(
+    payload: TeacherLinkageRequestPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    if _get_user_tenant_role(current_user) != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher account required")
+    admin = await _find_user_by_email(str(payload.admin_email).lower())
+    if not admin or _get_user_tenant_role(admin) not in {"school_admin", "training_admin", "super_admin"}:
+        raise HTTPException(status_code=404, detail="Administrator not found")
+    teacher_doc = await db.teachers.find_one({"id": current_user.get("teacher_id")}, {"_id": 0}) if current_user.get("teacher_id") else None
+    now = datetime.now(timezone.utc).isoformat()
+    record = {
+        "id": str(uuid.uuid4()),
+        "teacher_user_id": current_user["id"],
+        "teacher_id": (teacher_doc or {}).get("id"),
+        "teacher_name": current_user.get("name"),
+        "teacher_email": current_user.get("email"),
+        "target_admin_user_id": admin["id"],
+        "target_admin_email": admin.get("email"),
+        "status": "pending",
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.pending_linkages.insert_one(record)
+    await _create_notification(
+        recipient_user=admin,
+        notification_type="teacher_linkage_requested",
+        title=f"{current_user.get('name')} requested school linkage",
+        message="A teacher has requested to link their account to your school. Accept or decline from the teacher roster.",
+        payload={"teacher_user_id": current_user["id"], "teacher_id": record.get("teacher_id")},
+        teacher_id=record.get("teacher_id"),
+        workspace_id=admin.get("organization_id") or admin.get("id"),
+        cta_url="/teachers",
+    )
+    return {"status": "pending", "request": {k: v for k, v in record.items() if k != "_id"}}
+
+
+async def _link_teacher_to_admin_workspace(
+    teacher_id: str,
+    current_user: dict,
+    payload: Optional[TeacherAdminLinkPayload] = None,
+) -> dict:
+    tenant_role = _get_user_tenant_role(current_user)
+    if tenant_role not in {"school_admin", "training_admin", "super_admin"}:
+        raise HTTPException(status_code=403, detail="Administrator account required")
+    teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+    payload = payload or TeacherAdminLinkPayload()
+    admin_doc = current_user
+    if payload.admin_user_id:
+        admin_doc = await db.users.find_one({"id": payload.admin_user_id}, {"_id": 0, "password": 0}) or current_user
+    organization_id = payload.organization_id or admin_doc.get("organization_id") or current_user.get("organization_id")
+    school_id = payload.school_id or admin_doc.get("school_id") or current_user.get("school_id")
+    organization = await db.organizations.find_one({"id": organization_id}, {"_id": 0}) if organization_id else None
+    school = await db.schools.find_one({"id": school_id}, {"_id": 0}) if school_id else None
+    updates = {
+        "organization_id": organization_id,
+        "organization_name": (organization or {}).get("name") or admin_doc.get("organization_name"),
+        "school_id": school_id,
+        "school_name": (school or {}).get("name") or admin_doc.get("school_name"),
+        "linked_admin_user_id": admin_doc.get("id"),
+        "linked_admin_name": admin_doc.get("name"),
+        "linked_admin_email": admin_doc.get("email"),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.teachers.update_one({"id": teacher_id}, {"$set": updates})
+    if teacher.get("email"):
+        await db.users.update_one(
+            {"email": {"$regex": f"^{re.escape(str(teacher.get('email')).strip())}$", "$options": "i"}},
+            {"$set": {
+                "teacher_id": teacher_id,
+                "organization_id": organization_id,
+                "organization_name": updates["organization_name"],
+                "school_id": school_id,
+                "school_name": updates["school_name"],
+                "manager_user_id": admin_doc.get("id"),
+                "manager_name": admin_doc.get("name"),
+                "manager_email": admin_doc.get("email"),
+            }},
+        )
+    return {**teacher, **updates}
+
+
+@api_router.post("/admin/teachers/{teacher_id}/link")
+async def link_teacher_to_admin(
+    teacher_id: str,
+    payload: TeacherAdminLinkPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    linked = await _link_teacher_to_admin_workspace(teacher_id, current_user, payload)
+    return {"teacher": linked}
+
+
+@api_router.post("/admin/teachers/{teacher_id}/unlink")
+async def unlink_teacher_from_admin(
+    teacher_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    await db.teachers.update_one(
+        {"id": teacher_id},
+        {"$set": {
+            "linked_admin_user_id": None,
+            "linked_admin_name": None,
+            "linked_admin_email": None,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+    if teacher.get("email"):
+        await db.users.update_one(
+            {"email": {"$regex": f"^{re.escape(str(teacher.get('email')).strip())}$", "$options": "i"}},
+            {"$set": {"manager_user_id": None, "manager_name": None, "manager_email": None}},
+        )
+    return {"teacher_id": teacher_id, "linked": False}
 
 
 @api_router.post("/schools", response_model=SchoolResponse)
@@ -11399,10 +11678,35 @@ async def get_admin_feedback_digest(current_user: dict = Depends(get_current_use
     return await build_feedback_digest(current_user)
 
 
+def _access_request_workspace_name(user_doc: dict) -> Optional[str]:
+    return (
+        _clean_optional_string(user_doc.get("school_name"))
+        or _clean_optional_string(user_doc.get("requested_school_name"))
+        or _clean_optional_string(user_doc.get("training_provider_name"))
+        or _clean_optional_string(user_doc.get("organization_name"))
+        or _clean_optional_string(user_doc.get("requested_organization_name"))
+    )
+
+
+async def _access_request_suggested_organization_id(user_doc: dict) -> Optional[str]:
+    name = _access_request_workspace_name(user_doc)
+    if not name:
+        return None
+    organization_type = _normalize_organization_type(
+        user_doc.get("organization_type"),
+        user_doc.get("tenant_role"),
+    )
+    org = await _find_organization_by_name(organization_type=organization_type, name=name)
+    return (org or {}).get("id")
+
+
 @api_router.get("/admin/access-users", response_model=AccessUserListResponse)
 async def list_access_users(current_user: dict = Depends(get_current_user)):
     _require_admin_ops_user(current_user)
     docs = await db.users.find({}, {"_id": 0, "password": 0}).sort("created_at", -1).to_list(1000)
+    for doc in docs:
+        if _get_user_approval_status(doc) == "pending":
+            doc["suggested_organization_id"] = await _access_request_suggested_organization_id(doc)
     serialized = [_to_access_user_record(doc) for doc in docs]
     return AccessUserListResponse(
         pending=[item for item in serialized if item.approval_status == "pending"],
@@ -11425,10 +11729,13 @@ async def approve_access_user(
         target,
         actor_label=current_user.get("email") or current_user["id"],
         reason=payload.reason,
+        organization_id=payload.organization_id,
         organization_name=payload.organization_name,
         organization_type=payload.organization_type,
         school_name=payload.school_name,
         manager_email=payload.manager_email,
+        tenant_role=payload.tenant_role,
+        approval_note=payload.approval_note,
     )
     return _to_access_user_record(updated)
 
@@ -16362,6 +16669,253 @@ async def get_teacher_coaching_history(
     )
 
 
+def _normalize_action_plan_priority(value: Optional[str]) -> str:
+    normalized = str(value or "medium").strip().lower()
+    return normalized if normalized in {"high", "medium", "low"} else "medium"
+
+
+def _normalize_unified_action_plan_goal(goal: dict) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    title = goal.get("goal_text") or goal.get("title") or goal.get("description") or "Coaching goal"
+    recommended = goal.get("recommended_action") or goal.get("description") or goal.get("suggested_action")
+    status = str(goal.get("status") or "open").strip().lower()
+    if status in {"planned", "active"}:
+        status = "open"
+    if status in {"complete", "implemented"}:
+        status = "completed"
+    if status not in {"open", "in_progress", "completed", "dropped"}:
+        status = "open"
+    return {
+        "id": goal.get("id") or str(uuid.uuid4()),
+        "element_code": goal.get("element_code"),
+        "element_name": goal.get("element_name"),
+        "goal_text": str(title).strip(),
+        "recommended_action": recommended,
+        "due_date": goal.get("due_date"),
+        "priority": _normalize_action_plan_priority(goal.get("priority")),
+        "status": status,
+        "created_from_assessment_id": goal.get("created_from_assessment_id") or goal.get("assessment_id"),
+        "teacher_notes": goal.get("teacher_notes") or "",
+        "teacher_marked_tried_at": goal.get("teacher_marked_tried_at"),
+        "completion_note": goal.get("completion_note"),
+        "completed_at": goal.get("completed_at"),
+        "created_at": goal.get("created_at") or now,
+        "updated_at": goal.get("updated_at"),
+    }
+
+
+async def _get_or_create_unified_action_plan(teacher: dict, current_user: dict) -> dict:
+    teacher_id = teacher["id"]
+    plan = await db.action_plans.find_one({"teacher_id": teacher_id}, {"_id": 0})
+    now = datetime.now(timezone.utc).isoformat()
+    if plan:
+        goals = [_normalize_unified_action_plan_goal(goal) for goal in (plan.get("goals") or [])]
+        updates = {
+            "schema_version": "unified",
+            "workspace_id": plan.get("workspace_id") or teacher.get("organization_id") or teacher.get("school_id") or current_user.get("organization_id") or current_user.get("id"),
+            "teacher_name": plan.get("teacher_name") or teacher.get("name"),
+            "created_by_admin_id": plan.get("created_by_admin_id") or teacher.get("linked_admin_user_id") or teacher.get("created_by") or current_user.get("id"),
+            "created_by_admin_name": plan.get("created_by_admin_name") or teacher.get("linked_admin_name") or current_user.get("name"),
+            "goals": goals,
+            "admin_summary": plan.get("admin_summary") or plan.get("notes") or "",
+            "teacher_reflection": plan.get("teacher_reflection") or "",
+            "last_updated_by": plan.get("last_updated_by") or "admin",
+            "last_updated_at": plan.get("last_updated_at") or plan.get("updated_at") or plan.get("created_at") or now,
+            "updated_at": plan.get("updated_at") or now,
+        }
+        await db.action_plans.update_one({"id": plan["id"]}, {"$set": updates})
+        return {**plan, **updates}
+    doc = {
+        "id": str(uuid.uuid4()),
+        "schema_version": "unified",
+        "workspace_id": teacher.get("organization_id") or teacher.get("school_id") or current_user.get("organization_id") or current_user.get("id"),
+        "teacher_id": teacher_id,
+        "teacher_name": teacher.get("name"),
+        "created_by_admin_id": teacher.get("linked_admin_user_id") or teacher.get("created_by") or current_user.get("id"),
+        "created_by_admin_name": teacher.get("linked_admin_name") or current_user.get("name"),
+        "goals": [],
+        "admin_summary": "",
+        "teacher_reflection": "",
+        "last_updated_by": "admin",
+        "last_updated_at": now,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.action_plans.insert_one(doc)
+    return doc
+
+
+def _shape_action_plan_for_role(plan: dict, current_user: dict) -> dict:
+    result = _to_json_safe({k: v for k, v in plan.items() if k != "_id"})
+    if _get_user_tenant_role(current_user) == "teacher":
+        result.pop("admin_summary", None)
+        result.pop("created_by_admin_id", None)
+    return result
+
+
+async def _find_action_plan_goal_or_404(teacher: dict, current_user: dict, goal_id: str) -> Tuple[dict, dict]:
+    plan = await _get_or_create_unified_action_plan(teacher, current_user)
+    for goal in plan.get("goals") or []:
+        if goal.get("id") == goal_id:
+            return plan, goal
+    raise HTTPException(status_code=404, detail="Action plan goal not found")
+
+
+@api_router.get("/action-plan/{teacher_id}")
+async def get_unified_action_plan(
+    teacher_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    plan = await _get_or_create_unified_action_plan(teacher, current_user)
+    return _shape_action_plan_for_role(plan, current_user)
+
+
+@api_router.patch("/action-plan/{teacher_id}")
+async def patch_unified_action_plan(
+    teacher_id: str,
+    payload: UnifiedActionPlanPatch,
+    current_user: dict = Depends(get_current_user),
+):
+    if _get_user_tenant_role(current_user) == "teacher":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    plan = await _get_or_create_unified_action_plan(teacher, current_user)
+    now = datetime.now(timezone.utc).isoformat()
+    updates: Dict[str, Any] = {
+        "last_updated_by": "admin",
+        "last_updated_at": now,
+        "updated_at": now,
+    }
+    if payload.goals is not None:
+        updates["goals"] = [
+            _normalize_unified_action_plan_goal({**goal.dict(), "updated_at": now})
+            for goal in payload.goals
+        ]
+    if payload.admin_summary is not None:
+        updates["admin_summary"] = payload.admin_summary
+    await db.action_plans.update_one({"id": plan["id"]}, {"$set": updates})
+    updated = await db.action_plans.find_one({"id": plan["id"]}, {"_id": 0})
+    return _shape_action_plan_for_role(updated or {**plan, **updates}, current_user)
+
+
+@api_router.post("/action-plan/{teacher_id}/goals/{goal_id}/teacher-note")
+async def add_teacher_goal_note(
+    teacher_id: str,
+    goal_id: str,
+    payload: TeacherGoalNotePayload,
+    current_user: dict = Depends(get_current_user),
+):
+    if _get_user_tenant_role(current_user) != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher access required")
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    plan, goal = await _find_action_plan_goal_or_404(teacher, current_user, goal_id)
+    now = datetime.now(timezone.utc).isoformat()
+    goals = []
+    updated_goal = None
+    for item in plan.get("goals") or []:
+        if item.get("id") == goal_id:
+            updated_goal = {**item, "teacher_notes": payload.teacher_notes, "updated_at": now}
+            goals.append(updated_goal)
+        else:
+            goals.append(item)
+    await db.action_plans.update_one(
+        {"id": plan["id"]},
+        {"$set": {"goals": goals, "last_updated_by": "teacher", "last_updated_at": now, "updated_at": now}},
+    )
+    admin = await _find_admin_user_for_teacher(teacher, fallback_user_id=plan.get("created_by_admin_id"))
+    if admin:
+        from app.services.notification_service import NotificationService
+        await NotificationService().send_goal_tried_notification(admin, teacher, updated_goal or goal)
+    return {"goal": updated_goal or goal}
+
+
+@api_router.post("/action-plan/{teacher_id}/goals/{goal_id}/mark-tried")
+async def mark_action_plan_goal_tried(
+    teacher_id: str,
+    goal_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    if _get_user_tenant_role(current_user) != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher access required")
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    plan, goal = await _find_action_plan_goal_or_404(teacher, current_user, goal_id)
+    now = datetime.now(timezone.utc).isoformat()
+    goals = []
+    updated_goal = None
+    for item in plan.get("goals") or []:
+        if item.get("id") == goal_id:
+            updated_goal = {**item, "teacher_marked_tried_at": now, "status": "in_progress", "updated_at": now}
+            goals.append(updated_goal)
+        else:
+            goals.append(item)
+    await db.action_plans.update_one(
+        {"id": plan["id"]},
+        {"$set": {"goals": goals, "last_updated_by": "teacher", "last_updated_at": now, "updated_at": now}},
+    )
+    admin = await _find_admin_user_for_teacher(teacher, fallback_user_id=plan.get("created_by_admin_id"))
+    if admin:
+        from app.services.notification_service import NotificationService
+        await NotificationService().send_goal_tried_notification(admin, teacher, updated_goal or goal)
+    return {"goal": updated_goal or goal}
+
+
+@api_router.post("/action-plan/{teacher_id}/goals/{goal_id}/complete")
+async def complete_action_plan_goal(
+    teacher_id: str,
+    goal_id: str,
+    payload: GoalCompletionPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    if _get_user_tenant_role(current_user) == "teacher":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    plan, goal = await _find_action_plan_goal_or_404(teacher, current_user, goal_id)
+    note = str(payload.completion_note or "").strip()
+    if not note:
+        raise HTTPException(status_code=400, detail="completion_note is required")
+    now = datetime.now(timezone.utc).isoformat()
+    goals = []
+    updated_goal = None
+    for item in plan.get("goals") or []:
+        if item.get("id") == goal_id:
+            updated_goal = {**item, "status": "completed", "completion_note": note, "completed_at": now, "updated_at": now}
+            goals.append(updated_goal)
+        else:
+            goals.append(item)
+    await db.action_plans.update_one(
+        {"id": plan["id"]},
+        {"$set": {"goals": goals, "last_updated_by": "admin", "last_updated_at": now, "updated_at": now}},
+    )
+    return {"goal": updated_goal or goal}
+
+
+@api_router.post("/action-plan/{teacher_id}/reflection")
+async def update_action_plan_reflection(
+    teacher_id: str,
+    payload: TeacherReflectionPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    if _get_user_tenant_role(current_user) != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher access required")
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    plan = await _get_or_create_unified_action_plan(teacher, current_user)
+    now = datetime.now(timezone.utc).isoformat()
+    await db.action_plans.update_one(
+        {"id": plan["id"]},
+        {
+            "$set": {
+                "teacher_reflection": payload.teacher_reflection,
+                "last_updated_by": "teacher",
+                "last_updated_at": now,
+                "updated_at": now,
+            }
+        },
+    )
+    updated = await db.action_plans.find_one({"id": plan["id"]}, {"_id": 0})
+    return _shape_action_plan_for_role(updated or plan, current_user)
+
+
 @api_router.post("/teachers/{teacher_id}/action-plan", response_model=ActionPlan)
 async def save_action_plan(
     teacher_id: str,
@@ -16566,115 +17120,168 @@ async def publish_conference_agenda(
     return ConferenceAgendaRecord(**result)
 
 
+_conference_prep_cache: Dict[str, Tuple[float, dict]] = {}
+
+
+def _first_sentence(value: Optional[str], fallback: str = "") -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return fallback
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    return parts[0][:500]
+
+
+async def _generate_conference_ai_content(
+    *,
+    teacher: dict,
+    assessments: List[dict],
+    open_goals: List[dict],
+    teacher_reflection: Optional[str],
+) -> Tuple[str, List[str]]:
+    summaries = [
+        _first_sentence(a.get("summary") or a.get("analysis_summary") or a.get("feedback_summary"))
+        for a in assessments[:3]
+    ]
+    summaries = [s for s in summaries if s]
+    goal_lines = [
+        f"{g.get('goal_text')}: {g.get('teacher_notes') or 'no teacher note yet'}"
+        for g in open_goals[:5]
+    ]
+    fallback_thread = (
+        f"{teacher.get('name') or 'This teacher'} is building on recent feedback with a clear set of coaching goals. "
+        "Use the conversation to connect what they tried with the next small move that will help students see the impact."
+    )
+    fallback_starters = [
+        "What felt different when you tried the most recent goal?",
+        "Where did students respond in a way you want to build on next time?",
+        "What support would make the next attempt easier to plan?",
+    ]
+    if not OPENAI_API_KEY or AsyncOpenAI is None:
+        return fallback_thread, fallback_starters
+    prompt = (
+        "You are Cognivio's coaching prep assistant. In warm coach voice, read the last three lesson summaries, "
+        "the open action plan goals, and the teacher's own notes. Return JSON only with keys coaching_thread "
+        "(2-3 sentences) and suggested_conversation_starters (exactly 3 specific questions). Do not mention scores, "
+        "rubric codes, or system language.\n\n"
+        f"Teacher: {teacher.get('name')}\n"
+        f"Recent summaries: {summaries}\n"
+        f"Open goals and teacher notes: {goal_lines}\n"
+        f"Teacher reflection: {teacher_reflection or ''}"
+    )
+    try:
+        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            temperature=0.4,
+        )
+        content = response.choices[0].message.content or "{}"
+        parsed = json.loads(content)
+        thread = str(parsed.get("coaching_thread") or "").strip() or fallback_thread
+        starters = parsed.get("suggested_conversation_starters") or []
+        starters = [str(item).strip() for item in starters if str(item).strip()][:3]
+        return thread, (starters or fallback_starters)[:3]
+    except Exception as exc:
+        logger.warning("Conference prep AI generation failed for teacher %s: %s", teacher.get("id"), exc)
+        return fallback_thread, fallback_starters
+
+
 @api_router.get("/teachers/{teacher_id}/conference-prep")
 async def get_teacher_conference_prep(
     teacher_id: str,
     request: Request,
     current_user: dict = Depends(get_current_user),
 ):
-    from app.services.workspace_service import build_teacher_memory_support
-    from app.analysis.specialist_orchestrator import orchestrate_conference_prep
-
     teacher = await _get_teacher_or_404(teacher_id, current_user)
-    language = _resolve_request_language(request, default="en")
-    action_plan = await db.action_plans.find_one(
-        {"teacher_id": teacher_id, "user_id": current_user["id"]},
-        {"_id": 0, "user_id": 0},
-    ) or {"goals": [], "notes": None}
+    cache_key = f"{current_user['id']}:{teacher_id}:{_resolve_request_language(request, default='en')}"
+    cached = _conference_prep_cache.get(cache_key)
+    if cached and time.time() - cached[0] < 1800:
+        return _to_json_safe({**cached[1], "cache": {"hit": True, "ttl_seconds": int(1800 - (time.time() - cached[0]))}})
+
+    action_plan = await _get_or_create_unified_action_plan(teacher, current_user)
+    workspace_id = action_plan.get("workspace_id") or teacher.get("organization_id") or current_user.get("organization_id")
+    assessment_query: Dict[str, Any] = {"teacher_id": teacher_id}
+    if _get_user_tenant_role(current_user) != "super_admin":
+        assessment_query["$or"] = [
+            {"workspace_id": workspace_id},
+            {"user_id": current_user["id"]},
+            {"user_id": teacher.get("created_by")},
+        ]
     assessments = await db.assessments.find(
-        {"teacher_id": teacher_id, "user_id": current_user["id"]},
-        {"_id": 0, "user_id": 0},
+        assessment_query,
+        {"_id": 0},
     ).sort("analyzed_at", -1).to_list(5)
     observations = await db.observations.find(
-        {"teacher_id": teacher_id, "user_id": current_user["id"]},
-        {"_id": 0, "user_id": 0},
+        {"teacher_id": teacher_id},
+        {"_id": 0},
     ).sort("created_at", -1).to_list(8)
     latest = assessments[0] if assessments else None
-    previous = assessments[1] if len(assessments) > 1 else None
+    latest_summary = _first_sentence(
+        (latest or {}).get("summary") or (latest or {}).get("analysis_summary") or (latest or {}).get("feedback_summary"),
+        "There is not a reviewed lesson summary yet.",
+    )
+    top_strength = ""
+    top_growth_area = ""
+    if latest:
+        scores = latest.get("element_scores") or []
+        scored = [s for s in scores if isinstance(s.get("score"), (int, float))]
+        if scored:
+            best = max(scored, key=lambda item: item.get("score", 0))
+            growth = min(scored, key=lambda item: item.get("score", 0))
+            top_strength = f"{best.get('element_name') or 'A recent strength'} stood out as a place to build from."
+            top_growth_area = f"{growth.get('element_name') or 'One next focus area'} is the next area to practice."
+    if not top_strength:
+        top_strength = "Start by naming one student-facing move that went well."
+    if not top_growth_area:
+        top_growth_area = "Choose one small teaching move to try in the next lesson."
+
     open_goals = [
-        goal for goal in action_plan.get("goals", [])
-        if goal.get("title") and goal.get("status") not in {"complete", "implemented"}
+        goal for goal in action_plan.get("goals", []) if goal.get("status") not in {"completed", "dropped"}
     ]
-    latest_summary = (
-        generate_summary(
-            latest.get("element_scores", []),
-            latest.get("overall_score") or 0,
-            provided_summary=latest.get("summary"),
-            priority_element_ids=latest.get("priority_elements"),
-            focus_note=latest.get("focus_note"),
-            language=language,
-        )
-        if latest
-        else ""
+    audio_doc = {}
+    video_id = (latest or {}).get("video_id")
+    if video_id:
+        audio_doc = await db.audio_analyses.find_one({"video_id": video_id}, {"_id": 0}) or {}
+    talk_time_pct = (
+        audio_doc.get("teacher_talk_time_pct")
+        or audio_doc.get("talk_time_pct")
+        or (latest or {}).get("talk_time_pct")
+        or 0
     )
-    comparison_lines = []
-    if latest and previous:
-        latest_score = latest.get("overall_score")
-        previous_score = previous.get("overall_score")
-        if isinstance(latest_score, (int, float)) and isinstance(previous_score, (int, float)):
-            delta = round(latest_score - previous_score, 2)
-            if _is_hebrew_language(language):
-                comparison_lines.append(f"שינוי מאז השיעור הקודם: {delta:+}/10.")
-            else:
-                comparison_lines.append(f"Change since the previous reviewed lesson: {delta:+}/10.")
-    if open_goals:
-        joined = ", ".join(goal.get("title") for goal in open_goals[:3])
-        if _is_hebrew_language(language):
-            comparison_lines.append(f"יעדי המעקב הפעילים: {joined}.")
-        else:
-            comparison_lines.append(f"Current follow-up goals: {joined}.")
-    if action_plan.get("notes"):
-        if _is_hebrew_language(language):
-            comparison_lines.append(f"הערות תוכנית הפעולה: {action_plan.get('notes')}")
-        else:
-            comparison_lines.append(f"Action-plan notes: {action_plan.get('notes')}")
-    adaptive_support = await build_teacher_memory_support(
-        current_user,
-        teacher_id,
-        language=language,
+    goals_tried = sum(1 for goal in action_plan.get("goals", []) if goal.get("teacher_marked_tried_at"))
+    goals_completed = sum(1 for goal in action_plan.get("goals", []) if goal.get("status") == "completed")
+    recognition_earned = await db.recognition_badges.count_documents({"teacher_id": teacher_id})
+    coaching_thread, starters = await _generate_conference_ai_content(
+        teacher=teacher,
+        assessments=assessments,
+        open_goals=open_goals,
+        teacher_reflection=action_plan.get("teacher_reflection"),
     )
-    for line in adaptive_support.get("conference_continuity_lines") or []:
-        if line not in comparison_lines:
-            comparison_lines.append(line)
-    agenda = []
-    if latest_summary:
-        agenda.append(latest_summary)
-    for obs in observations[:3]:
-        summary = obs.get("admin_comment") or obs.get("teacher_response")
-        if summary:
-            agenda.append(summary)
-    if open_goals:
-        for goal in open_goals[:2]:
-            if _is_hebrew_language(language):
-                agenda.append(f"בדקו התקדמות מול היעד: {goal.get('title')}.")
-            else:
-                agenda.append(f"Check progress against the goal: {goal.get('title')}.")
-    if adaptive_support.get("admin_prompt_body"):
-        agenda.append(adaptive_support["admin_prompt_body"])
-    published_agenda = await _get_latest_published_conference_agenda(teacher_id)
-    prep_payload = orchestrate_conference_prep(
-        {
-            "agenda": agenda[:6],
-            "continuity_lines": comparison_lines,
-        },
-        language=language,
-        adaptive_support=adaptive_support,
-    )
-    return _to_json_safe({
+    payload = {
         "teacher_id": teacher_id,
         "teacher_name": teacher.get("name"),
-        "latest_assessment_id": latest.get("id") if latest else None,
-        "latest_assessment_date": latest.get("analyzed_at") if latest else None,
-        "summary": latest_summary,
-        "continuity_lines": prep_payload.get("continuity_lines", []),
-        "agenda": prep_payload.get("agenda", []),
-        "open_goals": open_goals[:4],
-        "recent_observations": observations[:4],
-        "next_conference": teacher.get("next_coaching_conference"),
-        "published_agenda": published_agenda,
-        "conference_specialist_trace": prep_payload.get("conference_specialist_trace", []),
-        "conference_specialist_orchestrator": prep_payload.get("conference_specialist_orchestrator"),
-    })
+        "last_observation": {
+            "date": (latest or {}).get("analyzed_at") or (observations[0].get("created_at") if observations else None),
+            "video_id": video_id,
+            "summary": latest_summary,
+            "top_strength": top_strength,
+            "top_growth_area": top_growth_area,
+            "talk_time_pct": float(talk_time_pct or 0),
+        },
+        "open_goals": open_goals,
+        "teacher_reflection": action_plan.get("teacher_reflection") or "",
+        "coaching_thread": coaching_thread,
+        "suggested_conversation_starters": starters,
+        "since_last_conversation": {
+            "observations_completed": len(observations),
+            "goals_tried": goals_tried,
+            "goals_completed": goals_completed,
+            "recognition_earned": recognition_earned,
+        },
+    }
+    _conference_prep_cache[cache_key] = (time.time(), payload)
+    return _to_json_safe({**payload, "cache": {"hit": False, "ttl_seconds": 1800}})
 
 @api_router.get("/teachers/{teacher_id}/peer-recommendations")
 async def get_peer_recommendations(
@@ -18138,10 +18745,14 @@ async def send_recording_compliance_reminder(
 
 
 # ==================== NOTIFICATION ENDPOINTS ====================
+_notification_unread_count_cache: Dict[str, Tuple[float, int]] = {}
+
+
 @api_router.get("/notifications", response_model=NotificationListResponse)
 async def list_notifications(
     unread_only: Optional[bool] = None,
     limit: int = 20,
+    page: int = 1,
     current_user: dict = Depends(get_current_user),
 ):
     query: Dict[str, Any] = {
@@ -18152,7 +18763,8 @@ async def list_notifications(
     }
     if unread_only:
         query["$and"] = [{"$or": [{"read": False}, {"read": {"$exists": False}}]}, {"read_at": None}]
-    limit = max(1, min(int(limit or 20), 50))
+    limit = max(1, min(int(limit or 20), 100))
+    skip = max(0, int(page or 1) - 1) * limit
     unread_query: Dict[str, Any] = {
         "$or": [
             {"recipient_user_id": current_user["id"]},
@@ -18164,11 +18776,29 @@ async def list_notifications(
     notifications = await db.notifications.find(
         query,
         {"_id": 0, "user_id": 0},
-    ).sort("created_at", -1).to_list(limit)
+    ).sort("created_at", -1).skip(skip).to_list(limit)
     return NotificationListResponse(
         items=[NotificationRecord(**_sanitize_notification_doc(n)) for n in notifications],
         unread_count=unread_count,
     )
+
+
+@api_router.get("/notifications/unread-count")
+async def get_notification_unread_count(current_user: dict = Depends(get_current_user)):
+    cached = _notification_unread_count_cache.get(current_user["id"])
+    now_ts = time.time()
+    if cached and now_ts - cached[0] < 30:
+        return {"count": cached[1]}
+    unread_query: Dict[str, Any] = {
+        "$or": [
+            {"recipient_user_id": current_user["id"]},
+            {"user_id": current_user["id"]},
+        ],
+        "$and": [{"$or": [{"read": False}, {"read": {"$exists": False}}]}, {"read_at": None}],
+    }
+    count = await db.notifications.count_documents(unread_query)
+    _notification_unread_count_cache[current_user["id"]] = (now_ts, count)
+    return {"count": count}
 
 
 @api_router.post("/notifications/{notification_id}/read", response_model=NotificationRecord)
@@ -18191,6 +18821,7 @@ async def mark_notification_read(
     )
     if not result:
         raise HTTPException(status_code=404, detail="Notification not found")
+    _notification_unread_count_cache.pop(current_user["id"], None)
     return NotificationRecord(**_sanitize_notification_doc(result))
 
 
@@ -18207,7 +18838,96 @@ async def mark_all_notifications_read(current_user: dict = Depends(get_current_u
         },
         {"$set": {"read": True, "read_at": read_at}},
     )
+    _notification_unread_count_cache.pop(current_user["id"], None)
     return {"updated_count": result.modified_count, "read_at": read_at}
+
+
+@api_router.post("/notifications/mark-all-read")
+async def mark_all_notifications_read_alias(current_user: dict = Depends(get_current_user)):
+    return await mark_all_notifications_read(current_user=current_user)
+
+
+@api_router.delete("/notifications/{notification_id}")
+async def dismiss_notification(
+    notification_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    result = await db.notifications.delete_one(
+        {
+            "id": notification_id,
+            "$or": [
+                {"recipient_user_id": current_user["id"]},
+                {"user_id": current_user["id"]},
+            ],
+        }
+    )
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    _notification_unread_count_cache.pop(current_user["id"], None)
+    return {"deleted": True}
+
+
+def _default_notification_preferences(user_id: str) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "id": user_id,
+        "user_id": user_id,
+        "email_observation_complete": True,
+        "email_goal_added": True,
+        "email_recognition": True,
+        "email_conference_reminder": True,
+        "email_frequency": "immediate",
+        "created_at": now,
+        "updated_at": None,
+    }
+
+
+@api_router.get("/user/notification-preferences")
+async def get_notification_preferences(current_user: dict = Depends(get_current_user)):
+    prefs = await db.notification_preferences.find_one(
+        {"user_id": current_user["id"]},
+        {"_id": 0},
+    )
+    return prefs or _default_notification_preferences(current_user["id"])
+
+
+@api_router.patch("/user/notification-preferences")
+async def update_notification_preferences(
+    payload: NotificationPreferencesPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    frequency = (payload.email_frequency or "immediate").strip().lower()
+    if frequency not in {"immediate", "daily_digest", "off"}:
+        raise HTTPException(status_code=400, detail="Unsupported email frequency")
+    now = datetime.now(timezone.utc).isoformat()
+    update_doc = payload.dict()
+    update_doc["email_frequency"] = frequency
+    update_doc["updated_at"] = now
+    existing = await db.notification_preferences.find_one({"user_id": current_user["id"]}, {"_id": 0})
+    if not existing:
+        update_doc.update({"id": current_user["id"], "user_id": current_user["id"], "created_at": now})
+        await db.notification_preferences.insert_one(update_doc)
+    else:
+        await db.notification_preferences.update_one(
+            {"user_id": current_user["id"]},
+            {"$set": update_doc},
+        )
+    return await get_notification_preferences(current_user=current_user)
+
+
+@api_router.get("/admin/email-preview/{template_name}")
+async def preview_email_template(
+    template_name: str,
+    current_user: dict = Depends(get_current_user),
+):
+    if _get_user_tenant_role(current_user) != "super_admin":
+        raise HTTPException(status_code=403, detail="Master admin access required")
+    from app.services.notification_service import NotificationService
+
+    try:
+        return {"template_name": template_name, "html": NotificationService().preview(template_name)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown email template")
 
 
 # ==================== INTEGRATIONS ====================
@@ -20487,6 +21207,7 @@ async def _create_notification(
     workspace_id: Optional[str] = None,
     cta_url: Optional[str] = None,
     channel: str = "in_app",
+    emailed: bool = False,
 ) -> dict:
     now = datetime.now(timezone.utc).isoformat()
     recipient_user_id = recipient_user.get("id")
@@ -20501,11 +21222,14 @@ async def _create_notification(
         "teacher_id": teacher_id,
         "title": title,
         "message": message,
+        "body": message,
         "cta_url": cta_url,
+        "action_url": cta_url,
         "channel": channel,
         "status": "queued",
         "read": False,
         "read_at": None,
+        "emailed": emailed,
         "created_at": now,
     }
     await db.notifications.insert_one(doc)
@@ -20519,6 +21243,11 @@ def _sanitize_notification_doc(doc: dict) -> dict:
     clean["notification_type"] = notification_type
     clean["payload"] = clean.get("payload") or {}
     clean["read"] = bool(clean.get("read") or clean.get("read_at"))
+    clean["body"] = clean.get("body") or clean.get("message")
+    clean["message"] = clean.get("message") or clean.get("body")
+    clean["action_url"] = clean.get("action_url") or clean.get("cta_url")
+    clean["cta_url"] = clean.get("cta_url") or clean.get("action_url")
+    clean["emailed"] = bool(clean.get("emailed"))
     clean.setdefault("channel", "in_app")
     clean.setdefault("status", "queued")
     return clean

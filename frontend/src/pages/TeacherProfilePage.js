@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, useQueries } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { LayoutShell } from "@/components/LayoutShell";
 import { TalkTimeChart } from "@/components/TalkTimeChart";
@@ -10,7 +10,7 @@ import {
   SkeletonCard,
   SkeletonText,
 } from "@/components/ui";
-import { observationSessionApi, reportApi, teacherApi, traineeApi, videoApi } from "@/lib/api";
+import { actionPlanApi, observationSessionApi, reportApi, teacherApi, traineeApi, videoApi } from "@/lib/api";
 import { useAdminTeacherDeepDiveData } from "@/pages/teacher-deep-dive/useAdminTeacherDeepDiveData";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -70,6 +70,133 @@ function trainingReadinessLabel(value) {
   if (scaled >= 2.75) return "Ready for lead teaching";
   if (scaled >= 2) return "Developing readiness";
   return "Emerging readiness";
+}
+
+function AdminActionPlanTab({ teacherId }) {
+  const queryClient = useQueryClient();
+  const { data: plan } = useQuery({
+    queryKey: ["admin-action-plan", teacherId],
+    enabled: Boolean(teacherId),
+    queryFn: () => actionPlanApi.get(teacherId).then((res) => res.data),
+  });
+  const [newGoal, setNewGoal] = useState({ goal_text: "", recommended_action: "", priority: "medium", due_date: "" });
+  const goals = plan?.goals || [];
+  const updateMutation = useMutation({
+    mutationFn: (payload) => actionPlanApi.update(teacherId, payload).then((res) => res.data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin-action-plan", teacherId] });
+      toast.success("Action plan saved");
+    },
+  });
+  const completeMutation = useMutation({
+    mutationFn: ({ goalId, completion_note }) =>
+      actionPlanApi.completeGoal(teacherId, goalId, { completion_note }).then((res) => res.data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin-action-plan", teacherId] });
+      toast.success("Goal completed");
+    },
+  });
+
+  const addGoal = () => {
+    if (!newGoal.goal_text.trim()) return;
+    updateMutation.mutate({
+      goals: [...goals, { ...newGoal, status: "open" }],
+      admin_summary: plan?.admin_summary || "",
+    });
+    setNewGoal({ goal_text: "", recommended_action: "", priority: "medium", due_date: "" });
+  };
+
+  return (
+    <section className="rounded-xl border border-teal-200 bg-white p-5">
+      <SectionHeader
+        eyebrow="Shared plan"
+        title="Action Plan"
+        description="One shared document for admin goals, teacher notes, and completion decisions."
+      />
+      <label className="mt-4 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+        Admin summary
+        <textarea
+          rows={4}
+          defaultValue={plan?.admin_summary || ""}
+          onBlur={(event) => updateMutation.mutate({ goals, admin_summary: event.target.value })}
+          className="mt-2 w-full rounded-md border border-slate-200 px-3 py-2 text-sm normal-case tracking-normal text-slate-800"
+        />
+      </label>
+      <div className="mt-4 space-y-3">
+        {goals
+          .slice()
+          .sort((a, b) => ({ high: 0, medium: 1, low: 2 }[a.priority] ?? 3) - ({ high: 0, medium: 1, low: 2 }[b.priority] ?? 3))
+          .map((goal) => (
+            <div key={goal.id} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="font-semibold text-slate-900">{goal.goal_text}</div>
+                <span className="rounded-full bg-white px-2 py-1 text-xs font-semibold text-slate-600">{goal.status}</span>
+              </div>
+              <p className="mt-2 text-sm text-slate-700">{goal.recommended_action}</p>
+              <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-500">
+                <span>{goal.priority}</span>
+                {goal.due_date ? <span>Due {goal.due_date}</span> : null}
+                {goal.element_code ? <span>{goal.element_code} {goal.element_name}</span> : null}
+              </div>
+              {goal.teacher_notes ? (
+                <div className="mt-3 rounded-md bg-white px-3 py-2 text-xs text-slate-700">
+                  <span className="font-semibold">Teacher note: </span>{goal.teacher_notes}
+                </div>
+              ) : null}
+              {goal.status !== "completed" ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const note = window.prompt("Completion note", "");
+                    if (note) completeMutation.mutate({ goalId: goal.id, completion_note: note });
+                  }}
+                  className="mt-3 rounded-md bg-teal-600 px-3 py-1.5 text-xs font-semibold text-white"
+                >
+                  Mark complete
+                </button>
+              ) : null}
+            </div>
+          ))}
+      </div>
+      <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
+        <div className="text-sm font-semibold text-slate-900">Add goal</div>
+        <div className="mt-3 grid gap-3">
+          <input
+            value={newGoal.goal_text}
+            onChange={(event) => setNewGoal((goal) => ({ ...goal, goal_text: event.target.value }))}
+            placeholder="Goal text"
+            className="rounded-md border border-slate-200 px-3 py-2 text-sm"
+          />
+          <textarea
+            value={newGoal.recommended_action}
+            onChange={(event) => setNewGoal((goal) => ({ ...goal, recommended_action: event.target.value }))}
+            placeholder="Recommended action"
+            className="rounded-md border border-slate-200 px-3 py-2 text-sm"
+          />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <select
+              value={newGoal.priority}
+              onChange={(event) => setNewGoal((goal) => ({ ...goal, priority: event.target.value }))}
+              className="rounded-md border border-slate-200 px-3 py-2 text-sm"
+            >
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+            <input
+              type="date"
+              value={newGoal.due_date}
+              onChange={(event) => setNewGoal((goal) => ({ ...goal, due_date: event.target.value }))}
+              className="rounded-md border border-slate-200 px-3 py-2 text-sm"
+            />
+          </div>
+          <button type="button" onClick={addGoal} className="rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white">
+            Add goal
+          </button>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 export function TeacherProfilePage() {
@@ -672,6 +799,8 @@ export function TeacherProfilePage() {
                 </Panel>
               </div>
             </section>
+
+            <AdminActionPlanTab teacherId={teacherId} />
           </div>
 
           <div className="space-y-6 lg:col-span-4">
