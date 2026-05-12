@@ -92,6 +92,20 @@ export const adminApi = {
   revokeAccessUser: (userId, payload = {}) => api.post(`/api/admin/access-users/${userId}/revoke`, payload),
 };
 
+export const onboardingApi = {
+  status: () => api.get("/api/onboarding/status"),
+  complete: (payload = {}) => api.post("/api/onboarding/complete", payload),
+};
+
+export const consentApi = {
+  status: () => api.get("/api/consent/status"),
+  grant: (payload) => api.post("/api/consent/grant", payload),
+  withdraw: (payload) => api.post("/api/consent/withdraw", payload),
+  records: () => api.get("/api/consent/records"),
+  dataExport: () => api.get("/api/user/data-export", { responseType: "blob" }),
+  erase: () => api.post("/api/user/right-to-erasure"),
+};
+
 export const masterAdminApi = {
   bootstrap: () => api.get("/api/master-admin/bootstrap"),
   overview: () => api.get("/api/master-admin/overview"),

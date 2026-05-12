@@ -1,44 +1,63 @@
-import React from "react";
+import React, { Suspense, lazy } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "@/hooks/useAuth";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
 import { useAuth } from "@/hooks/useAuth";
 import { AuthPage } from "@/pages/AuthPage";
 import { DashboardPage } from "@/pages/DashboardPage";
-import { MasterAdminPage } from "@/pages/MasterAdminPage";
-import { MasterAdminUsersPage } from "@/pages/MasterAdminUsersPage";
-import { MasterAdminUserDetailPage } from "@/pages/MasterAdminUserDetailPage";
-import { MasterAdminOrganizationsPage } from "@/pages/MasterAdminOrganizationsPage";
-import { MasterAdminOrganizationDetailPage } from "@/pages/MasterAdminOrganizationDetailPage";
-import { MasterAdminAuthActivityPage } from "@/pages/MasterAdminAuthActivityPage";
-import { MasterAdminAuditPage } from "@/pages/MasterAdminAuditPage";
-import { MasterAdminWorkspacesPage } from "@/pages/MasterAdminWorkspacesPage";
-import { MasterAdminWorkspaceDetailPage } from "@/pages/MasterAdminWorkspaceDetailPage";
-import { MasterAdminVideosPage } from "@/pages/MasterAdminVideosPage";
-import { MasterAdminVideoDetailPage } from "@/pages/MasterAdminVideoDetailPage";
-import { MasterAdminStoragePage } from "@/pages/MasterAdminStoragePage";
-import { MasterAdminDependenciesPage } from "@/pages/MasterAdminDependenciesPage";
-import { MasterAdminAIQualityPage } from "@/pages/MasterAdminAIQualityPage";
-import { MasterAdminIncidentsPage } from "@/pages/MasterAdminIncidentsPage";
-import { MasterAdminSupportPage } from "@/pages/MasterAdminSupportPage";
-import { TeachersPage } from "@/pages/TeachersPage";
-import { VideosPage } from "@/pages/VideosPage";
-import { TeacherProfilePage } from "@/pages/TeacherProfilePage";
-import { TeacherLatestLessonPage } from "@/pages/TeacherLatestLessonPage";
-import { TeacherHistoryPage } from "@/pages/TeacherHistoryPage";
-import { TeacherOperationsPage } from "@/pages/TeacherOperationsPage";
-import { CoachingHubPage } from "@/pages/CoachingHubPage";
-import { MasterSchedulePage } from "@/pages/MasterSchedulePage";
-import { VideoPlayerPage } from "@/pages/VideoPlayerPage";
-import { FrameworksPage } from "@/pages/FrameworksPage";
-import { PrivacyReviewQueuePage } from "@/pages/PrivacyReviewQueuePage";
-import { RecognitionReviewPage } from "@/pages/RecognitionReviewPage";
-import { ExemplarLibraryPage } from "@/pages/ExemplarLibraryPage";
-import { OpsMetricsPage } from "@/pages/OpsMetricsPage";
-import { TeacherWorkspacePage } from "@/pages/TeacherWorkspacePage";
-import { ActionPlanRecordPage } from "@/pages/ActionPlanRecordPage";
-import { ReflectionRecordPage } from "@/pages/ReflectionRecordPage";
-import { getDefaultHomeRoute } from "@/lib/userRoutes";
+import { CookieConsentBanner } from "@/components/CookieConsentBanner";
+import { SkeletonTable } from "@/components/ui";
+import { getHomeRoute } from "@/lib/roleRouter";
+
+const lazyPage = (loader, exportName) => lazy(() => loader().then((mod) => ({ default: mod[exportName] })));
+const MasterAdminPage = lazyPage(() => import("@/pages/MasterAdminPage"), "MasterAdminPage");
+const MasterAdminUsersPage = lazyPage(() => import("@/pages/MasterAdminUsersPage"), "MasterAdminUsersPage");
+const MasterAdminUserDetailPage = lazyPage(() => import("@/pages/MasterAdminUserDetailPage"), "MasterAdminUserDetailPage");
+const MasterAdminOrganizationsPage = lazyPage(() => import("@/pages/MasterAdminOrganizationsPage"), "MasterAdminOrganizationsPage");
+const MasterAdminOrganizationDetailPage = lazyPage(() => import("@/pages/MasterAdminOrganizationDetailPage"), "MasterAdminOrganizationDetailPage");
+const MasterAdminAuthActivityPage = lazyPage(() => import("@/pages/MasterAdminAuthActivityPage"), "MasterAdminAuthActivityPage");
+const MasterAdminAuditPage = lazyPage(() => import("@/pages/MasterAdminAuditPage"), "MasterAdminAuditPage");
+const MasterAdminWorkspacesPage = lazyPage(() => import("@/pages/MasterAdminWorkspacesPage"), "MasterAdminWorkspacesPage");
+const MasterAdminWorkspaceDetailPage = lazyPage(() => import("@/pages/MasterAdminWorkspaceDetailPage"), "MasterAdminWorkspaceDetailPage");
+const MasterAdminVideosPage = lazyPage(() => import("@/pages/MasterAdminVideosPage"), "MasterAdminVideosPage");
+const MasterAdminVideoDetailPage = lazyPage(() => import("@/pages/MasterAdminVideoDetailPage"), "MasterAdminVideoDetailPage");
+const MasterAdminStoragePage = lazyPage(() => import("@/pages/MasterAdminStoragePage"), "MasterAdminStoragePage");
+const MasterAdminDependenciesPage = lazyPage(() => import("@/pages/MasterAdminDependenciesPage"), "MasterAdminDependenciesPage");
+const MasterAdminAIQualityPage = lazyPage(() => import("@/pages/MasterAdminAIQualityPage"), "MasterAdminAIQualityPage");
+const MasterAdminIncidentsPage = lazyPage(() => import("@/pages/MasterAdminIncidentsPage"), "MasterAdminIncidentsPage");
+const MasterAdminSupportPage = lazyPage(() => import("@/pages/MasterAdminSupportPage"), "MasterAdminSupportPage");
+const TeachersPage = lazyPage(() => import("@/pages/TeachersPage"), "TeachersPage");
+const VideosPage = lazyPage(() => import("@/pages/VideosPage"), "VideosPage");
+const TeacherProfilePage = lazyPage(() => import("@/pages/TeacherProfilePage"), "TeacherProfilePage");
+const TeacherLatestLessonPage = lazyPage(() => import("@/pages/TeacherLatestLessonPage"), "TeacherLatestLessonPage");
+const TeacherHistoryPage = lazyPage(() => import("@/pages/TeacherHistoryPage"), "TeacherHistoryPage");
+const TeacherOperationsPage = lazyPage(() => import("@/pages/TeacherOperationsPage"), "TeacherOperationsPage");
+const CoachingHubPage = lazyPage(() => import("@/pages/CoachingHubPage"), "CoachingHubPage");
+const CohortManagementPage = lazyPage(() => import("@/pages/CohortManagementPage"), "CohortManagementPage");
+const MasterSchedulePage = lazyPage(() => import("@/pages/MasterSchedulePage"), "MasterSchedulePage");
+const ObservationSetupPage = lazyPage(() => import("@/pages/ObservationSetupPage"), "ObservationSetupPage");
+const ObserverInsightsPage = lazyPage(() => import("@/pages/ObserverInsightsPage"), "ObserverInsightsPage");
+const ReportsPage = lazyPage(() => import("@/pages/ReportsPage"), "ReportsPage");
+const NotificationsPage = lazyPage(() => import("@/pages/NotificationsPage"), "NotificationsPage");
+const NotificationPreferencesPage = lazyPage(() => import("@/pages/NotificationPreferencesPage"), "NotificationPreferencesPage");
+const OnboardingPage = lazyPage(() => import("@/pages/OnboardingPage"), "OnboardingPage");
+const ConsentPage = lazyPage(() => import("@/pages/ConsentPage"), "ConsentPage");
+const TeacherPrivacyPage = lazyPage(() => import("@/pages/TeacherPrivacyPage"), "TeacherPrivacyPage");
+const VideoPlayerPage = lazyPage(() => import("@/pages/VideoPlayerPage"), "VideoPlayerPage");
+const VideoRecorderPage = lazyPage(() => import("@/pages/VideoRecorderPage"), "VideoRecorderPage");
+const FrameworksPage = lazyPage(() => import("@/pages/FrameworksPage"), "FrameworksPage");
+const PrivacyReviewQueuePage = lazyPage(() => import("@/pages/PrivacyReviewQueuePage"), "PrivacyReviewQueuePage");
+const RecognitionReviewPage = lazyPage(() => import("@/pages/RecognitionReviewPage"), "RecognitionReviewPage");
+const ExemplarLibraryPage = lazyPage(() => import("@/pages/ExemplarLibraryPage"), "ExemplarLibraryPage");
+const OpsMetricsPage = lazyPage(() => import("@/pages/OpsMetricsPage"), "OpsMetricsPage");
+const TeacherWorkspacePage = lazyPage(() => import("@/pages/TeacherWorkspacePage"), "TeacherWorkspacePage");
+const TeacherBadgesPage = lazyPage(() => import("@/pages/TeacherBadgesPage"), "TeacherBadgesPage");
+const ActionPlanRecordPage = lazyPage(() => import("@/pages/ActionPlanRecordPage"), "ActionPlanRecordPage");
+const ReflectionRecordPage = lazyPage(() => import("@/pages/ReflectionRecordPage"), "ReflectionRecordPage");
+
+function LazyRoute({ children }) {
+  return <Suspense fallback={<div className="p-6"><SkeletonTable rows={8} /></div>}>{children}</Suspense>;
+}
 
 function HomeRedirect() {
   const { user, initializing } = useAuth();
@@ -51,7 +70,7 @@ function HomeRedirect() {
     return <Navigate to="/login" replace />;
   }
 
-  return <Navigate to={getDefaultHomeRoute(user)} replace />;
+  return <Navigate to={getHomeRoute(user)} replace />;
 }
 
 function App() {
@@ -63,7 +82,7 @@ function App() {
           path="/master-admin"
           element={
             <ProtectedRoute superAdminOnly>
-              <MasterAdminPage />
+              <LazyRoute><MasterAdminPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -71,7 +90,7 @@ function App() {
           path="/master-admin/users"
           element={
             <ProtectedRoute superAdminOnly>
-              <MasterAdminUsersPage />
+              <LazyRoute><MasterAdminUsersPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -79,7 +98,7 @@ function App() {
           path="/master-admin/users/:userId"
           element={
             <ProtectedRoute superAdminOnly>
-              <MasterAdminUserDetailPage />
+              <LazyRoute><MasterAdminUserDetailPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -87,7 +106,7 @@ function App() {
           path="/master-admin/organizations"
           element={
             <ProtectedRoute superAdminOnly>
-              <MasterAdminOrganizationsPage />
+              <LazyRoute><MasterAdminOrganizationsPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -95,7 +114,7 @@ function App() {
           path="/master-admin/organizations/:organizationId"
           element={
             <ProtectedRoute superAdminOnly>
-              <MasterAdminOrganizationDetailPage />
+              <LazyRoute><MasterAdminOrganizationDetailPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -103,7 +122,7 @@ function App() {
           path="/master-admin/workspaces"
           element={
             <ProtectedRoute superAdminOnly>
-              <MasterAdminWorkspacesPage />
+              <LazyRoute><MasterAdminWorkspacesPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -111,7 +130,7 @@ function App() {
           path="/master-admin/workspaces/:ownerUserId"
           element={
             <ProtectedRoute superAdminOnly>
-              <MasterAdminWorkspaceDetailPage />
+              <LazyRoute><MasterAdminWorkspaceDetailPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -119,7 +138,7 @@ function App() {
           path="/master-admin/videos"
           element={
             <ProtectedRoute superAdminOnly>
-              <MasterAdminVideosPage />
+              <LazyRoute><MasterAdminVideosPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -127,7 +146,7 @@ function App() {
           path="/master-admin/videos/:videoId"
           element={
             <ProtectedRoute superAdminOnly>
-              <MasterAdminVideoDetailPage />
+              <LazyRoute><MasterAdminVideoDetailPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -135,7 +154,7 @@ function App() {
           path="/master-admin/storage"
           element={
             <ProtectedRoute superAdminOnly>
-              <MasterAdminStoragePage />
+              <LazyRoute><MasterAdminStoragePage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -143,7 +162,7 @@ function App() {
           path="/master-admin/dependencies"
           element={
             <ProtectedRoute superAdminOnly>
-              <MasterAdminDependenciesPage />
+              <LazyRoute><MasterAdminDependenciesPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -151,7 +170,7 @@ function App() {
           path="/master-admin/ai-quality"
           element={
             <ProtectedRoute superAdminOnly>
-              <MasterAdminAIQualityPage />
+              <LazyRoute><MasterAdminAIQualityPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -159,7 +178,7 @@ function App() {
           path="/master-admin/incidents"
           element={
             <ProtectedRoute superAdminOnly>
-              <MasterAdminIncidentsPage />
+              <LazyRoute><MasterAdminIncidentsPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -167,7 +186,7 @@ function App() {
           path="/master-admin/support"
           element={
             <ProtectedRoute superAdminOnly>
-              <MasterAdminSupportPage />
+              <LazyRoute><MasterAdminSupportPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -175,7 +194,7 @@ function App() {
           path="/master-admin/auth-activity"
           element={
             <ProtectedRoute superAdminOnly>
-              <MasterAdminAuthActivityPage />
+              <LazyRoute><MasterAdminAuthActivityPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -183,15 +202,15 @@ function App() {
           path="/master-admin/audit"
           element={
             <ProtectedRoute superAdminOnly>
-              <MasterAdminAuditPage />
+              <LazyRoute><MasterAdminAuditPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
         <Route
           path="/dashboard"
           element={
-            <ProtectedRoute allowedTenantRoles={["school_admin"]}>
-              <DashboardPage forcedWorkspaceMode="school" />
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
+              <DashboardPage />
             </ProtectedRoute>
           }
         />
@@ -199,7 +218,7 @@ function App() {
           path="/dashboard/training"
           element={
             <ProtectedRoute allowedTenantRoles={["training_admin"]}>
-              <DashboardPage forcedWorkspaceMode="training" />
+              <Navigate to="/dashboard" replace />
             </ProtectedRoute>
           }
         />
@@ -207,7 +226,15 @@ function App() {
           path="/teachers"
           element={
             <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
-              <TeachersPage />
+              <LazyRoute><TeachersPage /></LazyRoute>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/cohorts"
+          element={
+            <ProtectedRoute allowedTenantRoles={["training_admin"]}>
+              <LazyRoute><CohortManagementPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -215,7 +242,7 @@ function App() {
           path="/teachers/:teacherId"
           element={
             <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
-              <TeacherProfilePage />
+              <LazyRoute><TeacherProfilePage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -223,7 +250,15 @@ function App() {
           path="/teachers/:teacherId/latest-lesson"
           element={
             <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
-              <TeacherLatestLessonPage />
+              <LazyRoute><TeacherLatestLessonPage /></LazyRoute>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/coaching"
+          element={
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
+              <LazyRoute><CoachingHubPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -231,7 +266,7 @@ function App() {
           path="/teachers/:teacherId/coaching"
           element={
             <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
-              <CoachingHubPage />
+              <LazyRoute><CoachingHubPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -239,7 +274,7 @@ function App() {
           path="/teachers/:teacherId/history"
           element={
             <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
-              <TeacherHistoryPage />
+              <LazyRoute><TeacherHistoryPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -247,7 +282,7 @@ function App() {
           path="/teachers/:teacherId/operations"
           element={
             <ProtectedRoute allowedTenantRoles={["super_admin"]}>
-              <TeacherOperationsPage />
+              <LazyRoute><TeacherOperationsPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -255,7 +290,7 @@ function App() {
           path="/teachers/:teacherId/action-plan"
           element={
             <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
-              <ActionPlanRecordPage />
+              <LazyRoute><ActionPlanRecordPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -263,7 +298,7 @@ function App() {
           path="/teachers/:teacherId/reflections"
           element={
             <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
-              <ReflectionRecordPage />
+              <LazyRoute><ReflectionRecordPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -271,7 +306,15 @@ function App() {
           path="/my-workspace"
           element={
             <ProtectedRoute allowedTenantRoles={["teacher"]}>
-              <TeacherWorkspacePage />
+              <LazyRoute><TeacherWorkspacePage /></LazyRoute>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/my-badges"
+          element={
+            <ProtectedRoute allowedTenantRoles={["teacher"]}>
+              <LazyRoute><TeacherBadgesPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -279,7 +322,7 @@ function App() {
           path="/my-workspace/goals"
           element={
             <ProtectedRoute allowedTenantRoles={["teacher"]}>
-              <ActionPlanRecordPage />
+              <LazyRoute><ActionPlanRecordPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -287,7 +330,7 @@ function App() {
           path="/my-workspace/coaching"
           element={
             <ProtectedRoute allowedTenantRoles={["teacher"]}>
-              <CoachingHubPage />
+              <LazyRoute><CoachingHubPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -295,7 +338,7 @@ function App() {
           path="/my-workspace/reflections"
           element={
             <ProtectedRoute allowedTenantRoles={["teacher"]}>
-              <ReflectionRecordPage />
+              <LazyRoute><ReflectionRecordPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -303,7 +346,7 @@ function App() {
           path="/my-workspace/:section"
           element={
             <ProtectedRoute allowedTenantRoles={["teacher"]}>
-              <TeacherWorkspacePage />
+              <LazyRoute><TeacherWorkspacePage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -311,7 +354,7 @@ function App() {
           path="/videos"
           element={
             <ProtectedRoute allowedTenantRoles={["teacher", "school_admin", "training_admin"]}>
-              <VideosPage />
+              <LazyRoute><VideosPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -319,7 +362,7 @@ function App() {
           path="/videos/:videoId"
           element={
             <ProtectedRoute allowedTenantRoles={["teacher", "school_admin", "training_admin"]}>
-              <VideoPlayerPage />
+              <LazyRoute><VideoPlayerPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -327,7 +370,7 @@ function App() {
           path="/privacy-review"
           element={
             <ProtectedRoute allowedTenantRoles={["school_admin"]}>
-              <PrivacyReviewQueuePage />
+              <LazyRoute><PrivacyReviewQueuePage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -335,7 +378,7 @@ function App() {
           path="/recognition-review"
           element={
             <ProtectedRoute allowedTenantRoles={["school_admin"]}>
-              <RecognitionReviewPage />
+              <LazyRoute><RecognitionReviewPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -343,7 +386,31 @@ function App() {
           path="/ops/metrics"
           element={
             <ProtectedRoute allowedTenantRoles={["school_admin"]}>
-              <OpsMetricsPage />
+              <LazyRoute><OpsMetricsPage /></LazyRoute>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/reports"
+          element={
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
+              <LazyRoute><ReportsPage /></LazyRoute>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/notifications"
+          element={
+            <ProtectedRoute allowedTenantRoles={["teacher", "school_admin", "training_admin", "super_admin"]}>
+              <LazyRoute><NotificationsPage /></LazyRoute>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/settings/notifications"
+          element={
+            <ProtectedRoute allowedTenantRoles={["teacher", "school_admin", "training_admin", "super_admin"]}>
+              <LazyRoute><NotificationPreferencesPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -351,7 +418,7 @@ function App() {
           path="/all-star-library"
           element={
             <ProtectedRoute allowedTenantRoles={["teacher", "school_admin", "training_admin"]}>
-              <ExemplarLibraryPage />
+              <LazyRoute><ExemplarLibraryPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -359,7 +426,7 @@ function App() {
           path="/school-setup"
           element={
             <ProtectedRoute allowedTenantRoles={["school_admin"]}>
-              <FrameworksPage />
+              <LazyRoute><FrameworksPage /></LazyRoute>
             </ProtectedRoute>
           }
         />
@@ -367,8 +434,32 @@ function App() {
         <Route
           path="/master-schedule"
           element={
-            <ProtectedRoute allowedTenantRoles={["school_admin"]}>
-              <MasterSchedulePage />
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
+              <LazyRoute><MasterSchedulePage /></LazyRoute>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/my-insights"
+          element={
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin", "super_admin"]}>
+              <LazyRoute><ObserverInsightsPage /></LazyRoute>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/observation/new"
+          element={
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
+              <LazyRoute><ObservationSetupPage /></LazyRoute>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/record"
+          element={
+            <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
+              <LazyRoute><VideoRecorderPage /></LazyRoute>
             </ProtectedRoute>
           }
         />

@@ -1,125 +1,82 @@
-version: '3.8'
+version: "3.8"
 
 services:
-  # PostgreSQL Database
-  postgres:
-    image: postgres:15-alpine
-    container_name: cognivio-postgres
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: teacher_assessment
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+  mongo:
+    image: mongo:7.0
+    container_name: cognivio-mongo
     ports:
-      - "5432:5432"
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # Express API Server
-  server:
+  api:
     build:
-      context: ./server
+      context: ./backend
       dockerfile: Dockerfile
-    container_name: cognivio-server
+    container_name: cognivio-api
+    command: sh -c "VIDEO_WORKER_COUNT=0 VIDEO_TRANSCODE_WORKER_COUNT=0 PRIVACY_WORKER_COUNT=0 uvicorn server:app --host 0.0.0.0 --port 8000"
     environment:
-      NODE_ENV: production
-      PORT: 8000
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_NAME: teacher_assessment
-      DB_USER: postgres
-      DB_PASSWORD: postgres
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required and must be set in environment or .env}
-      JWT_EXPIRES_IN: 24h
-      CORS_ORIGIN: http://localhost:3000
+      MONGO_URL: mongodb://mongo:27017
+      DB_NAME: cognivio
+      VIDEO_WORKER_COUNT: "0"
+      VIDEO_TRANSCODE_WORKER_COUNT: "0"
+      PRIVACY_WORKER_COUNT: "0"
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      FRONTEND_URL: http://localhost:3000
+      CORS_ORIGINS: http://localhost:3000
     ports:
       - "8000:8000"
+    volumes:
+      - ./backend/uploads:/app/uploads
     depends_on:
-      postgres:
+      mongo:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8000/api/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
 
-  # React Frontend
-  client:
+  worker:
     build:
-      context: ./client
+      context: ./backend
       dockerfile: Dockerfile
-    container_name: cognivio-client
+    container_name: cognivio-video-worker
+    command: sh -c "VIDEO_WORKER_COUNT=3 python worker_entrypoint.py"
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      DB_NAME: cognivio
+      VIDEO_WORKER_COUNT: "3"
+      VIDEO_TRANSCODE_WORKER_COUNT: "1"
+      PRIVACY_WORKER_COUNT: "1"
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      FRONTEND_URL: http://localhost:3000
+      CORS_ORIGINS: http://localhost:3000
+    volumes:
+      - ./backend/uploads:/app/uploads
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: cognivio-frontend
     ports:
       - "3000:80"
     depends_on:
-      server:
-        condition: service_healthy
-
-  # Database migrations (one-time run)
-  migrate:
-    build:
-      context: ./server
-      dockerfile: Dockerfile
-    container_name: cognivio-migrate
-    environment:
-      NODE_ENV: production
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_NAME: teacher_assessment
-      DB_USER: postgres
-      DB_PASSWORD: postgres
-    command: npm run migrate
-    depends_on:
-      postgres:
-        condition: service_healthy
-    profiles:
-      - setup
-
-  # Database seeding (one-time run)
-  seed:
-    build:
-      context: ./server
-      dockerfile: Dockerfile
-    container_name: cognivio-seed
-    environment:
-      NODE_ENV: production
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_NAME: teacher_assessment
-      DB_USER: postgres
-      DB_PASSWORD: postgres
-    command: npm run seed
-    depends_on:
-      postgres:
-        condition: service_healthy
-    profiles:
-      - setup
-
-  # AI Stub Worker (run manually when needed)
-  worker:
-    build:
-      context: ./server
-      dockerfile: Dockerfile
-    container_name: cognivio-worker
-    environment:
-      NODE_ENV: production
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_NAME: teacher_assessment
-      DB_USER: postgres
-      DB_PASSWORD: postgres
-    command: npm run worker
-    depends_on:
-      postgres:
-        condition: service_healthy
-    profiles:
-      - worker
+      - api
 
 volumes:
-  postgres_data:
-
+  mongo_data:
