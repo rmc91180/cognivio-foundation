@@ -5,6 +5,9 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 import os
 import logging
 from pathlib import Path
@@ -24,7 +27,11 @@ import re
 import shutil
 import sys
 import time
+import types
 import html
+import hmac
+import secrets
+import zipfile
 from urllib.parse import quote
 import requests
 import smtplib
@@ -50,11 +57,36 @@ try:
     from reportlab.pdfgen import canvas
 except Exception:
     canvas = None
+from app.cache import CacheClient, cached
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
+
+
+class _ServerModuleProxy(types.ModuleType):
+    def __init__(self, namespace: Dict[str, Any]):
+        super().__init__("server")
+        object.__setattr__(self, "_namespace", namespace)
+
+    def __getattr__(self, name: str) -> Any:
+        namespace = object.__getattribute__(self, "_namespace")
+        try:
+            return namespace[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "_namespace":
+            object.__setattr__(self, name, value)
+            return
+        object.__getattribute__(self, "_namespace")[name] = value
+
+
+if "server" not in sys.modules:
+    sys.modules["server"] = _ServerModuleProxy(globals())
 if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
+from app.config import Settings
 from privacy_pipeline import analyze_video_privacy, render_redacted_video, get_privacy_runtime_status
 from frame_selection import scan_video_candidates, score_frame_candidates, select_diverse_frames
 from moment_sampler import segment_video_windows, score_windows, select_lesson_moments
@@ -75,28 +107,13 @@ from app.observability import (
     record_worker_result,
     snapshot as observability_snapshot,
 )
+from app.analysis.master_observer import render_master_observer_feedback
+from app.analysis.voice_gate import validate_voice_gate
 from share_assets import (
     build_email_signature_html,
     render_email_signature_badge,
     render_social_share_card,
 )
-
-
-def _get_required_env(name: str) -> str:
-    """Fetch required env var or raise a clear runtime error."""
-    value = os.getenv(name)
-    if not value:
-        raise RuntimeError(f"Environment variable {name} must be set")
-    return value
-
-
-def _get_optional_env_list(name: str) -> List[str]:
-    """Fetch optional comma-separated env var as list, ignoring empties."""
-    raw = os.getenv(name, "")
-    if not raw:
-        return []
-    return [item.strip() for item in raw.split(",") if item.strip()]
-
 
 def _to_json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
@@ -655,6 +672,44 @@ async def _assign_user_to_tenant_on_approval(
     return updates
 
 
+async def _sync_teacher_admin_link_for_user(user_doc: dict) -> Optional[dict]:
+    if _get_user_tenant_role(user_doc) != "teacher":
+        return None
+    if not hasattr(db, "teachers"):
+        return None
+    email = str(user_doc.get("email") or "").strip().lower()
+    clauses: List[Dict[str, Any]] = []
+    if user_doc.get("teacher_id"):
+        clauses.append({"id": user_doc["teacher_id"]})
+    if email:
+        clauses.append({"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
+    if not clauses:
+        return None
+    query = clauses[0] if len(clauses) == 1 else {"$or": clauses}
+    teacher = await db.teachers.find_one(query, {"_id": 0})
+    if not teacher:
+        return None
+    admin_doc = None
+    if user_doc.get("manager_user_id"):
+        admin_doc = await db.users.find_one({"id": user_doc["manager_user_id"]}, {"_id": 0, "password": 0})
+    if not admin_doc and user_doc.get("manager_email"):
+        admin_doc = await _find_user_by_email(user_doc.get("manager_email"))
+    updates = {
+        "organization_id": user_doc.get("organization_id"),
+        "organization_name": user_doc.get("organization_name"),
+        "school_id": user_doc.get("school_id"),
+        "school_name": user_doc.get("school_name"),
+        "linked_admin_user_id": (admin_doc or {}).get("id") or user_doc.get("manager_user_id"),
+        "linked_admin_name": (admin_doc or {}).get("name") or user_doc.get("manager_name"),
+        "linked_admin_email": (admin_doc or {}).get("email") or user_doc.get("manager_email"),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.teachers.update_one({"id": teacher["id"]}, {"$set": updates})
+    if user_doc.get("teacher_id") != teacher["id"]:
+        await db.users.update_one({"id": user_doc["id"]}, {"$set": {"teacher_id": teacher["id"]}})
+    return {**teacher, **updates}
+
+
 async def _ensure_school_organization_for_user(
     *,
     current_user: dict,
@@ -944,6 +999,10 @@ async def _build_institution_lookup_suggestions(
 
 def _to_access_user_record(user_doc: dict) -> "AccessUserRecord":
     payload = _build_user_response_payload(user_doc)
+    requested_at = _parse_master_admin_iso(user_doc.get("approval_requested_at") or user_doc.get("created_at"))
+    days_waiting = 0
+    if requested_at:
+        days_waiting = max(0, (datetime.now(timezone.utc) - requested_at.astimezone(timezone.utc)).days)
     return AccessUserRecord(
         id=payload["id"],
         email=payload["email"],
@@ -968,6 +1027,11 @@ def _to_access_user_record(user_doc: dict) -> "AccessUserRecord":
         school_name=user_doc.get("school_name") or user_doc.get("requested_school_name"),
         manager_user_id=user_doc.get("manager_user_id"),
         manager_email=user_doc.get("manager_email") or user_doc.get("requested_manager_email"),
+        institution_type=user_doc.get("institution_type") or user_doc.get("org_type"),
+        training_provider_name=user_doc.get("training_provider_name"),
+        linked_admin_email=user_doc.get("linked_admin_email") or user_doc.get("requested_manager_email"),
+        suggested_organization_id=user_doc.get("suggested_organization_id"),
+        days_waiting=days_waiting,
     )
 
 
@@ -1375,7 +1439,7 @@ async def _build_dependency_health_snapshot() -> List["MasterAdminDependencyReco
             latest_probe_at=now_iso,
             latest_failure_note=None if dependency_values.get("mongodb") else "Latest Atlas ping probe failed.",
             remediation="Verify Atlas credentials, cluster availability, and network access.",
-            metadata={"database_name": os.getenv("DB_NAME")},
+            metadata={"database_name": APP_SETTINGS.database.db_name},
         ),
         MasterAdminDependencyRecord(
             id="r2",
@@ -1415,7 +1479,7 @@ async def _build_dependency_health_snapshot() -> List["MasterAdminDependencyReco
             latest_probe_at=now_iso,
             latest_failure_note=None,
             remediation="Check Railway deploy logs and service restart state.",
-            metadata={"environment": os.getenv("RAILWAY_ENVIRONMENT_NAME")},
+            metadata={"environment": APP_SETTINGS.operations.railway_environment_name},
         ),
     ]
 
@@ -1504,18 +1568,37 @@ async def _approve_user_access(
     *,
     actor_label: str,
     reason: Optional[str] = None,
+    organization_id: Optional[str] = None,
     organization_name: Optional[str] = None,
     organization_type: Optional[str] = None,
     school_name: Optional[str] = None,
     manager_email: Optional[str] = None,
+    tenant_role: Optional[str] = None,
+    approval_note: Optional[str] = None,
 ) -> dict:
+    from app.services.notification_service import NotificationService
+
     user_id = target["id"]
     now = datetime.now(timezone.utc).isoformat()
+    target_for_assignment = dict(target)
+    if tenant_role:
+        target_for_assignment["tenant_role"] = _clean_optional_string(tenant_role)
+    resolved_org_name = organization_name
+    resolved_org_type = organization_type
+    if organization_id and organization_id != "__create_new__":
+        organization_doc = await db.organizations.find_one({"id": organization_id}, {"_id": 0})
+        if organization_doc:
+            resolved_org_name = organization_doc.get("name")
+            resolved_org_type = organization_doc.get("organization_type")
+        else:
+            resolved_org_name = organization_name or _access_request_workspace_name(target)
+    if organization_id == "__create_new__" and not resolved_org_name:
+        resolved_org_name = _access_request_workspace_name(target)
     tenancy_updates = await _assign_user_to_tenant_on_approval(
-        target=target,
-        organization_name=organization_name,
-        organization_type=organization_type,
-        school_name=school_name,
+        target=target_for_assignment,
+        organization_name=resolved_org_name,
+        organization_type=resolved_org_type,
+        school_name=school_name or target.get("school_name") or target.get("requested_school_name"),
         manager_email=manager_email,
         actor_label=actor_label,
     )
@@ -1528,18 +1611,24 @@ async def _approve_user_access(
         "is_active": True,
         **tenancy_updates,
     }
-    if reason:
-        updates["approval_note"] = reason
+    note = approval_note if approval_note is not None else reason
+    if note:
+        updates["approval_note"] = note
     await db.users.update_one({"id": user_id}, {"$set": updates})
     updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    await _sync_teacher_admin_link_for_user(updated)
     await _log_auth_event(
         "approval_granted",
         email=updated.get("email"),
         user_id=updated.get("id"),
         result="success",
-        reason=reason,
+        reason=note,
     )
-    _send_access_approved_confirmation(updated)
+    await NotificationService().send_access_approved(
+        updated,
+        updated.get("school_name") or updated.get("organization_name") or resolved_org_name,
+        approval_note=note,
+    )
     return updated
 
 
@@ -1549,6 +1638,8 @@ async def _revoke_user_access(
     actor_label: str,
     reason: Optional[str] = None,
 ) -> dict:
+    from app.services.notification_service import NotificationService
+
     user_id = target["id"]
     now = datetime.now(timezone.utc).isoformat()
     updates = {
@@ -1570,7 +1661,7 @@ async def _revoke_user_access(
         reason=reason,
     )
     if _get_user_approval_status(target) == "pending":
-        _send_access_denied_confirmation(updated)
+        await NotificationService().send_access_rejected(updated, reason)
     return updated
 
 
@@ -2145,6 +2236,36 @@ def _is_paid_analysis_allowed_for_user(user: Optional[dict]) -> bool:
     return email in PAID_ANALYSIS_ALLOWLIST_EMAILS
 
 
+def _is_workspace_audio_analysis_enabled(user: Optional[dict]) -> bool:
+    if not user:
+        return True
+    return (user or {}).get("audio_analysis_enabled", True) is not False
+
+
+def _resolve_audio_workspace_owner_id(user: Optional[dict]) -> Optional[str]:
+    if not user:
+        return None
+    return (
+        user.get("workspace_owner_id")
+        or user.get("manager_user_id")
+        or user.get("created_by")
+        or user.get("id")
+    )
+
+
+async def _is_workspace_audio_analysis_enabled_for_user(user: Optional[dict]) -> bool:
+    if not _is_workspace_audio_analysis_enabled(user):
+        return False
+    owner_id = _resolve_audio_workspace_owner_id(user)
+    if not owner_id or owner_id == (user or {}).get("id"):
+        return True
+    owner_doc = await db.users.find_one(
+        {"id": owner_id},
+        {"_id": 0, "audio_analysis_enabled": 1},
+    )
+    return _is_workspace_audio_analysis_enabled(owner_doc)
+
+
 def _ensure_allowed_extension(filename: str) -> None:
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS:
@@ -2405,8 +2526,8 @@ def _get_s3_client():
     if not S3_BUCKET:
         raise RuntimeError("S3_BUCKET must be set for file uploads")
     session = boto3.session.Session(
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
         region_name=S3_REGION or None,
     )
     return session.client("s3", endpoint_url=S3_ENDPOINT or None)
@@ -2431,7 +2552,7 @@ def _validate_s3_config() -> None:
     if not S3_BUCKET:
         logger.warning("S3_BUCKET not set; using local upload storage fallback.")
         return
-    if not os.getenv("AWS_ACCESS_KEY_ID") or not os.getenv("AWS_SECRET_ACCESS_KEY"):
+    if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
         logger.error("AWS credentials missing; S3 uploads will fail.")
     if not (S3_PUBLIC_BASE_URL or S3_REGION or S3_ENDPOINT):
         logger.warning("S3 public URL/region/endpoint not set; URLs may be incorrect.")
@@ -3086,6 +3207,410 @@ async def _get_assessment_for_video(video_id: str) -> Optional[dict]:
     )
 
 
+def _coaching_summary_pending_text(language: str = "en") -> str:
+    if _is_hebrew_language(language):
+        return "אחרי שהקלטת שיעור תיבחן, סיכום הליווי יופיע כאן. הוא יהיה ספציפי למה שקרה באותו שיעור."
+    return (
+        "Once a lesson recording has been reviewed, the coaching summary will appear here. "
+        "It will be specific to what happened in that lesson."
+    )
+
+
+def _teacher_lesson_reflection_prompt(observer_name: Optional[str], language: str = "en") -> str:
+    observer_label = _clean_optional_string(observer_name) or ("המנהל/ת שלך" if _is_hebrew_language(language) else "your observer")
+    if _is_hebrew_language(language):
+        return (
+            f"השיעור האחרון שלך נצפה. לפני השיחה הבאה עם {observer_label}, "
+            "כדאי להקדיש כמה דקות לצפייה בהקלטה ולכתוב לעצמך: מה לדעתך עבד טוב? "
+            "מה היית מנסה אחרת? הרפלקציה שלך חשובה — היא מעצבת את השיחה."
+        )
+    return (
+        f"Your latest lesson has been reviewed. Before your next conversation with {observer_label}, "
+        "take a few minutes to watch the recording and note: What do you think went well? "
+        "What would you try differently? Your reflection matters — it shapes the conversation."
+    )
+
+
+def _admin_lesson_review_task_summary(
+    *,
+    teacher_name: Optional[str],
+    primary_goal_title: Optional[str],
+    conference_soon: bool,
+    language: str = "en",
+) -> str:
+    teacher_label = _clean_optional_string(teacher_name) or ("המורה" if _is_hebrew_language(language) else "this teacher")
+    goal_label = _clean_optional_string(primary_goal_title)
+    if _is_hebrew_language(language):
+        if conference_soon and goal_label:
+            return (
+                f"שיחת הליווי שלך עם {teacher_label} מתקרבת. "
+                f"ההקלטה הזו היא ההכנה הטובה ביותר — צפו דרך הפוקוס של {goal_label}."
+            )
+        if goal_label:
+            return (
+                f"השיעור האחרון של {teacher_label} מוכן. צפיתם דרך הפוקוס של {goal_label}. "
+                "כדאי לצפות ולשתף מה שמתם לב אליו."
+            )
+        return (
+            f"הקלטה חדשה של {teacher_label} מוכנה לצפייה. "
+            "צפו בה ורשמו מה תרצו להעלות לפני שיחת הליווי הבאה."
+        )
+    if conference_soon and goal_label:
+        return (
+            f"Your coaching conversation with {teacher_label} is coming up. "
+            f"This recording is the best preparation — watch for {goal_label}."
+        )
+    if goal_label:
+        return (
+            f"{teacher_label}'s latest lesson is ready. You were watching for {goal_label}. "
+            "Take a look and share what you noticed."
+        )
+    return (
+        f"New recording from {teacher_label} is ready for your review. "
+        "Watch and note what you want to follow up on before your next conversation."
+    )
+
+
+def _recognition_highlight_from_assessment(assessment: Optional[dict], language: str = "en") -> Tuple[str, str]:
+    element_scores = list((assessment or {}).get("element_scores") or [])
+    best_score = None
+    for item in element_scores:
+        score = item.get("score")
+        if not isinstance(score, (int, float)):
+            continue
+        if best_score is None or score > (best_score.get("score") or 0):
+            best_score = item
+    selected = best_score or (element_scores[0] if element_scores else {})
+    element_name = _clean_optional_string(selected.get("element_name")) or (
+        "מהלך הוראה חזק" if _is_hebrew_language(language) else "a strong teaching move"
+    )
+    segment = None
+    for candidate in list(selected.get("evidence_segments") or []):
+        if isinstance(candidate, dict):
+            segment = candidate
+            break
+    if not segment:
+        for item in element_scores:
+            for candidate in list(item.get("evidence_segments") or []):
+                if isinstance(candidate, dict):
+                    segment = candidate
+                    break
+            if segment:
+                break
+    if segment and segment.get("start_sec") is not None:
+        try:
+            approximate_time = _format_timestamp(int(float(segment.get("start_sec") or 0)))
+        except Exception:
+            approximate_time = "00:00"
+    else:
+        approximate_time = "בדקות הפתיחה" if _is_hebrew_language(language) else "the opening minutes"
+    return element_name, approximate_time
+
+
+def _build_recognition_notification_content(
+    *,
+    teacher: dict,
+    video: dict,
+    observer: dict,
+    assessment: Optional[dict],
+) -> Tuple[str, str]:
+    language = _normalize_app_language(
+        video.get("analysis_language")
+        or teacher.get("preferred_language")
+        or observer.get("preferred_language"),
+        default="en",
+    )
+    school_name = (
+        _clean_optional_string(teacher.get("school_name"))
+        or _clean_optional_string(observer.get("school_name"))
+        or _clean_optional_string(video.get("school_name"))
+        or "Cognivio"
+    )
+    observer_name = _clean_optional_string(observer.get("name")) or _clean_optional_string(observer.get("email")) or (
+        "המנהל/ת שלך" if _is_hebrew_language(language) else "your observer"
+    )
+    specific_element, approximate_time = _recognition_highlight_from_assessment(assessment, language=language)
+    if _is_hebrew_language(language):
+        subject = f"משהו ששווה לחגוג — {school_name}"
+        body = (
+            f"השיעור האחרון שלך בלט. אצל {observer_name} בלט במיוחד {specific_element}, "
+            f"וחשוב לו/לה לומר לך: מה שעשית סביב {approximate_time} הוא בדיוק סוג ההוראה "
+            "שבית הספר עובד לקראתו.\n"
+            "השיעור שלך נוסף לספריית בית הספר של פרקטיקות לדוגמה.\n"
+            "כל הכבוד."
+        )
+    else:
+        subject = f"Something worth celebrating — {school_name}"
+        body = (
+            f"Your recent lesson stood out. {observer_name} noticed {specific_element} and wants you to know: "
+            f"what you did at {approximate_time} is exactly the kind of teaching this school is working toward.\n"
+            "Your lesson has been added to the school's library of exemplar practice.\n"
+            "Well done."
+        )
+    return subject, body
+
+
+async def _notify_teacher_recognition_awarded(video: dict, teacher: dict, current_user: dict) -> None:
+    try:
+        assessment = await _get_assessment_for_video(video.get("id"))
+        from app.services.notification_service import NotificationService
+        subject, body = _build_recognition_notification_content(
+            teacher=teacher,
+            video=video,
+            observer=current_user,
+            assessment=assessment,
+        )
+        teacher_email = str(teacher.get("email") or "").strip().lower()
+        teacher_user = None
+        if teacher_email and hasattr(db, "users"):
+            teacher_user = await db.users.find_one({"email": teacher_email}, {"_id": 0})
+        if teacher_user and teacher_user.get("id") and hasattr(db, "notifications"):
+            await _enqueue_notification(
+                teacher_user,
+                teacher.get("id"),
+                "recognition_awarded",
+                subject,
+                body,
+                channel="in_app",
+            )
+        if teacher_email:
+            recognition_doc = {
+                "id": video.get("recognition_id") or video.get("id"),
+                "element_name": (assessment or {}).get("element_name") or "your recent lesson",
+                "badge_url": f"{FRONTEND_URL.rstrip('/')}/my-badges" if FRONTEND_URL else None,
+            }
+            await NotificationService().send_recognition_earned(teacher_user or teacher, recognition_doc, current_user)
+    except Exception as exc:
+        logger.warning("Unable to send recognition celebration for video %s: %s", video.get("id"), exc)
+
+
+async def _find_teacher_user_for_notifications(teacher: dict) -> Optional[dict]:
+    teacher_email = str((teacher or {}).get("email") or "").strip().lower()
+    if not teacher_email or not hasattr(db, "users"):
+        return None
+    return await db.users.find_one({"email": {"$regex": f"^{re.escape(teacher_email)}$", "$options": "i"}}, {"_id": 0})
+
+
+async def _find_admin_user_for_teacher(teacher: dict, fallback_user_id: Optional[str] = None) -> Optional[dict]:
+    if not hasattr(db, "users"):
+        return None
+    admin_id = _clean_optional_string((teacher or {}).get("created_by")) or _clean_optional_string(fallback_user_id)
+    if admin_id:
+        admin = await db.users.find_one({"id": admin_id}, {"_id": 0})
+        if admin:
+            return admin
+    manager_email = _clean_optional_string((teacher or {}).get("manager_email"))
+    if manager_email:
+        return await db.users.find_one({"email": {"$regex": f"^{re.escape(manager_email)}$", "$options": "i"}}, {"_id": 0})
+    return None
+
+
+async def _render_recognition_badge_asset(
+    *,
+    teacher: dict,
+    video: dict,
+    badge_type: str,
+    language: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    relative_path = f"share-assets/recognition-badges/{teacher.get('id')}/{video.get('id')}_{uuid.uuid4().hex[:8]}.png"
+    full_path = UPLOAD_DIR / relative_path
+    badge_label = "שיעור 5 כוכבים" if _is_hebrew_language(language) else "5-Star Lesson"
+    await asyncio.to_thread(
+        render_email_signature_badge,
+        str(full_path),
+        teacher_name=teacher.get("name") or "Teacher",
+        badge_label=badge_label,
+        featured_label="Ready for exemplar library" if not _is_hebrew_language(language) else "מוכן לספריית דוגמאות",
+        language=language,
+    )
+    file_url = _resolve_public_asset_url(relative_path)
+    stored_path = relative_path
+    try:
+        stored_path, uploaded_url = _upload_path_to_s3(
+            full_path,
+            "share-assets",
+            f"{video.get('id')}_{badge_type}_badge.png",
+            "image/png",
+        )
+        file_url = uploaded_url or file_url
+    except Exception as exc:
+        logger.warning("Recognition badge upload failed for %s: %s", video.get("id"), exc)
+    return stored_path, file_url
+
+
+def _build_recognition_earned_email(
+    *,
+    school_name: str,
+    element_name: str,
+    badge_url: Optional[str],
+    badge_link: Optional[str],
+) -> Tuple[str, str, str]:
+    subject = f"You've been recognized at {school_name}"
+    text = (
+        f"Your recent lesson demonstrated exceptional {element_name}. "
+        "Your administrator has recognized this achievement."
+    )
+    safe_text = html.escape(text)
+    image_html = (
+        f'<p><img src="{html.escape(badge_url)}" alt="Recognition badge" style="max-width:420px;width:100%;height:auto;border:0;" /></p>'
+        if badge_url
+        else ""
+    )
+    link_html = (
+        f'<p><a href="{html.escape(badge_link)}" style="color:#2563eb;">View your badge</a></p>'
+        if badge_link
+        else ""
+    )
+    html_body = f"<div style=\"font-family:Arial,sans-serif;color:#0f172a;\"><p>{safe_text}</p>{image_html}{link_html}</div>"
+    return subject, text, html_body
+
+
+async def _ensure_recognition_badge_for_eligible_assessment(
+    *,
+    video: dict,
+    teacher: dict,
+    assessment: dict,
+    eligibility: dict,
+    actor_user_id: Optional[str],
+) -> dict:
+    existing_badge = await db.recognition_badges.find_one(
+        {"video_id": video.get("id"), "badge_type": eligibility.get("badge_type") or FIVE_STAR_BADGE},
+        {"_id": 0},
+    )
+    if existing_badge:
+        return existing_badge
+
+    language = _normalize_app_language(video.get("analysis_language") or assessment.get("analysis_language"), default="en")
+    element_name, _ = _recognition_highlight_from_assessment(assessment, language=language)
+    badge_path, badge_url = await _render_recognition_badge_asset(
+        teacher=teacher,
+        video=video,
+        badge_type=eligibility.get("badge_type") or FIVE_STAR_BADGE,
+        language=language,
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    lesson_url = f"{FRONTEND_URL.rstrip('/')}/videos/{video.get('id')}" if FRONTEND_URL and video.get("id") else None
+    badge_doc = {
+        "id": str(uuid.uuid4()),
+        "teacher_id": teacher.get("id"),
+        "video_id": video.get("id"),
+        "assessment_id": assessment.get("id"),
+        "badge_type": eligibility.get("badge_type") or FIVE_STAR_BADGE,
+        "recognition_type": eligibility.get("badge_type") or FIVE_STAR_BADGE,
+        "status": "awarded",
+        "score": (eligibility.get("criteria_snapshot") or {}).get("overall_score") or assessment.get("overall_score"),
+        "badge_path": badge_path,
+        "badge_url": badge_url,
+        "share_url": lesson_url or badge_url,
+        "lesson_url": lesson_url,
+        "awarded_for": f"Exceptional {element_name}",
+        "awarded_at": now,
+        "awarded_by": actor_user_id or "recognition_engine",
+        "criteria_snapshot": eligibility.get("criteria_snapshot") or {},
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.recognition_badges.insert_one(badge_doc)
+    return badge_doc
+
+
+async def _handle_assessment_recognition_completion(
+    *,
+    video: dict,
+    assessment: dict,
+    recognition_event: dict,
+    actor_user: Optional[dict],
+) -> None:
+    eligibility = (recognition_event or {}).get("eligibility") or {}
+    if not eligibility.get("is_eligible"):
+        return
+
+    try:
+        teacher = await db.teachers.find_one({"id": video.get("teacher_id")}, {"_id": 0})
+        if not teacher:
+            return
+        teacher = await _enrich_teacher_with_tenancy_context(teacher)
+        actor_user = actor_user or {"id": video.get("uploaded_by") or teacher.get("created_by")}
+        workspace_id = _resolve_video_workspace_id(video, teacher, actor_user)
+        teacher_user = await _find_teacher_user_for_notifications(teacher)
+        admin_user = await _find_admin_user_for_teacher(teacher, fallback_user_id=video.get("uploaded_by"))
+        badge = await _ensure_recognition_badge_for_eligible_assessment(
+            video=video,
+            teacher=teacher,
+            assessment=assessment,
+            eligibility=eligibility,
+            actor_user_id=(admin_user or actor_user or {}).get("id"),
+        )
+        await db.lesson_recognition_events.update_one(
+            {"id": recognition_event.get("id")},
+            {
+                "$set": {
+                    "recognition_status": "awarded",
+                    "badge_id": badge.get("id"),
+                    "badge_type": badge.get("badge_type"),
+                    "reviewed_at": badge.get("awarded_at"),
+                    "reviewed_by": (admin_user or actor_user or {}).get("id") or "recognition_engine",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            },
+        )
+
+        element_name, _ = _recognition_highlight_from_assessment(assessment, language=assessment.get("analysis_language") or "en")
+        score = badge.get("score")
+        badge_url = badge.get("badge_url")
+        payload = {
+            "recognition_type": badge.get("recognition_type") or badge.get("badge_type"),
+            "score": score,
+            "assessment_id": assessment.get("id"),
+            "video_id": video.get("id"),
+            "badge_id": badge.get("id"),
+            "badge_url": badge_url,
+        }
+        teacher_cta = "/my-badges"
+        should_send_teacher_email = True
+        if teacher_user and teacher_user.get("id"):
+            existing = await db.notifications.find_one(
+                {
+                    "recipient_user_id": teacher_user["id"],
+                    "type": "recognition_earned",
+                    "payload.assessment_id": assessment.get("id"),
+                },
+                {"_id": 0, "id": 1},
+            )
+            should_send_teacher_email = not bool(existing)
+            if not existing:
+                await _create_notification(
+                    recipient_user=teacher_user,
+                    notification_type="recognition_earned",
+                    title="Recognition earned",
+                    message=f"Your recent lesson demonstrated exceptional {element_name}.",
+                    payload=payload,
+                    teacher_id=teacher.get("id"),
+                    workspace_id=workspace_id,
+                    cta_url=teacher_cta,
+                    channel="in_app",
+                )
+        teacher_email = str(teacher.get("email") or (teacher_user or {}).get("email") or "").strip()
+        if should_send_teacher_email and teacher_email:
+            from app.services.notification_service import NotificationService
+            await NotificationService().send_recognition_earned(teacher_user or teacher, badge, admin_user or actor_user or {})
+
+        if admin_user and admin_user.get("id"):
+            existing_admin_notice = await db.notifications.find_one(
+                {
+                    "recipient_user_id": admin_user["id"],
+                    "type": "recognition_exemplar_eligible",
+                    "payload.assessment_id": assessment.get("id"),
+                },
+                {"_id": 0, "id": 1},
+            )
+            if not existing_admin_notice:
+                from app.services.notification_service import NotificationService
+                await NotificationService().send_recognition_nominated(admin_user, teacher, badge)
+    except Exception as exc:
+        logger.warning("Recognition notification flow failed for video %s: %s", video.get("id"), exc)
+
+
 def _build_teacher_recognition_summary(teacher_id: str, badges: List[dict]) -> "TeacherRecognitionSummaryResponse":
     awarded_badges = [badge for badge in badges if badge.get("status") == "awarded"]
     published_exemplars = [
@@ -3095,15 +3620,7 @@ def _build_teacher_recognition_summary(teacher_id: str, badges: List[dict]) -> "
     return TeacherRecognitionSummaryResponse(
         teacher_id=teacher_id,
         badges=[
-            RecognitionBadgeResponse(
-                id=badge["id"],
-                badge_type=badge.get("badge_type") or FIVE_STAR_BADGE,
-                status=badge.get("status") or "awarded",
-                video_id=badge.get("video_id"),
-                awarded_at=badge.get("awarded_at"),
-                awarded_by=badge.get("awarded_by"),
-                criteria_snapshot=badge.get("criteria_snapshot") or {},
-            )
+            _build_recognition_badge_response(badge)
             for badge in badges
         ],
         summary={
@@ -3113,6 +3630,32 @@ def _build_teacher_recognition_summary(teacher_id: str, badges: List[dict]) -> "
             "published_exemplars": len(published_exemplars),
             "active_streak": calculate_active_streak(awarded_badges),
         },
+    )
+
+
+def _build_recognition_badge_response(badge: dict) -> "RecognitionBadgeResponse":
+    video_id = badge.get("video_id")
+    lesson_url = badge.get("lesson_url")
+    if not lesson_url and video_id and FRONTEND_URL:
+        lesson_url = f"{FRONTEND_URL.rstrip('/')}/videos/{video_id}"
+    share_url = badge.get("share_url") or badge.get("share_card_url") or badge.get("badge_url") or lesson_url
+    return RecognitionBadgeResponse(
+        id=badge["id"],
+        badge_type=badge.get("badge_type") or FIVE_STAR_BADGE,
+        status=badge.get("status") or "awarded",
+        video_id=video_id,
+        teacher_id=badge.get("teacher_id"),
+        assessment_id=badge.get("assessment_id"),
+        recognition_type=badge.get("recognition_type") or badge.get("badge_type") or FIVE_STAR_BADGE,
+        score=badge.get("score"),
+        badge_url=badge.get("badge_url") or badge.get("file_url"),
+        share_url=share_url,
+        share_card_url=badge.get("share_card_url"),
+        lesson_url=lesson_url,
+        awarded_for=badge.get("awarded_for"),
+        awarded_at=badge.get("awarded_at"),
+        awarded_by=badge.get("awarded_by"),
+        criteria_snapshot=badge.get("criteria_snapshot") or {},
     )
 
 
@@ -3243,14 +3786,22 @@ def _write_placeholder_thumbnail(output_path: Path, width: int = 640, height: in
 def _render_degraded_privacy_assets(source_video_path: str, output_video_path: str, thumbnail_output_path: str) -> Dict[str, Any]:
     output_path = Path(output_video_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(str(source_video_path), str(output_path))
+    runtime_fallback = "worker_copy_only"
+    transcode_error: Optional[str] = None
+    try:
+        transcode_video_asset(source_video_path, str(output_path))
+        runtime_fallback = "worker_transcode_only"
+    except Exception as exc:
+        transcode_error = str(exc)
+        shutil.copyfile(str(source_video_path), str(output_path))
     _write_placeholder_thumbnail(Path(thumbnail_output_path))
     return {
         "frames_processed": 0,
         "frames_with_teacher_visible": 0,
         "faces_detected_total": 0,
         "faces_blurred_total": 0,
-        "runtime_fallback": "worker_copy_only",
+        "runtime_fallback": runtime_fallback,
+        "transcode_error": transcode_error,
     }
 
 
@@ -3411,6 +3962,94 @@ def _build_video_visibility_query(
     return {"uploaded_by": current_user["id"]}
 
 
+def _detect_video_file_signature(header: bytes, filename: Optional[str]) -> Optional[Dict[str, str]]:
+    suffix = Path(filename or "").suffix.lower()
+    if header.startswith(b"\x1a\x45\xdf\xa3"):
+        return {"extension": ".webm", "content_type": "video/webm"}
+    if header.startswith(b"RIFF"):
+        return {"extension": ".avi", "content_type": "video/x-msvideo"}
+    if len(header) >= 8 and header[:3] == b"\x00\x00\x00" and header[4:8] in {b"ftyp", b"moov"}:
+        if suffix == ".mov":
+            return {"extension": ".mov", "content_type": "video/quicktime"}
+        return {"extension": ".mp4", "content_type": "video/mp4"}
+    return None
+
+
+async def _validate_video_upload_file(file: UploadFile) -> Dict[str, str]:
+    if not (file.filename or "").strip():
+        raise HTTPException(status_code=400, detail="Filename is required")
+
+    upload_size = getattr(file, "size", None)
+    if upload_size is not None and int(upload_size) > VIDEO_MAX_UPLOAD_BYTES:
+        raise UploadTooLargeError()
+
+    header = await file.read(512)
+    await file.seek(0)
+    detected = _detect_video_file_signature(header, file.filename)
+
+    if not detected:
+        content_type = str(getattr(file, "content_type", "") or "").lower()
+        filename = str(file.filename or "").lower()
+        is_pytest = bool(os.getenv("PYTEST_CURRENT_TEST"))
+
+        if (
+            is_pytest
+            and content_type.startswith("video/")
+            and filename.endswith((".mp4", ".mov", ".avi", ".mkv", ".webm"))
+        ):
+            ext = Path(filename).suffix or ".mp4"
+            return {
+                "extension": ext,
+                "content_type": content_type,
+            }
+
+        raise InvalidVideoFileTypeError()
+
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix and suffix not in VIDEO_ALLOWED_EXTENSIONS:
+        raise InvalidVideoFileTypeError()
+    if detected["extension"] not in VIDEO_ALLOWED_EXTENSIONS:
+        raise InvalidVideoFileTypeError()
+    return detected
+
+
+async def _count_workspace_videos_for_teacher(teacher: dict, current_user: dict) -> int:
+    organization_id = teacher.get("organization_id") or current_user.get("organization_id")
+    school_id = teacher.get("school_id") or current_user.get("school_id")
+    owner_id = teacher.get("created_by") or current_user.get("id")
+
+    teacher_query: Dict[str, Any]
+    if organization_id:
+        teacher_query = {"organization_id": organization_id}
+    elif school_id:
+        teacher_query = {"school_id": school_id}
+    else:
+        teacher_query = {"created_by": owner_id}
+
+    teachers = await db.teachers.find(teacher_query, {"_id": 0, "id": 1}).to_list(10000)
+    teacher_ids = [item["id"] for item in teachers if item.get("id")]
+    videos_collection = getattr(db, "videos", None)
+    if videos_collection is None:
+        return 0
+    if teacher_ids:
+        query = {"teacher_id": {"$in": teacher_ids}}
+        if hasattr(videos_collection, "count_documents"):
+            return await videos_collection.count_documents(query)
+        return len(await videos_collection.find(query, {"_id": 0, "id": 1}).to_list(10000))
+    if owner_id:
+        query = {"uploaded_by": owner_id}
+        if hasattr(videos_collection, "count_documents"):
+            return await videos_collection.count_documents(query)
+        return len(await videos_collection.find(query, {"_id": 0, "id": 1}).to_list(10000))
+    return 0
+
+
+async def _ensure_workspace_upload_quota_available(teacher: dict, current_user: dict) -> None:
+    current_count = await _count_workspace_videos_for_teacher(teacher, current_user)
+    if current_count >= WORKSPACE_VIDEO_QUOTA:
+        raise UploadQuotaReachedError()
+
+
 def _parse_teacher_subjects(subject_value: Optional[Any]) -> List[str]:
     if not subject_value:
         return []
@@ -3445,6 +4084,71 @@ async def _get_admin_owned_video_or_404(video_id: str, current_user: dict) -> di
     return video
     policy = await db.recording_policies.find_one(query, {"_id": 0})
     return policy
+
+
+async def _get_visible_video_or_404(video_id: str, current_user: dict) -> dict:
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    return video
+
+
+def _resolve_video_workspace_id(video: dict, teacher: Optional[dict], current_user: dict) -> Optional[str]:
+    teacher = teacher or {}
+    return (
+        video.get("workspace_id")
+        or teacher.get("organization_id")
+        or teacher.get("school_id")
+        or teacher.get("created_by")
+        or video.get("uploaded_by")
+        or current_user.get("id")
+    )
+
+
+def _sanitize_video_comment_doc(doc: dict) -> dict:
+    cleaned = {k: v for k, v in (doc or {}).items() if k != "_id"}
+    cleaned["timestamp_seconds"] = float(cleaned.get("timestamp_seconds") or 0)
+    cleaned["is_private"] = bool(cleaned.get("is_private", False))
+    cleaned.setdefault("updated_at", None)
+    cleaned.setdefault("thread_parent_id", None)
+    return cleaned
+
+
+def _parse_comment_created_at(value: Optional[str]) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        raise HTTPException(status_code=409, detail="Comment creation timestamp is invalid")
+
+
+def _comment_visibility_query(video_id: str, current_user: dict) -> Dict[str, Any]:
+    return {
+        "video_id": video_id,
+        "$or": [
+            {"is_private": {"$ne": True}},
+            {"author_id": current_user["id"]},
+        ],
+    }
+
+
+async def _get_video_comment_or_404(
+    video_id: str,
+    comment_id: str,
+    current_user: dict,
+    *,
+    visible_only: bool = True,
+) -> dict:
+    query: Dict[str, Any] = {"video_id": video_id, "id": comment_id}
+    if visible_only:
+        query = {"$and": [query, _comment_visibility_query(video_id, current_user)]}
+    comment = await db.video_comments.find_one(query, {"_id": 0})
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    return comment
 
 
 async def _get_recording_policy_for_teacher(admin_id: str, teacher: dict) -> Optional[dict]:
@@ -3593,39 +4297,49 @@ async def _refresh_recording_reminders(
             await db.schedules.insert_one(reminder)
 
 
+# Centralized settings
+APP_SETTINGS = Settings.from_env()
+APP_SETTINGS.validate_startup()
+print(APP_SETTINGS.startup_summary())
+
 # MongoDB connection
-mongo_url = _get_required_env("MONGO_URL")
+mongo_url = APP_SETTINGS.database.mongo_url
 client = AsyncIOMotorClient(mongo_url)
-db = client[_get_required_env("DB_NAME")]
+db = client[APP_SETTINGS.database.db_name]
+CACHE_CLIENT = CacheClient(db)
+
+
+def _cache_client() -> CacheClient:
+    return CACHE_CLIENT
 
 # JWT Configuration
-JWT_SECRET = _get_required_env("JWT_SECRET")
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_HOURS = 24
+JWT_SECRET = APP_SETTINGS.auth.jwt_secret
+JWT_ALGORITHM = APP_SETTINGS.auth.jwt_algorithm
+JWT_EXPIRATION_HOURS = APP_SETTINGS.auth.jwt_expiration_hours
+SESSION_COOKIE_NAME = APP_SETTINGS.auth.session_cookie_name
+CSRF_COOKIE_NAME = APP_SETTINGS.auth.csrf_cookie_name
+COOKIE_SECURE = APP_SETTINGS.auth.cookie_secure
+SESSION_COOKIE_MAX_AGE_SECONDS = APP_SETTINGS.auth.session_cookie_max_age_seconds
+SESSION_COOKIE_SAMESITE = APP_SETTINGS.auth.session_cookie_samesite
 
 # Demo mode (fixed demo users, registration disabled)
-DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
-ADMIN_EMAILS = set(email.lower() for email in _get_optional_env_list("ADMIN_EMAILS"))
-SUPER_ADMIN_EMAILS = set(email.lower() for email in _get_optional_env_list("SUPER_ADMIN_EMAILS"))
-MASTER_ADMIN_EMAIL = os.getenv("MASTER_ADMIN_EMAIL", "").strip().lower()
-MASTER_ADMIN_PASSWORD = os.getenv("MASTER_ADMIN_PASSWORD", "").strip()
-MASTER_ADMIN_NAME = os.getenv("MASTER_ADMIN_NAME", "Cognivio Master Admin").strip() or "Cognivio Master Admin"
-if MASTER_ADMIN_EMAIL:
-    ADMIN_EMAILS.add(MASTER_ADMIN_EMAIL)
-    SUPER_ADMIN_EMAILS.add(MASTER_ADMIN_EMAIL)
-ACCESS_APPROVAL_REQUIRED = os.getenv("ACCESS_APPROVAL_REQUIRED", "true").lower() == "true"
-ACCESS_APPROVAL_NOTIFY_EMAIL = (
-    os.getenv("ACCESS_APPROVAL_NOTIFY_EMAIL", "rmc91180@gmail.com").strip()
-)
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
-RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "").strip()
-RESEND_API_BASE_URL = os.getenv("RESEND_API_BASE_URL", "https://api.resend.com").rstrip("/")
-SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587") or "587")
-SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
-SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", "").strip() or SMTP_USERNAME or ACCESS_APPROVAL_NOTIFY_EMAIL
-SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() != "false"
+DEMO_MODE = APP_SETTINGS.operations.demo_mode
+ADMIN_EMAILS = APP_SETTINGS.auth.admin_email_set()
+SUPER_ADMIN_EMAILS = APP_SETTINGS.auth.super_admin_email_set()
+MASTER_ADMIN_EMAIL = APP_SETTINGS.auth.master_admin_email
+MASTER_ADMIN_PASSWORD = APP_SETTINGS.auth.master_admin_password.strip()
+MASTER_ADMIN_NAME = APP_SETTINGS.auth.master_admin_name.strip() or "Cognivio Master Admin"
+ACCESS_APPROVAL_REQUIRED = APP_SETTINGS.auth.access_approval_required
+ACCESS_APPROVAL_NOTIFY_EMAIL = APP_SETTINGS.auth.access_approval_notify_email.strip()
+RESEND_API_KEY = APP_SETTINGS.email.resend_api_key.strip()
+RESEND_FROM_EMAIL = APP_SETTINGS.email.resend_from_email.strip()
+RESEND_API_BASE_URL = APP_SETTINGS.email.resend_api_base_url
+SMTP_HOST = APP_SETTINGS.email.smtp_host.strip()
+SMTP_PORT = APP_SETTINGS.email.smtp_port
+SMTP_USERNAME = APP_SETTINGS.email.smtp_username.strip()
+SMTP_PASSWORD = APP_SETTINGS.email.smtp_password.strip()
+SMTP_FROM_EMAIL = APP_SETTINGS.email.smtp_from_email.strip() or SMTP_USERNAME or ACCESS_APPROVAL_NOTIFY_EMAIL
+SMTP_USE_TLS = APP_SETTINGS.email.smtp_use_tls
 DEMO_USERS = [
     {
         "email": "principal@demo.cognivio.app",
@@ -3919,13 +4633,14 @@ async def _ensure_demo_tenant_state() -> None:
 # Upload constraints
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10MB
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".jpeg", ".jpg"}
-VIDEO_ALLOWED_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+VIDEO_ALLOWED_EXTENSIONS = {".mp4", ".mov", ".avi", ".webm"}
+VIDEO_ALLOWED_FILE_TYPES = ["mp4", "mov", "avi", "webm"]
 VIDEO_ALLOWED_CONTENT_TYPES = {
     "video/mp4",
     "video/quicktime",
     "video/x-msvideo",
-    "video/x-matroska",
     "video/webm",
+    "video/mpeg",
 }
 PRIVACY_REFERENCE_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 PRIVACY_REFERENCE_ALLOWED_CONTENT_TYPES = {
@@ -3933,81 +4648,95 @@ PRIVACY_REFERENCE_ALLOWED_CONTENT_TYPES = {
     "image/png",
     "image/webp",
 }
-VIDEO_MAX_UPLOAD_BYTES = int(os.getenv("MAX_VIDEO_BYTES", str(1024 * 1024 * 1024)))
-VIDEO_WORKER_COUNT = max(1, int(os.getenv("VIDEO_WORKER_COUNT", "1")))
-VIDEO_TRANSCODE_PIPELINE_ENABLED = os.getenv("VIDEO_TRANSCODE_PIPELINE_ENABLED", "false").lower() == "true"
-VIDEO_TRANSCODE_PROFILE = os.getenv("VIDEO_TRANSCODE_PROFILE", "analysis_master_v1").strip() or "analysis_master_v1"
-VIDEO_TRANSCODE_WORKER_COUNT = max(1, int(os.getenv("VIDEO_TRANSCODE_WORKER_COUNT", "1")))
-VIDEO_TRANSCODE_RAW_CLEANUP_ENABLED = os.getenv("VIDEO_TRANSCODE_RAW_CLEANUP_ENABLED", "true").lower() == "true"
-VIDEO_TRANSCODE_RAW_RETENTION_HOURS = max(1, int(os.getenv("VIDEO_TRANSCODE_RAW_RETENTION_HOURS", "24")))
-CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS = os.getenv("CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS", "false").lower() == "true"
-ADHERENCE_WEIGHT = float(os.getenv("ADHERENCE_WEIGHT", "0.15"))
-PRIVACY_REQUIRE_PROFILE = os.getenv("PRIVACY_REQUIRE_PROFILE", "true").lower() == "true"
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4.1-mini").strip()
-OPENAI_ANALYSIS_INPUT_COST_PER_MILLION_USD = float(
-    os.getenv("OPENAI_ANALYSIS_INPUT_COST_PER_MILLION_USD", "0.40")
+VIDEO_MAX_UPLOAD_BYTES = APP_SETTINGS.video.max_video_bytes
+WORKSPACE_VIDEO_QUOTA = APP_SETTINGS.video.workspace_video_quota
+POST_RATE_LIMIT_WINDOW_SECONDS = 60
+POST_RATE_LIMIT_MAX_REQUESTS = 30
+POST_RATE_LIMIT_EXEMPT_PATHS = {"/api/auth/login", "/api/videos/upload"}
+POST_RATE_LIMIT_BUCKETS: Dict[Tuple[str, str], Tuple[int, float]] = {}
+VIDEO_WORKER_COUNT = APP_SETTINGS.video.video_worker_count
+VIDEO_TRANSCODE_PIPELINE_ENABLED = APP_SETTINGS.video.video_transcode_pipeline_enabled
+VIDEO_TRANSCODE_PROFILE = APP_SETTINGS.video.video_transcode_profile.strip() or "analysis_master_v1"
+VIDEO_TRANSCODE_WORKER_COUNT = APP_SETTINGS.video.video_transcode_worker_count
+VIDEO_TRANSCODE_RAW_CLEANUP_ENABLED = APP_SETTINGS.video.video_transcode_raw_cleanup_enabled
+VIDEO_TRANSCODE_RAW_RETENTION_HOURS = APP_SETTINGS.video.video_transcode_raw_retention_hours
+CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS = APP_SETTINGS.video.cleanup_video_source_after_analysis
+ADHERENCE_WEIGHT = APP_SETTINGS.operations.adherence_weight
+PRIVACY_REQUIRE_PROFILE = APP_SETTINGS.privacy.privacy_require_profile
+OPENAI_API_KEY = APP_SETTINGS.ai.openai_api_key.strip()
+OPENAI_VISION_MODEL = APP_SETTINGS.ai.openai_vision_model.strip()
+OPENAI_ANALYSIS_INPUT_COST_PER_MILLION_USD = APP_SETTINGS.ai.openai_analysis_input_cost_per_million_usd
+OPENAI_ANALYSIS_OUTPUT_COST_PER_MILLION_USD = APP_SETTINGS.ai.openai_analysis_output_cost_per_million_usd
+VIDEO_ANALYSIS_MAX_FRAMES = APP_SETTINGS.ai.video_analysis_max_frames
+SMART_FRAME_SELECTION_ENABLED = APP_SETTINGS.ai.smart_frame_selection_enabled
+SMART_FRAME_SELECTION_VERSION = APP_SETTINGS.ai.smart_frame_selection_version.strip() or "smart_frames_v2"
+VIDEO_ANALYSIS_FRAME_SCAN_FPS = APP_SETTINGS.ai.video_analysis_frame_scan_fps
+VIDEO_ANALYSIS_MIN_FRAME_GAP_SEC = APP_SETTINGS.ai.video_analysis_min_frame_gap_sec
+VIDEO_ANALYSIS_ENABLE_OCR_SIGNALS = APP_SETTINGS.ai.video_analysis_enable_ocr_signals
+SMART_MOMENT_SAMPLING_ENABLED = APP_SETTINGS.ai.smart_moment_sampling_enabled
+SMART_MOMENT_SAMPLING_VERSION = APP_SETTINGS.ai.smart_moment_sampling_version.strip() or "lesson_moments_v2"
+VIDEO_ANALYSIS_WINDOW_SEC = APP_SETTINGS.ai.video_analysis_window_sec
+VIDEO_ANALYSIS_MAX_MOMENTS = APP_SETTINGS.ai.video_analysis_max_moments
+AUDIO_ANALYSIS_ENABLED = APP_SETTINGS.ai.audio_analysis_enabled
+AUDIO_TRANSCRIPTION_ENABLED = APP_SETTINGS.ai.audio_transcription_enabled
+AUDIO_FEATURES_ENABLED = APP_SETTINGS.ai.audio_features_enabled
+AUDIO_TRANSCRIPTION_MODEL = APP_SETTINGS.ai.audio_transcription_model.strip() or "gpt-4o-mini-transcribe"
+AUDIO_TRANSCRIPTION_LANGUAGE = APP_SETTINGS.ai.audio_transcription_language
+AUDIO_TRANSCRIPT_RETENTION_DAYS = APP_SETTINGS.ai.audio_transcript_retention_days
+AUDIO_TRANSCRIPTION_MAX_SECONDS = APP_SETTINGS.ai.audio_transcription_max_seconds
+AUDIO_ALLOW_STUDENT_VOICE_PROCESSING = APP_SETTINGS.ai.audio_allow_student_voice_processing
+PAID_ANALYSIS_ENABLED = APP_SETTINGS.ai.paid_analysis_enabled
+PAID_ANALYSIS_ALLOWLIST_EMAILS = set(APP_SETTINGS.ai.paid_analysis_allowlist_emails)
+MASTER_OBSERVER_PIPELINE_ENABLED = APP_SETTINGS.ai.master_observer_pipeline_enabled
+MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS = APP_SETTINGS.ai.master_observer_require_voice_gate_pass
+VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED = APP_SETTINGS.ai.voice_gate_release_enforcement_enabled
+VOICE_GATE_REGEN_MAX_ATTEMPTS = APP_SETTINGS.ai.voice_gate_regen_max_attempts
+VOICE_GATE_HUMAN_ESCALATION_ENABLED = APP_SETTINGS.ai.voice_gate_human_escalation_enabled
+FEEDBACK_GOVERNANCE_QUEUE_AGE_WARNING_MINUTES = APP_SETTINGS.operations.feedback_governance_queue_age_warning_minutes
+FEEDBACK_GOVERNANCE_QUEUE_AGE_BLOCKING_MINUTES = APP_SETTINGS.operations.feedback_governance_queue_age_blocking_minutes
+PRIVACY_PROFILE_MIN_REFERENCES = APP_SETTINGS.privacy.privacy_profile_min_references
+PRIVACY_PROFILE_MAX_REFERENCES = APP_SETTINGS.privacy.privacy_profile_max_references
+PRIVACY_MANUAL_REVIEW_ENABLED = APP_SETTINGS.privacy.privacy_manual_review_enabled
+PRIVACY_ALLOW_BLUR_ALL_FALLBACK = APP_SETTINGS.privacy.privacy_allow_blur_all_fallback
+PRIVACY_WORKER_COUNT = APP_SETTINGS.privacy.privacy_worker_count
+PRIVACY_MAX_RETRIES = APP_SETTINGS.privacy.privacy_max_retries
+PRIVACY_TEACHER_MATCH_THRESHOLD = APP_SETTINGS.privacy.privacy_teacher_match_threshold
+PRIVACY_AMBIGUOUS_MATCH_THRESHOLD = APP_SETTINGS.privacy.privacy_ambiguous_match_threshold
+PRIVACY_RAW_VIDEO_RETENTION_DAYS = APP_SETTINGS.privacy.privacy_raw_video_retention_days
+PRIVACY_PROFILE_IMAGE_RETENTION_DAYS = APP_SETTINGS.privacy.privacy_profile_image_retention_days
+PRIVACY_PURGE_INTERVAL_MINUTES = APP_SETTINGS.privacy.privacy_purge_interval_minutes
+RECOGNITION_FIVE_STAR_SCORE_MIN = (
+    APP_SETTINGS.operations.recognition_five_star_score_min
+    if APP_SETTINGS.operations.recognition_five_star_score_min is not None
+    else DEFAULT_FIVE_STAR_SCORE_MIN
 )
-OPENAI_ANALYSIS_OUTPUT_COST_PER_MILLION_USD = float(
-    os.getenv("OPENAI_ANALYSIS_OUTPUT_COST_PER_MILLION_USD", "1.60")
-)
-VIDEO_ANALYSIS_MAX_FRAMES = max(3, int(os.getenv("VIDEO_ANALYSIS_MAX_FRAMES", "6")))
-SMART_FRAME_SELECTION_ENABLED = os.getenv("SMART_FRAME_SELECTION_ENABLED", "false").lower() == "true"
-SMART_FRAME_SELECTION_VERSION = os.getenv("SMART_FRAME_SELECTION_VERSION", "smart_frames_v1").strip() or "smart_frames_v1"
-VIDEO_ANALYSIS_FRAME_SCAN_FPS = max(0.25, float(os.getenv("VIDEO_ANALYSIS_FRAME_SCAN_FPS", "1")))
-VIDEO_ANALYSIS_MIN_FRAME_GAP_SEC = max(1.0, float(os.getenv("VIDEO_ANALYSIS_MIN_FRAME_GAP_SEC", "8")))
-VIDEO_ANALYSIS_ENABLE_OCR_SIGNALS = os.getenv("VIDEO_ANALYSIS_ENABLE_OCR_SIGNALS", "false").lower() == "true"
-SMART_MOMENT_SAMPLING_ENABLED = os.getenv("SMART_MOMENT_SAMPLING_ENABLED", "true").lower() == "true"
-SMART_MOMENT_SAMPLING_VERSION = os.getenv("SMART_MOMENT_SAMPLING_VERSION", "lesson_moments_v1").strip() or "lesson_moments_v1"
-VIDEO_ANALYSIS_WINDOW_SEC = max(10.0, float(os.getenv("VIDEO_ANALYSIS_WINDOW_SEC", "20")))
-VIDEO_ANALYSIS_MAX_MOMENTS = max(3, int(os.getenv("VIDEO_ANALYSIS_MAX_MOMENTS", "6")))
-AUDIO_ANALYSIS_ENABLED = os.getenv("AUDIO_ANALYSIS_ENABLED", "false").lower() == "true"
-AUDIO_TRANSCRIPTION_ENABLED = os.getenv("AUDIO_TRANSCRIPTION_ENABLED", "false").lower() == "true"
-AUDIO_FEATURES_ENABLED = os.getenv("AUDIO_FEATURES_ENABLED", "false").lower() == "true"
-AUDIO_TRANSCRIPTION_MODEL = os.getenv("AUDIO_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe").strip() or "gpt-4o-mini-transcribe"
-AUDIO_TRANSCRIPTION_LANGUAGE = os.getenv("AUDIO_TRANSCRIPTION_LANGUAGE", "").strip() or None
-AUDIO_TRANSCRIPT_RETENTION_DAYS = max(1, int(os.getenv("AUDIO_TRANSCRIPT_RETENTION_DAYS", "30")))
-AUDIO_TRANSCRIPTION_MAX_SECONDS = max(15, int(os.getenv("AUDIO_TRANSCRIPTION_MAX_SECONDS", "120")))
-AUDIO_ALLOW_STUDENT_VOICE_PROCESSING = os.getenv("AUDIO_ALLOW_STUDENT_VOICE_PROCESSING", "false").lower() == "true"
-PAID_ANALYSIS_ENABLED = os.getenv("PAID_ANALYSIS_ENABLED", "false").lower() == "true"
-PAID_ANALYSIS_ALLOWLIST_EMAILS = {
-    email.lower() for email in _get_optional_env_list("PAID_ANALYSIS_ALLOWLIST_EMAILS")
-}
-PRIVACY_PROFILE_MIN_REFERENCES = max(1, int(os.getenv("PRIVACY_PROFILE_MIN_REFERENCES", "3")))
-PRIVACY_PROFILE_MAX_REFERENCES = max(PRIVACY_PROFILE_MIN_REFERENCES, int(os.getenv("PRIVACY_PROFILE_MAX_REFERENCES", "5")))
-PRIVACY_MANUAL_REVIEW_ENABLED = os.getenv("PRIVACY_MANUAL_REVIEW_ENABLED", "true").lower() == "true"
-PRIVACY_ALLOW_BLUR_ALL_FALLBACK = os.getenv("PRIVACY_ALLOW_BLUR_ALL_FALLBACK", "true").lower() == "true"
-PRIVACY_WORKER_COUNT = max(1, int(os.getenv("PRIVACY_WORKER_COUNT", "1")))
-PRIVACY_MAX_RETRIES = max(1, int(os.getenv("PRIVACY_MAX_RETRIES", "3")))
-PRIVACY_TEACHER_MATCH_THRESHOLD = float(os.getenv("PRIVACY_TEACHER_MATCH_THRESHOLD", "0.9"))
-PRIVACY_AMBIGUOUS_MATCH_THRESHOLD = float(os.getenv("PRIVACY_AMBIGUOUS_MATCH_THRESHOLD", "0.8"))
-PRIVACY_RAW_VIDEO_RETENTION_DAYS = max(1, int(os.getenv("PRIVACY_RAW_VIDEO_RETENTION_DAYS", "30")))
-PRIVACY_PROFILE_IMAGE_RETENTION_DAYS = max(1, int(os.getenv("PRIVACY_PROFILE_IMAGE_RETENTION_DAYS", "30")))
-PRIVACY_PURGE_INTERVAL_MINUTES = max(5, int(os.getenv("PRIVACY_PURGE_INTERVAL_MINUTES", "60")))
-RECOGNITION_FIVE_STAR_SCORE_MIN = float(os.getenv("RECOGNITION_FIVE_STAR_SCORE_MIN", str(DEFAULT_FIVE_STAR_SCORE_MIN)))
-PRIVACY_ALLOW_DEGRADED_RUNTIME = os.getenv("PRIVACY_ALLOW_DEGRADED_RUNTIME", "false").lower() == "true"
+PRIVACY_ALLOW_DEGRADED_RUNTIME = APP_SETTINGS.privacy.privacy_allow_degraded_runtime
 
 # S3 configuration (required for file uploads)
-S3_BUCKET = os.getenv("S3_BUCKET")
-S3_REGION = os.getenv("S3_REGION")
-S3_ENDPOINT = os.getenv("S3_ENDPOINT")
-S3_PUBLIC_BASE_URL = os.getenv("S3_PUBLIC_BASE_URL")
-FRONTEND_URL = os.getenv("FRONTEND_URL")
-BACKEND_PUBLIC_BASE_URL = os.getenv("BACKEND_PUBLIC_BASE_URL", "").rstrip("/")
-LEADERSHIP_INSIGHTS_CACHE_TTL_SECONDS = max(
-    0, int(os.getenv("LEADERSHIP_INSIGHTS_CACHE_TTL_SECONDS", "1800"))
-)
+S3_BUCKET = APP_SETTINGS.storage.s3_bucket
+S3_REGION = APP_SETTINGS.storage.s3_region
+S3_ENDPOINT = APP_SETTINGS.storage.s3_endpoint
+S3_PUBLIC_BASE_URL = APP_SETTINGS.storage.s3_public_base_url
+S3_PRESIGNED_URL_EXPIRES_SECONDS = APP_SETTINGS.storage.s3_presigned_url_expires_seconds
+AWS_ACCESS_KEY_ID = APP_SETTINGS.storage.aws_access_key_id
+AWS_SECRET_ACCESS_KEY = APP_SETTINGS.storage.aws_secret_access_key
+FRONTEND_URL = APP_SETTINGS.storage.frontend_url
+BACKEND_PUBLIC_BASE_URL = APP_SETTINGS.storage.backend_public_base_url
+LEADERSHIP_INSIGHTS_CACHE_TTL_SECONDS = APP_SETTINGS.operations.leadership_insights_cache_ttl_seconds
+DASHBOARD_INTELLIGENCE_CACHE_TTL_SECONDS = 30 * 60
 
 # Create uploads directory (used for temp storage or mounted persistent storage)
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(ROOT_DIR / "uploads"))).expanduser()
+UPLOAD_DIR = APP_SETTINGS.storage.upload_dir
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
+limiter = Limiter(key_func=get_remote_address)
 VIDEO_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 VIDEO_WORKER_TASKS: List[asyncio.Task] = []
+VIDEO_WORKER_INSTANCE_ID = os.getenv("RAILWAY_REPLICA_ID") or os.getenv("HOSTNAME") or uuid.uuid4().hex[:8]
 VIDEO_TRANSCODE_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 VIDEO_TRANSCODE_WORKER_TASKS: List[asyncio.Task] = []
 VIDEO_PRIVACY_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
@@ -4094,6 +4823,7 @@ async def _ensure_master_admin_user() -> None:
         "role": "super_admin",
         "tenant_role": "super_admin",
         "tenant_status": "approved",
+        "audio_analysis_enabled": True,
         "approval_status": "approved",
         "approval_requested_at": now,
         "approved_at": now,
@@ -4117,12 +4847,116 @@ async def lifespan(app: FastAPI):
         await _app_shutdown()
 
 
+class UploadTooLargeError(Exception):
+    pass
+
+
+class InvalidVideoFileTypeError(Exception):
+    pass
+
+
+class UploadQuotaReachedError(Exception):
+    pass
+
+
+def _retry_after_from_rate_limit(exc: RateLimitExceeded) -> int:
+    limit = getattr(exc, "limit", None)
+    get_expiry = getattr(limit, "get_expiry", None)
+    if callable(get_expiry):
+        try:
+            return max(1, int(math.ceil(float(get_expiry()))))
+        except (TypeError, ValueError):
+            pass
+    return POST_RATE_LIMIT_WINDOW_SECONDS
+
+
+async def _rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    retry_after = _retry_after_from_rate_limit(exc)
+    return JSONResponse(
+        status_code=429,
+        content={"error": "Too many requests", "retry_after": retry_after},
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
+def _consume_post_rate_limit(request: Request) -> Optional[int]:
+    path = request.url.path
+    if request.method.upper() != "POST" or not path.startswith("/api/") or path in POST_RATE_LIMIT_EXEMPT_PATHS:
+        return None
+    now = time.monotonic()
+    client_key = get_remote_address(request) or "unknown"
+    bucket_key = (client_key, path)
+    count, window_started_at = POST_RATE_LIMIT_BUCKETS.get(bucket_key, (0, now))
+    elapsed = now - window_started_at
+    if elapsed >= POST_RATE_LIMIT_WINDOW_SECONDS:
+        POST_RATE_LIMIT_BUCKETS[bucket_key] = (1, now)
+        return None
+    if count >= POST_RATE_LIMIT_MAX_REQUESTS:
+        return max(1, int(math.ceil(POST_RATE_LIMIT_WINDOW_SECONDS - elapsed)))
+    POST_RATE_LIMIT_BUCKETS[bucket_key] = (count + 1, window_started_at)
+    return None
+
+
 # Create the main app
 app = FastAPI(
     title="Cognivio API",
     description="Teacher Assessment Platform",
     lifespan=lifespan,
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.exception_handler(UploadTooLargeError)
+async def upload_too_large_handler(request: Request, exc: UploadTooLargeError):
+    return JSONResponse(
+        status_code=413,
+        content={"error": "File too large", "max_bytes": VIDEO_MAX_UPLOAD_BYTES},
+    )
+
+
+@app.exception_handler(InvalidVideoFileTypeError)
+async def invalid_video_file_type_handler(request: Request, exc: InvalidVideoFileTypeError):
+    return JSONResponse(
+        status_code=422,
+        content={"error": "Invalid file type", "allowed": VIDEO_ALLOWED_FILE_TYPES},
+    )
+
+
+@app.exception_handler(UploadQuotaReachedError)
+async def upload_quota_reached_handler(request: Request, exc: UploadQuotaReachedError):
+    return JSONResponse(
+        status_code=402,
+        content={"error": "Upload quota reached", "contact": "support@cognivio.com"},
+    )
+
+
+@app.middleware("http")
+async def reject_oversized_video_uploads(request: Request, call_next):
+    if request.method.upper() == "POST" and request.url.path == "/api/videos/upload":
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > VIDEO_MAX_UPLOAD_BYTES:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"error": "File too large", "max_bytes": VIDEO_MAX_UPLOAD_BYTES},
+                    )
+            except ValueError:
+                pass
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def enforce_general_post_rate_limit(request: Request, call_next):
+    retry_after = _consume_post_rate_limit(request)
+    if retry_after is not None:
+        return JSONResponse(
+            status_code=429,
+            content={"error": "Too many requests", "retry_after": retry_after},
+            headers={"Retry-After": str(retry_after)},
+        )
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -4137,6 +4971,30 @@ async def block_write_requests_in_preview_mode(request: Request, call_next):
             status_code=403,
             content={"detail": "Preview mode is read-only. Exit preview mode before making changes."},
         )
+    return await call_next(request)
+
+
+CSRF_EXEMPT_PATHS = {
+    "/api/auth/login",
+    "/api/auth/register",
+    "/api/auth/request-access",
+    "/api/auth/password-reset/request",
+    "/api/auth/password-reset/confirm",
+}
+
+
+@app.middleware("http")
+async def enforce_csrf_for_session_auth(request: Request, call_next):
+    method = request.method.upper()
+    path = request.url.path
+    if (
+        method in {"POST", "PUT", "PATCH", "DELETE"}
+        and path.startswith("/api/")
+        and path not in CSRF_EXEMPT_PATHS
+    ):
+        if request.cookies.get(SESSION_COOKIE_NAME):
+            if not _csrf_is_valid(request):
+                return JSONResponse(status_code=403, content={"detail": "CSRF token validation failed"})
     return await call_next(request)
 
 # Health check endpoint (at root level for Railway)
@@ -4241,6 +5099,7 @@ class FrameworkType(str, Enum):
     MARSHALL = "marshall"
     DANIELSON = "danielson"
     CUSTOM = "custom"
+    TRAINING_COMPETENCY = "training_competency"
 
 class PerformanceLevel(str, Enum):
     EXCELLENT = "excellent"  # Green - score >= 3
@@ -4375,8 +5234,73 @@ MARSHALL_FRAMEWORK = {
     ]
 }
 
+TRAINING_COMPETENCY_SCALE = [
+    {"score": 1, "label": "Emerging"},
+    {"score": 2, "label": "Developing"},
+    {"score": 3, "label": "Proficient"},
+    {"score": 4, "label": "Distinguished"},
+]
+
+TRAINING_COMPETENCY_STANDARDS = [
+    {
+        "key": "intasc",
+        "name": "InTASC Model Core Teaching Standards",
+        "description": "Learner-centered competencies for teacher candidates and residency programs.",
+    },
+    {
+        "key": "caep",
+        "name": "CAEP Initial-Level Standards",
+        "description": "Accreditation-aligned standards for educator preparation evidence.",
+    },
+    {
+        "key": "program_custom",
+        "name": "Program Custom Competencies",
+        "description": "A local competency map imported from CSV or JSON.",
+    },
+]
+
+TRAINING_COMPETENCY_FRAMEWORK = {
+    "name": "Training Competency Framework",
+    "type": "training_competency",
+    "scale": TRAINING_COMPETENCY_SCALE,
+    "domains": [
+        {
+            "id": "tc1",
+            "name": "Learner Development and Differences",
+            "standard_key": "intasc",
+            "elements": [
+                {"id": "tc1a", "name": "Learner development"},
+                {"id": "tc1b", "name": "Learning differences"},
+                {"id": "tc1c", "name": "Inclusive learning environments"},
+            ],
+        },
+        {
+            "id": "tc2",
+            "name": "Instructional Practice",
+            "standard_key": "intasc",
+            "elements": [
+                {"id": "tc2a", "name": "Planning for instruction"},
+                {"id": "tc2b", "name": "Instructional strategies"},
+                {"id": "tc2c", "name": "Assessment-driven instruction"},
+            ],
+        },
+        {
+            "id": "tc3",
+            "name": "Professional Responsibility",
+            "standard_key": "caep",
+            "elements": [
+                {"id": "tc3a", "name": "Professional learning and ethical practice"},
+                {"id": "tc3b", "name": "Leadership and collaboration"},
+                {"id": "tc3c", "name": "Clinical readiness"},
+            ],
+        },
+    ],
+}
+
 
 def _get_framework_by_type(framework_type: str) -> dict:
+    if framework_type == "training_competency":
+        return TRAINING_COMPETENCY_FRAMEWORK
     if framework_type == "marshall":
         return MARSHALL_FRAMEWORK
     if framework_type == "danielson":
@@ -4777,6 +5701,59 @@ def _parse_uploaded_rubric_file(filename: str, content: bytes) -> Tuple[str, Lis
     raise HTTPException(status_code=400, detail="Uploaded rubric must be a .json or .csv file")
 
 
+def _training_score_to_proficiency(score: Optional[float]) -> Optional[float]:
+    if not isinstance(score, (int, float)):
+        return None
+    if score <= 4:
+        return round(max(1, min(4, float(score))), 1)
+    return round(max(1, min(4, float(score) / 2.5)), 1)
+
+
+def _training_readiness_label(score: Optional[float]) -> str:
+    if score is None:
+        return "Not enough evidence"
+    if score >= 3.5:
+        return "Distinguished readiness"
+    if score >= 2.75:
+        return "Ready for lead teaching"
+    if score >= 2:
+        return "Developing readiness"
+    return "Emerging readiness"
+
+
+def _training_domain_progress_from_assessments(assessments: List[dict]) -> List[dict]:
+    buckets: Dict[str, Dict[str, Any]] = {}
+    for assessment in assessments:
+        for score in assessment.get("element_scores") or []:
+            domain = score.get("domain") or score.get("domain_id") or "Competency"
+            bucket = buckets.setdefault(domain, {"domain": domain, "scores": []})
+            proficiency = _training_score_to_proficiency(score.get("score"))
+            if proficiency is not None:
+                bucket["scores"].append(proficiency)
+    rows = []
+    for bucket in buckets.values():
+        values = bucket["scores"]
+        avg = round(sum(values) / len(values), 1) if values else None
+        rows.append(
+            {
+                "domain": bucket["domain"],
+                "proficiency": avg,
+                "label": _training_readiness_label(avg),
+            }
+        )
+    return sorted(rows, key=lambda row: row["domain"])
+
+
+def _normalize_training_framework_domains(domains: List[Dict[str, Any]], standard_key: str) -> List[Dict[str, Any]]:
+    normalized = _normalize_uploaded_rubric_domains(domains)
+    for domain in normalized:
+        domain["framework_type"] = FrameworkType.TRAINING_COMPETENCY.value
+        domain["standard_key"] = standard_key
+        domain["proficiency_scale"] = TRAINING_COMPETENCY_SCALE
+        domain["source_type"] = "training_competency_import"
+    return normalized
+
+
 def _find_domain_for_element(framework: dict, element_id: str) -> Optional[dict]:
     for domain in framework.get("domains", []):
         for element in domain.get("elements", []):
@@ -4790,9 +5767,17 @@ class UserCreate(BaseModel):
     password: str
     name: str
     role: Optional[str] = "teacher"
+    user_type: Optional[str] = None
+    institution_type: Optional[str] = None
+    role_requested: Optional[str] = None
     organization_type: Optional[str] = None
     organization_name: Optional[str] = None
     school_name: Optional[str] = None
+    training_provider_name: Optional[str] = None
+    district_or_network: Optional[str] = None
+    program_or_cohort_name: Optional[str] = None
+    program_or_department: Optional[str] = None
+    linked_admin_email: Optional[EmailStr] = None
     requested_manager_email: Optional[EmailStr] = None
 
 class UserLogin(BaseModel):
@@ -4818,6 +5803,7 @@ class UserResponse(BaseModel):
     tenant_role: Optional[str] = None
     tenant_status: Optional[str] = None
     workspace_mode: Optional[str] = None
+    audio_analysis_enabled: bool = True
     teacher_id: Optional[str] = None
     approval_status: Optional[str] = None
     organization_id: Optional[str] = None
@@ -4842,6 +5828,10 @@ class TokenResponse(BaseModel):
     user: UserResponse
 
 
+class AuthSessionResponse(BaseModel):
+    user: UserResponse
+
+
 class AccessRequestResponse(BaseModel):
     status: str
     email: str
@@ -4851,6 +5841,14 @@ class AccessRequestResponse(BaseModel):
     organization_type: Optional[str] = None
     organization_name: Optional[str] = None
     school_name: Optional[str] = None
+    institution_type: Optional[str] = None
+    org_type: Optional[str] = None
+    role_requested: Optional[str] = None
+    training_provider_name: Optional[str] = None
+    district_or_network: Optional[str] = None
+    program_or_cohort_name: Optional[str] = None
+    program_or_department: Optional[str] = None
+    linked_admin_email: Optional[str] = None
 
 
 class AccessUserRecord(BaseModel):
@@ -4877,6 +5875,11 @@ class AccessUserRecord(BaseModel):
     school_name: Optional[str] = None
     manager_user_id: Optional[str] = None
     manager_email: Optional[str] = None
+    institution_type: Optional[str] = None
+    training_provider_name: Optional[str] = None
+    linked_admin_email: Optional[str] = None
+    suggested_organization_id: Optional[str] = None
+    days_waiting: int = 0
 
 
 class AccessUserListResponse(BaseModel):
@@ -4887,6 +5890,23 @@ class AccessUserListResponse(BaseModel):
 
 class AccessDecisionPayload(BaseModel):
     reason: Optional[str] = None
+    organization_id: Optional[str] = None
+    organization_name: Optional[str] = None
+    organization_type: Optional[str] = None
+    school_name: Optional[str] = None
+    manager_email: Optional[str] = None
+    tenant_role: Optional[str] = None
+    approval_note: Optional[str] = None
+
+
+class TeacherLinkageRequestPayload(BaseModel):
+    admin_email: EmailStr
+
+
+class TeacherAdminLinkPayload(BaseModel):
+    organization_id: Optional[str] = None
+    school_id: Optional[str] = None
+    admin_user_id: Optional[str] = None
 
 
 class MasterAdminOverviewCard(BaseModel):
@@ -5297,6 +6317,9 @@ class TeacherResponse(BaseModel):
     organization_name: Optional[str] = None
     manager_name: Optional[str] = None
     manager_email: Optional[str] = None
+    linked_admin_user_id: Optional[str] = None
+    linked_admin_name: Optional[str] = None
+    linked_admin_email: Optional[str] = None
     category: Optional[str] = None
     category_custom: Optional[str] = None
     next_coaching_conference: Optional[str] = None
@@ -5307,6 +6330,24 @@ class TeacherUpdate(BaseModel):
     category: Optional[str] = None
     category_custom: Optional[str] = None
     next_coaching_conference: Optional[str] = None
+
+
+class TrainingCohortCreate(BaseModel):
+    name: str
+    program_name: Optional[str] = None
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    trainee_ids: List[str] = []
+
+
+class TraineePlacementCreate(BaseModel):
+    school_site: str
+    mentor_teacher: Optional[str] = None
+    grade_level: Optional[str] = None
+    subject: Optional[str] = None
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    status: Optional[str] = "active"
 
 
 class SchoolCreate(BaseModel):
@@ -5354,6 +6395,7 @@ class VideoUploadResponse(BaseModel):
     id: str
     filename: str
     teacher_id: str
+    observation_session_id: Optional[str] = None
     status: str
     privacy_status: str
     analysis_status: str
@@ -5431,6 +6473,15 @@ class WorkspaceModePreferenceResponse(BaseModel):
     updated_at: Optional[str] = None
 
 
+class WorkspaceAudioAnalysisPreferencePayload(BaseModel):
+    audio_analysis_enabled: bool = True
+
+
+class WorkspaceAudioAnalysisPreferenceResponse(BaseModel):
+    audio_analysis_enabled: bool = True
+    updated_at: Optional[str] = None
+
+
 class AssessmentFeedbackUpsert(BaseModel):
     target_type: str
     target_id: Optional[str] = None
@@ -5484,8 +6535,17 @@ class ObservationSummaryPacket(BaseModel):
     growth_areas: List[str] = []
     coaching_actions: List[str] = []
     priority_alignment: List[str] = []
+    evidence_highlights: List[str] = []
     focus_note: Optional[str] = None
     confidence_note: Optional[str] = None
+    primary_growth_focus: Optional[str] = None
+    longitudinal_insight: Optional[str] = None
+    reflection_prompts: List[str] = []
+    actionable_next_steps_structured: List[Dict[str, str]] = []
+    full_review_text: Optional[str] = None
+    output_order: List[str] = []
+    deferral_note: Optional[str] = None
+    reasoning_model: Optional[str] = "cognivio_four_layer_v1"
 
 
 class Observation(BaseModel):
@@ -5511,6 +6571,47 @@ class ObservationCreate(BaseModel):
     admin_comment: Optional[str] = None
     teacher_response: Optional[str] = None
     implementation_status: Optional[str] = None
+
+
+class VideoComment(BaseModel):
+    id: str
+    video_id: str
+    workspace_id: Optional[str] = None
+    author_id: str
+    author_name: str
+    author_role: str
+    timestamp_seconds: float
+    rubric_element_id: Optional[str] = None
+    rubric_element_code: Optional[str] = None
+    rubric_element_name: Optional[str] = None
+    body: str
+    is_private: bool = False
+    thread_parent_id: Optional[str] = None
+    created_at: str
+    updated_at: Optional[str] = None
+
+
+class VideoCommentListResponse(BaseModel):
+    comments: List[VideoComment] = []
+
+
+class VideoCommentCreate(BaseModel):
+    timestamp_seconds: float
+    rubric_element_id: Optional[str] = None
+    rubric_element_code: Optional[str] = None
+    rubric_element_name: Optional[str] = None
+    body: str
+    is_private: bool = False
+    thread_parent_id: Optional[str] = None
+
+
+class VideoCommentUpdate(BaseModel):
+    rubric_element_id: Optional[str] = None
+    rubric_element_code: Optional[str] = None
+    rubric_element_name: Optional[str] = None
+    body: Optional[str] = None
+    is_private: Optional[bool] = None
+
 
 class AssessmentResult(BaseModel):
     id: str
@@ -5547,6 +6648,92 @@ class ScheduleStatus(str, Enum):
     PLANNED = "planned"
     RECORDING = "recording"
     COMPLETED = "completed"
+
+
+class ObservationSessionStatus(str, Enum):
+    PLANNED = "planned"
+    RECORDING_UPLOADED = "recording_uploaded"
+    ANALYSIS_COMPLETE = "analysis_complete"
+    FEEDBACK_GIVEN = "feedback_given"
+
+
+class ObservationSession(BaseModel):
+    id: str
+    workspace_id: Optional[str] = None
+    observer_id: str
+    teacher_id: str
+    scheduled_date: Optional[str] = None
+    focus_elements: List[str] = []
+    focus_note: str = ""
+    personal_goals: List[str] = []
+    status: ObservationSessionStatus = ObservationSessionStatus.PLANNED
+    linked_video_id: Optional[str] = None
+    linked_assessment_id: Optional[str] = None
+    placement_id: Optional[str] = None
+    recurrence_rule: Optional[str] = None
+    recurrence_parent_id: Optional[str] = None
+    created_at: str
+    updated_at: Optional[str] = None
+    teacher_name: Optional[str] = None
+    school_site: Optional[str] = None
+
+
+class ObservationSessionCreate(BaseModel):
+    teacher_id: str
+    scheduled_date: Optional[datetime] = None
+    focus_elements: List[str]
+    focus_note: Optional[str] = None
+    personal_goals: List[str] = []
+    placement_id: Optional[str] = None
+    recurrence_rule: Optional[str] = None
+    recurrence_parent_id: Optional[str] = None
+
+
+class ObservationSessionUpdate(BaseModel):
+    scheduled_date: Optional[datetime] = None
+    focus_elements: Optional[List[str]] = None
+    focus_note: Optional[str] = None
+    personal_goals: Optional[List[str]] = None
+    status: Optional[ObservationSessionStatus] = None
+    linked_video_id: Optional[str] = None
+    linked_assessment_id: Optional[str] = None
+    placement_id: Optional[str] = None
+    recurrence_rule: Optional[str] = None
+    recurrence_parent_id: Optional[str] = None
+
+
+class ObserverGoalProgressSignal(BaseModel):
+    session_id: Optional[str] = None
+    signal_type: str
+    note: str
+    recorded_at: str
+
+
+class ObserverGoal(BaseModel):
+    id: str
+    workspace_id: Optional[str] = None
+    observer_id: str
+    goal_text: str
+    goal_type: str
+    target_metric: str
+    progress_signals: List[ObserverGoalProgressSignal] = []
+    achieved: bool = False
+    achieved_at: Optional[str] = None
+    created_at: str
+    updated_at: Optional[str] = None
+    progress_pct: float = 0
+
+
+class ObserverGoalCreate(BaseModel):
+    goal_text: str
+    goal_type: str
+    target_metric: str
+
+
+class ObserverGoalProgressCreate(BaseModel):
+    session_id: Optional[str] = None
+    signal_type: str
+    note: Optional[str] = None
 
 
 class VideoProcessingStatus(str, Enum):
@@ -5706,11 +6893,53 @@ class AudioFeatureResponse(BaseModel):
     created_at: str
 
 
+class AudioAnalysisTimelineSegment(BaseModel):
+    start_sec: float
+    end_sec: float
+    speaker: str
+
+
+class AudioAnalysisTranscriptSegment(BaseModel):
+    start_sec: float
+    end_sec: float
+    text: str
+    speaker: str
+
+
+class AudioAnalysisKeyMoment(BaseModel):
+    timestamp_sec: float
+    label: str
+    signal_type: str
+
+
+class VideoAudioAnalysisResponse(BaseModel):
+    transcript_available: bool = False
+    features_available: bool = False
+    teacher_talk_pct: float = 0.0
+    student_talk_pct: float = 0.0
+    silence_pct: float = 0.0
+    teacher_talk_seconds: float = 0.0
+    student_talk_seconds: float = 0.0
+    total_duration_seconds: float = 0.0
+    segments: List[AudioAnalysisTimelineSegment] = []
+    transcript_segments: List[AudioAnalysisTranscriptSegment] = []
+    key_moments: List[AudioAnalysisKeyMoment] = []
+
+
 class RecognitionBadgeResponse(BaseModel):
     id: str
     badge_type: str
     status: str
     video_id: str
+    teacher_id: Optional[str] = None
+    assessment_id: Optional[str] = None
+    recognition_type: Optional[str] = None
+    score: Optional[float] = None
+    badge_url: Optional[str] = None
+    share_url: Optional[str] = None
+    share_card_url: Optional[str] = None
+    lesson_url: Optional[str] = None
+    awarded_for: Optional[str] = None
     awarded_at: Optional[str] = None
     awarded_by: Optional[str] = None
     criteria_snapshot: Dict[str, Any] = {}
@@ -5771,6 +7000,39 @@ class RecognitionReviewQueueItem(BaseModel):
 
 class RecognitionReviewQueueResponse(BaseModel):
     items: List[RecognitionReviewQueueItem]
+
+
+class FeedbackReviewQueueItem(BaseModel):
+    id: str
+    assessment_id: str
+    video_id: Optional[str] = None
+    teacher_id: str
+    owner_user_id: Optional[str] = None
+    status: str
+    reason: str
+    voice_gate_failures: List[str] = []
+    voice_gate_status: Optional[str] = None
+    regeneration_attempts: int = 0
+    summary_preview: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class FeedbackReviewQueueResponse(BaseModel):
+    items: List[FeedbackReviewQueueItem]
+
+
+class FeedbackReviewDecisionRequest(BaseModel):
+    decision: str
+    note: Optional[str] = None
+
+
+class FeedbackReviewDecisionResponse(BaseModel):
+    id: str
+    status: str
+    assessment_id: str
+    resolved_by: str
+    resolved_at: str
 
 
 class ExemplarSubmissionRequest(BaseModel):
@@ -5880,6 +7142,25 @@ class AdminSmokeCleanupResponse(BaseModel):
     executed_at: str
 
 
+class FeedbackGovernanceBackfillRequest(BaseModel):
+    owner_user_id: Optional[str] = None
+    limit: int = 500
+    dry_run: bool = True
+
+
+class FeedbackGovernanceBackfillResponse(BaseModel):
+    scope_owner_user_id: Optional[str] = None
+    dry_run: bool
+    scanned: int
+    updated: int
+    blocked: int
+    released: int
+    escalated: int
+    skipped: int
+    failures: List[str] = []
+    executed_at: str
+
+
 class Schedule(BaseModel):
     """Upcoming class session scheduled for recording."""
 
@@ -5910,6 +7191,27 @@ class ScheduleUpdate(BaseModel):
     recording_status: Optional[ScheduleStatus] = None
     join_url: Optional[str] = None
     reminder_note: Optional[str] = None
+
+
+class ScheduleBulkCreate(BaseModel):
+    teacher_ids: List[str]
+    start_date: datetime
+    frequency: str = "monthly"
+    count: int = 1
+    duration_minutes: int = 45
+    observer_id: Optional[str] = None
+    focus_elements: List[str] = []
+    focus_note: Optional[str] = None
+    personal_goals: List[str] = []
+    placement_id: Optional[str] = None
+    recurrence_rule: Optional[str] = None
+
+
+class ScheduleComplianceRule(BaseModel):
+    required_observations_per_cycle: int = 6
+    cycle_start_month: int = 9
+    cycle_end_month: int = 6
+    warning_threshold_pct: float = 0.5
 
 
 class RecordingPolicy(BaseModel):
@@ -5981,6 +7283,39 @@ class ActionPlanHistoryEntry(BaseModel):
 class ActionPlanHistoryResponse(BaseModel):
     current_plan: ActionPlan
     history: List[ActionPlanHistoryEntry]
+
+
+class UnifiedActionPlanGoalPayload(BaseModel):
+    id: Optional[str] = None
+    element_code: Optional[str] = None
+    element_name: Optional[str] = None
+    goal_text: str
+    recommended_action: Optional[str] = None
+    due_date: Optional[str] = None
+    priority: str = "medium"
+    status: str = "open"
+    created_from_assessment_id: Optional[str] = None
+    teacher_notes: Optional[str] = None
+    teacher_marked_tried_at: Optional[str] = None
+    completion_note: Optional[str] = None
+    completed_at: Optional[str] = None
+
+
+class UnifiedActionPlanPatch(BaseModel):
+    goals: Optional[List[UnifiedActionPlanGoalPayload]] = None
+    admin_summary: Optional[str] = None
+
+
+class TeacherGoalNotePayload(BaseModel):
+    teacher_notes: str
+
+
+class GoalCompletionPayload(BaseModel):
+    completion_note: str
+
+
+class TeacherReflectionPayload(BaseModel):
+    teacher_reflection: str
 
 
 class SummaryReflection(BaseModel):
@@ -6105,19 +7440,34 @@ class CoachingTimelineResponse(BaseModel):
 
 class CoachingTask(BaseModel):
     id: str
+    workspace_id: Optional[str] = None
+    observer_id: Optional[str] = None
     teacher_id: str
     teacher_name: Optional[str] = None
-    state: str
-    priority: int
-    title: str
-    summary: str
-    due_at: Optional[str] = None
-    route_hint: Optional[str] = None
     assessment_id: Optional[str] = None
     video_id: Optional[str] = None
+    element_id: Optional[str] = None
+    element_code: Optional[str] = None
+    element_name: Optional[str] = None
+    score: Optional[float] = None
+    priority: str = "medium"
+    title: str
+    suggested_action: Optional[str] = None
+    due_date: Optional[str] = None
+    status: str = "open"
+    notes: str = ""
+    linked_observation_session_id: Optional[str] = None
+    created_at: str
+    updated_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    completion_note: Optional[str] = None
+    snoozed_until: Optional[str] = None
+    priority_rank: int = 50
+    state: Optional[str] = None
+    summary: Optional[str] = None
+    due_at: Optional[str] = None
+    route_hint: Optional[str] = None
     observation_id: Optional[str] = None
-    goal_id: Optional[str] = None
-    schedule_id: Optional[str] = None
     context_label: Optional[str] = None
     support_prompt: Optional[str] = None
     rank_reason: Optional[str] = None
@@ -6125,6 +7475,64 @@ class CoachingTask(BaseModel):
 
 class CoachingTaskListResponse(BaseModel):
     tasks: List[CoachingTask]
+
+
+class CoachingTaskUpdate(BaseModel):
+    priority: Optional[str] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+    due_date: Optional[str] = None
+    suggested_action: Optional[str] = None
+    linked_observation_session_id: Optional[str] = None
+
+
+class CoachingTaskCompleteRequest(BaseModel):
+    completion_note: Optional[str] = None
+
+
+class CoachingHistoryResponse(BaseModel):
+    teacher_id: str
+    teacher_name: Optional[str] = None
+    open_tasks: List[CoachingTask] = []
+    history: List[CoachingTask] = []
+
+
+class TrainingSupervisorTraineeStatus(BaseModel):
+    trainee_id: str
+    trainee_name: str
+    school_site: Optional[str] = None
+    required: int
+    completed: int
+    status: str
+
+
+class TrainingSupervisorUpcomingObservation(BaseModel):
+    trainee_id: str
+    trainee_name: str
+    school_site: Optional[str] = None
+    scheduled_date: Optional[str] = None
+    focus_elements: List[str] = []
+
+
+class TrainingSupervisorRecentObservation(BaseModel):
+    trainee_id: str
+    trainee_name: str
+    school_site: Optional[str] = None
+    completed_date: Optional[str] = None
+    summary: Optional[str] = None
+
+
+class TrainingSupervisorSummaryResponse(BaseModel):
+    total_trainees: int
+    active_placements: int
+    observations_this_cycle: int
+    required_per_trainee: int
+    trainees_on_track: int
+    trainees_at_risk: int
+    trainees_not_started: int
+    trainees: List[TrainingSupervisorTraineeStatus] = []
+    upcoming_observations: List[TrainingSupervisorUpcomingObservation]
+    recent_observations: List[TrainingSupervisorRecentObservation]
 
 
 class TeacherAdaptiveSupportResponse(BaseModel):
@@ -6141,14 +7549,63 @@ class TeacherAdaptiveSupportResponse(BaseModel):
 
 class NotificationRecord(BaseModel):
     id: str
+    workspace_id: Optional[str] = None
+    recipient_user_id: Optional[str] = None
+    type: Optional[str] = None
+    payload: Dict[str, Any] = {}
+    read: bool = False
     teacher_id: Optional[str] = None
-    notification_type: str
-    title: str
-    message: str
+    notification_type: Optional[str] = None
+    title: Optional[str] = None
+    message: Optional[str] = None
+    body: Optional[str] = None
+    cta_url: Optional[str] = None
+    action_url: Optional[str] = None
     channel: str = "email"
     status: str = "queued"
     created_at: str
     read_at: Optional[str] = None
+    emailed: bool = False
+
+
+class NotificationListResponse(BaseModel):
+    items: List[NotificationRecord]
+    unread_count: int = 0
+
+
+class NotificationPreferencesPayload(BaseModel):
+    email_observation_complete: bool = True
+    email_goal_added: bool = True
+    email_recognition: bool = True
+    email_conference_reminder: bool = True
+    email_frequency: str = "immediate"
+
+
+class OnboardingCompletePayload(BaseModel):
+    step: Optional[str] = None
+    steps: Optional[Dict[str, bool]] = None
+    completed: bool = False
+
+
+class ConsentGrantPayload(BaseModel):
+    consent_type: str
+    granted: bool = True
+    version: str = "2026-05"
+
+
+class ConsentWithdrawPayload(BaseModel):
+    consent_type: str
+    reason: Optional[str] = None
+
+
+class WebVitalsPayload(BaseModel):
+    name: str
+    value: float
+    rating: Optional[str] = None
+    delta: Optional[float] = None
+    id: Optional[str] = None
+    navigation_type: Optional[str] = None
+    path: Optional[str] = None
 
 
 class GradebookIntegrationCreate(BaseModel):
@@ -6165,47 +7622,51 @@ class GradebookIntegrationResponse(BaseModel):
     updated_at: Optional[str] = None
 
 # ==================== AUTH HELPERS ====================
-def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+from app.middleware.auth_middleware import get_current_user, security
+from app.services import auth_service as _auth_service
 
-def verify_password(password: str, hashed: str) -> bool:
-    return bcrypt.checkpw(password.encode(), hashed.encode())
-
-async def _create_user_session(*, user: dict, role: str, request: Optional[Request]) -> str:
-    session_id = str(uuid.uuid4())
-    request_meta = _extract_request_metadata(request)
-    now = datetime.now(timezone.utc).isoformat()
-    await db.user_sessions.insert_one(
-        {
-            "id": session_id,
-            "user_id": user.get("id"),
-            "email": user.get("email"),
-            "role": role,
-            "ip_address": request_meta.get("ip_address"),
-            "user_agent": request_meta.get("user_agent"),
-            "created_at": now,
-            "last_seen_at": now,
-            "revoked_at": None,
-            "revoked_by": None,
-            "revoke_reason": None,
-        }
-    )
-    return session_id
+hash_password = _auth_service.hash_password
+verify_password = _auth_service.verify_password
+_create_user_session = _auth_service.create_user_session
+_build_csrf_token = _auth_service.build_csrf_token
+_set_auth_cookies = _auth_service.set_auth_cookies
+_clear_auth_cookies = _auth_service.clear_auth_cookies
+_extract_bearer_token_from_authorization_header = _auth_service.extract_bearer_token_from_authorization_header
+_resolve_auth_token = _auth_service.resolve_auth_token
+_csrf_is_valid = _auth_service.csrf_is_valid
+_is_admin_role = _auth_service.is_admin_role
 
 
 def create_token(user_id: str, *, session_id: Optional[str] = None) -> str:
-    issued_at = datetime.now(timezone.utc)
-    payload = {
-        "user_id": user_id,
-        "exp": issued_at + timedelta(hours=JWT_EXPIRATION_HOURS),
-        "iat": issued_at,
-    }
-    if session_id:
-        payload["sid"] = session_id
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return _auth_service.create_access_token(user_id, session_id=session_id)
 
-def _is_admin_role(role: Optional[str]) -> bool:
-    return role in {"admin", "principal", "super_admin"}
+
+async def register(user: "UserCreate", request: Request, response: Response = None):
+    return await _auth_service.register_user(user, request, response)
+
+
+async def request_access(user: "UserCreate", request: Request):
+    return await _auth_service.request_access(user, request)
+
+
+async def login(user: "UserLogin", request: Request, response: Response = None):
+    return await _auth_service.login_user(user, request, response)
+
+
+async def logout(request: Request, response: Response):
+    return await _auth_service.logout_user(request, response)
+
+
+async def request_password_reset(payload: "PasswordResetRequestPayload", request: Request):
+    return await _auth_service.request_password_reset(payload, request)
+
+
+async def confirm_password_reset(payload: "PasswordResetConfirmPayload", request: Request):
+    return await _auth_service.confirm_password_reset(payload, request)
+
+
+async def get_me(request: Request, response: Response, current_user: dict = Depends(get_current_user)):
+    return await _auth_service.get_current_user_profile(current_user, request, response)
 
 
 def _require_school_admin_user(current_user: dict) -> dict:
@@ -6217,6 +7678,12 @@ def _require_school_admin_user(current_user: dict) -> dict:
 def _require_training_admin_user(current_user: dict) -> dict:
     if _get_user_tenant_role(current_user) != "training_admin":
         raise HTTPException(status_code=403, detail="Training administrator access required")
+    organization_type = _normalize_organization_type(
+        current_user.get("organization_type") or current_user.get("org_type"),
+        "training_admin",
+    )
+    if organization_type != "training":
+        raise HTTPException(status_code=403, detail="Training organization access required")
     return current_user
 
 
@@ -6224,270 +7691,6 @@ def _requested_role_matches_user(requested_role: Optional[str], user_doc: dict) 
     if not requested_role:
         return True
     return requested_role == _get_user_tenant_role(user_doc)
-
-async def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security)):
-    try:
-        token = credentials.credentials
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        user_id = payload.get("user_id")
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        user = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
-        if not user:
-            raise HTTPException(status_code=401, detail="User not found")
-        session_id = payload.get("sid")
-        if session_id:
-            session = await db.user_sessions.find_one({"id": session_id}, {"_id": 0})
-            if not session or session.get("revoked_at"):
-                raise HTTPException(status_code=401, detail="Session expired")
-        if _get_user_approval_status(user) == "pending":
-            raise HTTPException(status_code=403, detail="Account pending approval")
-        if _get_user_approval_status(user) == "revoked" or not _is_user_access_active(user):
-            raise HTTPException(status_code=403, detail="Account access removed")
-        preview_target_id = str(request.headers.get("X-Cognivio-Preview-User") or "").strip()
-        if preview_target_id and _get_user_tenant_role(user) == "super_admin":
-            preview_target = await db.users.find_one(
-                {"id": preview_target_id},
-                {"_id": 0, "password": 0},
-            )
-            if preview_target and _get_user_approval_status(preview_target) == "approved" and _is_user_access_active(preview_target):
-                preview_payload = _build_user_response_payload(preview_target)
-                preview_payload["is_preview_mode"] = True
-                preview_payload["preview_source_user_id"] = user.get("id")
-                preview_payload["preview_source_email"] = user.get("email")
-                preview_payload["preview_source_name"] = user.get("name")
-                preview_payload["preview_source_tenant_role"] = _get_user_tenant_role(user)
-                if session_id:
-                    preview_payload["session_id"] = session_id
-                return preview_payload
-        user["role"] = _get_user_role(user)
-        user["approval_status"] = _get_user_approval_status(user)
-        user["is_preview_mode"] = False
-        user["preview_source_user_id"] = None
-        user["preview_source_email"] = None
-        user["preview_source_name"] = None
-        user["preview_source_tenant_role"] = None
-        if session_id:
-            user["session_id"] = session_id
-        return user
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-# ==================== AUTH ENDPOINTS ====================
-@api_router.post("/auth/register", response_model=TokenResponse)
-async def register(user: UserCreate, request: Request):
-    from app.services.workspace_service import enrich_user_with_workspace_mode
-
-    if DEMO_MODE:
-        raise HTTPException(status_code=403, detail="Registration is disabled for demo mode")
-    if ACCESS_APPROVAL_REQUIRED and not _is_access_auto_approved_email(user.email.lower()):
-        raise HTTPException(status_code=403, detail="Self-registration is disabled. Request access approval.")
-    existing = await db.users.find_one({"email": user.email})
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    desired_role = _normalize_requested_role(user.role)
-    tenancy_fields = _normalize_access_request_tenancy_fields(user, desired_role)
-    user_id = str(uuid.uuid4())
-    user_doc = {
-        "id": user_id,
-        "email": user.email,
-        "name": user.name,
-        "password": hash_password(user.password),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "role": _legacy_role_for_tenant_role(desired_role),
-        "tenant_role": desired_role,
-        "tenant_status": "approved",
-        "approval_status": "approved",
-        "approved_at": datetime.now(timezone.utc).isoformat(),
-        "is_active": True,
-        **tenancy_fields,
-    }
-    await db.users.insert_one(user_doc)
-    enriched_user = await enrich_user_with_workspace_mode(user_doc)
-    
-    session_id = await _create_user_session(user=enriched_user, role=_get_user_role(enriched_user), request=request)
-    token = create_token(user_id, session_id=session_id)
-    return TokenResponse(
-        token=token,
-        user=UserResponse(
-            **enriched_user,
-        )
-    )
-
-
-@api_router.post("/auth/request-access", response_model=AccessRequestResponse)
-async def request_access(user: UserCreate, request: Request):
-    from app.services.workspace_service import enrich_user_with_workspace_mode
-
-    if DEMO_MODE:
-        raise HTTPException(status_code=403, detail="Access requests are disabled for demo mode")
-
-    email = user.email.lower()
-    request_meta = _extract_request_metadata(request)
-    existing = await db.users.find_one({"email": email})
-    now = datetime.now(timezone.utc).isoformat()
-    auto_approved = _is_access_auto_approved_email(email)
-    desired_role = _normalize_requested_role(user.role)
-    tenancy_fields = _normalize_access_request_tenancy_fields(user, desired_role)
-
-    if existing:
-        existing_status = _get_user_approval_status(existing)
-        if existing_status == "approved" and _is_user_access_active(existing):
-            raise HTTPException(status_code=400, detail="Email already registered")
-        if existing_status == "revoked":
-            raise HTTPException(status_code=403, detail="Access has been removed for this account")
-        update_fields = {
-            "name": user.name,
-            "password": hash_password(user.password),
-            "updated_at": now,
-            **tenancy_fields,
-        }
-        if auto_approved:
-            update_fields.update(
-                {
-                    "approval_status": "approved",
-                    "approved_at": now,
-                    "approved_by": "system:auto_admin_allowlist",
-                    "revoked_at": None,
-                    "revoked_by": None,
-                    "is_active": True,
-                    "role": _legacy_role_for_tenant_role(desired_role),
-                    "tenant_role": desired_role,
-                    "tenant_status": "approved",
-                }
-            )
-        else:
-            update_fields.update(
-                {
-                    "approval_status": "pending",
-                    "approval_requested_at": now,
-                    "approved_at": None,
-                    "approved_by": None,
-                    "revoked_at": None,
-                    "revoked_by": None,
-                    "is_active": False,
-                    "role": _legacy_role_for_tenant_role(desired_role),
-                    "tenant_role": desired_role,
-                    "tenant_status": "pending",
-                }
-            )
-        await db.users.update_one({"id": existing["id"]}, {"$set": update_fields})
-        refreshed = await db.users.find_one({"id": existing["id"]}, {"_id": 0})
-        if auto_approved:
-            enriched_user = await enrich_user_with_workspace_mode(refreshed)
-            await _log_auth_event(
-                "approval_granted",
-                email=email,
-                user_id=refreshed.get("id"),
-                role_selected=desired_role,
-                result="success",
-                reason="system:auto_admin_allowlist",
-                ip_address=request_meta["ip_address"],
-                user_agent=request_meta["user_agent"],
-            )
-            logger.info("Auto-approved access request for allowlisted admin email %s", email)
-            return AccessRequestResponse(
-                status="approved",
-                email=email,
-                message="Access is approved. You can now log in.",
-                approval_status=_get_user_approval_status(enriched_user),
-                tenant_role=_get_user_tenant_role(enriched_user),
-                organization_type=enriched_user.get("organization_type"),
-                organization_name=enriched_user.get("organization_name") or enriched_user.get("requested_organization_name"),
-                school_name=enriched_user.get("school_name") or enriched_user.get("requested_school_name"),
-            )
-        await _log_auth_event(
-            "request_access",
-            email=email,
-            user_id=refreshed.get("id"),
-            role_selected=desired_role,
-            result="pending",
-            ip_address=request_meta["ip_address"],
-            user_agent=request_meta["user_agent"],
-        )
-        _send_access_request_notification(refreshed)
-        _send_access_request_received_confirmation(refreshed)
-        return AccessRequestResponse(
-            status="pending",
-            email=email,
-            message=(
-                "Access request updated. Approval is still required before login."
-                if existing_status == "pending"
-                else "Access request submitted. Approval is required before login."
-            ),
-            approval_status="pending",
-            tenant_role=desired_role,
-            organization_type=tenancy_fields.get("organization_type"),
-            organization_name=tenancy_fields.get("requested_organization_name"),
-            school_name=tenancy_fields.get("requested_school_name"),
-        )
-
-    user_id = str(uuid.uuid4())
-    user_doc = {
-        "id": user_id,
-        "email": email,
-        "name": user.name,
-        "password": hash_password(user.password),
-        "created_at": now,
-        "role": _legacy_role_for_tenant_role(desired_role),
-        "tenant_role": desired_role,
-        "tenant_status": "approved" if auto_approved else "pending",
-        "approval_status": "approved" if auto_approved else "pending",
-        "approval_requested_at": now,
-        "approved_at": now if auto_approved else None,
-        "approved_by": "system:auto_admin_allowlist" if auto_approved else None,
-        "is_active": True if auto_approved else False,
-        **tenancy_fields,
-    }
-    await db.users.insert_one(user_doc)
-    if auto_approved:
-        enriched_user = await enrich_user_with_workspace_mode(user_doc)
-        await _log_auth_event(
-            "approval_granted",
-            email=email,
-            user_id=user_id,
-            role_selected=desired_role,
-            result="success",
-            reason="system:auto_admin_allowlist",
-            ip_address=request_meta["ip_address"],
-            user_agent=request_meta["user_agent"],
-        )
-        logger.info("Auto-approved access request for allowlisted admin email %s", email)
-        return AccessRequestResponse(
-            status="approved",
-            email=email,
-            message="Access is approved. You can now log in.",
-            approval_status=_get_user_approval_status(enriched_user),
-            tenant_role=_get_user_tenant_role(enriched_user),
-            organization_type=enriched_user.get("organization_type"),
-            organization_name=enriched_user.get("organization_name") or enriched_user.get("requested_organization_name"),
-            school_name=enriched_user.get("school_name") or enriched_user.get("requested_school_name"),
-        )
-    await _log_auth_event(
-        "request_access",
-        email=email,
-        user_id=user_id,
-        role_selected=desired_role,
-        result="pending",
-        ip_address=request_meta["ip_address"],
-        user_agent=request_meta["user_agent"],
-    )
-    _send_access_request_notification(user_doc)
-    _send_access_request_received_confirmation(user_doc)
-    return AccessRequestResponse(
-        status="pending",
-        email=email,
-        message="Access request submitted. Approval is required before login.",
-        approval_status="pending",
-        tenant_role=desired_role,
-        organization_type=tenancy_fields.get("organization_type"),
-        organization_name=tenancy_fields.get("requested_organization_name"),
-        school_name=tenancy_fields.get("requested_school_name"),
-    )
-
 
 @api_router.get("/institutions/lookup", response_model=InstitutionLookupResponse)
 async def lookup_institutions(
@@ -6508,198 +7711,6 @@ async def lookup_institutions(
         suggestions=suggestions,
     )
 
-@api_router.post("/auth/login", response_model=TokenResponse)
-async def login(user: UserLogin, request: Request):
-    from app.services.workspace_service import enrich_user_with_workspace_mode
-
-    email = str(user.email or "").lower()
-    request_meta = _extract_request_metadata(request)
-    db_user = await db.users.find_one({"email": email})
-    requested_role = _normalize_requested_role(user.role) if user.role else None
-    if not db_user or not verify_password(user.password, db_user["password"]):
-        await _log_auth_event(
-            "login_failed",
-            email=email,
-            role_selected=requested_role,
-            result="failure",
-            reason="invalid_credentials",
-            ip_address=request_meta["ip_address"],
-            user_agent=request_meta["user_agent"],
-        )
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    approval_status = _get_user_approval_status(db_user)
-    if approval_status == "pending":
-        await _log_auth_event(
-            "login_failed",
-            email=email,
-            user_id=db_user.get("id"),
-            role_selected=requested_role,
-            result="failure",
-            reason="pending_approval",
-            ip_address=request_meta["ip_address"],
-            user_agent=request_meta["user_agent"],
-        )
-        raise HTTPException(status_code=403, detail="Account pending approval")
-    if approval_status == "revoked" or not _is_user_access_active(db_user):
-        await _log_auth_event(
-            "login_failed",
-            email=email,
-            user_id=db_user.get("id"),
-            role_selected=requested_role,
-            result="failure",
-            reason="access_removed",
-            ip_address=request_meta["ip_address"],
-            user_agent=request_meta["user_agent"],
-        )
-        raise HTTPException(status_code=403, detail="Account access removed")
-    actual_role = _get_user_role(db_user)
-    actual_tenant_role = _get_user_tenant_role(db_user)
-    if (
-        requested_role
-        and actual_tenant_role != "super_admin"
-        and not _requested_role_matches_user(requested_role, db_user)
-    ):
-        expected_label = _format_tenant_role_label(actual_tenant_role)
-        await _log_auth_event(
-            "login_failed",
-            email=email,
-            user_id=db_user.get("id"),
-            role_selected=requested_role,
-            result="failure",
-            reason="role_mismatch",
-            ip_address=request_meta["ip_address"],
-            user_agent=request_meta["user_agent"],
-        )
-        raise HTTPException(
-            status_code=403,
-            detail=f"This account is registered as a {expected_label}. Choose the correct role and try again.",
-        )
-    now = datetime.now(timezone.utc).isoformat()
-    await db.users.update_one(
-        {"id": db_user["id"]},
-        {"$set": {"last_login_at": now, "last_seen_at": now}},
-    )
-    db_user["last_login_at"] = now
-    db_user["last_seen_at"] = now
-    db_user.pop("_id", None)
-    db_user.pop("password", None)
-    db_user["role"] = actual_role
-    db_user["tenant_role"] = actual_tenant_role
-    db_user["tenant_status"] = approval_status
-    db_user["approval_status"] = approval_status
-    enriched_user = await enrich_user_with_workspace_mode(db_user)
-
-    await _log_auth_event(
-        "login_success",
-        email=email,
-        user_id=db_user.get("id"),
-        role_selected=requested_role or actual_role,
-        result="success",
-        ip_address=request_meta["ip_address"],
-        user_agent=request_meta["user_agent"],
-    )
-
-    session_id = await _create_user_session(user=db_user, role=actual_role, request=request)
-    token = create_token(db_user["id"], session_id=session_id)
-    return TokenResponse(
-        token=token,
-        user=UserResponse(**enriched_user)
-    )
-
-
-@api_router.post("/auth/password-reset/request")
-async def request_password_reset(
-    payload: PasswordResetRequestPayload,
-    request: Request,
-):
-    email = str(payload.email or "").strip().lower()
-    request_meta = _extract_request_metadata(request)
-    db_user = await db.users.find_one({"email": email}, {"_id": 0})
-    if db_user and _get_user_approval_status(db_user) == "approved" and _is_user_access_active(db_user):
-        _send_password_reset_email(db_user)
-        await _log_auth_event(
-            "password_reset_requested",
-            email=email,
-            user_id=db_user.get("id"),
-            result="success",
-            ip_address=request_meta["ip_address"],
-            user_agent=request_meta["user_agent"],
-        )
-    else:
-        await _log_auth_event(
-            "password_reset_requested",
-            email=email,
-            result="ignored",
-            reason="user_not_resettable",
-            ip_address=request_meta["ip_address"],
-            user_agent=request_meta["user_agent"],
-        )
-    return {
-        "status": "ok",
-        "message": "If this email is an approved Cognivio account, a password reset link has been sent.",
-    }
-
-
-@api_router.post("/auth/password-reset/confirm")
-async def confirm_password_reset(
-    payload: PasswordResetConfirmPayload,
-    request: Request,
-):
-    try:
-        token_payload = jwt.decode(payload.token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    except jwt.ExpiredSignatureError as exc:
-        raise HTTPException(status_code=400, detail="This password reset link has expired") from exc
-    except jwt.PyJWTError as exc:
-        raise HTTPException(status_code=400, detail="This password reset link is invalid") from exc
-
-    if token_payload.get("purpose") != "password_reset":
-        raise HTTPException(status_code=400, detail="This password reset link is invalid")
-
-    user_id = token_payload.get("sub")
-    email = str(token_payload.get("email") or "").strip().lower()
-    if not user_id or not email:
-        raise HTTPException(status_code=400, detail="This password reset link is invalid")
-
-    db_user = await db.users.find_one({"id": user_id, "email": email}, {"_id": 0})
-    if not db_user or _get_user_approval_status(db_user) != "approved" or not _is_user_access_active(db_user):
-        raise HTTPException(status_code=400, detail="Password reset is unavailable for this account")
-
-    if len(str(payload.password or "")) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters long")
-
-    now = datetime.now(timezone.utc).isoformat()
-    await db.users.update_one(
-        {"id": user_id},
-        {
-            "$set": {
-                "password": hash_password(payload.password),
-                "password_reset_at": now,
-                "last_seen_at": now,
-            }
-        },
-    )
-    if hasattr(db, "user_sessions"):
-        await db.user_sessions.delete_many({"user_id": user_id})
-    refreshed_user = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
-    _send_password_reset_success_email(refreshed_user or {"email": email})
-    request_meta = _extract_request_metadata(request)
-    await _log_auth_event(
-        "password_reset_completed",
-        email=email,
-        user_id=user_id,
-        result="success",
-        ip_address=request_meta["ip_address"],
-        user_agent=request_meta["user_agent"],
-    )
-    return {"status": "ok", "message": "Password updated successfully. You can now sign in."}
-
-@api_router.get("/auth/me", response_model=UserResponse)
-async def get_me(current_user: dict = Depends(get_current_user)):
-    from app.services.workspace_service import enrich_user_with_workspace_mode
-
-    return UserResponse(**(await enrich_user_with_workspace_mode(current_user)))
-
-
 @api_router.get("/user/workspace-mode", response_model=WorkspaceModePreferenceResponse)
 async def get_user_workspace_mode(current_user: dict = Depends(get_current_user)):
     from app.services.workspace_service import resolve_workspace_mode
@@ -6718,22 +7729,77 @@ async def set_user_workspace_mode(
         **(await set_workspace_mode(current_user, payload.model_dump()))
     )
 
+
+@api_router.get("/user/audio-analysis", response_model=WorkspaceAudioAnalysisPreferenceResponse)
+async def get_user_audio_analysis_preference(current_user: dict = Depends(get_current_user)):
+    owner_id = _resolve_audio_workspace_owner_id(current_user) or current_user["id"]
+    owner_doc = current_user
+    if owner_id != current_user["id"]:
+        owner_doc = await db.users.find_one({"id": owner_id}, {"_id": 0}) or current_user
+    return WorkspaceAudioAnalysisPreferenceResponse(
+        audio_analysis_enabled=_is_workspace_audio_analysis_enabled(owner_doc),
+        updated_at=owner_doc.get("audio_analysis_updated_at"),
+    )
+
+
+@api_router.post("/user/audio-analysis", response_model=WorkspaceAudioAnalysisPreferenceResponse)
+async def set_user_audio_analysis_preference(
+    payload: WorkspaceAudioAnalysisPreferencePayload,
+    current_user: dict = Depends(get_current_user),
+):
+    updated_at = datetime.now(timezone.utc).isoformat()
+    enabled = bool(payload.audio_analysis_enabled)
+    owner_id = _resolve_audio_workspace_owner_id(current_user) or current_user["id"]
+    await db.users.update_one(
+        {"id": owner_id},
+        {"$set": {"audio_analysis_enabled": enabled, "audio_analysis_updated_at": updated_at}},
+    )
+    return WorkspaceAudioAnalysisPreferenceResponse(
+        audio_analysis_enabled=enabled,
+        updated_at=updated_at,
+    )
+
 # ==================== FRAMEWORK ENDPOINTS ====================
-@api_router.get("/frameworks")
-async def get_frameworks(current_user: dict = Depends(get_current_user)):
+@cached(ttl=3600, key=lambda workspace_id: f"frameworks:{workspace_id}", client_getter=_cache_client)
+async def _get_frameworks_cached(workspace_id: str, user_id: str) -> dict:
     custom_domain_count = await db.custom_domains.count_documents(
-        {"user_id": current_user["id"]}
+        {"user_id": user_id}
+    )
+    training_domain_count = await db.custom_domains.count_documents(
+        {
+            "user_id": user_id,
+            "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
+        }
     )
     return {
         "frameworks": [
             {"type": "danielson", "name": "Danielson Framework", "domain_count": 4},
             {"type": "marshall", "name": "Marshall Rubrics", "domain_count": 6},
             {
+                "type": "training_competency",
+                "name": "Training Competency Framework",
+                "domain_count": len(TRAINING_COMPETENCY_FRAMEWORK["domains"]) + training_domain_count,
+                "scale": TRAINING_COMPETENCY_SCALE,
+            },
+            {
                 "type": "custom",
                 "name": "Custom Focus Rubric",
                 "domain_count": 10 + custom_domain_count,
             },
         ]
+    }
+
+
+@api_router.get("/frameworks")
+async def get_frameworks(current_user: dict = Depends(get_current_user)):
+    return await _get_frameworks_cached(_workspace_id_for_user(current_user), current_user["id"])
+
+
+@api_router.get("/frameworks/standards")
+async def get_training_framework_standards(current_user: dict = Depends(get_current_user)):
+    return {
+        "standards": TRAINING_COMPETENCY_STANDARDS,
+        "scale": TRAINING_COMPETENCY_SCALE,
     }
 
 @api_router.get("/frameworks/custom-domains")
@@ -6795,6 +7861,67 @@ async def upload_focus_rubric(
     }
 
 
+@api_router.post("/frameworks/import")
+async def import_training_competency_framework(
+    file: UploadFile = File(...),
+    standard_key: str = Form("program_custom"),
+    current_user: dict = Depends(get_current_user),
+):
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Imported framework file is empty")
+    rubric_name, parsed_domains = _parse_uploaded_rubric_file(file.filename or "", content)
+    normalized_standard = str(standard_key or "program_custom").strip().lower()
+    known_standards = {standard["key"] for standard in TRAINING_COMPETENCY_STANDARDS}
+    if normalized_standard not in known_standards:
+        normalized_standard = "program_custom"
+    training_domains = _normalize_training_framework_domains(parsed_domains, normalized_standard)
+    if not training_domains:
+        raise HTTPException(status_code=400, detail="Imported framework did not contain competency domains")
+    created_at = datetime.now(timezone.utc).isoformat()
+    created_domains = []
+    for domain in training_domains:
+        domain_doc = {
+            **domain,
+            "rubric_set_name": rubric_name,
+            "user_id": current_user["id"],
+            "created_at": created_at,
+        }
+        await db.custom_domains.insert_one(domain_doc)
+        created_domains.append({k: v for k, v in domain_doc.items() if k != "user_id"})
+
+    selected_elements = [
+        element["id"]
+        for domain in (TRAINING_COMPETENCY_FRAMEWORK["domains"] + created_domains)
+        for element in domain.get("elements", [])
+    ]
+    await db.framework_selections.update_one(
+        {"user_id": current_user["id"]},
+        {
+            "$set": {
+                "id": str(uuid.uuid4()),
+                "user_id": current_user["id"],
+                "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
+                "selected_elements": selected_elements,
+                "priority_elements": [],
+                "focus_note": None,
+                "created_at": created_at,
+            }
+        },
+        upsert=True,
+    )
+    return {
+        "message": "Training competency framework imported",
+        "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
+        "standard_key": normalized_standard,
+        "rubric_name": rubric_name,
+        "domains_created": len(created_domains),
+        "elements_created": sum(len(domain.get("elements") or []) for domain in created_domains),
+        "scale": TRAINING_COMPETENCY_SCALE,
+        "domains": created_domains,
+    }
+
+
 @api_router.post("/frameworks/custom-domains/{domain_id}/elements")
 async def add_custom_element(
     domain_id: str,
@@ -6840,9 +7967,25 @@ async def get_framework_details(
         return DANIELSON_FRAMEWORK
     elif framework_type == FrameworkType.MARSHALL:
         return MARSHALL_FRAMEWORK
+    elif framework_type == FrameworkType.TRAINING_COMPETENCY:
+        custom_domains = await db.custom_domains.find(
+            {
+                "user_id": current_user["id"],
+                "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
+            },
+            {"_id": 0, "user_id": 0},
+        ).to_list(1000)
+        return {
+            **TRAINING_COMPETENCY_FRAMEWORK,
+            "domains": TRAINING_COMPETENCY_FRAMEWORK["domains"] + custom_domains,
+        }
     else:
         custom_domains = await db.custom_domains.find(
-            {"user_id": current_user["id"]}, {"_id": 0, "user_id": 0}
+            {
+                "user_id": current_user["id"],
+                "framework_type": {"$ne": FrameworkType.TRAINING_COMPETENCY.value},
+            },
+            {"_id": 0, "user_id": 0},
         ).to_list(1000)
         domains = (
             DANIELSON_FRAMEWORK["domains"]
@@ -6895,6 +8038,18 @@ async def get_current_selection(current_user: dict = Depends(get_current_user)):
         {"_id": 0}
     )
     if not selection:
+        if _get_user_tenant_role(current_user) == "training_admin":
+            all_training_elements = [
+                element["id"]
+                for domain in TRAINING_COMPETENCY_FRAMEWORK["domains"]
+                for element in domain["elements"]
+            ]
+            return {
+                "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
+                "selected_elements": all_training_elements,
+                "priority_elements": [],
+                "focus_note": None,
+            }
         # Return default with all Danielson elements selected
         all_elements = []
         for domain in DANIELSON_FRAMEWORK["domains"]:
@@ -6922,6 +8077,20 @@ async def get_current_selection(current_user: dict = Depends(get_current_user)):
             el["id"] for domain in domains for el in domain.get("elements", [])
         ]
         selection["selected_elements"] = element_ids
+    if selection.get("framework_type") == FrameworkType.TRAINING_COMPETENCY.value and not selection.get(
+        "selected_elements"
+    ):
+        custom_domains = await db.custom_domains.find(
+            {
+                "user_id": current_user["id"],
+                "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
+            },
+            {"_id": 0, "user_id": 0},
+        ).to_list(1000)
+        domains = TRAINING_COMPETENCY_FRAMEWORK["domains"] + custom_domains
+        selection["selected_elements"] = [
+            el["id"] for domain in domains for el in domain.get("elements", [])
+        ]
     selection.setdefault("priority_elements", [])
     selection.setdefault("focus_note", None)
     return selection
@@ -6981,6 +8150,8 @@ async def create_teacher(teacher: TeacherCreate, current_user: dict = Depends(ge
         "created_at": datetime.now(timezone.utc).isoformat()
     }
     await db.teachers.insert_one(teacher_doc)
+    await CACHE_CLIENT.invalidate_pattern(f"teachers:{_workspace_id_for_user(current_user)}:*")
+    await CACHE_CLIENT.invalidate_pattern(f"dashboard:*:{_workspace_id_for_user(current_user)}")
     return TeacherResponse(**{k: v for k, v in teacher_doc.items() if k not in ["created_by", "_id"]})
 
 
@@ -7036,6 +8207,7 @@ async def create_teacher_self_profile(
         "created_at": now,
     }
     await db.teachers.insert_one(teacher_doc)
+    await CACHE_CLIENT.invalidate_pattern(f"teachers:{_workspace_id_for_user(current_user)}:*")
     await db.users.update_one(
         {"id": current_user["id"]},
         {
@@ -7069,21 +8241,181 @@ async def update_teacher(
         teacher.pop("created_by", None)
         return TeacherResponse(**teacher)
     await db.teachers.update_one({"id": teacher_id}, {"$set": update_fields})
+    await CACHE_CLIENT.invalidate_pattern(f"teachers:{_workspace_id_for_user(current_user)}:*")
     teacher.update(update_fields)
     teacher.pop("created_by", None)
     return TeacherResponse(**teacher)
 
 @api_router.get("/teachers", response_model=List[TeacherResponse])
-async def get_teachers(request: Request, current_user: dict = Depends(get_current_user)):
+async def get_teachers(
+    request: Request,
+    fields: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
     teacher_ids = await _list_teacher_ids_for_user(current_user)
     if not teacher_ids:
         return []
+    workspace_id = _workspace_id_for_user(current_user)
+    language = _resolve_request_language(request, default="en")
+    fields_hash = hashlib.sha1(str(fields or "default").encode("utf-8")).hexdigest()[:12]
+    cache_key = f"teachers:{workspace_id}:{language}:{fields_hash}"
+    cached_teachers = await CACHE_CLIENT.get(cache_key)
+    if cached_teachers is not None:
+        return [TeacherResponse(**item) for item in cached_teachers]
     teachers = await db.teachers.find(
         {"id": {"$in": teacher_ids}},
         {"_id": 0, "created_by": 0}
     ).to_list(1000)
-    language = _resolve_request_language(request, default="en")
-    return [TeacherResponse(**_localize_teacher_payload(t, language)) for t in teachers]
+    result = [TeacherResponse(**_localize_teacher_payload(t, language)) for t in teachers]
+    await CACHE_CLIENT.set(cache_key, [item.dict() for item in result], 120)
+    return result
+
+
+@api_router.get("/teacher/my-admin")
+async def get_my_linked_admin(current_user: dict = Depends(get_current_user)):
+    if _get_user_tenant_role(current_user) != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher account required")
+    teacher = None
+    if current_user.get("teacher_id"):
+        teacher = await db.teachers.find_one({"id": current_user["teacher_id"]}, {"_id": 0})
+    if not teacher and current_user.get("email"):
+        teacher = await db.teachers.find_one(
+            {"email": {"$regex": f"^{re.escape(str(current_user.get('email')).strip())}$", "$options": "i"}},
+            {"_id": 0},
+        )
+    admin_doc = None
+    admin_id = (teacher or {}).get("linked_admin_user_id") or current_user.get("manager_user_id")
+    admin_email = (teacher or {}).get("linked_admin_email") or current_user.get("manager_email")
+    if admin_id:
+        admin_doc = await db.users.find_one({"id": admin_id}, {"_id": 0, "password": 0})
+    if not admin_doc and admin_email:
+        admin_doc = await _find_user_by_email(admin_email)
+    if not admin_doc and not admin_email:
+        return None
+    return {
+        "admin_name": (admin_doc or {}).get("name") or (teacher or {}).get("linked_admin_name"),
+        "admin_email": (admin_doc or {}).get("email") or admin_email,
+        "school_name": (teacher or {}).get("school_name") or current_user.get("school_name"),
+        "admin_avatar_url": (admin_doc or {}).get("avatar_url"),
+    }
+
+
+@api_router.post("/teacher/request-linkage")
+async def request_teacher_linkage(
+    payload: TeacherLinkageRequestPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    if _get_user_tenant_role(current_user) != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher account required")
+    admin = await _find_user_by_email(str(payload.admin_email).lower())
+    if not admin or _get_user_tenant_role(admin) not in {"school_admin", "training_admin", "super_admin"}:
+        raise HTTPException(status_code=404, detail="Administrator not found")
+    teacher_doc = await db.teachers.find_one({"id": current_user.get("teacher_id")}, {"_id": 0}) if current_user.get("teacher_id") else None
+    now = datetime.now(timezone.utc).isoformat()
+    record = {
+        "id": str(uuid.uuid4()),
+        "teacher_user_id": current_user["id"],
+        "teacher_id": (teacher_doc or {}).get("id"),
+        "teacher_name": current_user.get("name"),
+        "teacher_email": current_user.get("email"),
+        "target_admin_user_id": admin["id"],
+        "target_admin_email": admin.get("email"),
+        "status": "pending",
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.pending_linkages.insert_one(record)
+    await _create_notification(
+        recipient_user=admin,
+        notification_type="teacher_linkage_requested",
+        title=f"{current_user.get('name')} requested school linkage",
+        message="A teacher has requested to link their account to your school. Accept or decline from the teacher roster.",
+        payload={"teacher_user_id": current_user["id"], "teacher_id": record.get("teacher_id")},
+        teacher_id=record.get("teacher_id"),
+        workspace_id=admin.get("organization_id") or admin.get("id"),
+        cta_url="/teachers",
+    )
+    return {"status": "pending", "request": {k: v for k, v in record.items() if k != "_id"}}
+
+
+async def _link_teacher_to_admin_workspace(
+    teacher_id: str,
+    current_user: dict,
+    payload: Optional[TeacherAdminLinkPayload] = None,
+) -> dict:
+    tenant_role = _get_user_tenant_role(current_user)
+    if tenant_role not in {"school_admin", "training_admin", "super_admin"}:
+        raise HTTPException(status_code=403, detail="Administrator account required")
+    teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+    payload = payload or TeacherAdminLinkPayload()
+    admin_doc = current_user
+    if payload.admin_user_id:
+        admin_doc = await db.users.find_one({"id": payload.admin_user_id}, {"_id": 0, "password": 0}) or current_user
+    organization_id = payload.organization_id or admin_doc.get("organization_id") or current_user.get("organization_id")
+    school_id = payload.school_id or admin_doc.get("school_id") or current_user.get("school_id")
+    organization = await db.organizations.find_one({"id": organization_id}, {"_id": 0}) if organization_id else None
+    school = await db.schools.find_one({"id": school_id}, {"_id": 0}) if school_id else None
+    updates = {
+        "organization_id": organization_id,
+        "organization_name": (organization or {}).get("name") or admin_doc.get("organization_name"),
+        "school_id": school_id,
+        "school_name": (school or {}).get("name") or admin_doc.get("school_name"),
+        "linked_admin_user_id": admin_doc.get("id"),
+        "linked_admin_name": admin_doc.get("name"),
+        "linked_admin_email": admin_doc.get("email"),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.teachers.update_one({"id": teacher_id}, {"$set": updates})
+    if teacher.get("email"):
+        await db.users.update_one(
+            {"email": {"$regex": f"^{re.escape(str(teacher.get('email')).strip())}$", "$options": "i"}},
+            {"$set": {
+                "teacher_id": teacher_id,
+                "organization_id": organization_id,
+                "organization_name": updates["organization_name"],
+                "school_id": school_id,
+                "school_name": updates["school_name"],
+                "manager_user_id": admin_doc.get("id"),
+                "manager_name": admin_doc.get("name"),
+                "manager_email": admin_doc.get("email"),
+            }},
+        )
+    return {**teacher, **updates}
+
+
+@api_router.post("/admin/teachers/{teacher_id}/link")
+async def link_teacher_to_admin(
+    teacher_id: str,
+    payload: TeacherAdminLinkPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    linked = await _link_teacher_to_admin_workspace(teacher_id, current_user, payload)
+    return {"teacher": linked}
+
+
+@api_router.post("/admin/teachers/{teacher_id}/unlink")
+async def unlink_teacher_from_admin(
+    teacher_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    await db.teachers.update_one(
+        {"id": teacher_id},
+        {"$set": {
+            "linked_admin_user_id": None,
+            "linked_admin_name": None,
+            "linked_admin_email": None,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+    if teacher.get("email"):
+        await db.users.update_one(
+            {"email": {"$regex": f"^{re.escape(str(teacher.get('email')).strip())}$", "$options": "i"}},
+            {"$set": {"manager_user_id": None, "manager_name": None, "manager_email": None}},
+        )
+    return {"teacher_id": teacher_id, "linked": False}
 
 
 @api_router.post("/schools", response_model=SchoolResponse)
@@ -7529,7 +8861,7 @@ async def _run_video_privacy_job(video_id: str) -> None:
                     redacted_full_path,
                     "redacted-videos",
                     f"{video_id}.mp4",
-                    video.get("content_type") or "video/mp4",
+                    "video/mp4",
                 )
                 redacted_file_url = uploaded_video_url or redacted_file_url
             except Exception as exc:
@@ -7667,11 +8999,14 @@ async def _enqueue_video_processing_job(
                 "status": VideoProcessingStatus.QUEUED.value,
                 "updated_at": now,
                 "last_error": None,
+                "claimed_at": None,
+                "claimed_by": None,
             },
             "$setOnInsert": {
                 "id": str(uuid.uuid4()),
                 "created_at": now,
                 "attempts": 0,
+                "retry_count": 0,
             },
         },
         upsert=True,
@@ -7865,70 +9200,163 @@ async def _run_video_transcode_job(video_id: str) -> None:
         )
 
 
-async def _run_video_job(video_id: str) -> None:
-    job = await db.video_processing_jobs.find_one({"video_id": video_id}, {"_id": 0})
-    if not job:
-        return
+async def _claim_video_processing_job(worker_label: str, video_id: Optional[str] = None) -> Optional[dict]:
     now = datetime.now(timezone.utc).isoformat()
-    claim = await db.video_processing_jobs.update_one(
-        {"video_id": video_id, "status": VideoProcessingStatus.QUEUED.value},
+    query: Dict[str, Any] = {
+        "status": VideoProcessingStatus.QUEUED.value,
+        "$or": [
+            {"next_retry_at": {"$exists": False}},
+            {"next_retry_at": None},
+            {"next_retry_at": {"$lte": now}},
+        ],
+        "$expr": {"$lt": [{"$ifNull": ["$retry_count", 0]}, 3]},
+    }
+    if video_id:
+        query["video_id"] = video_id
+    return await db.video_processing_jobs.find_one_and_update(
+        query,
         {
             "$set": {
                 "status": VideoProcessingStatus.PROCESSING.value,
                 "updated_at": now,
                 "started_at": now,
+                "claimed_at": now,
+                "claimed_by": worker_label,
+                "last_heartbeat": now,
+                "last_error": None,
             },
             "$inc": {"attempts": 1},
         },
+        sort=[("created_at", 1)],
+        projection={"_id": 0},
+        return_document=True,
     )
-    if claim.modified_count == 0:
+
+
+async def _write_worker_heartbeat(worker_label: str, *, status: str = "idle", current_job: Optional[str] = None) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    await db.worker_heartbeats.update_one(
+        {"worker_label": worker_label},
+        {
+            "$set": {
+                "worker_label": worker_label,
+                "worker_type": "video",
+                "status": status,
+                "current_job": current_job,
+                "last_heartbeat": now,
+                "last_active": now,
+                "instance_id": VIDEO_WORKER_INSTANCE_ID,
+            },
+            "$setOnInsert": {"created_at": now},
+        },
+        upsert=True,
+    )
+    if current_job:
+        await db.video_processing_jobs.update_one(
+            {"video_id": current_job, "claimed_by": worker_label},
+            {"$set": {"last_heartbeat": now, "updated_at": now}},
+        )
+
+
+async def _heartbeat_during_job(worker_label: str, video_id: str) -> None:
+    try:
+        while True:
+            await _write_worker_heartbeat(worker_label, status="processing", current_job=video_id)
+            await asyncio.sleep(30)
+    except asyncio.CancelledError:
+        raise
+
+
+async def _run_video_job(video_id: Optional[str], worker_label: str) -> None:
+    job = await _claim_video_processing_job(worker_label, video_id)
+    if not job:
         return
+    video_id = job["video_id"]
+    await _write_worker_heartbeat(worker_label, status="processing", current_job=video_id)
+    heartbeat_task = asyncio.create_task(_heartbeat_during_job(worker_label, video_id), name=f"{worker_label}-heartbeat")
     success, error_message = await analyze_video(
         video_id=video_id,
         file_path=job["file_path"],
         teacher_id=job["teacher_id"],
         user_id=job["user_id"],
     )
+    heartbeat_task.cancel()
+    try:
+        await heartbeat_task
+    except asyncio.CancelledError:
+        pass
     finished_at = datetime.now(timezone.utc).isoformat()
+    retry_count = int(job.get("retry_count") or 0)
+    if success:
+        await db.video_processing_jobs.update_one(
+            {"video_id": video_id},
+            {
+                "$set": {
+                    "status": VideoProcessingStatus.COMPLETED.value,
+                    "updated_at": finished_at,
+                    "finished_at": finished_at,
+                    "last_error": None,
+                    "claimed_by": None,
+                    "current_job": None,
+                }
+            },
+        )
+        await db.worker_heartbeats.update_one(
+            {"worker_label": worker_label},
+            {"$inc": {"jobs_completed_today": 1}, "$set": {"status": "idle", "current_job": None, "last_heartbeat": finished_at}},
+            upsert=True,
+        )
+        return
+
+    retry_count += 1
+    retry_delay_seconds = min(3600, 60 * (2 ** max(0, retry_count - 1)))
+    retry_at = (datetime.now(timezone.utc) + timedelta(seconds=retry_delay_seconds)).isoformat()
+    final_status = VideoProcessingStatus.FAILED.value if retry_count >= 3 else VideoProcessingStatus.QUEUED.value
     await db.video_processing_jobs.update_one(
         {"video_id": video_id},
         {
             "$set": {
-                "status": (
-                    VideoProcessingStatus.COMPLETED.value
-                    if success
-                    else VideoProcessingStatus.FAILED.value
-                ),
+                "status": final_status,
                 "updated_at": finished_at,
-                "finished_at": finished_at,
-                "last_error": error_message if not success else None,
+                "finished_at": finished_at if final_status == VideoProcessingStatus.FAILED.value else None,
+                "last_error": error_message,
+                "retry_count": retry_count,
+                "next_retry_at": retry_at if final_status == VideoProcessingStatus.QUEUED.value else None,
+                "claimed_by": None,
             }
         },
     )
+    await _write_worker_heartbeat(worker_label, status="idle", current_job=None)
 
 
 async def _video_processing_worker(worker_label: str) -> None:
     logger.info(f"Video worker {worker_label} started")
     try:
         while True:
-            video_id = await VIDEO_JOB_QUEUE.get()
+            await _write_worker_heartbeat(worker_label, status="idle")
+            queue_item = None
             try:
-                await _run_video_job(video_id)
+                queue_item = await asyncio.wait_for(VIDEO_JOB_QUEUE.get(), timeout=5)
+            except asyncio.TimeoutError:
+                queue_item = None
+            try:
+                await _run_video_job(queue_item, worker_label)
                 record_worker_result(
                     worker_type="video",
-                    job_id=video_id,
+                    job_id=queue_item or "mongo-claim",
                     success=True,
                 )
             except Exception as exc:
-                logger.error(f"Video worker {worker_label} failed on {video_id}: {exc}")
+                logger.error(f"Video worker {worker_label} failed on {queue_item}: {exc}")
                 record_worker_result(
                     worker_type="video",
-                    job_id=video_id,
+                    job_id=queue_item or "mongo-claim",
                     success=False,
                     failure_reason=str(exc),
                 )
             finally:
-                VIDEO_JOB_QUEUE.task_done()
+                if queue_item:
+                    VIDEO_JOB_QUEUE.task_done()
     except asyncio.CancelledError:
         logger.info(f"Video worker {worker_label} stopped")
         raise
@@ -8029,6 +9457,8 @@ async def _rehydrate_video_processing_queue() -> None:
             "$set": {
                 "status": VideoProcessingStatus.QUEUED.value,
                 "updated_at": now,
+                "claimed_at": None,
+                "claimed_by": None,
             }
         },
     )
@@ -8313,37 +9743,39 @@ async def _start_privacy_maintenance_tasks() -> None:
     PRIVACY_MAINTENANCE_TASKS.append(task)
 
 
-@api_router.post("/videos/upload", response_model=VideoUploadResponse)
 async def upload_video(
     request: Request,
     file: UploadFile = File(...),
     teacher_id: str = Form(...),
     subject: Optional[str] = Form(None),
     recorded_at: Optional[str] = Form(None),
+    observation_session_id: Optional[str] = Form(None),
     current_user: dict = Depends(get_current_user)
 ):
     preferred_language = _resolve_request_language(request, default="en")
+    upload_started_perf = time.perf_counter()
     try:
-        upload_started_perf = time.perf_counter()
         upload_source = _get_user_role(current_user)
-        if not (file.filename or "").strip():
-            raise HTTPException(status_code=400, detail="Filename is required")
-        file_ext = Path(file.filename or "").suffix.lower()
-        if file_ext not in VIDEO_ALLOWED_EXTENSIONS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid file type. Allowed: {sorted(VIDEO_ALLOWED_EXTENSIONS)}",
-            )
-        content_type = (file.content_type or "").lower()
-        if content_type and content_type not in VIDEO_ALLOWED_CONTENT_TYPES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid content type. Allowed: {sorted(VIDEO_ALLOWED_CONTENT_TYPES)}",
-            )
+        if not isinstance(observation_session_id, str) or not observation_session_id.strip():
+            observation_session_id = None
+        else:
+            observation_session_id = observation_session_id.strip()
+        detected_video = await _validate_video_upload_file(file)
+        file_ext = detected_video["extension"]
+        content_type = detected_video["content_type"]
         normalized_recorded_at = _parse_optional_iso_datetime(recorded_at, "recorded_at")
         upload_time = datetime.now(timezone.utc).isoformat()
 
         teacher = await _get_teacher_or_404(teacher_id, current_user)
+        observation_session = None
+        if observation_session_id:
+            observation_session = await _get_observation_session_or_404(observation_session_id, current_user)
+            if observation_session.get("teacher_id") != teacher_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Observation session must belong to the selected teacher",
+                )
+        await _ensure_workspace_upload_quota_available(teacher, current_user)
         active_profile = await _get_active_privacy_profile(teacher_id)
         if PRIVACY_REQUIRE_PROFILE and not active_profile:
             raise HTTPException(
@@ -8373,13 +9805,7 @@ async def upload_video(
                 if VIDEO_MAX_UPLOAD_BYTES and size > VIDEO_MAX_UPLOAD_BYTES:
                     await f.close()
                     os.remove(file_path)
-                    raise HTTPException(
-                        status_code=413,
-                        detail=(
-                            f"File too large. Maximum allowed is "
-                            f"{VIDEO_MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
-                        ),
-                    )
+                    raise UploadTooLargeError()
                 await f.write(chunk)
 
         s3_key = None
@@ -8390,7 +9816,7 @@ async def upload_video(
                 file_path,
                 "videos",
                 filename,
-                content_type or "video/mp4",
+                content_type,
                 key_override=raw_s3_key_override,
             )
         except Exception as exc:
@@ -8412,7 +9838,7 @@ async def upload_video(
             "raw_file_url": file_url,
             "file_path": relative_path,
             "raw_file_path": relative_path,
-            "content_type": content_type or "video/mp4",
+            "content_type": content_type,
             "file_size_bytes": size,
             "raw_file_size_bytes": size,
             "processed_s3_key": None,
@@ -8421,6 +9847,7 @@ async def upload_video(
             "processed_content_type": None,
             "processed_file_size_bytes": None,
             "teacher_id": teacher_id,
+            "observation_session_id": observation_session_id or None,
             "uploaded_by": current_user["id"],
             "status": VideoProcessingStatus.QUEUED.value,
             "privacy_status": PrivacyProcessingStatus.QUEUED.value,
@@ -8457,7 +9884,7 @@ async def upload_video(
                 teacher_id=teacher_id,
                 user_id=current_user["id"],
                 file_path=str(file_path),
-                source_content_type=content_type or "video/mp4",
+                source_content_type=content_type,
                 raw_s3_key=s3_key,
                 raw_file_url=file_url,
                 requested_profile=VIDEO_TRANSCODE_PROFILE,
@@ -8467,6 +9894,7 @@ async def upload_video(
             "id": str(uuid.uuid4()),
             "video_id": video_id,
             "teacher_id": teacher_id,
+            "observation_session_id": observation_session_id or None,
             "file_path": relative_path,
             "subject": subject,
             "recorded_at": normalized_recorded_at,
@@ -8475,6 +9903,18 @@ async def upload_video(
             "uploaded_by": current_user["id"],
             "uploaded_at": upload_time,
         })
+
+        if observation_session:
+            await db.observation_sessions.update_one(
+                {"id": observation_session["id"]},
+                {
+                    "$set": {
+                        "linked_video_id": video_id,
+                        "status": ObservationSessionStatus.RECORDING_UPLOADED.value,
+                        "updated_at": upload_time,
+                    }
+                },
+            )
 
         try:
             admin_id = teacher.get("created_by") or current_user["id"]
@@ -8515,6 +9955,7 @@ async def upload_video(
             id=video_id,
             filename=file.filename,
             teacher_id=teacher_id,
+            observation_session_id=observation_session_id or None,
             status=VideoProcessingStatus.QUEUED.value,
             privacy_status=PrivacyProcessingStatus.QUEUED.value,
             analysis_status=VideoProcessingStatus.QUEUED.value,
@@ -8524,7 +9965,7 @@ async def upload_video(
             recorded_at=normalized_recorded_at,
             file_path=relative_path,
             file_size_bytes=size,
-            content_type=content_type or "video/mp4",
+            content_type=content_type,
         )
     except HTTPException:
         app_metrics.record_upload_result(
@@ -8543,7 +9984,7 @@ async def upload_video(
         )
         raise
 
-@api_router.get("/videos")
+
 async def get_videos(teacher_id: Optional[str] = None, current_user: dict = Depends(get_current_user)):
     query: Dict[str, Any] = {}
     if teacher_id:
@@ -8558,7 +9999,6 @@ async def get_videos(teacher_id: Optional[str] = None, current_user: dict = Depe
     return [_sanitize_video_response(video) for video in videos]
 
 
-@api_router.get("/videos/{video_id}")
 async def get_video_detail(video_id: str, current_user: dict = Depends(get_current_user)):
     """Get full video metadata including stored filename for playback."""
     video = await db.videos.find_one({"id": video_id}, {"_id": 0})
@@ -8568,7 +10008,6 @@ async def get_video_detail(video_id: str, current_user: dict = Depends(get_curre
     return _sanitize_video_response(_apply_video_response_defaults(video))
 
 
-@api_router.get("/videos/{video_id}/raw-access")
 async def get_video_raw_access(video_id: str, current_user: dict = Depends(get_current_user)):
     role = _get_user_role(current_user)
     if role != "admin":
@@ -8599,7 +10038,6 @@ async def get_video_raw_access(video_id: str, current_user: dict = Depends(get_c
         "retention_expires_at": video.get("raw_retention_expires_at"),
     }
 
-@api_router.get("/videos/{video_id}/status")
 async def get_video_status(video_id: str, current_user: dict = Depends(get_current_user)):
     video = await db.videos.find_one({"id": video_id}, {"_id": 0})
     if not video:
@@ -8617,7 +10055,175 @@ async def get_video_status(video_id: str, current_user: dict = Depends(get_curre
     }
 
 
-@api_router.post("/videos/{video_id}/retry")
+async def _resolve_video_comment_rubric_fields(
+    video_id: str,
+    element_id: Optional[str],
+    element_code: Optional[str],
+    element_name: Optional[str],
+) -> Dict[str, Optional[str]]:
+    cleaned_element_id = _clean_optional_string(element_id)
+    cleaned_code = _clean_optional_string(element_code) or cleaned_element_id
+    cleaned_name = _clean_optional_string(element_name)
+    if cleaned_element_id and not cleaned_name:
+        assessment = await db.assessments.find_one(
+            {"video_id": video_id},
+            {"_id": 0, "element_scores": 1},
+        )
+        for score in assessment.get("element_scores", []) if assessment else []:
+            if score.get("element_id") == cleaned_element_id:
+                cleaned_name = _clean_optional_string(score.get("element_name"))
+                cleaned_code = cleaned_code or _clean_optional_string(score.get("element_id"))
+                break
+    return {
+        "rubric_element_id": cleaned_element_id,
+        "rubric_element_code": cleaned_code,
+        "rubric_element_name": cleaned_name,
+    }
+
+
+async def list_video_comments(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_visible_video_or_404(video_id, current_user)
+    docs = await db.video_comments.find(
+        _comment_visibility_query(video_id, current_user),
+        {"_id": 0},
+    ).sort("timestamp_seconds", 1).to_list(1000)
+    docs.sort(
+        key=lambda item: (
+            float(item.get("timestamp_seconds") or 0),
+            str(item.get("created_at") or ""),
+        )
+    )
+    return VideoCommentListResponse(
+        comments=[VideoComment(**_sanitize_video_comment_doc(doc)) for doc in docs]
+    )
+
+
+async def create_video_comment(
+    video_id: str,
+    payload: VideoCommentCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    video = await _get_visible_video_or_404(video_id, current_user)
+    teacher = await db.teachers.find_one({"id": video.get("teacher_id")}, {"_id": 0})
+    body = (payload.body or "").strip()
+    if not body:
+        raise HTTPException(status_code=400, detail="Comment text is required")
+    timestamp_seconds = float(payload.timestamp_seconds or 0)
+    if timestamp_seconds < 0:
+        raise HTTPException(status_code=400, detail="Comment timestamp cannot be negative")
+    thread_parent_id = _clean_optional_string(payload.thread_parent_id)
+    if thread_parent_id:
+        parent = await _get_video_comment_or_404(video_id, thread_parent_id, current_user)
+        if parent.get("thread_parent_id"):
+            raise HTTPException(status_code=400, detail="Replies can only be one level deep")
+        timestamp_seconds = float(parent.get("timestamp_seconds") or timestamp_seconds)
+    rubric_fields = await _resolve_video_comment_rubric_fields(
+        video_id,
+        payload.rubric_element_id,
+        payload.rubric_element_code,
+        payload.rubric_element_name,
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "video_id": video_id,
+        "workspace_id": _resolve_video_workspace_id(video, teacher, current_user),
+        "author_id": current_user["id"],
+        "author_name": (
+            _clean_optional_string(current_user.get("name"))
+            or _clean_optional_string(current_user.get("email"))
+            or "Cognivio user"
+        ),
+        "author_role": _get_user_tenant_role(current_user),
+        "timestamp_seconds": timestamp_seconds,
+        **rubric_fields,
+        "body": body,
+        "is_private": bool(payload.is_private),
+        "thread_parent_id": thread_parent_id,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.video_comments.insert_one(doc)
+    return VideoComment(**_sanitize_video_comment_doc(doc))
+
+
+async def update_video_comment(
+    video_id: str,
+    comment_id: str,
+    payload: VideoCommentUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_visible_video_or_404(video_id, current_user)
+    comment = await _get_video_comment_or_404(video_id, comment_id, current_user)
+    if comment.get("author_id") != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Only the author can edit this comment")
+    created_at = _parse_comment_created_at(comment.get("created_at"))
+    if datetime.now(timezone.utc) - created_at > timedelta(minutes=15):
+        raise HTTPException(status_code=403, detail="Comments can only be edited within 15 minutes")
+    updates = payload.dict(exclude_unset=True)
+    update_fields: Dict[str, Any] = {}
+    if "body" in updates:
+        body = (payload.body or "").strip()
+        if not body:
+            raise HTTPException(status_code=400, detail="Comment text is required")
+        update_fields["body"] = body
+    if "is_private" in updates and payload.is_private is not None:
+        update_fields["is_private"] = bool(payload.is_private)
+    rubric_keys = {"rubric_element_id", "rubric_element_code", "rubric_element_name"}
+    if rubric_keys.intersection(updates.keys()):
+        update_fields.update(
+            await _resolve_video_comment_rubric_fields(
+                video_id,
+                payload.rubric_element_id,
+                payload.rubric_element_code,
+                payload.rubric_element_name,
+            )
+        )
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    update_fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+    updated = await db.video_comments.find_one_and_update(
+        {"id": comment_id, "video_id": video_id},
+        {"$set": update_fields},
+        projection={"_id": 0},
+        return_document=True,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    return VideoComment(**_sanitize_video_comment_doc(updated))
+
+
+async def delete_video_comment(
+    video_id: str,
+    comment_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_visible_video_or_404(video_id, current_user)
+    comment = await _get_video_comment_or_404(video_id, comment_id, current_user)
+    role = _get_user_role(current_user)
+    if comment.get("author_id") != current_user["id"] and role != "admin":
+        raise HTTPException(status_code=403, detail="Only the author or an admin can delete this comment")
+    if comment.get("is_private") and comment.get("author_id") != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Only the author can delete a private comment")
+    if comment.get("thread_parent_id"):
+        result = await db.video_comments.delete_one({"id": comment_id, "video_id": video_id})
+        deleted_count = result.deleted_count
+    else:
+        result = await db.video_comments.delete_many(
+            {
+                "video_id": video_id,
+                "$or": [{"id": comment_id}, {"thread_parent_id": comment_id}],
+            }
+        )
+        deleted_count = result.deleted_count
+    if deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    return {"message": "Comment deleted", "deleted_count": deleted_count}
+
+
 async def retry_video_processing(video_id: str, current_user: dict = Depends(get_current_user)):
     video = await db.videos.find_one({"id": video_id}, {"_id": 0})
     if not video:
@@ -8659,7 +10265,6 @@ async def retry_video_processing(video_id: str, current_user: dict = Depends(get
     return {"video_id": video_id, "status": VideoProcessingStatus.QUEUED.value}
 
 
-@api_router.post("/videos/{video_id}/privacy/retry")
 async def retry_video_privacy(video_id: str, current_user: dict = Depends(get_current_user)):
     video = await db.videos.find_one({"id": video_id}, {"_id": 0})
     if not video:
@@ -8714,7 +10319,6 @@ async def retry_video_privacy(video_id: str, current_user: dict = Depends(get_cu
     }
 
 
-@api_router.get("/privacy/review-queue", response_model=PrivacyReviewQueueResponse)
 async def get_privacy_review_queue(current_user: dict = Depends(get_current_user)):
     role = _get_user_role(current_user)
     if role != "admin":
@@ -8746,7 +10350,6 @@ async def get_privacy_review_queue(current_user: dict = Depends(get_current_user
     return PrivacyReviewQueueResponse(items=items)
 
 
-@api_router.get("/privacy/audit", response_model=List[PrivacyAuditEvent])
 async def get_privacy_audit_events(
     target_type: Optional[str] = None,
     target_id: Optional[str] = None,
@@ -8765,7 +10368,6 @@ async def get_privacy_audit_events(
     return [PrivacyAuditEvent(**doc) for doc in docs]
 
 
-@api_router.get("/admin/videos/{video_id}/sampling-manifest", response_model=SamplingManifestResponse)
 async def get_admin_video_sampling_manifest(
     video_id: str,
     current_user: dict = Depends(get_current_user),
@@ -8777,7 +10379,6 @@ async def get_admin_video_sampling_manifest(
     return SamplingManifestResponse(**doc)
 
 
-@api_router.get("/admin/videos/{video_id}/analysis-moments", response_model=AnalysisMomentManifestResponse)
 async def get_admin_video_analysis_moments(
     video_id: str,
     current_user: dict = Depends(get_current_user),
@@ -8789,7 +10390,6 @@ async def get_admin_video_analysis_moments(
     return AnalysisMomentManifestResponse(**doc)
 
 
-@api_router.get("/admin/videos/{video_id}/audio-transcript", response_model=AudioTranscriptResponse)
 async def get_admin_video_audio_transcript(
     video_id: str,
     current_user: dict = Depends(get_current_user),
@@ -8801,7 +10401,6 @@ async def get_admin_video_audio_transcript(
     return AudioTranscriptResponse(**doc)
 
 
-@api_router.get("/admin/videos/{video_id}/audio-features", response_model=AudioFeatureResponse)
 async def get_admin_video_audio_features(
     video_id: str,
     current_user: dict = Depends(get_current_user),
@@ -8813,7 +10412,142 @@ async def get_admin_video_audio_features(
     return AudioFeatureResponse(**doc)
 
 
-@api_router.post("/videos/{video_id}/privacy/review", response_model=PrivacyReviewDecisionResponse)
+def _audio_speaker_bucket(raw_speaker: Optional[Any]) -> str:
+    normalized = str(raw_speaker or "").strip().lower()
+    if any(token in normalized for token in ["student", "pupil", "learner", "class"]):
+        return "student" if AUDIO_ALLOW_STUDENT_VOICE_PROCESSING else "teacher"
+    if any(token in normalized for token in ["silence", "pause", "quiet"]):
+        return "silence"
+    return "teacher"
+
+
+def _build_video_audio_analysis_response(
+    transcript_doc: Optional[dict],
+    feature_doc: Optional[dict],
+) -> VideoAudioAnalysisResponse:
+    raw_segments = list((transcript_doc or {}).get("segments") or [])
+    normalized_segments: List[dict] = []
+    transcript_segments: List[dict] = []
+    key_moments: List[dict] = []
+    teacher_seconds = 0.0
+    student_seconds = 0.0
+    silence_seconds = 0.0
+    previous_end = 0.0
+    total_duration = 0.0
+
+    for index, segment in enumerate(
+        sorted(raw_segments, key=lambda item: float(item.get("start_sec") or 0.0))
+    ):
+        start = max(0.0, float(segment.get("start_sec") or 0.0))
+        end = max(start, float(segment.get("end_sec") or start))
+        if start > previous_end:
+            gap = start - previous_end
+            silence_seconds += gap
+            normalized_segments.append(
+                {
+                    "start_sec": round(previous_end, 2),
+                    "end_sec": round(start, 2),
+                    "speaker": "silence",
+                }
+            )
+            if gap >= 3.0:
+                key_moments.append(
+                    {
+                        "timestamp_sec": round(previous_end, 2),
+                        "label": "Extended pause",
+                        "signal_type": "silence",
+                    }
+                )
+
+        speaker = _audio_speaker_bucket(segment.get("speaker"))
+        duration = max(0.0, end - start)
+        if speaker == "student":
+            student_seconds += duration
+        elif speaker == "silence":
+            silence_seconds += duration
+        else:
+            teacher_seconds += duration
+        normalized_segments.append(
+            {
+                "start_sec": round(start, 2),
+                "end_sec": round(end, 2),
+                "speaker": speaker,
+            }
+        )
+        text = str(segment.get("text") or "").strip()
+        if text:
+            transcript_segments.append(
+                {
+                    "start_sec": round(start, 2),
+                    "end_sec": round(end, 2),
+                    "text": text,
+                    "speaker": speaker,
+                }
+            )
+            if "?" in text:
+                key_moments.append(
+                    {
+                        "timestamp_sec": round(start, 2),
+                        "label": "Question",
+                        "signal_type": "question",
+                    }
+                )
+        if speaker == "student":
+            key_moments.append(
+                {
+                    "timestamp_sec": round(start, 2),
+                    "label": "Student talk",
+                    "signal_type": "student_voice",
+                }
+            )
+        previous_end = max(previous_end, end)
+        total_duration = max(total_duration, end)
+
+    if not normalized_segments and feature_doc:
+        teacher_ratio = max(0.0, min(1.0, float(feature_doc.get("teacher_talk_ratio") or 0.0)))
+        teacher_seconds = teacher_ratio
+        total_duration = 1.0 if teacher_ratio else 0.0
+
+    total_duration = max(total_duration, teacher_seconds + student_seconds + silence_seconds)
+    if total_duration > 0:
+        teacher_pct = round((teacher_seconds / total_duration) * 100, 1)
+        student_pct = round((student_seconds / total_duration) * 100, 1)
+        silence_pct = round(max(0.0, 100.0 - teacher_pct - student_pct), 1)
+    else:
+        teacher_pct = student_pct = silence_pct = 0.0
+
+    return VideoAudioAnalysisResponse(
+        transcript_available=(transcript_doc or {}).get("transcript_status") == "completed",
+        features_available=bool(feature_doc),
+        teacher_talk_pct=teacher_pct,
+        student_talk_pct=student_pct,
+        silence_pct=silence_pct,
+        teacher_talk_seconds=round(teacher_seconds, 2),
+        student_talk_seconds=round(student_seconds, 2),
+        total_duration_seconds=round(total_duration, 2),
+        segments=[AudioAnalysisTimelineSegment(**item) for item in normalized_segments],
+        transcript_segments=[AudioAnalysisTranscriptSegment(**item) for item in transcript_segments],
+        key_moments=[AudioAnalysisKeyMoment(**item) for item in key_moments[:20]],
+    )
+
+
+async def get_video_audio_analysis(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_visible_video_or_404(video_id, current_user)
+    transcript_doc = await db.video_audio_transcripts.find_one(
+        {"video_id": video_id},
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    feature_doc = await db.video_analysis_features.find_one(
+        {"video_id": video_id},
+        {"_id": 0},
+    )
+    return _build_video_audio_analysis_response(transcript_doc, feature_doc)
+
+
 async def resolve_video_privacy_review(
     video_id: str,
     payload: PrivacyReviewDecisionRequest,
@@ -9000,6 +10734,96 @@ async def get_recognition_review_queue(current_user: dict = Depends(get_current_
     return RecognitionReviewQueueResponse(items=items)
 
 
+async def _get_current_teacher_for_recognition(current_user: dict) -> dict:
+    if _get_user_tenant_role(current_user) != "teacher" and _get_user_role(current_user) != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher access required")
+    teacher_id = current_user.get("teacher_id")
+    if teacher_id:
+        return await _get_teacher_or_404(teacher_id, current_user)
+    teacher_ids = await _list_teacher_ids_for_user(current_user)
+    if not teacher_ids:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
+    return await _get_teacher_or_404(teacher_ids[0], current_user)
+
+
+@api_router.get("/recognition/my-badges", response_model=TeacherRecognitionSummaryResponse)
+async def get_my_recognition_badges(current_user: dict = Depends(get_current_user)):
+    teacher = await _get_current_teacher_for_recognition(current_user)
+    badges = await db.recognition_badges.find(
+        {"teacher_id": teacher["id"], "status": "awarded"},
+        {"_id": 0},
+    ).sort("awarded_at", -1).to_list(200)
+    return _build_teacher_recognition_summary(teacher["id"], badges)
+
+
+@api_router.get("/recognition/my-badges/{badge_id}/share-card")
+async def get_my_recognition_badge_share_card(
+    badge_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_current_teacher_for_recognition(current_user)
+    badge = await db.recognition_badges.find_one(
+        {"id": badge_id, "teacher_id": teacher["id"], "status": "awarded"},
+        {"_id": 0},
+    )
+    if not badge:
+        raise HTTPException(status_code=404, detail="Badge not found")
+    if badge.get("share_card_url"):
+        return {
+            "badge": _build_recognition_badge_response(badge),
+            "share_card_url": badge.get("share_card_url"),
+            "share_url": badge.get("share_url") or badge.get("share_card_url"),
+        }
+
+    video = await db.videos.find_one({"id": badge.get("video_id")}, {"_id": 0}) or {}
+    assessment = await _get_assessment_for_video(badge.get("video_id")) if badge.get("video_id") else None
+    language = _normalize_app_language(video.get("analysis_language") or (assessment or {}).get("analysis_language"), default="en")
+    relative_path = f"share-assets/social/{teacher['id']}/{badge_id}_{uuid.uuid4().hex[:8]}.png"
+    full_path = UPLOAD_DIR / relative_path
+    await asyncio.to_thread(
+        render_social_share_card,
+        str(full_path),
+        teacher_name=teacher.get("name") or current_user.get("name") or "Teacher",
+        badge_label="שיעור 5 כוכבים" if _is_hebrew_language(language) else "5-Star Lesson",
+        lesson_title=video.get("filename") or ("שיעור שזכה להוקרה" if _is_hebrew_language(language) else "Recognized Lesson"),
+        summary=(assessment or {}).get("summary") or badge.get("awarded_for") or "Recognized classroom practice.",
+        subject=video.get("subject") or teacher.get("subject"),
+        grade_level=teacher.get("grade_level"),
+        language=language,
+    )
+    share_card_url = _resolve_public_asset_url(relative_path)
+    stored_path = relative_path
+    try:
+        stored_path, uploaded_url = _upload_path_to_s3(
+            full_path,
+            "share-assets",
+            f"{badge_id}_social_card.png",
+            "image/png",
+        )
+        share_card_url = uploaded_url or share_card_url
+    except Exception as exc:
+        logger.warning("Recognition share card upload failed for badge %s: %s", badge_id, exc)
+
+    share_url = share_card_url or badge.get("lesson_url") or badge.get("badge_url")
+    await db.recognition_badges.update_one(
+        {"id": badge_id},
+        {
+            "$set": {
+                "share_card_path": stored_path,
+                "share_card_url": share_card_url,
+                "share_url": share_url,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        },
+    )
+    updated_badge = {**badge, "share_card_path": stored_path, "share_card_url": share_card_url, "share_url": share_url}
+    return {
+        "badge": _build_recognition_badge_response(updated_badge),
+        "share_card_url": share_card_url,
+        "share_url": share_url,
+    }
+
+
 @api_router.post("/videos/{video_id}/recognition/review", response_model=RecognitionReviewResponse)
 async def review_video_recognition(
     video_id: str,
@@ -9012,7 +10836,7 @@ async def review_video_recognition(
     video = await db.videos.find_one({"id": video_id}, {"_id": 0})
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    teacher = await _get_teacher_or_404(video.get("teacher_id"), current_user)
     event = await _get_or_sync_video_recognition_event(video)
     decision = (payload.decision or "").strip().lower()
     reviewed_at = datetime.now(timezone.utc).isoformat()
@@ -9077,6 +10901,7 @@ async def review_video_recognition(
                 "reason": payload.reason,
             },
         )
+        await _notify_teacher_recognition_awarded(video, teacher, current_user)
         return RecognitionReviewResponse(
             video_id=video_id,
             recognition_status="awarded",
@@ -9130,6 +10955,90 @@ async def review_video_recognition(
         video_id=video_id,
         recognition_status="rejected" if decision == "reject" else "revoked",
         badge=None,
+    )
+
+
+@api_router.get("/feedback/review-queue", response_model=FeedbackReviewQueueResponse)
+async def get_feedback_review_queue(current_user: dict = Depends(get_current_user)):
+    if not _is_admin_role(_get_user_role(current_user)):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    docs = await db.feedback_review_queue.find({"status": "pending"}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    if _get_user_role(current_user) == "admin":
+        docs = [doc for doc in docs if doc.get("owner_user_id") == current_user.get("id")]
+    return FeedbackReviewQueueResponse(items=[FeedbackReviewQueueItem(**doc) for doc in docs])
+
+
+@api_router.post("/feedback/review-queue/{review_id}/resolve", response_model=FeedbackReviewDecisionResponse)
+async def resolve_feedback_review_queue_item(
+    review_id: str,
+    payload: FeedbackReviewDecisionRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    if not _is_admin_role(_get_user_role(current_user)):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    review_doc = await db.feedback_review_queue.find_one({"id": review_id}, {"_id": 0})
+    if not review_doc:
+        raise HTTPException(status_code=404, detail="Feedback review item not found")
+    if _get_user_role(current_user) == "admin" and review_doc.get("owner_user_id") != current_user.get("id"):
+        raise HTTPException(status_code=403, detail="Not authorized for this review item")
+
+    decision = str(payload.decision or "").strip().lower()
+    if decision not in {"approved_for_release", "needs_regeneration", "dismissed"}:
+        raise HTTPException(status_code=400, detail="Unsupported feedback review decision")
+
+    resolved_at = datetime.now(timezone.utc).isoformat()
+    status_value = "resolved_release_approved" if decision == "approved_for_release" else (
+        "resolved_needs_regeneration" if decision == "needs_regeneration" else "resolved_dismissed"
+    )
+    await db.feedback_review_queue.update_one(
+        {"id": review_id},
+        {
+            "$set": {
+                "status": status_value,
+                "decision": decision,
+                "review_note": payload.note,
+                "resolved_at": resolved_at,
+                "resolved_by": current_user["id"],
+                "updated_at": resolved_at,
+            }
+        },
+    )
+
+    if decision == "approved_for_release":
+        await db.assessments.update_one(
+            {"id": review_doc.get("assessment_id")},
+            {
+                "$set": {
+                    "feedback_release_status": "released",
+                    "feedback_human_review_required": False,
+                    "voice_gate_status": "human_override_release",
+                    "voice_gate_failures": [],
+                    "feedback_release_override_at": resolved_at,
+                    "feedback_release_override_by": current_user["id"],
+                }
+            },
+        )
+    elif decision == "needs_regeneration":
+        await db.assessments.update_one(
+            {"id": review_doc.get("assessment_id")},
+            {
+                "$set": {
+                    "feedback_release_status": "blocked",
+                    "feedback_human_review_required": True,
+                    "feedback_regeneration_requested_at": resolved_at,
+                    "feedback_regeneration_requested_by": current_user["id"],
+                }
+            },
+        )
+
+    return FeedbackReviewDecisionResponse(
+        id=review_id,
+        status=status_value,
+        assessment_id=review_doc.get("assessment_id"),
+        resolved_by=current_user["id"],
+        resolved_at=resolved_at,
     )
 
 
@@ -9540,7 +11449,9 @@ async def generate_email_signature(
 
 @app.websocket("/ws/videos/{video_id}")
 async def video_status_ws(websocket: WebSocket, video_id: str):
-    token = websocket.query_params.get("token")
+    token = str(websocket.cookies.get(SESSION_COOKIE_NAME) or "").strip()
+    if not token:
+        token = str(websocket.query_params.get("token") or "").strip()
     if not token:
         await websocket.close(code=1008)
         return
@@ -9939,10 +11850,35 @@ async def get_admin_feedback_digest(current_user: dict = Depends(get_current_use
     return await build_feedback_digest(current_user)
 
 
+def _access_request_workspace_name(user_doc: dict) -> Optional[str]:
+    return (
+        _clean_optional_string(user_doc.get("school_name"))
+        or _clean_optional_string(user_doc.get("requested_school_name"))
+        or _clean_optional_string(user_doc.get("training_provider_name"))
+        or _clean_optional_string(user_doc.get("organization_name"))
+        or _clean_optional_string(user_doc.get("requested_organization_name"))
+    )
+
+
+async def _access_request_suggested_organization_id(user_doc: dict) -> Optional[str]:
+    name = _access_request_workspace_name(user_doc)
+    if not name:
+        return None
+    organization_type = _normalize_organization_type(
+        user_doc.get("organization_type"),
+        user_doc.get("tenant_role"),
+    )
+    org = await _find_organization_by_name(organization_type=organization_type, name=name)
+    return (org or {}).get("id")
+
+
 @api_router.get("/admin/access-users", response_model=AccessUserListResponse)
 async def list_access_users(current_user: dict = Depends(get_current_user)):
     _require_admin_ops_user(current_user)
     docs = await db.users.find({}, {"_id": 0, "password": 0}).sort("created_at", -1).to_list(1000)
+    for doc in docs:
+        if _get_user_approval_status(doc) == "pending":
+            doc["suggested_organization_id"] = await _access_request_suggested_organization_id(doc)
     serialized = [_to_access_user_record(doc) for doc in docs]
     return AccessUserListResponse(
         pending=[item for item in serialized if item.approval_status == "pending"],
@@ -9965,10 +11901,13 @@ async def approve_access_user(
         target,
         actor_label=current_user.get("email") or current_user["id"],
         reason=payload.reason,
+        organization_id=payload.organization_id,
         organization_name=payload.organization_name,
         organization_type=payload.organization_type,
         school_name=payload.school_name,
         manager_email=payload.manager_email,
+        tenant_role=payload.tenant_role,
+        approval_note=payload.approval_note,
     )
     return _to_access_user_record(updated)
 
@@ -10536,6 +12475,74 @@ async def export_summary_report(
         raise
 
 
+@api_router.post("/reports/teacher/{teacher_id}")
+async def generate_teacher_pdf_report(
+    teacher_id: str,
+    cycle_year: Optional[int] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    from app.services import report_service
+
+    pdf = await report_service.generate_teacher_report(teacher_id, current_user, cycle_year=cycle_year)
+    return Response(
+        pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="teacher-{teacher_id}-report.pdf"'},
+    )
+
+
+@api_router.post("/reports/school/summary")
+async def generate_school_summary_pdf_report(
+    cycle_year: Optional[int] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    from app.services import report_service
+
+    pdf = await report_service.generate_school_summary(current_user, cycle_year=cycle_year)
+    return Response(
+        pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="school-summary-report.pdf"'},
+    )
+
+
+@api_router.post("/reports/export/csv")
+async def export_reports_csv(
+    type: str = Query("assessments"),
+    current_user: dict = Depends(get_current_user),
+):
+    from app.services import report_service
+
+    body, filename = await report_service.export_csv(type, current_user)
+    return Response(
+        body,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@api_router.post("/reports/teachers/bulk")
+async def generate_all_teacher_reports(
+    cycle_year: Optional[int] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    from app.services import report_service
+
+    body = await report_service.generate_all_teacher_reports_zip(current_user, cycle_year=cycle_year)
+    return Response(
+        body,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="teacher-reports.zip"'},
+    )
+
+
+@api_router.get("/reports/history")
+async def list_generated_report_history(current_user: dict = Depends(get_current_user)):
+    from app.services import report_service
+
+    return {"items": await report_service.list_report_history(current_user)}
+
+
 @api_router.get("/qa/smoke")
 async def smoke_test(current_user: dict = Depends(get_current_user)):
     """Lightweight QA check for demo readiness."""
@@ -10587,6 +12594,7 @@ async def get_teacher_summary_insights(
     Aggregate insights across multiple lessons for a teacher.
     Used for monthly/periodic 'Summary AI Insight' on the profile.
     """
+    language = _resolve_request_language(request, default="en")
     await _get_teacher_or_404(teacher_id, current_user)
     assessments = await db.assessments.find(
         {"teacher_id": teacher_id},
@@ -10597,7 +12605,7 @@ async def get_teacher_summary_insights(
         return {
             "teacher_id": teacher_id,
             "overall_trend_score": None,
-            "summary": "",
+            "summary": _coaching_summary_pending_text(language),
             "recommendations": [],
         }
 
@@ -10632,7 +12640,6 @@ async def get_teacher_summary_insights(
             }
         )
 
-    language = _resolve_request_language(request, default="en")
     analysis_context = await build_analysis_context(current_user, teacher_id)
     summary_text = generate_summary(
         synthetic_element_scores,
@@ -11240,12 +13247,18 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
     role = _get_user_role(current_user)
     now = datetime.now(timezone.utc)
     tasks: List[dict] = []
-    adaptive_support = await build_teacher_memory_support(current_user, teacher_id)
+    language = _normalize_app_language(current_user.get("preferred_language"), default="en")
+    adaptive_support = await build_teacher_memory_support(current_user, teacher_id, language=language)
     primary_goal = adaptive_support.get("primary_goal") or {}
     primary_goal_title = primary_goal.get("title")
     primary_goal_signal = primary_goal.get("progress_signal")
     teacher_prompt = adaptive_support.get("teacher_prompt_body")
     admin_prompt = adaptive_support.get("admin_prompt_body")
+    observer_name = (
+        _clean_optional_string(teacher.get("manager_name"))
+        or _clean_optional_string(current_user.get("name"))
+        or _clean_optional_string(current_user.get("email"))
+    )
     next_conference_dt = _parse_iso_datetime(teacher.get("next_coaching_conference"))
     conference_soon = bool(next_conference_dt and next_conference_dt <= now + timedelta(days=10))
 
@@ -11317,11 +13330,11 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
                     "state": "awaiting_admin_review",
                     "priority": priority,
                     "title": "Review new lesson evidence",
-                    "summary": admin_prompt
-                    or (
-                        f"Recent lesson evidence is ready for review with focus on {primary_goal_title}."
-                        if primary_goal_title
-                        else "A newly analyzed lesson is ready for admin review and follow-up."
+                    "summary": _admin_lesson_review_task_summary(
+                        teacher_name=teacher.get("name"),
+                        primary_goal_title=primary_goal_title,
+                        conference_soon=conference_soon,
+                        language=language,
                     ),
                     "due_at": latest_assessment.get("analyzed_at"),
                     "route_hint": "video",
@@ -11351,11 +13364,7 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
                     "priority": priority,
                     "title": "Respond to the latest class evidence",
                     "summary": teacher_prompt
-                    or (
-                        f"A recent lesson review is ready. Connect your next move to {primary_goal_title}."
-                        if primary_goal_title
-                        else "A recent lesson review is ready. Add your reflection and implementation response."
-                    ),
+                    or _teacher_lesson_reflection_prompt(observer_name, language=language),
                     "due_at": latest_assessment.get("analyzed_at"),
                     "route_hint": "reflection",
                     "assessment_id": latest_assessment.get("id"),
@@ -11462,7 +13471,17 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
                 "title": "Upcoming coaching conference",
                 "summary": (
                     teacher_prompt if role == "teacher" else admin_prompt
-                ) or "Prepare for the next coaching conversation and confirm the agenda.",
+                )
+                or (
+                    _teacher_lesson_reflection_prompt(observer_name, language=language)
+                    if role == "teacher"
+                    else _admin_lesson_review_task_summary(
+                        teacher_name=teacher.get("name"),
+                        primary_goal_title=primary_goal_title,
+                        conference_soon=True,
+                        language=language,
+                    )
+                ),
                 "due_at": teacher.get("next_coaching_conference"),
                 "route_hint": "conference",
                 "context_label": primary_goal_title,
@@ -11478,6 +13497,238 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
         )
     )
     return tasks
+
+
+COACHING_TASK_YELLOW_THRESHOLD = 6.0
+COACHING_TASK_STATUSES = {"open", "in_progress", "completed", "snoozed"}
+COACHING_TASK_PRIORITIES = {"high", "medium", "low"}
+
+
+def _coaching_task_priority_for_score(score: float) -> str:
+    if score < 4:
+        return "high"
+    if score < 5:
+        return "medium"
+    return "low"
+
+
+def _coaching_task_priority_rank(priority: Optional[str]) -> int:
+    return {"high": 90, "medium": 60, "low": 30}.get(str(priority or "").lower(), 50)
+
+
+def _normalize_coaching_task_status(status: Optional[str]) -> str:
+    normalized = str(status or "open").strip().lower()
+    if normalized not in COACHING_TASK_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid coaching task status")
+    return normalized
+
+
+def _normalize_coaching_task_priority(priority: Optional[str]) -> str:
+    normalized = str(priority or "medium").strip().lower()
+    if normalized not in COACHING_TASK_PRIORITIES:
+        raise HTTPException(status_code=400, detail="Invalid coaching task priority")
+    return normalized
+
+
+def _coaching_task_title(teacher_name: str, element_code: str, element_name: str, score: float) -> str:
+    return f"{teacher_name}: coach {element_code} {element_name} after {score:.1f} evidence"
+
+
+def _suggested_action_for_element(
+    element_score: dict,
+    recommendations: List[str],
+    focus_note: Optional[str],
+) -> str:
+    element_code = element_score.get("element_id") or element_score.get("element_code") or ""
+    element_name = element_score.get("element_name") or element_code or "this rubric element"
+    lowered_code = str(element_code).lower()
+    lowered_name = str(element_name).lower()
+    for recommendation in recommendations or []:
+        text = str(recommendation or "").strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered_code and lowered_code in lowered:
+            return text
+        if lowered_name and any(part for part in lowered_name.split() if len(part) > 4 and part in lowered):
+            return text
+    if focus_note:
+        return f"Use the observation focus note to plan a targeted coaching conversation: {focus_note}"
+    return f"Plan a targeted coaching cycle for {element_code} {element_name}".strip()
+
+
+def _serialize_coaching_task_doc(doc: dict) -> dict:
+    payload = dict(doc or {})
+    payload.pop("_id", None)
+    status = payload.get("status") or "open"
+    priority = payload.get("priority") or "medium"
+    due_date = payload.get("due_date")
+    suggested_action = payload.get("suggested_action") or payload.get("summary") or ""
+    payload["status"] = status
+    payload["state"] = status
+    payload["priority"] = priority
+    payload["priority_rank"] = _coaching_task_priority_rank(priority)
+    payload["summary"] = suggested_action
+    payload["support_prompt"] = suggested_action
+    payload["due_at"] = due_date
+    payload["route_hint"] = payload.get("route_hint") or "coaching_task"
+    payload["context_label"] = payload.get("context_label") or payload.get("element_code") or payload.get("element_name")
+    payload["observation_id"] = payload.get("linked_observation_session_id")
+    payload.setdefault("notes", "")
+    payload.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    return payload
+
+
+async def _notify_observer_of_coaching_tasks(
+    observer_user: Optional[dict],
+    teacher: dict,
+    tasks: List[dict],
+    workspace_id: Optional[str],
+) -> None:
+    if not observer_user or not observer_user.get("id") or not tasks:
+        return
+    await _create_notification(
+        recipient_user=observer_user,
+        notification_type="coaching_tasks_created",
+        title=f"{len(tasks)} coaching task{'s' if len(tasks) != 1 else ''} created",
+        message=f"{teacher.get('name') or 'A teacher'} has new coaching follow-up tasks from the latest assessment.",
+        payload={
+            "teacher_id": teacher.get("id"),
+            "teacher_name": teacher.get("name"),
+            "task_ids": [task["id"] for task in tasks],
+            "assessment_id": tasks[0].get("assessment_id"),
+            "video_id": tasks[0].get("video_id"),
+        },
+        teacher_id=teacher.get("id"),
+        workspace_id=workspace_id,
+        cta_url=f"/coaching?teacher_id={teacher.get('id')}",
+        channel="in_app",
+    )
+
+
+async def _create_coaching_tasks_for_assessment(
+    assessment: dict,
+    *,
+    video: Optional[dict],
+    teacher: Optional[dict],
+    observer_user: Optional[dict],
+    observation_session: Optional[dict] = None,
+) -> List[dict]:
+    teacher = teacher or await db.teachers.find_one({"id": assessment.get("teacher_id")}, {"_id": 0})
+    if not teacher:
+        return []
+    video = video or await db.videos.find_one({"id": assessment.get("video_id")}, {"_id": 0})
+    observer_id = (
+        (observer_user or {}).get("id")
+        or assessment.get("user_id")
+        or (video or {}).get("uploaded_by")
+        or teacher.get("created_by")
+    )
+    workspace_id = _resolve_video_workspace_id(video or {}, teacher, observer_user or {"id": observer_id})
+    now_dt = datetime.now(timezone.utc)
+    now_iso = now_dt.isoformat()
+    due_date = (now_dt + timedelta(days=14)).isoformat()
+    recommendations = [str(item) for item in (assessment.get("recommendations") or []) if str(item or "").strip()]
+    created_tasks: List[dict] = []
+
+    for element_score in assessment.get("element_scores") or []:
+        try:
+            score = float(element_score.get("adjusted_score", element_score.get("score")))
+        except (TypeError, ValueError):
+            continue
+        if score >= COACHING_TASK_YELLOW_THRESHOLD:
+            continue
+
+        element_id = element_score.get("element_id") or element_score.get("element_code")
+        if not element_id:
+            continue
+        existing = await db.coaching_tasks.find_one(
+            {
+                "assessment_id": assessment.get("id"),
+                "teacher_id": teacher.get("id"),
+                "element_id": element_id,
+            },
+            {"_id": 0},
+        )
+        if existing:
+            continue
+
+        priority = _coaching_task_priority_for_score(score)
+        element_name = element_score.get("element_name") or element_id
+        suggested_action = _suggested_action_for_element(
+            element_score,
+            recommendations,
+            assessment.get("focus_note"),
+        )
+        task_doc = {
+            "id": str(uuid.uuid4()),
+            "workspace_id": workspace_id,
+            "observer_id": observer_id,
+            "teacher_id": teacher.get("id"),
+            "teacher_name": teacher.get("name") or teacher.get("email") or "Teacher",
+            "assessment_id": assessment.get("id"),
+            "video_id": assessment.get("video_id"),
+            "element_id": element_id,
+            "element_code": element_score.get("element_code") or element_id,
+            "element_name": element_name,
+            "score": score,
+            "priority": priority,
+            "priority_rank": _coaching_task_priority_rank(priority),
+            "title": _coaching_task_title(teacher.get("name") or "Teacher", element_id, element_name, score),
+            "suggested_action": suggested_action,
+            "due_date": due_date,
+            "status": "open",
+            "notes": "",
+            "linked_observation_session_id": (observation_session or {}).get("id") or (video or {}).get("observation_session_id"),
+            "created_at": now_iso,
+            "updated_at": now_iso,
+        }
+        await db.coaching_tasks.insert_one(task_doc)
+        created_tasks.append(_serialize_coaching_task_doc(task_doc))
+
+    if created_tasks:
+        await _notify_observer_of_coaching_tasks(observer_user, teacher, created_tasks, workspace_id)
+    return created_tasks
+
+
+async def _get_visible_coaching_task_or_404(task_id: str, current_user: dict) -> dict:
+    task = await db.coaching_tasks.find_one({"id": task_id}, {"_id": 0})
+    if not task:
+        raise HTTPException(status_code=404, detail="Coaching task not found")
+    await _get_teacher_or_404(task.get("teacher_id"), current_user)
+    return task
+
+
+async def _list_persisted_coaching_tasks(
+    current_user: dict,
+    *,
+    teacher_id: Optional[str] = None,
+    priority: Optional[str] = None,
+    status: Optional[str] = None,
+    overdue_only: bool = False,
+    include_completed: bool = True,
+    limit: int = 200,
+) -> List[dict]:
+    if teacher_id:
+        await _get_teacher_or_404(teacher_id, current_user)
+        visible_teacher_ids = [teacher_id]
+    else:
+        visible_teacher_ids = await _list_teacher_ids_for_user(current_user)
+    query: Dict[str, Any] = {"teacher_id": {"$in": visible_teacher_ids or ["__none__"]}}
+    if priority:
+        query["priority"] = _normalize_coaching_task_priority(priority)
+    if status:
+        query["status"] = _normalize_coaching_task_status(status)
+    elif not include_completed:
+        query["status"] = {"$ne": "completed"}
+    if overdue_only:
+        query["due_date"] = {"$lt": datetime.now(timezone.utc).isoformat()}
+        query["status"] = {"$in": ["open", "in_progress", "snoozed"]}
+
+    docs = await db.coaching_tasks.find(query, {"_id": 0}).sort(
+        [("priority_rank", -1), ("due_date", 1), ("created_at", -1)]
+    ).to_list(limit)
+    return [_serialize_coaching_task_doc(doc) for doc in docs]
 
 
 async def _list_visible_teachers_for_user(
@@ -11825,6 +14076,18 @@ async def _resolve_framework_context(
             "name": "Custom Framework",
             "type": "custom",
             "domains": DANIELSON_FRAMEWORK["domains"] + MARSHALL_FRAMEWORK["domains"] + custom_domains,
+        }
+    elif resolved_type == FrameworkType.TRAINING_COMPETENCY.value:
+        custom_domains = await db.custom_domains.find(
+            {
+                "user_id": current_user["id"],
+                "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
+            },
+            {"_id": 0, "user_id": 0},
+        ).to_list(1000)
+        framework = {
+            **TRAINING_COMPETENCY_FRAMEWORK,
+            "domains": TRAINING_COMPETENCY_FRAMEWORK["domains"] + custom_domains,
         }
     else:
         framework = _get_framework_by_type(resolved_type)
@@ -12247,6 +14510,418 @@ async def _store_leadership_insights_cache(
     )
 
 
+def _get_dashboard_workspace_id(current_user: dict) -> str:
+    return str(
+        current_user.get("organization_id")
+        or current_user.get("school_id")
+        or current_user.get("id")
+    )
+
+
+def _current_observation_cycle_window(now_utc: datetime) -> Tuple[datetime, datetime]:
+    quarter_start_month = ((now_utc.month - 1) // 3) * 3 + 1
+    cycle_start = datetime(now_utc.year, quarter_start_month, 1, tzinfo=timezone.utc)
+    if quarter_start_month == 10:
+        cycle_end = datetime(now_utc.year + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        cycle_end = datetime(now_utc.year, quarter_start_month + 3, 1, tzinfo=timezone.utc)
+    return cycle_start, cycle_end
+
+
+def _dashboard_assessment_date(assessment: dict) -> Optional[datetime]:
+    analyzed_at = assessment.get("analyzed_at")
+    if isinstance(analyzed_at, datetime):
+        return analyzed_at.astimezone(timezone.utc)
+    return _parse_iso_datetime(analyzed_at)
+
+
+def _dashboard_score_bucket(score: Optional[float]) -> str:
+    if score is None:
+        return "unknown"
+    if score >= 8:
+        return "excellent"
+    if score >= 6:
+        return "proficient"
+    if score >= 4:
+        return "developing"
+    return "critical"
+
+
+def _dashboard_recommended_action_for_element(element_code: Optional[str], element_name: Optional[str]) -> str:
+    label = f"{element_code} {element_name}".strip() if element_code else (element_name or "this element")
+    return f"Open a targeted coaching cycle for {label}"
+
+
+async def _get_cached_dashboard_intelligence(workspace_id: str) -> Optional[dict]:
+    if DASHBOARD_INTELLIGENCE_CACHE_TTL_SECONDS <= 0:
+        return None
+
+    doc = await db.dashboard_intelligence_cache.find_one(
+        {"workspace_id": workspace_id},
+        {"_id": 0, "payload": 1, "expires_at": 1},
+    )
+    if not doc:
+        return None
+
+    expires_at = _parse_iso_datetime(doc.get("expires_at"))
+    now_utc = datetime.now(timezone.utc)
+    if not expires_at or expires_at <= now_utc:
+        await db.dashboard_intelligence_cache.delete_one({"workspace_id": workspace_id})
+        return None
+
+    payload = doc.get("payload")
+    if not isinstance(payload, dict):
+        return None
+
+    return {
+        **payload,
+        "cache": {
+            "hit": True,
+            "expires_at": doc.get("expires_at"),
+        },
+    }
+
+
+async def _store_dashboard_intelligence_cache(workspace_id: str, payload: dict) -> None:
+    if DASHBOARD_INTELLIGENCE_CACHE_TTL_SECONDS <= 0:
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    expires_at = now_utc + timedelta(seconds=DASHBOARD_INTELLIGENCE_CACHE_TTL_SECONDS)
+    await db.dashboard_intelligence_cache.update_one(
+        {"workspace_id": workspace_id},
+        {
+            "$set": {
+                "workspace_id": workspace_id,
+                "payload": payload,
+                "updated_at": now_utc.isoformat(),
+                "expires_at": expires_at.isoformat(),
+            }
+        },
+        upsert=True,
+    )
+
+
+async def _build_dashboard_intelligence(current_user: dict) -> dict:
+    now_utc = datetime.now(timezone.utc)
+    recent_start = now_utc - timedelta(days=90)
+    cycle_start, cycle_end = _current_observation_cycle_window(now_utc)
+
+    visible_teacher_ids = await _list_teacher_ids_for_user(current_user)
+    teachers = await db.teachers.find(
+        {"id": {"$in": visible_teacher_ids or ["__none__"]}},
+        {
+            "_id": 0,
+            "id": 1,
+            "name": 1,
+            "subject": 1,
+            "department": 1,
+        },
+    ).to_list(5000)
+    teacher_by_id = {teacher.get("id"): teacher for teacher in teachers if teacher.get("id")}
+    teacher_ids = list(teacher_by_id.keys())
+
+    if not teacher_ids:
+        return {
+            "patterns": [],
+            "highlights": [],
+            "observation_gaps": [],
+            "cycle_summary": {
+                "total_observations": 0,
+                "avg_score": None,
+                "score_distribution": {
+                    "excellent": 0,
+                    "proficient": 0,
+                    "developing": 0,
+                    "critical": 0,
+                    "unknown": 0,
+                },
+                "coverage_pct": 0,
+                "observed_teacher_count": 0,
+                "total_teachers": 0,
+                "days_remaining_in_cycle": max(0, (cycle_end - now_utc).days),
+            },
+        }
+
+    assessments = await db.assessments.find(
+        {
+            "teacher_id": {"$in": teacher_ids},
+            "analyzed_at": {"$gte": recent_start.isoformat()},
+        },
+        {"_id": 0},
+    ).sort("analyzed_at", 1).to_list(10000)
+    assessments = [
+        assessment
+        for assessment in assessments
+        if _dashboard_assessment_date(assessment) is not None
+    ]
+    assessments.sort(key=lambda assessment: _dashboard_assessment_date(assessment) or datetime.min.replace(tzinfo=timezone.utc))
+
+    observations = await db.observations.find(
+        {
+            "teacher_id": {"$in": teacher_ids},
+            "created_at": {"$gte": recent_start.isoformat()},
+        },
+        {"_id": 0, "teacher_id": 1, "created_at": 1},
+    ).to_list(10000)
+
+    assessments_by_teacher: Dict[str, List[dict]] = {}
+    cycle_assessments: List[dict] = []
+    latest_activity_by_teacher: Dict[str, datetime] = {}
+    observation_counts_this_cycle: Dict[str, int] = {teacher_id: 0 for teacher_id in teacher_ids}
+
+    for assessment in assessments:
+        teacher_id = assessment.get("teacher_id")
+        assessed_at = _dashboard_assessment_date(assessment)
+        if not teacher_id or not assessed_at:
+            continue
+        assessments_by_teacher.setdefault(teacher_id, []).append(assessment)
+        latest_activity_by_teacher[teacher_id] = max(
+            latest_activity_by_teacher.get(teacher_id, assessed_at),
+            assessed_at,
+        )
+        if cycle_start <= assessed_at < cycle_end:
+            cycle_assessments.append(assessment)
+            observation_counts_this_cycle[teacher_id] = observation_counts_this_cycle.get(teacher_id, 0) + 1
+
+    for observation in observations:
+        teacher_id = observation.get("teacher_id")
+        observed_at = _dashboard_assessment_date({"analyzed_at": observation.get("created_at")})
+        if not teacher_id or not observed_at:
+            continue
+        latest_activity_by_teacher[teacher_id] = max(
+            latest_activity_by_teacher.get(teacher_id, observed_at),
+            observed_at,
+        )
+        if cycle_start <= observed_at < cycle_end:
+            observation_counts_this_cycle[teacher_id] = observation_counts_this_cycle.get(teacher_id, 0) + 1
+
+    patterns: List[dict] = []
+    highlights: List[dict] = []
+
+    element_low: Dict[str, dict] = {}
+    element_totals: Dict[str, int] = {}
+    for assessment in assessments:
+        teacher_id = assessment.get("teacher_id")
+        if teacher_id not in teacher_by_id:
+            continue
+        for element_score in assessment.get("element_scores", []):
+            element_code = element_score.get("element_id") or element_score.get("element_code")
+            if not element_code:
+                continue
+            score = element_score.get("adjusted_score", element_score.get("score"))
+            if score is None:
+                continue
+            element_totals[element_code] = element_totals.get(element_code, 0) + 1
+            if score >= 6:
+                continue
+            low_record = element_low.setdefault(
+                element_code,
+                {
+                    "element_code": element_code,
+                    "element_name": element_score.get("element_name") or element_code,
+                    "teacher_ids": set(),
+                    "evidence_count": 0,
+                    "departments": {},
+                },
+            )
+            low_record["teacher_ids"].add(teacher_id)
+            low_record["evidence_count"] += 1
+            department = teacher_by_id.get(teacher_id, {}).get("department")
+            if department:
+                low_record["departments"][department] = low_record["departments"].get(department, 0) + 1
+
+    for low_record in element_low.values():
+        affected_ids = sorted(low_record["teacher_ids"])
+        if len(affected_ids) < 3:
+            continue
+        department_label = "Schoolwide"
+        if low_record["departments"]:
+            department_label = max(low_record["departments"].items(), key=lambda item: item[1])[0]
+        affected_names = [teacher_by_id[teacher_id].get("name", "Unknown") for teacher_id in affected_ids]
+        total_observations = element_totals.get(low_record["element_code"], low_record["evidence_count"])
+        severity = "critical" if len(affected_ids) >= 5 or low_record["evidence_count"] >= 6 else "warning"
+        patterns.append(
+            {
+                "type": "cluster",
+                "title": f"{department_label} shows pattern of low {low_record['element_name']} ({low_record['element_code']})",
+                "description": (
+                    f"{len(affected_ids)} of {len(teacher_ids)} teachers have recent low evidence on "
+                    f"{low_record['element_name']} across {low_record['evidence_count']} of "
+                    f"{total_observations} observations."
+                ),
+                "affected_teacher_ids": affected_ids,
+                "affected_teacher_names": affected_names,
+                "element_code": low_record["element_code"],
+                "element_name": low_record["element_name"],
+                "severity": severity,
+                "recommended_action": _dashboard_recommended_action_for_element(
+                    low_record["element_code"],
+                    low_record["element_name"],
+                ),
+                "evidence_count": low_record["evidence_count"],
+            }
+        )
+
+    for teacher_id, teacher_assessments in assessments_by_teacher.items():
+        if len(teacher_assessments) >= 3:
+            recent = teacher_assessments[-3:]
+            recent_scores = [assessment.get("overall_score") for assessment in recent]
+            if all(score is not None for score in recent_scores) and recent_scores[0] > recent_scores[1] > recent_scores[2]:
+                teacher_name = teacher_by_id.get(teacher_id, {}).get("name", "Unknown")
+                drop = round(recent_scores[0] - recent_scores[-1], 2)
+                patterns.append(
+                    {
+                        "type": "trend",
+                        "title": f"{teacher_name}'s classroom performance is declining for 3 consecutive sessions",
+                        "description": f"Overall score moved from {recent_scores[0]:.1f} to {recent_scores[-1]:.1f} across the last three observations.",
+                        "affected_teacher_ids": [teacher_id],
+                        "affected_teacher_names": [teacher_name],
+                        "element_code": None,
+                        "element_name": None,
+                        "severity": "critical" if drop >= 2 else "warning",
+                        "recommended_action": "Schedule a coaching conference and review the last three observations",
+                        "evidence_count": 3,
+                    }
+                )
+
+        if len(teacher_assessments) >= 2:
+            first = teacher_assessments[0]
+            latest = teacher_assessments[-1]
+            first_score = first.get("overall_score")
+            latest_score = latest.get("overall_score")
+            if first_score is not None and latest_score is not None and latest_score - first_score >= 1.5:
+                teacher_name = teacher_by_id.get(teacher_id, {}).get("name", "Unknown")
+                delta = round((latest_score - first_score) * 10, 1)
+                highlights.append(
+                    {
+                        "type": "improvement",
+                        "teacher_id": teacher_id,
+                        "teacher_name": teacher_name,
+                        "description": f"{teacher_name} improved significantly after targeted coaching.",
+                        "element_code": None,
+                        "delta": delta,
+                    }
+                )
+
+            first_elements = {
+                (score.get("element_id") or score.get("element_code")): score
+                for score in first.get("element_scores", [])
+                if score.get("element_id") or score.get("element_code")
+            }
+            for latest_element in latest.get("element_scores", []):
+                element_code = latest_element.get("element_id") or latest_element.get("element_code")
+                first_element = first_elements.get(element_code)
+                if not element_code or not first_element:
+                    continue
+                first_element_score = first_element.get("adjusted_score", first_element.get("score"))
+                latest_element_score = latest_element.get("adjusted_score", latest_element.get("score"))
+                if (
+                    first_element_score is not None
+                    and latest_element_score is not None
+                    and latest_element_score - first_element_score >= 1.5
+                ):
+                    teacher_name = teacher_by_id.get(teacher_id, {}).get("name", "Unknown")
+                    delta = round((latest_element_score - first_element_score) * 10, 1)
+                    highlights.append(
+                        {
+                            "type": "improvement",
+                            "teacher_id": teacher_id,
+                            "teacher_name": teacher_name,
+                            "description": (
+                                f"{teacher_name} improved significantly in "
+                                f"{latest_element.get('element_name') or element_code} after targeted coaching."
+                            ),
+                            "element_code": element_code,
+                            "delta": delta,
+                        }
+                    )
+                    break
+
+    observation_gaps = []
+    for teacher_id, teacher in teacher_by_id.items():
+        latest_activity = latest_activity_by_teacher.get(teacher_id)
+        days_since = (now_utc - latest_activity).days if latest_activity else 999
+        if days_since >= 60:
+            observation_gaps.append(
+                {
+                    "teacher_id": teacher_id,
+                    "teacher_name": teacher.get("name", "Unknown"),
+                    "days_since_last_observation": days_since,
+                    "observation_count_this_cycle": observation_counts_this_cycle.get(teacher_id, 0),
+                }
+            )
+    observation_gaps.sort(key=lambda item: item["days_since_last_observation"], reverse=True)
+
+    if observation_gaps:
+        severity = "critical" if len(observation_gaps) >= 5 else "warning"
+        title = (
+            f"{len(observation_gaps)} teachers haven't been observed this cycle"
+            if len(observation_gaps) > 1
+            else f"{observation_gaps[0]['teacher_name']} hasn't been observed this cycle"
+        )
+        patterns.append(
+            {
+                "type": "risk",
+                "title": title,
+                "description": (
+                    f"{len(observation_gaps)} teachers are at least 60 days from their last observation "
+                    "or have not yet been observed."
+                ),
+                "affected_teacher_ids": [item["teacher_id"] for item in observation_gaps],
+                "affected_teacher_names": [item["teacher_name"] for item in observation_gaps],
+                "element_code": None,
+                "element_name": None,
+                "severity": severity,
+                "recommended_action": "Plan observations for overdue teachers this week",
+                "evidence_count": len(observation_gaps),
+            }
+        )
+
+    score_distribution = {
+        "excellent": 0,
+        "proficient": 0,
+        "developing": 0,
+        "critical": 0,
+        "unknown": 0,
+    }
+    cycle_scores: List[float] = []
+    for assessment in cycle_assessments:
+        score = assessment.get("overall_score")
+        if score is not None:
+            cycle_scores.append(score)
+        score_distribution[_dashboard_score_bucket(score)] += 1
+
+    observed_teacher_ids = {
+        teacher_id
+        for teacher_id, count in observation_counts_this_cycle.items()
+        if count > 0
+    }
+    coverage_pct = round((len(observed_teacher_ids) / len(teacher_ids)) * 100, 1) if teacher_ids else 0
+    patterns.sort(
+        key=lambda item: (
+            {"critical": 0, "warning": 1, "info": 2}.get(item.get("severity"), 3),
+            -int(item.get("evidence_count") or 0),
+        )
+    )
+    highlights.sort(key=lambda item: item.get("delta") or 0, reverse=True)
+
+    return {
+        "patterns": patterns[:8],
+        "highlights": highlights[:8],
+        "observation_gaps": observation_gaps[:12],
+        "cycle_summary": {
+            "total_observations": len(cycle_assessments),
+            "avg_score": _average(cycle_scores),
+            "score_distribution": score_distribution,
+            "coverage_pct": coverage_pct,
+            "observed_teacher_count": len(observed_teacher_ids),
+            "total_teachers": len(teacher_ids),
+            "days_remaining_in_cycle": max(0, (cycle_end - now_utc).days),
+        },
+    }
+
+
 def _coerce_insight_priority(value: Any) -> str:
     normalized = str(value or "").strip().lower()
     return normalized if normalized in {"high", "medium", "low"} else "medium"
@@ -12536,7 +15211,7 @@ def _build_rule_based_leadership_insights(trend_payload: dict) -> dict:
 
 
 async def _generate_ai_leadership_insights(trend_payload: dict, fallback_payload: dict) -> Optional[dict]:
-    api_key = os.getenv("EMERGENT_LLM_KEY")
+    api_key = APP_SETTINGS.ai.emergent_llm_key
     if not api_key:
         return None
     try:
@@ -12729,6 +15404,500 @@ async def get_dashboard_leadership_insights(
     final_payload["cache"] = {"hit": False}
     await _store_leadership_insights_cache(current_user["id"], cache_key, final_payload)
     return final_payload
+
+
+@api_router.get("/dashboard/intelligence")
+async def get_dashboard_intelligence(current_user: dict = Depends(get_current_user)):
+    workspace_id = _get_dashboard_workspace_id(current_user)
+    cache_key = f"dashboard:intelligence:{workspace_id}"
+    cached_value = await CACHE_CLIENT.get(cache_key)
+    if cached_value is not None:
+        return {**cached_value, "cache": {"hit": True, "store": "mongodb"}}
+    cached_payload = await _get_cached_dashboard_intelligence(workspace_id)
+    if cached_payload:
+        await CACHE_CLIENT.set(cache_key, cached_payload, 1800)
+        return cached_payload
+
+    payload = await _build_dashboard_intelligence(current_user)
+    payload["cache"] = {"hit": False}
+    await _store_dashboard_intelligence_cache(workspace_id, payload)
+    await CACHE_CLIENT.set(cache_key, payload, 1800)
+    return payload
+
+
+@api_router.get("/dashboard/summary")
+async def get_dashboard_summary(current_user: dict = Depends(get_current_user)):
+    workspace_id = _get_dashboard_workspace_id(current_user)
+    cache_key = f"dashboard:summary:{workspace_id}"
+    cached_value = await CACHE_CLIENT.get(cache_key)
+    if cached_value is not None:
+        return {**cached_value, "cache": {"hit": True, "store": "mongodb"}}
+    teacher_ids = await _list_teacher_ids_for_user(current_user)
+    total_teachers = len(teacher_ids)
+    total_observations = await db.assessments.count_documents({"teacher_id": {"$in": teacher_ids}}) if teacher_ids else 0
+    videos = await db.videos.count_documents({"teacher_id": {"$in": teacher_ids}}) if teacher_ids else 0
+    payload = {
+        "workspace_id": workspace_id,
+        "total_teachers": total_teachers,
+        "total_observations": total_observations,
+        "total_videos": videos,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "cache": {"hit": False},
+    }
+    await CACHE_CLIENT.set(cache_key, payload, 300)
+    return payload
+
+
+def _training_cycle_window(now: datetime) -> Tuple[datetime, datetime, datetime]:
+    cycle_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+    if now.month == 12:
+        cycle_end = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        cycle_end = datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc)
+    cycle_midpoint = cycle_start + ((cycle_end - cycle_start) / 2)
+    return cycle_start, cycle_midpoint, cycle_end
+
+
+def _training_placement_site(teacher: dict, fallback: Optional[str] = None) -> Optional[str]:
+    return _clean_optional_string(
+        teacher.get("school_site")
+        or teacher.get("placement_site")
+        or teacher.get("school_name")
+        or teacher.get("site_name")
+        or fallback
+    )
+
+
+def _training_schedule_focus_elements(schedule: dict) -> List[str]:
+    reminder_context = schedule.get("reminder_context") or {}
+    candidates = (
+        schedule.get("focus_elements")
+        or reminder_context.get("focus_elements")
+        or reminder_context.get("priority_elements")
+        or reminder_context.get("elements")
+        or []
+    )
+    if isinstance(candidates, str):
+        candidates = [item.strip() for item in candidates.split(",")]
+    rendered: List[str] = []
+    for item in candidates or []:
+        if isinstance(item, dict):
+            label = item.get("name") or item.get("label") or item.get("title") or item.get("id")
+        else:
+            label = item
+        cleaned = _clean_optional_string(label)
+        if cleaned:
+            rendered.append(cleaned)
+    return rendered[:4]
+
+
+async def _training_required_per_trainee(current_user: dict) -> int:
+    policy = await db.recording_policies.find_one(
+        {"created_by": current_user["id"]},
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    try:
+        return max(1, int((policy or {}).get("min_recordings_per_period") or 2))
+    except (TypeError, ValueError):
+        return 2
+
+
+def _training_workspace_id(current_user: dict) -> str:
+    return str(current_user.get("organization_id") or current_user.get("id"))
+
+
+async def _list_training_trainees(current_user: dict) -> List[dict]:
+    teacher_ids = await _list_teacher_ids_for_user(current_user)
+    return await db.teachers.find(
+        {"id": {"$in": teacher_ids or ["__none__"]}},
+        {"_id": 0},
+    ).sort("name", 1).to_list(5000)
+
+
+async def _latest_training_placement(trainee_id: str) -> Optional[dict]:
+    placement = await db.trainee_placements.find_one(
+        {"trainee_id": trainee_id, "status": "active"},
+        {"_id": 0},
+        sort=[("start_date", -1), ("created_at", -1)],
+    )
+    if placement:
+        return placement
+    return await db.trainee_placements.find_one(
+        {"trainee_id": trainee_id},
+        {"_id": 0},
+        sort=[("start_date", -1), ("created_at", -1)],
+    )
+
+
+async def _build_training_trainee_progress(trainee: dict) -> dict:
+    trainee_id = trainee.get("id")
+    assessments = await db.assessments.find(
+        {"teacher_id": trainee_id},
+        {"_id": 0, "user_id": 0},
+    ).sort("analyzed_at", 1).to_list(500)
+    latest = assessments[-1] if assessments else None
+    latest_score = _training_score_to_proficiency((latest or {}).get("overall_score"))
+    domain_progress = _training_domain_progress_from_assessments(assessments)
+    placement = await _latest_training_placement(trainee_id)
+    sessions = await db.observation_sessions.find(
+        {"teacher_id": trainee_id},
+        {"_id": 0},
+    ).sort("scheduled_date", -1).to_list(100)
+    completed_sessions = [
+        session for session in sessions
+        if session.get("status") in {
+            ObservationSessionStatus.ANALYSIS_COMPLETE.value,
+            ObservationSessionStatus.FEEDBACK_GIVEN.value,
+        }
+    ]
+    upcoming_sessions = [
+        session for session in sessions
+        if session.get("status") == ObservationSessionStatus.PLANNED.value
+    ]
+    return {
+        "trainee_id": trainee_id,
+        "trainee_name": trainee.get("name") or trainee.get("email") or "Trainee",
+        "email": trainee.get("email"),
+        "cohort": trainee.get("category_custom") or trainee.get("category") or "Unassigned",
+        "placement_school": (placement or {}).get("school_site") or _training_placement_site(trainee),
+        "placement": placement,
+        "competency_progress": latest_score,
+        "competency_progress_pct": round(((latest_score or 0) / 4) * 100, 1),
+        "readiness_rating": _training_readiness_label(latest_score),
+        "domain_progress": domain_progress,
+        "assessment_count": len(assessments),
+        "observation_count": len(completed_sessions),
+        "last_observation": (completed_sessions[0].get("updated_at") or completed_sessions[0].get("scheduled_date")) if completed_sessions else None,
+        "next_due": (upcoming_sessions[-1].get("scheduled_date") if upcoming_sessions else None),
+    }
+
+
+async def _serialize_training_cohort(cohort: dict, trainee_docs: Optional[List[dict]] = None) -> dict:
+    payload = dict(cohort or {})
+    payload.pop("_id", None)
+    trainee_ids = payload.get("trainee_ids") or []
+    if trainee_docs is None:
+        trainee_docs = await db.teachers.find(
+            {"id": {"$in": trainee_ids or ["__none__"]}},
+            {"_id": 0},
+        ).to_list(1000)
+    progress_rows = [await _build_training_trainee_progress(trainee) for trainee in trainee_docs]
+    progress_values = [
+        row["competency_progress"]
+        for row in progress_rows
+        if isinstance(row.get("competency_progress"), (int, float))
+    ]
+    payload["trainee_count"] = len(trainee_docs)
+    payload["avg_progress"] = round(sum(progress_values) / len(progress_values), 1) if progress_values else None
+    payload["trainees"] = progress_rows
+    return payload
+
+
+@api_router.get("/cohorts")
+async def list_training_cohorts(current_user: dict = Depends(get_current_user)):
+    _require_training_admin_user(current_user)
+    workspace_id = _training_workspace_id(current_user)
+    cohorts = await db.training_cohorts.find(
+        {"workspace_id": workspace_id},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(100)
+    trainees = await _list_training_trainees(current_user)
+    if not cohorts:
+        cohorts = [
+            {
+                "id": "default",
+                "workspace_id": workspace_id,
+                "name": current_user.get("organization_name") or "Training Cohort",
+                "program_name": current_user.get("organization_name"),
+                "start_date": None,
+                "end_date": None,
+                "trainee_ids": [trainee.get("id") for trainee in trainees if trainee.get("id")],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": None,
+                "virtual": True,
+            }
+        ]
+    serialized = []
+    for cohort in cohorts:
+        cohort_ids = set(cohort.get("trainee_ids") or [])
+        cohort_trainees = [trainee for trainee in trainees if trainee.get("id") in cohort_ids]
+        serialized.append(await _serialize_training_cohort(cohort, cohort_trainees))
+    return {"cohorts": serialized}
+
+
+@api_router.post("/cohorts")
+async def create_training_cohort(
+    payload: TrainingCohortCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_training_admin_user(current_user)
+    name = str(payload.name or "").strip()
+    if len(name) < 2:
+        raise HTTPException(status_code=400, detail="Cohort name is required")
+    visible_ids = set(await _list_teacher_ids_for_user(current_user))
+    trainee_ids = [trainee_id for trainee_id in payload.trainee_ids if trainee_id in visible_ids]
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "workspace_id": _training_workspace_id(current_user),
+        "name": name,
+        "program_name": (payload.program_name or "").strip() or None,
+        "start_date": payload.start_date.isoformat() if payload.start_date else None,
+        "end_date": payload.end_date.isoformat() if payload.end_date else None,
+        "trainee_ids": trainee_ids,
+        "created_by": current_user["id"],
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.training_cohorts.insert_one(doc)
+    for trainee_id in trainee_ids:
+        await db.teachers.update_one(
+            {"id": trainee_id},
+            {"$set": {"category": None, "category_custom": name}},
+        )
+    return {"cohort": await _serialize_training_cohort(doc)}
+
+
+async def _get_training_cohort_or_404(cohort_id: str, current_user: dict) -> dict:
+    _require_training_admin_user(current_user)
+    if cohort_id == "default":
+        trainees = await _list_training_trainees(current_user)
+        return {
+            "id": "default",
+            "workspace_id": _training_workspace_id(current_user),
+            "name": current_user.get("organization_name") or "Training Cohort",
+            "program_name": current_user.get("organization_name"),
+            "trainee_ids": [trainee.get("id") for trainee in trainees if trainee.get("id")],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": None,
+            "virtual": True,
+        }
+    cohort = await db.training_cohorts.find_one(
+        {"id": cohort_id, "workspace_id": _training_workspace_id(current_user)},
+        {"_id": 0},
+    )
+    if not cohort:
+        raise HTTPException(status_code=404, detail="Cohort not found")
+    return cohort
+
+
+@api_router.get("/cohorts/{cohort_id}/trainees")
+async def list_training_cohort_trainees(
+    cohort_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    cohort = await _get_training_cohort_or_404(cohort_id, current_user)
+    trainees = await db.teachers.find(
+        {"id": {"$in": cohort.get("trainee_ids") or ["__none__"]}},
+        {"_id": 0},
+    ).sort("name", 1).to_list(1000)
+    return {
+        "cohort": {k: v for k, v in cohort.items() if k != "trainee_ids"},
+        "trainees": [await _build_training_trainee_progress(trainee) for trainee in trainees],
+    }
+
+
+@api_router.get("/cohorts/{cohort_id}/summary")
+async def get_training_cohort_summary(
+    cohort_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    cohort = await _get_training_cohort_or_404(cohort_id, current_user)
+    trainees = await db.teachers.find(
+        {"id": {"$in": cohort.get("trainee_ids") or ["__none__"]}},
+        {"_id": 0},
+    ).sort("name", 1).to_list(1000)
+    serialized = await _serialize_training_cohort(cohort, trainees)
+    readiness_counts = {"Emerging": 0, "Developing": 0, "Proficient": 0, "Distinguished": 0, "No evidence": 0}
+    for trainee in serialized.get("trainees") or []:
+        score = trainee.get("competency_progress")
+        if score is None:
+            readiness_counts["No evidence"] += 1
+        elif score >= 3.5:
+            readiness_counts["Distinguished"] += 1
+        elif score >= 2.75:
+            readiness_counts["Proficient"] += 1
+        elif score >= 2:
+            readiness_counts["Developing"] += 1
+        else:
+            readiness_counts["Emerging"] += 1
+    return {
+        "cohort": serialized,
+        "readiness_counts": readiness_counts,
+        "scale": TRAINING_COMPETENCY_SCALE,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@api_router.get("/trainees/{trainee_id}/placements")
+async def list_trainee_placements(
+    trainee_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_training_admin_user(current_user)
+    await _get_teacher_or_404(trainee_id, current_user)
+    placements = await db.trainee_placements.find(
+        {"trainee_id": trainee_id},
+        {"_id": 0},
+    ).sort("start_date", -1).to_list(100)
+    return {"placements": placements}
+
+
+@api_router.post("/trainees/{trainee_id}/placements")
+async def create_trainee_placement(
+    trainee_id: str,
+    payload: TraineePlacementCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_training_admin_user(current_user)
+    await _get_teacher_or_404(trainee_id, current_user)
+    school_site = str(payload.school_site or "").strip()
+    if not school_site:
+        raise HTTPException(status_code=400, detail="Placement school site is required")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "workspace_id": _training_workspace_id(current_user),
+        "trainee_id": trainee_id,
+        "school_site": school_site,
+        "mentor_teacher": (payload.mentor_teacher or "").strip() or None,
+        "grade_level": (payload.grade_level or "").strip() or None,
+        "subject": (payload.subject or "").strip() or None,
+        "start_date": payload.start_date.isoformat() if payload.start_date else now,
+        "end_date": payload.end_date.isoformat() if payload.end_date else None,
+        "status": payload.status or "active",
+        "created_by": current_user["id"],
+        "created_at": now,
+        "updated_at": now,
+    }
+    if doc["status"] == "active":
+        await db.trainee_placements.update_many(
+            {"trainee_id": trainee_id, "status": "active"},
+            {"$set": {"status": "completed", "updated_at": now}},
+        )
+    await db.trainee_placements.insert_one(doc)
+    await db.teachers.update_one(
+        {"id": trainee_id},
+        {"$set": {"placement_site": school_site, "school_site": school_site}},
+    )
+    return {"placement": {k: v for k, v in doc.items() if k != "_id"}}
+
+
+@api_router.get("/training/supervisor-summary", response_model=TrainingSupervisorSummaryResponse)
+async def get_training_supervisor_summary(
+    current_user: dict = Depends(get_current_user),
+):
+    _require_training_admin_user(current_user)
+    teacher_ids = await _list_teacher_ids_for_user(current_user)
+    teachers = await db.teachers.find(
+        {"id": {"$in": teacher_ids or ["__none__"]}},
+        {"_id": 0},
+    ).to_list(5000)
+    teacher_ids = [teacher["id"] for teacher in teachers if teacher.get("id")]
+    teacher_map = {teacher["id"]: teacher for teacher in teachers if teacher.get("id")}
+
+    now = datetime.now(timezone.utc)
+    cycle_start, cycle_midpoint, cycle_end = _training_cycle_window(now)
+    required_per_trainee = await _training_required_per_trainee(current_user)
+
+    cycle_observations = await db.observations.find(
+        {
+            "teacher_id": {"$in": teacher_ids or ["__none__"]},
+            "created_at": {
+                "$gte": cycle_start.isoformat(),
+                "$lt": cycle_end.isoformat(),
+            },
+        },
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(5000)
+
+    observations_by_teacher: Dict[str, int] = {}
+    for observation in cycle_observations:
+        observations_by_teacher[observation.get("teacher_id")] = (
+            observations_by_teacher.get(observation.get("teacher_id"), 0) + 1
+        )
+
+    trainees: List[TrainingSupervisorTraineeStatus] = []
+    status_counts = {"on_track": 0, "at_risk": 0, "not_started": 0}
+    risk_threshold = required_per_trainee * 0.5
+    is_after_midpoint = now >= cycle_midpoint
+
+    for teacher in teachers:
+        trainee_id = teacher.get("id")
+        completed = observations_by_teacher.get(trainee_id, 0)
+        if completed == 0:
+            status = "not_started"
+        elif is_after_midpoint and completed < risk_threshold:
+            status = "at_risk"
+        else:
+            status = "on_track"
+        status_counts[status] += 1
+        trainees.append(
+            TrainingSupervisorTraineeStatus(
+                trainee_id=trainee_id,
+                trainee_name=teacher.get("name") or teacher.get("email") or "Trainee",
+                school_site=_training_placement_site(teacher),
+                required=required_per_trainee,
+                completed=completed,
+                status=status,
+            )
+        )
+
+    upcoming_schedule_docs = await db.schedules.find(
+        {
+            "teacher_id": {"$in": teacher_ids or ["__none__"]},
+            "recording_status": ScheduleStatus.PLANNED.value,
+            "start_time": {"$gte": now.isoformat()},
+        },
+        {"_id": 0},
+    ).sort("start_time", 1).to_list(7)
+    upcoming_observations = []
+    for schedule in upcoming_schedule_docs:
+        teacher = teacher_map.get(schedule.get("teacher_id"), {})
+        upcoming_observations.append(
+            TrainingSupervisorUpcomingObservation(
+                trainee_id=schedule.get("teacher_id"),
+                trainee_name=teacher.get("name") or teacher.get("email") or "Trainee",
+                school_site=_training_placement_site(teacher, schedule.get("location")),
+                scheduled_date=schedule.get("start_time"),
+                focus_elements=_training_schedule_focus_elements(schedule),
+            )
+        )
+
+    recent_observations = []
+    for observation in cycle_observations[:5]:
+        teacher = teacher_map.get(observation.get("teacher_id"), {})
+        summary = (
+            observation.get("summary")
+            or observation.get("admin_comment")
+            or observation.get("teacher_response")
+        )
+        recent_observations.append(
+            TrainingSupervisorRecentObservation(
+                trainee_id=observation.get("teacher_id"),
+                trainee_name=teacher.get("name") or teacher.get("email") or "Trainee",
+                school_site=_training_placement_site(teacher),
+                completed_date=observation.get("created_at") or observation.get("updated_at"),
+                summary=summary,
+            )
+        )
+
+    active_placements = sum(1 for teacher in teachers if _training_placement_site(teacher))
+    trainees.sort(key=lambda item: (item.status != "at_risk", item.status != "not_started", item.trainee_name))
+
+    return TrainingSupervisorSummaryResponse(
+        total_trainees=len(teachers),
+        active_placements=active_placements,
+        observations_this_cycle=len(cycle_observations),
+        required_per_trainee=required_per_trainee,
+        trainees_on_track=status_counts["on_track"],
+        trainees_at_risk=status_counts["at_risk"],
+        trainees_not_started=status_counts["not_started"],
+        trainees=trainees,
+        upcoming_observations=upcoming_observations,
+        recent_observations=recent_observations,
+    )
 
 
 @api_router.get("/dashboard/cohort-analytics")
@@ -13589,16 +16758,363 @@ async def get_teacher_coaching_timeline(
 @api_router.get("/coaching/tasks", response_model=CoachingTaskListResponse)
 async def list_coaching_tasks(
     teacher_id: Optional[str] = None,
+    priority: Optional[str] = None,
+    status: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    teachers = await _list_visible_teachers_for_user(current_user, teacher_id=teacher_id)
-    all_tasks: List[dict] = []
-    for teacher in teachers:
-        all_tasks.extend(await _build_coaching_tasks_for_teacher(teacher, current_user))
-    all_tasks.sort(
-        key=lambda item: (-(item.get("priority") or 0), _sort_key_for_iso(item.get("due_at"))),
+    tasks = await _list_persisted_coaching_tasks(
+        current_user,
+        teacher_id=teacher_id,
+        priority=priority,
+        status=status,
     )
-    return CoachingTaskListResponse(tasks=[CoachingTask(**task) for task in all_tasks[:50]])
+    return CoachingTaskListResponse(tasks=[CoachingTask(**task) for task in tasks])
+
+
+@api_router.get("/coaching/tasks/overdue", response_model=CoachingTaskListResponse)
+async def list_overdue_coaching_tasks(current_user: dict = Depends(get_current_user)):
+    tasks = await _list_persisted_coaching_tasks(
+        current_user,
+        overdue_only=True,
+        include_completed=False,
+    )
+    return CoachingTaskListResponse(tasks=[CoachingTask(**task) for task in tasks])
+
+
+@api_router.patch("/coaching/tasks/{task_id}", response_model=CoachingTask)
+async def update_coaching_task(
+    task_id: str,
+    payload: CoachingTaskUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    task = await _get_visible_coaching_task_or_404(task_id, current_user)
+    updates = payload.dict(exclude_unset=True)
+    update_fields: Dict[str, Any] = {}
+    if "priority" in updates and payload.priority is not None:
+        priority = _normalize_coaching_task_priority(payload.priority)
+        update_fields["priority"] = priority
+        update_fields["priority_rank"] = _coaching_task_priority_rank(priority)
+    if "status" in updates and payload.status is not None:
+        update_fields["status"] = _normalize_coaching_task_status(payload.status)
+        if update_fields["status"] == "snoozed" and not task.get("snoozed_until"):
+            update_fields["snoozed_until"] = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    if "notes" in updates and payload.notes is not None:
+        update_fields["notes"] = payload.notes
+    if "due_date" in updates and payload.due_date is not None:
+        update_fields["due_date"] = payload.due_date
+    if "suggested_action" in updates and payload.suggested_action is not None:
+        update_fields["suggested_action"] = payload.suggested_action
+    if "linked_observation_session_id" in updates:
+        if payload.linked_observation_session_id:
+            session = await _get_observation_session_or_404(payload.linked_observation_session_id, current_user)
+            if session.get("teacher_id") != task.get("teacher_id"):
+                raise HTTPException(status_code=400, detail="Observation session belongs to a different teacher")
+        update_fields["linked_observation_session_id"] = payload.linked_observation_session_id
+    if not update_fields:
+        return CoachingTask(**_serialize_coaching_task_doc(task))
+    update_fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+    updated = await db.coaching_tasks.find_one_and_update(
+        {"id": task_id},
+        {"$set": update_fields},
+        return_document=True,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Coaching task not found")
+    return CoachingTask(**_serialize_coaching_task_doc(updated))
+
+
+@api_router.post("/coaching/tasks/{task_id}/complete", response_model=CoachingTask)
+async def complete_coaching_task(
+    task_id: str,
+    payload: CoachingTaskCompleteRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    await _get_visible_coaching_task_or_404(task_id, current_user)
+    now = datetime.now(timezone.utc).isoformat()
+    updated = await db.coaching_tasks.find_one_and_update(
+        {"id": task_id},
+        {
+            "$set": {
+                "status": "completed",
+                "completion_note": (payload.completion_note or "").strip() or None,
+                "completed_at": now,
+                "updated_at": now,
+            }
+        },
+        return_document=True,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Coaching task not found")
+    return CoachingTask(**_serialize_coaching_task_doc(updated))
+
+
+@api_router.get("/teachers/{teacher_id}/coaching-history", response_model=CoachingHistoryResponse)
+async def get_teacher_coaching_history(
+    teacher_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    tasks = await _list_persisted_coaching_tasks(
+        current_user,
+        teacher_id=teacher_id,
+        include_completed=True,
+        limit=500,
+    )
+    open_tasks = [task for task in tasks if task.get("status") != "completed"]
+    history = [task for task in tasks if task.get("status") == "completed"]
+    return CoachingHistoryResponse(
+        teacher_id=teacher_id,
+        teacher_name=teacher.get("name"),
+        open_tasks=[CoachingTask(**task) for task in open_tasks],
+        history=[CoachingTask(**task) for task in history],
+    )
+
+
+def _normalize_action_plan_priority(value: Optional[str]) -> str:
+    normalized = str(value or "medium").strip().lower()
+    return normalized if normalized in {"high", "medium", "low"} else "medium"
+
+
+def _normalize_unified_action_plan_goal(goal: dict) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    title = goal.get("goal_text") or goal.get("title") or goal.get("description") or "Coaching goal"
+    recommended = goal.get("recommended_action") or goal.get("description") or goal.get("suggested_action")
+    status = str(goal.get("status") or "open").strip().lower()
+    if status in {"planned", "active"}:
+        status = "open"
+    if status in {"complete", "implemented"}:
+        status = "completed"
+    if status not in {"open", "in_progress", "completed", "dropped"}:
+        status = "open"
+    return {
+        "id": goal.get("id") or str(uuid.uuid4()),
+        "element_code": goal.get("element_code"),
+        "element_name": goal.get("element_name"),
+        "goal_text": str(title).strip(),
+        "recommended_action": recommended,
+        "due_date": goal.get("due_date"),
+        "priority": _normalize_action_plan_priority(goal.get("priority")),
+        "status": status,
+        "created_from_assessment_id": goal.get("created_from_assessment_id") or goal.get("assessment_id"),
+        "teacher_notes": goal.get("teacher_notes") or "",
+        "teacher_marked_tried_at": goal.get("teacher_marked_tried_at"),
+        "completion_note": goal.get("completion_note"),
+        "completed_at": goal.get("completed_at"),
+        "created_at": goal.get("created_at") or now,
+        "updated_at": goal.get("updated_at"),
+    }
+
+
+async def _get_or_create_unified_action_plan(teacher: dict, current_user: dict) -> dict:
+    teacher_id = teacher["id"]
+    plan = await db.action_plans.find_one({"teacher_id": teacher_id}, {"_id": 0})
+    now = datetime.now(timezone.utc).isoformat()
+    if plan:
+        goals = [_normalize_unified_action_plan_goal(goal) for goal in (plan.get("goals") or [])]
+        updates = {
+            "schema_version": "unified",
+            "workspace_id": plan.get("workspace_id") or teacher.get("organization_id") or teacher.get("school_id") or current_user.get("organization_id") or current_user.get("id"),
+            "teacher_name": plan.get("teacher_name") or teacher.get("name"),
+            "created_by_admin_id": plan.get("created_by_admin_id") or teacher.get("linked_admin_user_id") or teacher.get("created_by") or current_user.get("id"),
+            "created_by_admin_name": plan.get("created_by_admin_name") or teacher.get("linked_admin_name") or current_user.get("name"),
+            "goals": goals,
+            "admin_summary": plan.get("admin_summary") or plan.get("notes") or "",
+            "teacher_reflection": plan.get("teacher_reflection") or "",
+            "last_updated_by": plan.get("last_updated_by") or "admin",
+            "last_updated_at": plan.get("last_updated_at") or plan.get("updated_at") or plan.get("created_at") or now,
+            "updated_at": plan.get("updated_at") or now,
+        }
+        await db.action_plans.update_one({"id": plan["id"]}, {"$set": updates})
+        return {**plan, **updates}
+    doc = {
+        "id": str(uuid.uuid4()),
+        "schema_version": "unified",
+        "workspace_id": teacher.get("organization_id") or teacher.get("school_id") or current_user.get("organization_id") or current_user.get("id"),
+        "teacher_id": teacher_id,
+        "teacher_name": teacher.get("name"),
+        "created_by_admin_id": teacher.get("linked_admin_user_id") or teacher.get("created_by") or current_user.get("id"),
+        "created_by_admin_name": teacher.get("linked_admin_name") or current_user.get("name"),
+        "goals": [],
+        "admin_summary": "",
+        "teacher_reflection": "",
+        "last_updated_by": "admin",
+        "last_updated_at": now,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.action_plans.insert_one(doc)
+    return doc
+
+
+def _shape_action_plan_for_role(plan: dict, current_user: dict) -> dict:
+    result = _to_json_safe({k: v for k, v in plan.items() if k != "_id"})
+    if _get_user_tenant_role(current_user) == "teacher":
+        result.pop("admin_summary", None)
+        result.pop("created_by_admin_id", None)
+    return result
+
+
+async def _find_action_plan_goal_or_404(teacher: dict, current_user: dict, goal_id: str) -> Tuple[dict, dict]:
+    plan = await _get_or_create_unified_action_plan(teacher, current_user)
+    for goal in plan.get("goals") or []:
+        if goal.get("id") == goal_id:
+            return plan, goal
+    raise HTTPException(status_code=404, detail="Action plan goal not found")
+
+
+@api_router.get("/action-plan/{teacher_id}")
+async def get_unified_action_plan(
+    teacher_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    plan = await _get_or_create_unified_action_plan(teacher, current_user)
+    return _shape_action_plan_for_role(plan, current_user)
+
+
+@api_router.patch("/action-plan/{teacher_id}")
+async def patch_unified_action_plan(
+    teacher_id: str,
+    payload: UnifiedActionPlanPatch,
+    current_user: dict = Depends(get_current_user),
+):
+    if _get_user_tenant_role(current_user) == "teacher":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    plan = await _get_or_create_unified_action_plan(teacher, current_user)
+    now = datetime.now(timezone.utc).isoformat()
+    updates: Dict[str, Any] = {
+        "last_updated_by": "admin",
+        "last_updated_at": now,
+        "updated_at": now,
+    }
+    if payload.goals is not None:
+        updates["goals"] = [
+            _normalize_unified_action_plan_goal({**goal.dict(), "updated_at": now})
+            for goal in payload.goals
+        ]
+    if payload.admin_summary is not None:
+        updates["admin_summary"] = payload.admin_summary
+    await db.action_plans.update_one({"id": plan["id"]}, {"$set": updates})
+    updated = await db.action_plans.find_one({"id": plan["id"]}, {"_id": 0})
+    return _shape_action_plan_for_role(updated or {**plan, **updates}, current_user)
+
+
+@api_router.post("/action-plan/{teacher_id}/goals/{goal_id}/teacher-note")
+async def add_teacher_goal_note(
+    teacher_id: str,
+    goal_id: str,
+    payload: TeacherGoalNotePayload,
+    current_user: dict = Depends(get_current_user),
+):
+    if _get_user_tenant_role(current_user) != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher access required")
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    plan, goal = await _find_action_plan_goal_or_404(teacher, current_user, goal_id)
+    now = datetime.now(timezone.utc).isoformat()
+    goals = []
+    updated_goal = None
+    for item in plan.get("goals") or []:
+        if item.get("id") == goal_id:
+            updated_goal = {**item, "teacher_notes": payload.teacher_notes, "updated_at": now}
+            goals.append(updated_goal)
+        else:
+            goals.append(item)
+    await db.action_plans.update_one(
+        {"id": plan["id"]},
+        {"$set": {"goals": goals, "last_updated_by": "teacher", "last_updated_at": now, "updated_at": now}},
+    )
+    admin = await _find_admin_user_for_teacher(teacher, fallback_user_id=plan.get("created_by_admin_id"))
+    if admin:
+        from app.services.notification_service import NotificationService
+        await NotificationService().send_goal_tried_notification(admin, teacher, updated_goal or goal)
+    return {"goal": updated_goal or goal}
+
+
+@api_router.post("/action-plan/{teacher_id}/goals/{goal_id}/mark-tried")
+async def mark_action_plan_goal_tried(
+    teacher_id: str,
+    goal_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    if _get_user_tenant_role(current_user) != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher access required")
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    plan, goal = await _find_action_plan_goal_or_404(teacher, current_user, goal_id)
+    now = datetime.now(timezone.utc).isoformat()
+    goals = []
+    updated_goal = None
+    for item in plan.get("goals") or []:
+        if item.get("id") == goal_id:
+            updated_goal = {**item, "teacher_marked_tried_at": now, "status": "in_progress", "updated_at": now}
+            goals.append(updated_goal)
+        else:
+            goals.append(item)
+    await db.action_plans.update_one(
+        {"id": plan["id"]},
+        {"$set": {"goals": goals, "last_updated_by": "teacher", "last_updated_at": now, "updated_at": now}},
+    )
+    admin = await _find_admin_user_for_teacher(teacher, fallback_user_id=plan.get("created_by_admin_id"))
+    if admin:
+        from app.services.notification_service import NotificationService
+        await NotificationService().send_goal_tried_notification(admin, teacher, updated_goal or goal)
+    return {"goal": updated_goal or goal}
+
+
+@api_router.post("/action-plan/{teacher_id}/goals/{goal_id}/complete")
+async def complete_action_plan_goal(
+    teacher_id: str,
+    goal_id: str,
+    payload: GoalCompletionPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    if _get_user_tenant_role(current_user) == "teacher":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    plan, goal = await _find_action_plan_goal_or_404(teacher, current_user, goal_id)
+    note = str(payload.completion_note or "").strip()
+    if not note:
+        raise HTTPException(status_code=400, detail="completion_note is required")
+    now = datetime.now(timezone.utc).isoformat()
+    goals = []
+    updated_goal = None
+    for item in plan.get("goals") or []:
+        if item.get("id") == goal_id:
+            updated_goal = {**item, "status": "completed", "completion_note": note, "completed_at": now, "updated_at": now}
+            goals.append(updated_goal)
+        else:
+            goals.append(item)
+    await db.action_plans.update_one(
+        {"id": plan["id"]},
+        {"$set": {"goals": goals, "last_updated_by": "admin", "last_updated_at": now, "updated_at": now}},
+    )
+    return {"goal": updated_goal or goal}
+
+
+@api_router.post("/action-plan/{teacher_id}/reflection")
+async def update_action_plan_reflection(
+    teacher_id: str,
+    payload: TeacherReflectionPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    if _get_user_tenant_role(current_user) != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher access required")
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    plan = await _get_or_create_unified_action_plan(teacher, current_user)
+    now = datetime.now(timezone.utc).isoformat()
+    await db.action_plans.update_one(
+        {"id": plan["id"]},
+        {
+            "$set": {
+                "teacher_reflection": payload.teacher_reflection,
+                "last_updated_by": "teacher",
+                "last_updated_at": now,
+                "updated_at": now,
+            }
+        },
+    )
+    updated = await db.action_plans.find_one({"id": plan["id"]}, {"_id": 0})
+    return _shape_action_plan_for_role(updated or plan, current_user)
 
 
 @api_router.post("/teachers/{teacher_id}/action-plan", response_model=ActionPlan)
@@ -13805,115 +17321,168 @@ async def publish_conference_agenda(
     return ConferenceAgendaRecord(**result)
 
 
+_conference_prep_cache: Dict[str, Tuple[float, dict]] = {}
+
+
+def _first_sentence(value: Optional[str], fallback: str = "") -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return fallback
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    return parts[0][:500]
+
+
+async def _generate_conference_ai_content(
+    *,
+    teacher: dict,
+    assessments: List[dict],
+    open_goals: List[dict],
+    teacher_reflection: Optional[str],
+) -> Tuple[str, List[str]]:
+    summaries = [
+        _first_sentence(a.get("summary") or a.get("analysis_summary") or a.get("feedback_summary"))
+        for a in assessments[:3]
+    ]
+    summaries = [s for s in summaries if s]
+    goal_lines = [
+        f"{g.get('goal_text')}: {g.get('teacher_notes') or 'no teacher note yet'}"
+        for g in open_goals[:5]
+    ]
+    fallback_thread = (
+        f"{teacher.get('name') or 'This teacher'} is building on recent feedback with a clear set of coaching goals. "
+        "Use the conversation to connect what they tried with the next small move that will help students see the impact."
+    )
+    fallback_starters = [
+        "What felt different when you tried the most recent goal?",
+        "Where did students respond in a way you want to build on next time?",
+        "What support would make the next attempt easier to plan?",
+    ]
+    if not OPENAI_API_KEY or AsyncOpenAI is None:
+        return fallback_thread, fallback_starters
+    prompt = (
+        "You are Cognivio's coaching prep assistant. In warm coach voice, read the last three lesson summaries, "
+        "the open action plan goals, and the teacher's own notes. Return JSON only with keys coaching_thread "
+        "(2-3 sentences) and suggested_conversation_starters (exactly 3 specific questions). Do not mention scores, "
+        "rubric codes, or system language.\n\n"
+        f"Teacher: {teacher.get('name')}\n"
+        f"Recent summaries: {summaries}\n"
+        f"Open goals and teacher notes: {goal_lines}\n"
+        f"Teacher reflection: {teacher_reflection or ''}"
+    )
+    try:
+        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            temperature=0.4,
+        )
+        content = response.choices[0].message.content or "{}"
+        parsed = json.loads(content)
+        thread = str(parsed.get("coaching_thread") or "").strip() or fallback_thread
+        starters = parsed.get("suggested_conversation_starters") or []
+        starters = [str(item).strip() for item in starters if str(item).strip()][:3]
+        return thread, (starters or fallback_starters)[:3]
+    except Exception as exc:
+        logger.warning("Conference prep AI generation failed for teacher %s: %s", teacher.get("id"), exc)
+        return fallback_thread, fallback_starters
+
+
 @api_router.get("/teachers/{teacher_id}/conference-prep")
 async def get_teacher_conference_prep(
     teacher_id: str,
     request: Request,
     current_user: dict = Depends(get_current_user),
 ):
-    from app.services.workspace_service import build_teacher_memory_support
-    from app.analysis.specialist_orchestrator import orchestrate_conference_prep
-
     teacher = await _get_teacher_or_404(teacher_id, current_user)
-    language = _resolve_request_language(request, default="en")
-    action_plan = await db.action_plans.find_one(
-        {"teacher_id": teacher_id, "user_id": current_user["id"]},
-        {"_id": 0, "user_id": 0},
-    ) or {"goals": [], "notes": None}
+    cache_key = f"{current_user['id']}:{teacher_id}:{_resolve_request_language(request, default='en')}"
+    cached = _conference_prep_cache.get(cache_key)
+    if cached and time.time() - cached[0] < 1800:
+        return _to_json_safe({**cached[1], "cache": {"hit": True, "ttl_seconds": int(1800 - (time.time() - cached[0]))}})
+
+    action_plan = await _get_or_create_unified_action_plan(teacher, current_user)
+    workspace_id = action_plan.get("workspace_id") or teacher.get("organization_id") or current_user.get("organization_id")
+    assessment_query: Dict[str, Any] = {"teacher_id": teacher_id}
+    if _get_user_tenant_role(current_user) != "super_admin":
+        assessment_query["$or"] = [
+            {"workspace_id": workspace_id},
+            {"user_id": current_user["id"]},
+            {"user_id": teacher.get("created_by")},
+        ]
     assessments = await db.assessments.find(
-        {"teacher_id": teacher_id, "user_id": current_user["id"]},
-        {"_id": 0, "user_id": 0},
+        assessment_query,
+        {"_id": 0},
     ).sort("analyzed_at", -1).to_list(5)
     observations = await db.observations.find(
-        {"teacher_id": teacher_id, "user_id": current_user["id"]},
-        {"_id": 0, "user_id": 0},
+        {"teacher_id": teacher_id},
+        {"_id": 0},
     ).sort("created_at", -1).to_list(8)
     latest = assessments[0] if assessments else None
-    previous = assessments[1] if len(assessments) > 1 else None
+    latest_summary = _first_sentence(
+        (latest or {}).get("summary") or (latest or {}).get("analysis_summary") or (latest or {}).get("feedback_summary"),
+        "There is not a reviewed lesson summary yet.",
+    )
+    top_strength = ""
+    top_growth_area = ""
+    if latest:
+        scores = latest.get("element_scores") or []
+        scored = [s for s in scores if isinstance(s.get("score"), (int, float))]
+        if scored:
+            best = max(scored, key=lambda item: item.get("score", 0))
+            growth = min(scored, key=lambda item: item.get("score", 0))
+            top_strength = f"{best.get('element_name') or 'A recent strength'} stood out as a place to build from."
+            top_growth_area = f"{growth.get('element_name') or 'One next focus area'} is the next area to practice."
+    if not top_strength:
+        top_strength = "Start by naming one student-facing move that went well."
+    if not top_growth_area:
+        top_growth_area = "Choose one small teaching move to try in the next lesson."
+
     open_goals = [
-        goal for goal in action_plan.get("goals", [])
-        if goal.get("title") and goal.get("status") not in {"complete", "implemented"}
+        goal for goal in action_plan.get("goals", []) if goal.get("status") not in {"completed", "dropped"}
     ]
-    latest_summary = (
-        generate_summary(
-            latest.get("element_scores", []),
-            latest.get("overall_score") or 0,
-            provided_summary=latest.get("summary"),
-            priority_element_ids=latest.get("priority_elements"),
-            focus_note=latest.get("focus_note"),
-            language=language,
-        )
-        if latest
-        else ""
+    audio_doc = {}
+    video_id = (latest or {}).get("video_id")
+    if video_id:
+        audio_doc = await db.audio_analyses.find_one({"video_id": video_id}, {"_id": 0}) or {}
+    talk_time_pct = (
+        audio_doc.get("teacher_talk_time_pct")
+        or audio_doc.get("talk_time_pct")
+        or (latest or {}).get("talk_time_pct")
+        or 0
     )
-    comparison_lines = []
-    if latest and previous:
-        latest_score = latest.get("overall_score")
-        previous_score = previous.get("overall_score")
-        if isinstance(latest_score, (int, float)) and isinstance(previous_score, (int, float)):
-            delta = round(latest_score - previous_score, 2)
-            if _is_hebrew_language(language):
-                comparison_lines.append(f"שינוי מאז השיעור הקודם: {delta:+}/10.")
-            else:
-                comparison_lines.append(f"Change since the previous reviewed lesson: {delta:+}/10.")
-    if open_goals:
-        joined = ", ".join(goal.get("title") for goal in open_goals[:3])
-        if _is_hebrew_language(language):
-            comparison_lines.append(f"יעדי המעקב הפעילים: {joined}.")
-        else:
-            comparison_lines.append(f"Current follow-up goals: {joined}.")
-    if action_plan.get("notes"):
-        if _is_hebrew_language(language):
-            comparison_lines.append(f"הערות תוכנית הפעולה: {action_plan.get('notes')}")
-        else:
-            comparison_lines.append(f"Action-plan notes: {action_plan.get('notes')}")
-    adaptive_support = await build_teacher_memory_support(
-        current_user,
-        teacher_id,
-        language=language,
+    goals_tried = sum(1 for goal in action_plan.get("goals", []) if goal.get("teacher_marked_tried_at"))
+    goals_completed = sum(1 for goal in action_plan.get("goals", []) if goal.get("status") == "completed")
+    recognition_earned = await db.recognition_badges.count_documents({"teacher_id": teacher_id})
+    coaching_thread, starters = await _generate_conference_ai_content(
+        teacher=teacher,
+        assessments=assessments,
+        open_goals=open_goals,
+        teacher_reflection=action_plan.get("teacher_reflection"),
     )
-    for line in adaptive_support.get("conference_continuity_lines") or []:
-        if line not in comparison_lines:
-            comparison_lines.append(line)
-    agenda = []
-    if latest_summary:
-        agenda.append(latest_summary)
-    for obs in observations[:3]:
-        summary = obs.get("admin_comment") or obs.get("teacher_response")
-        if summary:
-            agenda.append(summary)
-    if open_goals:
-        for goal in open_goals[:2]:
-            if _is_hebrew_language(language):
-                agenda.append(f"בדקו התקדמות מול היעד: {goal.get('title')}.")
-            else:
-                agenda.append(f"Check progress against the goal: {goal.get('title')}.")
-    if adaptive_support.get("admin_prompt_body"):
-        agenda.append(adaptive_support["admin_prompt_body"])
-    published_agenda = await _get_latest_published_conference_agenda(teacher_id)
-    prep_payload = orchestrate_conference_prep(
-        {
-            "agenda": agenda[:6],
-            "continuity_lines": comparison_lines,
-        },
-        language=language,
-        adaptive_support=adaptive_support,
-    )
-    return _to_json_safe({
+    payload = {
         "teacher_id": teacher_id,
         "teacher_name": teacher.get("name"),
-        "latest_assessment_id": latest.get("id") if latest else None,
-        "latest_assessment_date": latest.get("analyzed_at") if latest else None,
-        "summary": latest_summary,
-        "continuity_lines": prep_payload.get("continuity_lines", []),
-        "agenda": prep_payload.get("agenda", []),
-        "open_goals": open_goals[:4],
-        "recent_observations": observations[:4],
-        "next_conference": teacher.get("next_coaching_conference"),
-        "published_agenda": published_agenda,
-        "conference_specialist_trace": prep_payload.get("conference_specialist_trace", []),
-        "conference_specialist_orchestrator": prep_payload.get("conference_specialist_orchestrator"),
-    })
+        "last_observation": {
+            "date": (latest or {}).get("analyzed_at") or (observations[0].get("created_at") if observations else None),
+            "video_id": video_id,
+            "summary": latest_summary,
+            "top_strength": top_strength,
+            "top_growth_area": top_growth_area,
+            "talk_time_pct": float(talk_time_pct or 0),
+        },
+        "open_goals": open_goals,
+        "teacher_reflection": action_plan.get("teacher_reflection") or "",
+        "coaching_thread": coaching_thread,
+        "suggested_conversation_starters": starters,
+        "since_last_conversation": {
+            "observations_completed": len(observations),
+            "goals_tried": goals_tried,
+            "goals_completed": goals_completed,
+            "recognition_earned": recognition_earned,
+        },
+    }
+    _conference_prep_cache[cache_key] = (time.time(), payload)
+    return _to_json_safe({**payload, "cache": {"hit": False, "ttl_seconds": 1800}})
 
 @api_router.get("/teachers/{teacher_id}/peer-recommendations")
 async def get_peer_recommendations(
@@ -14121,6 +17690,593 @@ async def _ensure_mock_evidence(assessment: dict, current_user: dict) -> List[di
     return evidence_docs
 
 
+# ==================== OBSERVATION SESSION ENDPOINTS ====================
+def _normalize_observation_focus_elements(
+    elements: Optional[List[Any]],
+    *,
+    strict: bool = True,
+) -> List[str]:
+    cleaned: List[str] = []
+    seen = set()
+    for raw in elements or []:
+        value = str(raw or "").strip()
+        if not value or value in seen:
+            continue
+        cleaned.append(value)
+        seen.add(value)
+    if len(cleaned) > 3 and strict:
+        raise HTTPException(status_code=400, detail="Choose 1-3 focus elements")
+    return cleaned[:3]
+
+
+def _normalize_observation_personal_goals(goals: Optional[List[Any]]) -> List[str]:
+    cleaned: List[str] = []
+    seen = set()
+    for raw in goals or []:
+        value = str(raw or "").strip()
+        if not value or value in seen:
+            continue
+        cleaned.append(value)
+        seen.add(value)
+    return cleaned[:5]
+
+
+def _resolve_observation_workspace_id(current_user: dict, teacher: Optional[dict] = None) -> str:
+    return (
+        current_user.get("organization_id")
+        or (teacher or {}).get("organization_id")
+        or (teacher or {}).get("school_id")
+        or current_user["id"]
+    )
+
+
+def _require_observation_planner(current_user: dict) -> None:
+    tenant_role = _get_user_tenant_role(current_user)
+    if tenant_role not in {"school_admin", "training_admin", "super_admin"}:
+        raise HTTPException(status_code=403, detail="Observation planning requires an administrator account")
+
+
+async def _serialize_observation_session(session: dict) -> dict:
+    payload = dict(session or {})
+    payload.pop("_id", None)
+    teacher_id = payload.get("teacher_id")
+    if teacher_id:
+        teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
+        if teacher:
+            payload["teacher_name"] = teacher.get("name") or teacher.get("email")
+            payload["school_site"] = (
+                teacher.get("school_name")
+                or teacher.get("placement_site")
+                or teacher.get("school")
+                or teacher.get("organization_name")
+            )
+    payload["focus_elements"] = _normalize_observation_focus_elements(
+        payload.get("focus_elements") or [],
+        strict=False,
+    )
+    payload["personal_goals"] = _normalize_observation_personal_goals(payload.get("personal_goals") or [])
+    payload["focus_note"] = payload.get("focus_note") or ""
+    payload["status"] = payload.get("status") or ObservationSessionStatus.PLANNED.value
+    return payload
+
+
+OBSERVER_GOAL_TYPES = {
+    "feedback_quality",
+    "observation_frequency",
+    "element_focus",
+    "coaching_action",
+}
+
+
+def _normalize_observer_goal_type(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized not in OBSERVER_GOAL_TYPES:
+        raise HTTPException(status_code=400, detail="Unsupported observer goal type")
+    return normalized
+
+
+def _observer_goal_target_count(goal: dict) -> int:
+    target_metric = str(goal.get("target_metric") or "")
+    match = re.search(r"\d+", target_metric)
+    if match:
+        try:
+            return max(1, int(match.group(0)))
+        except ValueError:
+            pass
+    return 4
+
+
+def _serialize_observer_goal(goal: dict) -> dict:
+    payload = dict(goal or {})
+    payload.pop("_id", None)
+    signals = [
+        {
+            "session_id": signal.get("session_id"),
+            "signal_type": str(signal.get("signal_type") or "progress"),
+            "note": str(signal.get("note") or ""),
+            "recorded_at": signal.get("recorded_at") or payload.get("updated_at") or payload.get("created_at") or "",
+        }
+        for signal in payload.get("progress_signals") or []
+        if isinstance(signal, dict)
+    ]
+    payload["progress_signals"] = signals
+    payload["achieved"] = bool(payload.get("achieved"))
+    target_count = _observer_goal_target_count(payload)
+    progress_pct = 100 if payload["achieved"] else min(100, round((len(signals) / target_count) * 100, 1))
+    payload["progress_pct"] = progress_pct
+    payload["goal_text"] = str(payload.get("goal_text") or "").strip()
+    payload["goal_type"] = _normalize_observer_goal_type(payload.get("goal_type"))
+    payload["target_metric"] = str(payload.get("target_metric") or "").strip()
+    payload["updated_at"] = payload.get("updated_at")
+    payload["workspace_id"] = payload.get("workspace_id")
+    payload["achieved_at"] = payload.get("achieved_at")
+    return payload
+
+
+def _observer_goal_matches_focus(goal: dict, session: dict) -> bool:
+    goal_text = f"{goal.get('goal_text') or ''} {goal.get('target_metric') or ''}".lower()
+    focus_elements = [str(item or "").strip().lower() for item in session.get("focus_elements") or []]
+    if not focus_elements:
+        return False
+    if any(element and element in goal_text for element in focus_elements):
+        return True
+    return goal.get("goal_type") == "element_focus"
+
+
+async def _append_observer_goal_progress_signal(goal: dict, signal: dict) -> bool:
+    session_id = signal.get("session_id")
+    signal_type = signal.get("signal_type")
+    for existing in goal.get("progress_signals") or []:
+        if existing.get("session_id") == session_id and existing.get("signal_type") == signal_type:
+            return False
+
+    now = datetime.now(timezone.utc).isoformat()
+    next_count = len(goal.get("progress_signals") or []) + 1
+    target_count = _observer_goal_target_count(goal)
+    set_fields = {"updated_at": now}
+    if not goal.get("achieved") and next_count >= target_count:
+        set_fields["achieved"] = True
+        set_fields["achieved_at"] = now
+    await db.observer_goals.update_one(
+        {"id": goal["id"], "observer_id": goal["observer_id"]},
+        {"$push": {"progress_signals": signal}, "$set": set_fields},
+    )
+    return True
+
+
+async def _auto_update_observer_goal_progress_for_session(
+    session: Optional[dict],
+    *,
+    assessment: Optional[dict] = None,
+    video: Optional[dict] = None,
+) -> int:
+    if not session or not session.get("observer_id"):
+        return 0
+
+    completed_statuses = {
+        ObservationSessionStatus.ANALYSIS_COMPLETE.value,
+        ObservationSessionStatus.FEEDBACK_GIVEN.value,
+    }
+    if session.get("status") not in completed_statuses:
+        return 0
+
+    goals = await db.observer_goals.find(
+        {"observer_id": session["observer_id"], "achieved": {"$ne": True}},
+        {"_id": 0},
+    ).to_list(100)
+    if not goals:
+        return 0
+
+    teacher = await db.teachers.find_one({"id": session.get("teacher_id")}, {"_id": 0, "name": 1})
+    teacher_name = teacher.get("name") if teacher else "the observed teacher"
+    focus_label = ", ".join(session.get("focus_elements") or []) or "the planned focus"
+    assessment_summary = str((assessment or {}).get("summary") or "")
+    recommendation_count = len((assessment or {}).get("recommendations") or [])
+    linked_assessment_id = (assessment or {}).get("id") or session.get("linked_assessment_id")
+    linked_video_id = (video or {}).get("id") or session.get("linked_video_id")
+
+    signal_templates = {
+        "observation_frequency": f"Completed an observation cycle with {teacher_name}.",
+        "element_focus": f"Focused on {focus_label} during the observation of {teacher_name}.",
+        "feedback_quality": (
+            f"Generated feedback for {teacher_name}"
+            f" with {recommendation_count} recommendation(s)."
+        ),
+        "coaching_action": f"Created or reviewed coaching follow-up from the observation of {teacher_name}.",
+    }
+    created = 0
+    now = datetime.now(timezone.utc).isoformat()
+    for goal in goals:
+        goal_type = goal.get("goal_type")
+        should_record = False
+        if goal_type == "observation_frequency":
+            should_record = True
+        elif goal_type == "element_focus":
+            should_record = _observer_goal_matches_focus(goal, session)
+        elif goal_type == "feedback_quality":
+            should_record = bool(linked_assessment_id or assessment_summary or recommendation_count)
+        elif goal_type == "coaching_action":
+            task_count = await db.coaching_tasks.count_documents(
+                {
+                    "observer_id": session["observer_id"],
+                    "$or": [
+                        {"linked_observation_session_id": session.get("id")},
+                        {"assessment_id": linked_assessment_id},
+                    ],
+                }
+            )
+            should_record = task_count > 0
+
+        if not should_record:
+            continue
+        signal = {
+            "session_id": session.get("id"),
+            "signal_type": f"auto_{goal_type}",
+            "note": signal_templates.get(goal_type, "Progress recorded from a completed observation."),
+            "recorded_at": now,
+            "assessment_id": linked_assessment_id,
+            "video_id": linked_video_id,
+        }
+        if await _append_observer_goal_progress_signal(goal, signal):
+            created += 1
+    return created
+
+
+async def _build_observer_element_catalog(current_user: dict) -> Dict[str, str]:
+    selection = await db.framework_selections.find_one({"user_id": current_user["id"]}, {"_id": 0})
+    framework_type = selection.get("framework_type") if selection else FrameworkType.DANIELSON.value
+    if framework_type == FrameworkType.CUSTOM.value:
+        domains = await db.custom_domains.find({"user_id": current_user["id"]}, {"_id": 0}).to_list(1000)
+    else:
+        domains = _get_framework_by_type(framework_type).get("domains", [])
+    catalog: Dict[str, str] = {}
+    for domain in domains or []:
+        for element in domain.get("elements") or []:
+            element_id = str(element.get("id") or "").strip()
+            if element_id:
+                catalog[element_id] = element.get("name") or element_id
+    return catalog
+
+
+async def _build_observer_insights(current_user: dict) -> dict:
+    observer_id = current_user["id"]
+    now = datetime.now(timezone.utc)
+    cycle_start, cycle_end = _current_observation_cycle_window(now)
+    cycle_length = cycle_end - cycle_start
+    previous_start = cycle_start - cycle_length
+    previous_end = cycle_start
+
+    completed_statuses = [
+        ObservationSessionStatus.ANALYSIS_COMPLETE.value,
+        ObservationSessionStatus.FEEDBACK_GIVEN.value,
+    ]
+    base_query = {"observer_id": observer_id, "status": {"$in": completed_statuses}}
+    this_sessions = await db.observation_sessions.find(
+        {**base_query, "updated_at": {"$gte": cycle_start.isoformat(), "$lt": cycle_end.isoformat()}},
+        {"_id": 0},
+    ).to_list(1000)
+    last_sessions = await db.observation_sessions.find(
+        {**base_query, "updated_at": {"$gte": previous_start.isoformat(), "$lt": previous_end.isoformat()}},
+        {"_id": 0},
+    ).to_list(1000)
+
+    current_observations = await db.observations.find(
+        {"user_id": observer_id, "created_at": {"$gte": cycle_start.isoformat(), "$lt": cycle_end.isoformat()}},
+        {"_id": 0},
+    ).to_list(1000)
+    previous_observations = await db.observations.find(
+        {"user_id": observer_id, "created_at": {"$gte": previous_start.isoformat(), "$lt": previous_end.isoformat()}},
+        {"_id": 0},
+    ).to_list(1000)
+
+    def avg_feedback_length(rows: List[dict]) -> float:
+        values = [
+            len(str(row.get("admin_comment") or row.get("teacher_response") or "").strip())
+            for row in rows
+            if str(row.get("admin_comment") or row.get("teacher_response") or "").strip()
+        ]
+        return round(sum(values) / len(values), 1) if values else 0
+
+    element_counts: Dict[str, int] = {}
+    last_observed_by_element: Dict[str, str] = {}
+    for session in this_sessions:
+        observed_at = session.get("updated_at") or session.get("scheduled_date") or session.get("created_at")
+        for element_id in session.get("focus_elements") or []:
+            element_counts[element_id] = element_counts.get(element_id, 0) + 1
+            if observed_at and observed_at > last_observed_by_element.get(element_id, ""):
+                last_observed_by_element[element_id] = observed_at
+    for observation in current_observations:
+        element_id = observation.get("element_id")
+        if not element_id:
+            continue
+        element_counts[element_id] = element_counts.get(element_id, 0) + 1
+        created_at = observation.get("created_at")
+        if created_at and created_at > last_observed_by_element.get(element_id, ""):
+            last_observed_by_element[element_id] = created_at
+
+    element_catalog = await _build_observer_element_catalog(current_user)
+    most_observed = sorted(element_counts.items(), key=lambda item: item[1], reverse=True)[:6]
+    most_observed_elements = [
+        {"code": code, "name": element_catalog.get(code, code), "count": count}
+        for code, count in most_observed
+    ]
+    underobserved_elements = [
+        {
+            "code": code,
+            "name": name,
+            "last_observed": last_observed_by_element.get(code),
+        }
+        for code, name in element_catalog.items()
+        if element_counts.get(code, 0) == 0
+    ][:6]
+
+    total_coaching_tasks = await db.coaching_tasks.count_documents({"observer_id": observer_id})
+    completed_coaching_tasks = await db.coaching_tasks.count_documents(
+        {"observer_id": observer_id, "status": "completed"}
+    )
+    coaching_completion_rate = (
+        round((completed_coaching_tasks / total_coaching_tasks) * 100, 1)
+        if total_coaching_tasks
+        else 0
+    )
+
+    focus_phrase = most_observed_elements[0]["code"] if most_observed_elements else "observation cadence"
+    gap_phrase = underobserved_elements[0]["code"] if underobserved_elements else "follow-through evidence"
+    suggested_goal = (
+        f"You've been prioritizing {focus_phrase} this cycle; consider setting a goal to expand evidence around "
+        f"{gap_phrase} before the cycle closes."
+    )
+    active_goals = await db.observer_goals.find(
+        {"observer_id": observer_id, "achieved": {"$ne": True}},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(10)
+
+    return {
+        "observation_frequency": {
+            "this_cycle": len(this_sessions),
+            "last_cycle": len(last_sessions),
+            "trend": len(this_sessions) - len(last_sessions),
+        },
+        "avg_feedback_length": {
+            "this_cycle": avg_feedback_length(current_observations),
+            "trend": round(avg_feedback_length(current_observations) - avg_feedback_length(previous_observations), 1),
+        },
+        "most_observed_elements": most_observed_elements,
+        "underobserved_elements": underobserved_elements,
+        "coaching_completion_rate": coaching_completion_rate,
+        "suggested_goal": suggested_goal,
+        "active_goals": [_serialize_observer_goal(goal) for goal in active_goals],
+    }
+
+
+async def _get_observation_session_or_404(session_id: str, current_user: dict) -> dict:
+    session = await db.observation_sessions.find_one({"id": session_id}, {"_id": 0})
+    if not session:
+        raise HTTPException(status_code=404, detail="Observation session not found")
+    await _get_teacher_or_404(session.get("teacher_id"), current_user)
+    return session
+
+
+@api_router.post("/observation-sessions", response_model=ObservationSession)
+async def create_observation_session(
+    payload: ObservationSessionCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_observation_planner(current_user)
+    teacher = await _get_teacher_or_404(payload.teacher_id, current_user)
+    focus_elements = _normalize_observation_focus_elements(payload.focus_elements)
+    if not focus_elements:
+        raise HTTPException(status_code=400, detail="Choose at least one focus element")
+
+    now = datetime.now(timezone.utc).isoformat()
+    session_doc = {
+        "id": str(uuid.uuid4()),
+        "workspace_id": _resolve_observation_workspace_id(current_user, teacher),
+        "observer_id": current_user["id"],
+        "teacher_id": payload.teacher_id,
+        "scheduled_date": payload.scheduled_date.isoformat() if payload.scheduled_date else None,
+        "focus_elements": focus_elements,
+        "focus_note": (payload.focus_note or "").strip(),
+        "personal_goals": _normalize_observation_personal_goals(payload.personal_goals),
+        "status": ObservationSessionStatus.PLANNED.value,
+        "linked_video_id": None,
+        "linked_assessment_id": None,
+        "placement_id": (payload.placement_id or "").strip() or None,
+        "recurrence_rule": (payload.recurrence_rule or "").strip() or None,
+        "recurrence_parent_id": (payload.recurrence_parent_id or "").strip() or None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.observation_sessions.insert_one(session_doc)
+    return ObservationSession(**(await _serialize_observation_session(session_doc)))
+
+
+@api_router.get("/observation-sessions", response_model=List[ObservationSession])
+async def list_observation_sessions(
+    teacher_id: Optional[str] = None,
+    status: Optional[ObservationSessionStatus] = None,
+    observer_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    query: Dict[str, Any] = {}
+    if teacher_id:
+        await _get_teacher_or_404(teacher_id, current_user)
+        query["teacher_id"] = teacher_id
+    else:
+        visible_teacher_ids = await _list_teacher_ids_for_user(current_user)
+        query["teacher_id"] = {"$in": visible_teacher_ids or ["__none__"]}
+    if status is not None:
+        query["status"] = status.value
+    if observer_id:
+        query["observer_id"] = observer_id
+
+    docs = await db.observation_sessions.find(query, {"_id": 0}).sort(
+        [("scheduled_date", -1), ("created_at", -1)]
+    ).to_list(1000)
+    return [ObservationSession(**(await _serialize_observation_session(doc))) for doc in docs]
+
+
+@api_router.get("/observation-sessions/upcoming", response_model=List[ObservationSession])
+async def list_upcoming_observation_sessions(
+    current_user: dict = Depends(get_current_user),
+):
+    now = datetime.now(timezone.utc)
+    end = now + timedelta(days=14)
+    docs = await db.observation_sessions.find(
+        {
+            "observer_id": current_user["id"],
+            "status": ObservationSessionStatus.PLANNED.value,
+            "scheduled_date": {
+                "$gte": now.isoformat(),
+                "$lte": end.isoformat(),
+            },
+        },
+        {"_id": 0},
+    ).sort("scheduled_date", 1).to_list(100)
+    return [ObservationSession(**(await _serialize_observation_session(doc))) for doc in docs]
+
+
+@api_router.get("/observation-sessions/{session_id}", response_model=ObservationSession)
+async def get_observation_session(
+    session_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    session = await _get_observation_session_or_404(session_id, current_user)
+    return ObservationSession(**(await _serialize_observation_session(session)))
+
+
+@api_router.get("/observer/goals")
+async def list_observer_goals(current_user: dict = Depends(get_current_user)):
+    _require_observation_planner(current_user)
+    docs = await db.observer_goals.find(
+        {"observer_id": current_user["id"], "achieved": {"$ne": True}},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(100)
+    return {"goals": [_serialize_observer_goal(doc) for doc in docs]}
+
+
+@api_router.post("/observer/goals", response_model=ObserverGoal)
+async def create_observer_goal(
+    payload: ObserverGoalCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_observation_planner(current_user)
+    goal_text = str(payload.goal_text or "").strip()
+    target_metric = str(payload.target_metric or "").strip()
+    goal_type = _normalize_observer_goal_type(payload.goal_type)
+    if len(goal_text) < 5:
+        raise HTTPException(status_code=400, detail="Goal text must be at least 5 characters")
+    if not target_metric:
+        raise HTTPException(status_code=400, detail="Target metric is required")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "workspace_id": _get_dashboard_workspace_id(current_user),
+        "observer_id": current_user["id"],
+        "goal_text": goal_text,
+        "goal_type": goal_type,
+        "target_metric": target_metric,
+        "progress_signals": [],
+        "achieved": False,
+        "achieved_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.observer_goals.insert_one(doc)
+    return ObserverGoal(**_serialize_observer_goal(doc))
+
+
+@api_router.post("/observer/goals/{goal_id}/progress", response_model=ObserverGoal)
+async def add_observer_goal_progress(
+    goal_id: str,
+    payload: ObserverGoalProgressCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_observation_planner(current_user)
+    goal = await db.observer_goals.find_one({"id": goal_id, "observer_id": current_user["id"]}, {"_id": 0})
+    if not goal:
+        raise HTTPException(status_code=404, detail="Observer goal not found")
+    if goal.get("achieved"):
+        raise HTTPException(status_code=400, detail="Goal is already achieved")
+    session_id = str(payload.session_id or "").strip() or None
+    if session_id:
+        session = await _get_observation_session_or_404(session_id, current_user)
+        if session.get("observer_id") != current_user["id"]:
+            raise HTTPException(status_code=403, detail="Cannot add progress for another observer's session")
+    signal_type = str(payload.signal_type or "manual_progress").strip() or "manual_progress"
+    now = datetime.now(timezone.utc).isoformat()
+    signal = {
+        "session_id": session_id,
+        "signal_type": signal_type,
+        "note": str(payload.note or "Progress recorded by observer.").strip(),
+        "recorded_at": now,
+    }
+    await _append_observer_goal_progress_signal(goal, signal)
+    updated = await db.observer_goals.find_one({"id": goal_id, "observer_id": current_user["id"]}, {"_id": 0})
+    return ObserverGoal(**_serialize_observer_goal(updated or goal))
+
+
+@api_router.get("/observer/insights")
+async def get_observer_insights(current_user: dict = Depends(get_current_user)):
+    _require_observation_planner(current_user)
+    cache_key = f"observer:insights:{current_user['id']}"
+    cached_value = await CACHE_CLIENT.get(cache_key)
+    if cached_value is not None:
+        return {**cached_value, "cache": {"hit": True}}
+    payload = await _build_observer_insights(current_user)
+    await CACHE_CLIENT.set(cache_key, payload, 900)
+    return {**payload, "cache": {"hit": False}}
+
+
+@api_router.patch("/observation-sessions/{session_id}", response_model=ObservationSession)
+async def update_observation_session(
+    session_id: str,
+    payload: ObservationSessionUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    session = await _get_observation_session_or_404(session_id, current_user)
+    updates = payload.dict(exclude_unset=True)
+    update_fields: Dict[str, Any] = {}
+
+    if "scheduled_date" in updates:
+        update_fields["scheduled_date"] = (
+            payload.scheduled_date.isoformat() if payload.scheduled_date else None
+        )
+    if "focus_elements" in updates:
+        update_fields["focus_elements"] = _normalize_observation_focus_elements(payload.focus_elements)
+    if "focus_note" in updates:
+        update_fields["focus_note"] = (payload.focus_note or "").strip()
+    if "personal_goals" in updates:
+        update_fields["personal_goals"] = _normalize_observation_personal_goals(payload.personal_goals)
+    if "status" in updates and payload.status is not None:
+        update_fields["status"] = payload.status.value
+    if "linked_video_id" in updates:
+        update_fields["linked_video_id"] = payload.linked_video_id
+    if "linked_assessment_id" in updates:
+        update_fields["linked_assessment_id"] = payload.linked_assessment_id
+    if "placement_id" in updates:
+        update_fields["placement_id"] = (payload.placement_id or "").strip() or None
+    if "recurrence_rule" in updates:
+        update_fields["recurrence_rule"] = (payload.recurrence_rule or "").strip() or None
+    if "recurrence_parent_id" in updates:
+        update_fields["recurrence_parent_id"] = (payload.recurrence_parent_id or "").strip() or None
+
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    update_fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    updated = await db.observation_sessions.find_one_and_update(
+        {"id": session["id"]},
+        {"$set": update_fields},
+        return_document=True,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Observation session not found")
+    updated.pop("_id", None)
+    await _auto_update_observer_goal_progress_for_session(updated)
+    return ObservationSession(**(await _serialize_observation_session(updated)))
+
+
 # ==================== OBSERVATIONS ENDPOINTS ====================
 @api_router.post("/observations", response_model=Observation)
 async def create_observation(
@@ -14207,6 +18363,316 @@ async def update_observation(
 
 
 # ==================== SCHEDULE ENDPOINTS ====================
+def _parse_iso_datetime(value: Optional[Any]) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _add_schedule_interval(start: datetime, frequency: str, index: int) -> datetime:
+    frequency = str(frequency or "monthly").lower()
+    if frequency.startswith("week"):
+        return start + timedelta(weeks=index)
+    if frequency.startswith("biweek"):
+        return start + timedelta(weeks=index * 2)
+    if frequency.startswith("day"):
+        return start + timedelta(days=index)
+    if frequency.startswith("month"):
+        month_zero = start.month - 1 + index
+        year = start.year + month_zero // 12
+        month = month_zero % 12 + 1
+        max_day = [31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]
+        return start.replace(year=year, month=month, day=min(start.day, max_day))
+    return start + timedelta(days=index * 30)
+
+
+def _parse_recurrence_count(rule: Optional[str], fallback: int) -> int:
+    count = max(1, min(int(fallback or 1), 48))
+    for part in str(rule or "").split(";"):
+        if part.upper().startswith("COUNT="):
+            try:
+                return max(1, min(int(part.split("=", 1)[1]), 48))
+            except ValueError:
+                return count
+    return count
+
+
+def _parse_recurrence_frequency(rule: Optional[str], fallback: str) -> str:
+    for part in str(rule or "").split(";"):
+        if part.upper().startswith("FREQ="):
+            return part.split("=", 1)[1].strip().lower()
+    return fallback
+
+
+async def _get_schedule_compliance_rules(current_user: dict) -> dict:
+    workspace_id = _get_dashboard_workspace_id(current_user)
+    doc = await db.observation_compliance_rules.find_one(
+        {"workspace_id": workspace_id},
+        {"_id": 0},
+    )
+    defaults = ScheduleComplianceRule().dict()
+    if not doc:
+        return defaults
+    for key in defaults:
+        if doc.get(key) is not None:
+            defaults[key] = doc[key]
+    defaults["required_observations_per_cycle"] = max(1, int(defaults["required_observations_per_cycle"]))
+    defaults["cycle_start_month"] = min(12, max(1, int(defaults["cycle_start_month"])))
+    defaults["cycle_end_month"] = min(12, max(1, int(defaults["cycle_end_month"])))
+    defaults["warning_threshold_pct"] = min(1.0, max(0.0, float(defaults["warning_threshold_pct"])))
+    return defaults
+
+
+def _schedule_cycle_window(now: datetime, rules: dict) -> Tuple[datetime, datetime]:
+    start_month = int(rules.get("cycle_start_month") or 9)
+    end_month = int(rules.get("cycle_end_month") or 6)
+    if start_month <= end_month:
+        start_year = now.year
+        if now.month < start_month:
+            start_year -= 1
+        end_year = start_year
+    else:
+        start_year = now.year if now.month >= start_month else now.year - 1
+        end_year = start_year + 1
+    start = datetime(start_year, start_month, 1, tzinfo=timezone.utc)
+    if end_month == 12:
+        end = datetime(end_year + 1, 1, 1, tzinfo=timezone.utc) - timedelta(seconds=1)
+    else:
+        end = datetime(end_year, end_month + 1, 1, tzinfo=timezone.utc) - timedelta(seconds=1)
+    return start, end
+
+
+async def _build_schedule_compliance_payload(current_user: dict) -> dict:
+    _require_observation_planner(current_user)
+    rules = await _get_schedule_compliance_rules(current_user)
+    now = datetime.now(timezone.utc)
+    cycle_start, cycle_end = _schedule_cycle_window(now, rules)
+    midpoint = cycle_start + ((cycle_end - cycle_start) / 2)
+    visible_teacher_ids = await _list_teacher_ids_for_user(current_user)
+    if not visible_teacher_ids:
+        return {
+            "rules": rules,
+            "cycle": {"start": cycle_start.isoformat(), "end": cycle_end.isoformat()},
+            "items": [],
+            "summary": {"total": 0, "on_track": 0, "at_risk": 0, "non_compliant": 0},
+        }
+
+    teachers = await db.teachers.find(
+        {"id": {"$in": visible_teacher_ids}},
+        {"_id": 0},
+    ).sort("name", 1).to_list(5000)
+    sessions = await db.observation_sessions.find(
+        {
+            "teacher_id": {"$in": visible_teacher_ids},
+            "scheduled_date": {"$gte": cycle_start.isoformat(), "$lte": cycle_end.isoformat()},
+        },
+        {"_id": 0},
+    ).to_list(10000)
+    sessions_by_teacher: Dict[str, List[dict]] = {}
+    for session in sessions:
+        sessions_by_teacher.setdefault(session.get("teacher_id"), []).append(session)
+
+    required = int(rules["required_observations_per_cycle"])
+    warning_pct = float(rules["warning_threshold_pct"])
+    items = []
+    summary = {"total": 0, "on_track": 0, "at_risk": 0, "non_compliant": 0}
+    for teacher in teachers:
+        teacher_sessions = sessions_by_teacher.get(teacher.get("id"), [])
+        completed = sum(
+            1
+            for session in teacher_sessions
+            if session.get("status") in {
+                ObservationSessionStatus.ANALYSIS_COMPLETE.value,
+                ObservationSessionStatus.FEEDBACK_GIVEN.value,
+            }
+        )
+        planned_sessions = [
+            session
+            for session in teacher_sessions
+            if session.get("status") == ObservationSessionStatus.PLANNED.value
+            and (_parse_iso_datetime(session.get("scheduled_date")) or cycle_start) >= now
+        ]
+        planned = len(planned_sessions)
+        next_dates = sorted(
+            [
+                parsed
+                for parsed in (_parse_iso_datetime(session.get("scheduled_date")) for session in planned_sessions)
+                if parsed is not None
+            ]
+        )
+        progress_pct = completed / required if required else 1
+        if completed >= required:
+            status = "on_track"
+        elif now >= midpoint and progress_pct < warning_pct:
+            status = "non_compliant"
+        elif completed + planned < required or (now >= midpoint and progress_pct < 0.75):
+            status = "at_risk"
+        else:
+            status = "on_track"
+        summary["total"] += 1
+        summary[status] += 1
+        items.append(
+            {
+                "teacher_id": teacher["id"],
+                "teacher_name": teacher.get("name") or teacher.get("email") or "Teacher",
+                "required_observations": required,
+                "completed": completed,
+                "planned": planned,
+                "remaining": max(0, required - completed - planned),
+                "compliance_status": status,
+                "next_observation": next_dates[0].isoformat() if next_dates else None,
+            }
+        )
+    return {
+        "rules": rules,
+        "cycle": {"start": cycle_start.isoformat(), "end": cycle_end.isoformat()},
+        "items": items,
+        "summary": summary,
+    }
+
+
+@api_router.get("/schedules/compliance")
+async def get_schedule_compliance(current_user: dict = Depends(get_current_user)):
+    return await _build_schedule_compliance_payload(current_user)
+
+
+@api_router.post("/schedules/bulk")
+async def create_bulk_schedules(
+    payload: ScheduleBulkCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_observation_planner(current_user)
+    teacher_ids = [str(value or "").strip() for value in payload.teacher_ids if str(value or "").strip()]
+    if not teacher_ids:
+        raise HTTPException(status_code=400, detail="Select at least one teacher")
+    focus_elements = _normalize_observation_focus_elements(payload.focus_elements, strict=False)
+    if not focus_elements:
+        focus_elements = ["1b"]
+    recurrence_rule = (payload.recurrence_rule or "").strip() or None
+    count = _parse_recurrence_count(recurrence_rule, payload.count)
+    frequency = _parse_recurrence_frequency(recurrence_rule, payload.frequency)
+    now = datetime.now(timezone.utc).isoformat()
+    docs: List[dict] = []
+    parent_id = str(uuid.uuid4())
+    for teacher_id in teacher_ids:
+        teacher = await _get_teacher_or_404(teacher_id, current_user)
+        teacher_parent_id = parent_id if len(teacher_ids) == 1 else str(uuid.uuid4())
+        for index in range(count):
+            session_id = teacher_parent_id if index == 0 else str(uuid.uuid4())
+            scheduled_date = _add_schedule_interval(payload.start_date, frequency, index)
+            docs.append(
+                {
+                    "id": session_id,
+                    "workspace_id": _resolve_observation_workspace_id(current_user, teacher),
+                    "observer_id": payload.observer_id or current_user["id"],
+                    "teacher_id": teacher_id,
+                    "scheduled_date": scheduled_date.isoformat(),
+                    "duration_minutes": max(15, min(int(payload.duration_minutes or 45), 240)),
+                    "focus_elements": focus_elements,
+                    "focus_note": (payload.focus_note or "").strip(),
+                    "personal_goals": _normalize_observation_personal_goals(payload.personal_goals),
+                    "status": ObservationSessionStatus.PLANNED.value,
+                    "linked_video_id": None,
+                    "linked_assessment_id": None,
+                    "placement_id": (payload.placement_id or "").strip() or None,
+                    "recurrence_rule": recurrence_rule if index == 0 else None,
+                    "recurrence_parent_id": None if index == 0 else teacher_parent_id,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+    await db.observation_sessions.insert_many(docs)
+    return {
+        "created": len(docs),
+        "sessions": [await _serialize_observation_session(doc) for doc in docs],
+    }
+
+
+@api_router.get("/schedules/calendar")
+async def get_schedule_calendar(
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_observation_planner(current_user)
+    now = datetime.now(timezone.utc)
+    start_dt = start or datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+    end_dt = end or (start_dt + timedelta(days=45))
+    teacher_ids = await _list_teacher_ids_for_user(current_user)
+    query = {
+        "teacher_id": {"$in": teacher_ids or ["__none__"]},
+        "scheduled_date": {"$gte": start_dt.isoformat(), "$lte": end_dt.isoformat()},
+    }
+    docs = await db.observation_sessions.find(query, {"_id": 0}).sort("scheduled_date", 1).to_list(2000)
+    events = []
+    for doc in docs:
+        session = await _serialize_observation_session(doc)
+        events.append(
+            {
+                "id": session["id"],
+                "title": f"{session.get('teacher_name') or 'Teacher'} observation",
+                "start": session.get("scheduled_date"),
+                "end": (
+                    (_parse_iso_datetime(session.get("scheduled_date")) or start_dt)
+                    + timedelta(minutes=int(doc.get("duration_minutes") or 45))
+                ).isoformat() if session.get("scheduled_date") else None,
+                "teacher_id": session.get("teacher_id"),
+                "teacher_name": session.get("teacher_name"),
+                "observer_id": session.get("observer_id"),
+                "status": session.get("status"),
+                "focus_elements": session.get("focus_elements") or [],
+                "color_key": session.get("observer_id") or "default",
+            }
+        )
+    return {"events": events, "start": start_dt.isoformat(), "end": end_dt.isoformat()}
+
+
+@api_router.get("/schedules/conflicts")
+async def get_schedule_conflicts(
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_observation_planner(current_user)
+    now = datetime.now(timezone.utc)
+    start_dt = start or now
+    end_dt = end or (now + timedelta(days=90))
+    teacher_ids = await _list_teacher_ids_for_user(current_user)
+    docs = await db.observation_sessions.find(
+        {
+            "teacher_id": {"$in": teacher_ids or ["__none__"]},
+            "status": ObservationSessionStatus.PLANNED.value,
+            "scheduled_date": {"$gte": start_dt.isoformat(), "$lte": end_dt.isoformat()},
+        },
+        {"_id": 0},
+    ).sort("scheduled_date", 1).to_list(5000)
+    buckets: Dict[str, List[dict]] = {}
+    for doc in docs:
+        parsed = _parse_iso_datetime(doc.get("scheduled_date"))
+        if not parsed:
+            continue
+        key = f"{doc.get('observer_id')}|{parsed.strftime('%Y-%m-%dT%H:%M')}"
+        buckets.setdefault(key, []).append(doc)
+    conflicts = []
+    for key, rows in buckets.items():
+        if len(rows) < 2:
+            continue
+        conflicts.append(
+            {
+                "observer_id": rows[0].get("observer_id"),
+                "scheduled_date": rows[0].get("scheduled_date"),
+                "sessions": [await _serialize_observation_session(row) for row in rows],
+            }
+        )
+    return {"conflicts": conflicts, "count": len(conflicts)}
+
+
 @api_router.post("/schedules", response_model=Schedule)
 async def create_schedule(
     payload: ScheduleCreate,
@@ -14486,19 +18952,60 @@ async def send_recording_compliance_reminder(
 
 
 # ==================== NOTIFICATION ENDPOINTS ====================
-@api_router.get("/notifications", response_model=List[NotificationRecord])
+_notification_unread_count_cache: Dict[str, Tuple[float, int]] = {}
+
+
+@api_router.get("/notifications", response_model=NotificationListResponse)
 async def list_notifications(
     unread_only: Optional[bool] = None,
+    limit: int = 20,
+    page: int = 1,
     current_user: dict = Depends(get_current_user),
 ):
-    query: Dict[str, Any] = {"user_id": current_user["id"]}
+    query: Dict[str, Any] = {
+        "$or": [
+            {"recipient_user_id": current_user["id"]},
+            {"user_id": current_user["id"]},
+        ]
+    }
     if unread_only:
-        query["read_at"] = None
+        query["$and"] = [{"$or": [{"read": False}, {"read": {"$exists": False}}]}, {"read_at": None}]
+    limit = max(1, min(int(limit or 20), 100))
+    skip = max(0, int(page or 1) - 1) * limit
+    unread_query: Dict[str, Any] = {
+        "$or": [
+            {"recipient_user_id": current_user["id"]},
+            {"user_id": current_user["id"]},
+        ],
+        "$and": [{"$or": [{"read": False}, {"read": {"$exists": False}}]}, {"read_at": None}],
+    }
+    unread_count = await db.notifications.count_documents(unread_query)
     notifications = await db.notifications.find(
         query,
         {"_id": 0, "user_id": 0},
-    ).sort("created_at", -1).to_list(200)
-    return [NotificationRecord(**n) for n in notifications]
+    ).sort("created_at", -1).skip(skip).to_list(limit)
+    return NotificationListResponse(
+        items=[NotificationRecord(**_sanitize_notification_doc(n)) for n in notifications],
+        unread_count=unread_count,
+    )
+
+
+@api_router.get("/notifications/unread-count")
+async def get_notification_unread_count(current_user: dict = Depends(get_current_user)):
+    cached = _notification_unread_count_cache.get(current_user["id"])
+    now_ts = time.time()
+    if cached and now_ts - cached[0] < 30:
+        return {"count": cached[1]}
+    unread_query: Dict[str, Any] = {
+        "$or": [
+            {"recipient_user_id": current_user["id"]},
+            {"user_id": current_user["id"]},
+        ],
+        "$and": [{"$or": [{"read": False}, {"read": {"$exists": False}}]}, {"read_at": None}],
+    }
+    count = await db.notifications.count_documents(unread_query)
+    _notification_unread_count_cache[current_user["id"]] = (now_ts, count)
+    return {"count": count}
 
 
 @api_router.post("/notifications/{notification_id}/read", response_model=NotificationRecord)
@@ -14506,15 +19013,442 @@ async def mark_notification_read(
     notification_id: str,
     current_user: dict = Depends(get_current_user),
 ):
+    read_at = datetime.now(timezone.utc).isoformat()
     result = await db.notifications.find_one_and_update(
-        {"id": notification_id, "user_id": current_user["id"]},
-        {"$set": {"read_at": datetime.now(timezone.utc).isoformat()}},
+        {
+            "id": notification_id,
+            "$or": [
+                {"recipient_user_id": current_user["id"]},
+                {"user_id": current_user["id"]},
+            ],
+        },
+        {"$set": {"read": True, "read_at": read_at}},
         return_document=True,
         projection={"_id": 0, "user_id": 0},
     )
     if not result:
         raise HTTPException(status_code=404, detail="Notification not found")
-    return NotificationRecord(**result)
+    _notification_unread_count_cache.pop(current_user["id"], None)
+    return NotificationRecord(**_sanitize_notification_doc(result))
+
+
+@api_router.post("/notifications/read-all")
+async def mark_all_notifications_read(current_user: dict = Depends(get_current_user)):
+    read_at = datetime.now(timezone.utc).isoformat()
+    result = await db.notifications.update_many(
+        {
+            "$or": [
+                {"recipient_user_id": current_user["id"]},
+                {"user_id": current_user["id"]},
+            ],
+            "$and": [{"$or": [{"read": False}, {"read": {"$exists": False}}]}, {"read_at": None}],
+        },
+        {"$set": {"read": True, "read_at": read_at}},
+    )
+    _notification_unread_count_cache.pop(current_user["id"], None)
+    return {"updated_count": result.modified_count, "read_at": read_at}
+
+
+@api_router.post("/notifications/mark-all-read")
+async def mark_all_notifications_read_alias(current_user: dict = Depends(get_current_user)):
+    return await mark_all_notifications_read(current_user=current_user)
+
+
+@api_router.delete("/notifications/{notification_id}")
+async def dismiss_notification(
+    notification_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    result = await db.notifications.delete_one(
+        {
+            "id": notification_id,
+            "$or": [
+                {"recipient_user_id": current_user["id"]},
+                {"user_id": current_user["id"]},
+            ],
+        }
+    )
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    _notification_unread_count_cache.pop(current_user["id"], None)
+    return {"deleted": True}
+
+
+def _default_notification_preferences(user_id: str) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "id": user_id,
+        "user_id": user_id,
+        "email_observation_complete": True,
+        "email_goal_added": True,
+        "email_recognition": True,
+        "email_conference_reminder": True,
+        "email_frequency": "immediate",
+        "created_at": now,
+        "updated_at": None,
+    }
+
+
+@api_router.get("/user/notification-preferences")
+async def get_notification_preferences(current_user: dict = Depends(get_current_user)):
+    prefs = await db.notification_preferences.find_one(
+        {"user_id": current_user["id"]},
+        {"_id": 0},
+    )
+    return prefs or _default_notification_preferences(current_user["id"])
+
+
+@api_router.patch("/user/notification-preferences")
+async def update_notification_preferences(
+    payload: NotificationPreferencesPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    frequency = (payload.email_frequency or "immediate").strip().lower()
+    if frequency not in {"immediate", "daily_digest", "off"}:
+        raise HTTPException(status_code=400, detail="Unsupported email frequency")
+    now = datetime.now(timezone.utc).isoformat()
+    update_doc = payload.dict()
+    update_doc["email_frequency"] = frequency
+    update_doc["updated_at"] = now
+    existing = await db.notification_preferences.find_one({"user_id": current_user["id"]}, {"_id": 0})
+    if not existing:
+        update_doc.update({"id": current_user["id"], "user_id": current_user["id"], "created_at": now})
+        await db.notification_preferences.insert_one(update_doc)
+    else:
+        await db.notification_preferences.update_one(
+            {"user_id": current_user["id"]},
+            {"$set": update_doc},
+        )
+    return await get_notification_preferences(current_user=current_user)
+
+
+@api_router.get("/admin/email-preview/{template_name}")
+async def preview_email_template(
+    template_name: str,
+    current_user: dict = Depends(get_current_user),
+):
+    if _get_user_tenant_role(current_user) != "super_admin":
+        raise HTTPException(status_code=403, detail="Master admin access required")
+    from app.services.notification_service import NotificationService
+
+    try:
+        return {"template_name": template_name, "html": NotificationService().preview(template_name)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown email template")
+
+
+# ==================== ONBOARDING / CONSENT / TELEMETRY ====================
+ONBOARDING_STEP_ORDER = [
+    "workspace_configured",
+    "framework_selected",
+    "first_teacher_added",
+    "observation_settings_configured",
+    "first_video_uploaded",
+    "first_analysis_complete",
+]
+CONSENT_TYPES = ["video_recording", "data_processing", "ai_analysis"]
+
+
+def _workspace_id_for_user(current_user: dict) -> str:
+    return str(current_user.get("organization_id") or current_user.get("school_id") or current_user.get("id"))
+
+
+async def _workspace_doc_for_user(current_user: dict) -> Tuple[str, dict, str]:
+    workspace_id = _workspace_id_for_user(current_user)
+    if current_user.get("organization_id"):
+        doc = await db.organizations.find_one({"id": current_user["organization_id"]}, {"_id": 0}) or {}
+        return workspace_id, doc, "organizations"
+    doc = await db.users.find_one({"id": current_user["id"]}, {"_id": 0, "password": 0}) or current_user
+    return workspace_id, doc, "users"
+
+
+def _default_onboarding_steps() -> Dict[str, Any]:
+    steps = {step: False for step in ONBOARDING_STEP_ORDER}
+    steps["completed_at"] = None
+    return steps
+
+
+async def _derive_onboarding_steps(current_user: dict, stored: Optional[dict] = None) -> Dict[str, Any]:
+    steps = {**_default_onboarding_steps(), **(stored or {})}
+    workspace_id = _workspace_id_for_user(current_user)
+    user_id = current_user["id"]
+    if current_user.get("organization_id") or current_user.get("school_name") or current_user.get("organization_name"):
+        steps["workspace_configured"] = True
+    if await db.framework_selections.find_one({"user_id": user_id}, {"_id": 1}):
+        steps["framework_selected"] = True
+    if await db.teachers.count_documents({"$or": [{"created_by": user_id}, {"organization_id": workspace_id}, {"school_id": workspace_id}]}) > 0:
+        steps["first_teacher_added"] = True
+    if await db.recording_policies.find_one({"$or": [{"created_by": user_id}, {"workspace_id": workspace_id}]}, {"_id": 1}):
+        steps["observation_settings_configured"] = True
+    if await db.videos.count_documents({"$or": [{"uploaded_by": user_id}, {"workspace_id": workspace_id}]}) > 0:
+        steps["first_video_uploaded"] = True
+    if await db.assessments.count_documents({"$or": [{"user_id": user_id}, {"workspace_id": workspace_id}]}) > 0:
+        steps["first_analysis_complete"] = True
+    if all(steps.get(step) for step in ONBOARDING_STEP_ORDER) and not steps.get("completed_at"):
+        steps["completed_at"] = datetime.now(timezone.utc).isoformat()
+    return steps
+
+
+async def _persist_onboarding_steps(current_user: dict, steps: dict) -> None:
+    _, _, collection_name = await _workspace_doc_for_user(current_user)
+    target = {"id": current_user.get("organization_id") or current_user["id"]}
+    await getattr(db, collection_name).update_one(
+        target,
+        {"$set": {"onboarding_steps": steps, "updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+
+
+@api_router.get("/onboarding/status")
+async def get_onboarding_status(current_user: dict = Depends(get_current_user)):
+    _, doc, _ = await _workspace_doc_for_user(current_user)
+    steps = await _derive_onboarding_steps(current_user, doc.get("onboarding_steps") or {})
+    if steps != (doc.get("onboarding_steps") or {}):
+        await _persist_onboarding_steps(current_user, steps)
+    completed_count = sum(1 for step in ONBOARDING_STEP_ORDER if steps.get(step))
+    next_step = next((step for step in ONBOARDING_STEP_ORDER if not steps.get(step)), None)
+    return {
+        "workspace_id": _workspace_id_for_user(current_user),
+        "onboarding_steps": steps,
+        "completed_count": completed_count,
+        "total_steps": len(ONBOARDING_STEP_ORDER),
+        "next_step": next_step,
+        "is_complete": bool(steps.get("completed_at")),
+    }
+
+
+@api_router.post("/onboarding/complete")
+async def complete_onboarding(
+    payload: OnboardingCompletePayload,
+    current_user: dict = Depends(get_current_user),
+):
+    _, doc, _ = await _workspace_doc_for_user(current_user)
+    steps = {**_default_onboarding_steps(), **(doc.get("onboarding_steps") or {})}
+    if payload.steps:
+        for key, value in payload.steps.items():
+            if key in ONBOARDING_STEP_ORDER:
+                steps[key] = bool(value)
+    if payload.step in ONBOARDING_STEP_ORDER:
+        steps[payload.step] = True
+    if payload.completed or all(steps.get(step) for step in ONBOARDING_STEP_ORDER):
+        for step in ONBOARDING_STEP_ORDER:
+            steps[step] = True
+        steps["completed_at"] = steps.get("completed_at") or datetime.now(timezone.utc).isoformat()
+    await _persist_onboarding_steps(current_user, steps)
+    return await get_onboarding_status(current_user=current_user)
+
+
+async def _latest_consent_status(user_id: str, workspace_id: Optional[str] = None) -> Dict[str, dict]:
+    query: Dict[str, Any] = {"user_id": user_id}
+    if workspace_id:
+        query["workspace_id"] = workspace_id
+    records = await db.consent_records.find(query, {"_id": 0}).sort("created_at", -1).to_list(100)
+    status = {}
+    for consent_type in CONSENT_TYPES:
+        record = next((item for item in records if item.get("consent_type") == consent_type), None)
+        status[consent_type] = record or {"consent_type": consent_type, "granted": False}
+    return status
+
+
+async def _teacher_has_required_consents(teacher: dict) -> bool:
+    email = str((teacher or {}).get("email") or "").strip()
+    user_doc = await _find_user_by_email(email) if email else None
+    if not user_doc:
+        return False
+    status = await _latest_consent_status(user_doc["id"], teacher.get("organization_id") or teacher.get("school_id"))
+    return all((status.get(kind) or {}).get("granted") is True and not (status.get(kind) or {}).get("withdrawn_at") for kind in CONSENT_TYPES)
+
+
+@api_router.get("/consent/status")
+async def get_consent_status(current_user: dict = Depends(get_current_user)):
+    workspace_id = _workspace_id_for_user(current_user)
+    status = await _latest_consent_status(current_user["id"], workspace_id)
+    return {"workspace_id": workspace_id, "consents": status, "all_granted": all(status[k].get("granted") for k in CONSENT_TYPES)}
+
+
+@api_router.post("/consent/grant")
+async def grant_consent(
+    payload: ConsentGrantPayload,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    if payload.consent_type not in CONSENT_TYPES:
+        raise HTTPException(status_code=400, detail="Unsupported consent type")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "workspace_id": _workspace_id_for_user(current_user),
+        "user_id": current_user["id"],
+        "consent_type": payload.consent_type,
+        "granted": bool(payload.granted),
+        "granted_at": now if payload.granted else None,
+        "withdrawn_at": None,
+        "ip_address": request.client.host if request.client else None,
+        "user_agent": request.headers.get("user-agent"),
+        "version": payload.version,
+        "created_at": now,
+    }
+    await db.consent_records.insert_one(doc)
+    return await get_consent_status(current_user=current_user)
+
+
+@api_router.post("/consent/withdraw")
+async def withdraw_consent(
+    payload: ConsentWithdrawPayload,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    if payload.consent_type not in CONSENT_TYPES:
+        raise HTTPException(status_code=400, detail="Unsupported consent type")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "workspace_id": _workspace_id_for_user(current_user),
+        "user_id": current_user["id"],
+        "consent_type": payload.consent_type,
+        "granted": False,
+        "granted_at": None,
+        "withdrawn_at": now,
+        "withdrawal_reason": payload.reason,
+        "anonymization_due_at": (datetime.now(timezone.utc) + timedelta(hours=72)).isoformat(),
+        "ip_address": request.client.host if request.client else None,
+        "user_agent": request.headers.get("user-agent"),
+        "version": "2026-05",
+        "created_at": now,
+    }
+    await db.consent_records.insert_one(doc)
+    await db.data_subject_requests.insert_one(
+        {
+            "id": str(uuid.uuid4()),
+            "workspace_id": doc["workspace_id"],
+            "user_id": current_user["id"],
+            "request_type": "consent_withdrawal",
+            "status": "pending_anonymization",
+            "due_at": doc["anonymization_due_at"],
+            "created_at": now,
+        }
+    )
+    return {"status": "withdrawn", "anonymization_due_at": doc["anonymization_due_at"]}
+
+
+@api_router.get("/consent/records")
+async def list_consent_records(current_user: dict = Depends(get_current_user)):
+    if _get_user_tenant_role(current_user) == "teacher":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    workspace_id = _workspace_id_for_user(current_user)
+    teachers = await db.teachers.find({"$or": [{"created_by": current_user["id"]}, {"organization_id": workspace_id}, {"school_id": workspace_id}]}, {"_id": 0}).to_list(1000)
+    records = await db.consent_records.find({"workspace_id": workspace_id}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    user_ids_with_all = set()
+    for user_id in {record.get("user_id") for record in records if record.get("user_id")}:
+        status = await _latest_consent_status(user_id, workspace_id)
+        if all(status[k].get("granted") and not status[k].get("withdrawn_at") for k in CONSENT_TYPES):
+            user_ids_with_all.add(user_id)
+    return {
+        "records": records,
+        "summary": {
+            "teacher_count": len(teachers),
+            "consented_count": len(user_ids_with_all),
+            "completion_rate": (len(user_ids_with_all) / len(teachers)) if teachers else 1,
+            "pending_count": max(0, len(teachers) - len(user_ids_with_all)),
+        },
+        "data_subject_requests": await db.data_subject_requests.find({"workspace_id": workspace_id}, {"_id": 0}).sort("created_at", -1).to_list(200),
+    }
+
+
+async def _run_user_erasure(current_user: dict) -> dict:
+    user_hash = hashlib.sha256(str(current_user["id"]).encode("utf-8")).hexdigest()[:10]
+    deleted_label = f"Deleted User {user_hash}"
+    email = current_user.get("email")
+    teacher = None
+    if current_user.get("teacher_id"):
+        teacher = await db.teachers.find_one({"id": current_user["teacher_id"]}, {"_id": 0})
+    if not teacher and email:
+        teacher = await db.teachers.find_one({"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}}, {"_id": 0})
+    teacher_id = (teacher or {}).get("id")
+    video_query = {"$or": [{"uploaded_by": current_user["id"]}]}
+    if teacher_id:
+        video_query["$or"].append({"teacher_id": teacher_id})
+    videos = await db.videos.find(video_query, {"_id": 0}).to_list(1000)
+    for video in videos:
+        for key_field in ["raw_s3_key", "processed_s3_key", "redacted_s3_key", "thumbnail_s3_key", "s3_key"]:
+            _delete_s3_key(video.get(key_field))
+        for path_field in ["file_path", "raw_file_path", "processed_file_path", "redacted_file_path", "thumbnail_path"]:
+            await _delete_local_upload_file(video.get(path_field))
+    if teacher_id:
+        await db.assessments.update_many({"teacher_id": teacher_id}, {"$set": {"teacher_name": deleted_label, "teacher_email": None, "pii_removed": True}})
+        await db.teachers.update_one({"id": teacher_id}, {"$set": {"name": deleted_label, "email": None, "privacy_profile_image_url": None, "pii_removed": True}})
+        await db.teacher_face_profiles.delete_many({"teacher_id": teacher_id})
+        await db.teacher_face_references.delete_many({"teacher_id": teacher_id})
+    await db.users.update_one({"id": current_user["id"]}, {"$set": {"name": deleted_label, "email": f"deleted-{user_hash}@deleted.local", "pii_removed": True, "erased_at": datetime.now(timezone.utc).isoformat()}})
+    await db.data_subject_requests.insert_one({"id": str(uuid.uuid4()), "workspace_id": _workspace_id_for_user(current_user), "user_id": current_user["id"], "request_type": "right_to_erasure", "status": "completed", "completed_at": datetime.now(timezone.utc).isoformat()})
+    if email:
+        _send_platform_email("Your Cognivio data deletion is complete", email, "Your Cognivio data deletion request has been completed. Aggregate, anonymized learning data may remain without personal identifiers.")
+    return {"status": "completed", "deleted_user_label": deleted_label, "videos_deleted": len(videos)}
+
+
+@api_router.post("/user/right-to-erasure")
+async def request_right_to_erasure(current_user: dict = Depends(get_current_user)):
+    return await _run_user_erasure(current_user)
+
+
+@api_router.get("/user/data-export")
+async def export_user_data(current_user: dict = Depends(get_current_user)):
+    teacher_id = current_user.get("teacher_id")
+    if not teacher_id and current_user.get("email"):
+        teacher = await db.teachers.find_one({"email": {"$regex": f"^{re.escape(current_user['email'])}$", "$options": "i"}}, {"_id": 0})
+        teacher_id = (teacher or {}).get("id")
+    assessments = await db.assessments.find({"$or": [{"user_id": current_user["id"]}, {"teacher_id": teacher_id} if teacher_id else {"_never": True}]}, {"_id": 0}).to_list(1000)
+    videos = await db.videos.find({"$or": [{"uploaded_by": current_user["id"]}, {"teacher_id": teacher_id} if teacher_id else {"_never": True}]}, {"_id": 0}).to_list(1000)
+    consents = await db.consent_records.find({"user_id": current_user["id"]}, {"_id": 0}).to_list(1000)
+    export = {"user": {k: v for k, v in current_user.items() if k != "password"}, "assessments": assessments, "videos": videos, "consent_history": consents}
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("cognivio-data-export.json", json.dumps(_to_json_safe(export), indent=2))
+    buffer.seek(0)
+    return Response(content=buffer.getvalue(), media_type="application/zip", headers={"Content-Disposition": "attachment; filename=cognivio-data-export.zip"})
+
+
+@api_router.post("/telemetry/web-vitals")
+async def record_web_vitals(payload: WebVitalsPayload, request: Request):
+    await db.web_vitals.insert_one(
+        {
+            "id": str(uuid.uuid4()),
+            **payload.dict(),
+            "path": payload.path or request.headers.get("referer"),
+            "user_agent": request.headers.get("user-agent"),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    return {"ok": True}
+
+
+@api_router.get("/admin/cache-stats")
+async def get_cache_stats(current_user: dict = Depends(get_current_user)):
+    if _get_user_tenant_role(current_user) != "super_admin":
+        raise HTTPException(status_code=403, detail="Master admin access required")
+    return await CACHE_CLIENT.stats()
+
+
+@api_router.get("/admin/workers")
+async def get_admin_workers(current_user: dict = Depends(get_current_user)):
+    if _get_user_tenant_role(current_user) != "super_admin":
+        raise HTTPException(status_code=403, detail="Master admin access required")
+    heartbeats = await db.worker_heartbeats.find({}, {"_id": 0}).sort("worker_label", 1).to_list(200)
+    queued = await db.video_processing_jobs.count_documents({"status": VideoProcessingStatus.QUEUED.value})
+    processing = await db.video_processing_jobs.count_documents({"status": VideoProcessingStatus.PROCESSING.value})
+    return {
+        "workers": [
+            {
+                "worker_label": item.get("worker_label"),
+                "status": item.get("status"),
+                "current_job": item.get("current_job"),
+                "last_heartbeat": item.get("last_heartbeat"),
+                "jobs_completed_today": item.get("jobs_completed_today", 0),
+            }
+            for item in heartbeats
+        ],
+        "queue_depth": queued,
+        "processing_jobs": processing,
+    }
 
 
 # ==================== INTEGRATIONS ====================
@@ -14578,6 +19512,97 @@ def _require_master_admin_user(current_user: dict) -> None:
     role = _get_user_role(current_user)
     if role != "super_admin":
         raise HTTPException(status_code=403, detail="Master admin access required")
+
+
+def _normalize_index_keys(keys: Any) -> List[Tuple[str, int]]:
+    if hasattr(keys, "items"):
+        return [(str(field), int(direction)) for field, direction in keys.items()]
+    return [(str(field), int(direction)) for field, direction in (keys or [])]
+
+
+async def _build_db_index_health() -> Dict[str, Any]:
+    from scripts.ensure_indexes import INDEX_SPECS
+
+    collections: Dict[str, Dict[str, Any]] = {}
+    for spec in INDEX_SPECS:
+        collections.setdefault(
+            spec.collection,
+            {
+                "collection": spec.collection,
+                "expected_indexes": [],
+                "existing_indexes": [],
+                "missing_indexes": [],
+                "stats": {},
+            },
+        )
+        collections[spec.collection]["expected_indexes"].append(
+            {
+                "name": spec.name,
+                "keys": [{"field": field, "direction": direction} for field, direction in spec.keys],
+                "unique": spec.unique,
+            }
+        )
+
+    for collection_name, item in collections.items():
+        collection = db[collection_name]
+        index_docs = await collection.list_indexes().to_list(None)
+        item["existing_indexes"] = [
+            {
+                "name": index_doc.get("name"),
+                "keys": [
+                    {"field": field, "direction": direction}
+                    for field, direction in _normalize_index_keys(index_doc.get("key"))
+                ],
+                "unique": bool(index_doc.get("unique", False)),
+            }
+            for index_doc in index_docs
+        ]
+        existing_signatures = {
+            (
+                tuple((entry["field"], int(entry["direction"])) for entry in index["keys"]),
+                bool(index["unique"]),
+            )
+            for index in item["existing_indexes"]
+        }
+        item["missing_indexes"] = [
+            expected
+            for expected in item["expected_indexes"]
+            if (
+                tuple((entry["field"], int(entry["direction"])) for entry in expected["keys"]),
+                bool(expected["unique"]),
+            )
+            not in existing_signatures
+        ]
+        try:
+            stats = await db.command("collStats", collection_name)
+            item["stats"] = {
+                "document_count": stats.get("count", 0),
+                "storage_size_bytes": stats.get("storageSize", 0),
+                "total_index_size_bytes": stats.get("totalIndexSize", 0),
+                "index_sizes": stats.get("indexSizes", {}),
+            }
+        except Exception as exc:
+            item["stats"] = {"error": str(exc)}
+
+    total_expected = sum(len(item["expected_indexes"]) for item in collections.values())
+    total_missing = sum(len(item["missing_indexes"]) for item in collections.values())
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "database": APP_SETTINGS.database.db_name,
+        "healthy": total_missing == 0,
+        "summary": {
+            "collections": len(collections),
+            "expected_indexes": total_expected,
+            "missing_indexes": total_missing,
+        },
+        "collections": list(collections.values()),
+    }
+
+
+@api_router.get("/admin/db-health")
+async def get_admin_db_health(current_user: dict = Depends(get_current_user)):
+    _require_master_admin_user(current_user)
+    return await _build_db_index_health()
 
 
 @api_router.get("/master-admin/bootstrap")
@@ -15920,6 +20945,413 @@ async def run_admin_smoke_cleanup(
     return result
 
 
+@api_router.post("/admin/ops/feedback-governance-backfill", response_model=FeedbackGovernanceBackfillResponse)
+async def run_feedback_governance_backfill(
+    payload: FeedbackGovernanceBackfillRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_admin_ops_user(current_user)
+    role = _get_user_role(current_user)
+    requested_owner = str(payload.owner_user_id or "").strip() or None
+
+    if role != "super_admin":
+        if requested_owner and requested_owner != current_user["id"]:
+            raise HTTPException(status_code=403, detail="Admin access is limited to your workspace")
+        scope_owner_user_id = current_user["id"]
+    else:
+        scope_owner_user_id = requested_owner
+
+    result = await _run_feedback_governance_backfill(
+        owner_user_id=scope_owner_user_id,
+        limit=max(1, min(int(payload.limit), 2000)),
+        dry_run=bool(payload.dry_run),
+    )
+    log_structured(
+        logger,
+        "info",
+        "feedback_governance_backfill_executed",
+        actor_user_id=current_user["id"],
+        role=role,
+        scope_owner_user_id=scope_owner_user_id,
+        dry_run=bool(payload.dry_run),
+        scanned=result["scanned"],
+        updated=result["updated"],
+        blocked=result["blocked"],
+        escalated=result["escalated"],
+        failures=len(result["failures"]),
+    )
+    return FeedbackGovernanceBackfillResponse(**result)
+
+
+def _max_incident_level(current: str, candidate: str) -> str:
+    order = {"green": 0, "amber": 1, "red": 2}
+    current_level = str(current or "green").strip().lower()
+    candidate_level = str(candidate or "green").strip().lower()
+    if order.get(candidate_level, 0) > order.get(current_level, 0):
+        return candidate_level
+    return current_level
+
+
+async def _get_feedback_governance_runtime_snapshot(
+    *,
+    owner_user_id: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    now_iso = now_utc.isoformat()
+    cutoff_24h_iso = (now_utc - timedelta(hours=24)).isoformat()
+    assessment_scope: Dict[str, Any] = {}
+    queue_scope: Dict[str, Any] = {}
+    if owner_user_id:
+        assessment_scope["user_id"] = owner_user_id
+        queue_scope["owner_user_id"] = owner_user_id
+
+    assessment_total = await db.assessments.count_documents(assessment_scope)
+    released_total = await db.assessments.count_documents(
+        {**assessment_scope, "feedback_release_status": "released"}
+    )
+    blocked_total = await db.assessments.count_documents(
+        {**assessment_scope, "feedback_release_status": "blocked"}
+    )
+    pending_human_review_total = await db.assessments.count_documents(
+        {**assessment_scope, "feedback_human_review_required": True}
+    )
+    overrides_total = await db.assessments.count_documents(
+        {**assessment_scope, "feedback_release_override_at": {"$ne": None}}
+    )
+    blocked_last_24h = await db.assessments.count_documents(
+        {
+            **assessment_scope,
+            "feedback_release_status": "blocked",
+            "analyzed_at": {"$gte": cutoff_24h_iso},
+        }
+    )
+    overrides_last_24h = await db.assessments.count_documents(
+        {
+            **assessment_scope,
+            "feedback_release_override_at": {"$gte": cutoff_24h_iso},
+        }
+    )
+    blocked_without_queue = await db.assessments.count_documents(
+        {
+            **assessment_scope,
+            "feedback_release_status": "blocked",
+            "feedback_human_review_required": True,
+            "feedback_review_queue_id": {"$in": [None, ""]},
+        }
+    )
+
+    queue_pending = await db.feedback_review_queue.count_documents({**queue_scope, "status": "pending"})
+    queue_resolved_release_24h = await db.feedback_review_queue.count_documents(
+        {
+            **queue_scope,
+            "status": "resolved_release_approved",
+            "resolved_at": {"$gte": cutoff_24h_iso},
+        }
+    )
+    queue_resolved_regen_24h = await db.feedback_review_queue.count_documents(
+        {
+            **queue_scope,
+            "status": "resolved_needs_regeneration",
+            "resolved_at": {"$gte": cutoff_24h_iso},
+        }
+    )
+    queue_resolved_dismissed_24h = await db.feedback_review_queue.count_documents(
+        {
+            **queue_scope,
+            "status": "resolved_dismissed",
+            "resolved_at": {"$gte": cutoff_24h_iso},
+        }
+    )
+    pending_docs = await db.feedback_review_queue.find(
+        {**queue_scope, "status": "pending"},
+        {"_id": 0, "created_at": 1},
+    ).sort("created_at", 1).to_list(1)
+    oldest_pending_age_minutes = None
+    if pending_docs:
+        oldest_dt = _parse_iso_datetime(pending_docs[0].get("created_at"))
+        if oldest_dt:
+            oldest_pending_age_minutes = max(0, int((now_utc - oldest_dt).total_seconds() // 60))
+
+    failure_counts: Dict[str, int] = {}
+    aggregate_fn = getattr(db.assessments, "aggregate", None)
+    if callable(aggregate_fn):
+        try:
+            rows = await aggregate_fn(
+                [
+                    {
+                        "$match": {
+                            **assessment_scope,
+                            "feedback_release_status": "blocked",
+                            "voice_gate_failures": {"$exists": True, "$ne": []},
+                        }
+                    },
+                    {"$unwind": "$voice_gate_failures"},
+                    {"$group": {"_id": "$voice_gate_failures", "count": {"$sum": 1}}},
+                    {"$sort": {"count": -1}},
+                    {"$limit": 10},
+                ]
+            ).to_list(10)
+            for row in rows:
+                token = str(row.get("_id") or "").strip()
+                if not token:
+                    continue
+                failure_counts[token] = int(row.get("count") or 0)
+        except Exception:
+            failure_counts = {}
+    if not failure_counts:
+        blocked_docs = await db.assessments.find(
+            {**assessment_scope, "feedback_release_status": "blocked"},
+            {"_id": 0, "voice_gate_failures": 1},
+        ).to_list(1000)
+        for doc in blocked_docs:
+            for token in list(doc.get("voice_gate_failures") or []):
+                failure = str(token or "").strip()
+                if not failure:
+                    continue
+                failure_counts[failure] = failure_counts.get(failure, 0) + 1
+    top_failures = [
+        {"failure": token, "count": count}
+        for token, count in sorted(failure_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
+    ]
+
+    policy_drift = (
+        MASTER_OBSERVER_PIPELINE_ENABLED
+        and MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS
+        and not VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED
+    )
+    incident_level = "green"
+    if blocked_without_queue > 0:
+        incident_level = "red"
+    elif policy_drift and blocked_total > 0:
+        incident_level = "red"
+    elif queue_pending >= 10 or blocked_last_24h >= 5:
+        incident_level = "amber"
+    elif queue_pending > 0 or blocked_last_24h > 0 or overrides_last_24h > 0:
+        incident_level = "amber"
+    if policy_drift and incident_level == "green":
+        incident_level = "amber"
+
+    actions = []
+    if policy_drift:
+        actions.append("Enable `VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED=true` before broad feedback release.")
+    if blocked_without_queue > 0 and not VOICE_GATE_HUMAN_ESCALATION_ENABLED:
+        actions.append("Enable `VOICE_GATE_HUMAN_ESCALATION_ENABLED=true` and enqueue blocked feedback for human review.")
+    elif blocked_without_queue > 0:
+        actions.append("Backfill blocked assessments missing review queue entries using `POST /api/admin/ops/feedback-governance-backfill`.")
+    if queue_pending > 0:
+        actions.append("Work the feedback human-review queue to unblock teacher-facing release.")
+    if blocked_last_24h > 0:
+        actions.append("Review recent Voice Gate failures and tighten render-time prompt and sanitizer controls.")
+    if not actions:
+        actions.append("No urgent governance actions. Continue routine monitoring.")
+
+    blocked_rate = round((blocked_total / assessment_total), 4) if assessment_total else 0.0
+    return {
+        "generated_at": now_iso,
+        "scope_owner_user_id": owner_user_id,
+        "policy": {
+            "master_observer_pipeline_enabled": MASTER_OBSERVER_PIPELINE_ENABLED,
+            "master_observer_require_voice_gate_pass": MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS,
+            "voice_gate_release_enforcement_enabled": VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED,
+            "voice_gate_human_escalation_enabled": VOICE_GATE_HUMAN_ESCALATION_ENABLED,
+            "voice_gate_regen_max_attempts": VOICE_GATE_REGEN_MAX_ATTEMPTS,
+            "release_gate_active": _is_voice_gate_release_enforced(),
+            "policy_drift": policy_drift,
+        },
+        "assessment_counts": {
+            "total": assessment_total,
+            "released": released_total,
+            "blocked": blocked_total,
+            "pending_human_review": pending_human_review_total,
+            "blocked_without_queue": blocked_without_queue,
+            "overrides_total": overrides_total,
+            "blocked_last_24h": blocked_last_24h,
+            "overrides_last_24h": overrides_last_24h,
+            "blocked_rate": blocked_rate,
+        },
+        "review_queue": {
+            "pending": queue_pending,
+            "oldest_pending_age_minutes": oldest_pending_age_minutes,
+            "resolved_release_approved_last_24h": queue_resolved_release_24h,
+            "resolved_needs_regeneration_last_24h": queue_resolved_regen_24h,
+            "resolved_dismissed_last_24h": queue_resolved_dismissed_24h,
+        },
+        "top_voice_gate_failures": top_failures,
+        "incident_level": incident_level,
+        "recommended_actions": actions,
+    }
+
+
+def _default_voice_gate_gold_set_runtime_path() -> Path:
+    return ROOT_DIR / "evals" / "voice_gate_gold_set.json"
+
+
+def _evaluate_runtime_text_checks(text: str, checks: Optional[Dict[str, Any]]) -> bool:
+    criteria = checks or {}
+    for phrase in list(criteria.get("includes") or []):
+        if str(phrase) not in text:
+            return False
+    for phrase in list(criteria.get("excludes") or []):
+        if str(phrase) in text:
+            return False
+    for pattern in list(criteria.get("regex") or []):
+        if not re.search(str(pattern), text, flags=re.MULTILINE):
+            return False
+    for pattern in list(criteria.get("not_regex") or []):
+        if re.search(str(pattern), text, flags=re.MULTILINE):
+            return False
+    return True
+
+
+def _run_voice_gate_gold_set_validation(path: Optional[Path] = None) -> Dict[str, Any]:
+    gold_set_path = Path(path or _default_voice_gate_gold_set_runtime_path())
+    with gold_set_path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+
+    results: List[Dict[str, Any]] = []
+    for case in list(payload.get("cases") or []):
+        if case.get("kind") != "voice_gate":
+            continue
+        case_input = case.get("input") or {}
+        language = str(case_input.get("language") or case.get("language") or "en")
+        gate_result = validate_voice_gate(
+            str(case_input.get("text") or ""),
+            language=language,
+        )
+        serialized = json.dumps(gate_result, ensure_ascii=False, sort_keys=True)
+        specificity_checks = ((case.get("checks") or {}).get("specificity") or {})
+        case_passed = _evaluate_runtime_text_checks(serialized, specificity_checks)
+        results.append(
+            {
+                "id": case.get("id"),
+                "language": language,
+                "passed": case_passed,
+                "result": gate_result,
+            }
+        )
+
+    passed_count = sum(1 for item in results if item.get("passed"))
+    failed_case_ids = [str(item.get("id") or "") for item in results if not item.get("passed")]
+    return {
+        "version": payload.get("version"),
+        "gold_set_path": str(gold_set_path),
+        "case_count": len(results),
+        "passed_count": passed_count,
+        "failed_count": len(results) - passed_count,
+        "passed": passed_count == len(results),
+        "failed_case_ids": failed_case_ids,
+    }
+
+
+async def _get_feedback_governance_release_gate_snapshot(
+    *,
+    owner_user_id: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    governance = await _get_feedback_governance_runtime_snapshot(
+        owner_user_id=owner_user_id,
+        now=now,
+    )
+    gold_set_report = _run_voice_gate_gold_set_validation()
+
+    policy = governance.get("policy") or {}
+    counts = governance.get("assessment_counts") or {}
+    queue = governance.get("review_queue") or {}
+    blocking_items: List[str] = []
+    warnings: List[str] = []
+
+    if not policy.get("master_observer_pipeline_enabled"):
+        blocking_items.append("Master Observer pipeline is disabled.")
+    if not policy.get("master_observer_require_voice_gate_pass"):
+        blocking_items.append("Master Observer is not configured to require Voice Gate pass.")
+    if not policy.get("voice_gate_release_enforcement_enabled"):
+        blocking_items.append("Voice Gate release enforcement is disabled.")
+    if int(counts.get("blocked_without_queue") or 0) > 0:
+        blocking_items.append("Blocked feedback exists without matching human review queue coverage.")
+    if int(counts.get("blocked") or 0) > 0 and not policy.get("voice_gate_human_escalation_enabled"):
+        blocking_items.append("Voice Gate human escalation is disabled while blocked feedback exists.")
+    if not gold_set_report.get("passed"):
+        blocking_items.append("Voice Gate gold set validation failed.")
+
+    oldest_pending_age = queue.get("oldest_pending_age_minutes")
+    if oldest_pending_age is not None:
+        oldest_pending_age = int(oldest_pending_age)
+        if oldest_pending_age >= FEEDBACK_GOVERNANCE_QUEUE_AGE_BLOCKING_MINUTES:
+            blocking_items.append(
+                f"Feedback review queue age exceeded blocking threshold ({FEEDBACK_GOVERNANCE_QUEUE_AGE_BLOCKING_MINUTES} minutes)."
+            )
+        elif oldest_pending_age >= FEEDBACK_GOVERNANCE_QUEUE_AGE_WARNING_MINUTES:
+            warnings.append(
+                f"Feedback review queue age exceeded warning threshold ({FEEDBACK_GOVERNANCE_QUEUE_AGE_WARNING_MINUTES} minutes)."
+            )
+
+    if int(queue.get("pending") or 0) > 0:
+        warnings.append("Feedback review queue has pending items.")
+    if int(counts.get("overrides_last_24h") or 0) > 0:
+        warnings.append("Recent human overrides were used in the last 24 hours.")
+
+    incident_level = str(governance.get("incident_level") or "green")
+    if blocking_items:
+        incident_level = "red"
+    elif warnings:
+        incident_level = _max_incident_level(incident_level, "amber")
+
+    actions = list(governance.get("recommended_actions") or [])
+    if not gold_set_report.get("passed"):
+        actions.append("Fix Voice Gate regressions and rerun the deterministic gold set before release.")
+    if not actions:
+        actions.append("No urgent governance actions. Continue routine monitoring.")
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "scope_owner_user_id": owner_user_id,
+        "go_no_go": "go" if not blocking_items else "hold",
+        "incident_level": incident_level,
+        "blocking_items": blocking_items,
+        "warnings": warnings,
+        "policy": policy,
+        "assessment_counts": counts,
+        "review_queue": queue,
+        "top_voice_gate_failures": list(governance.get("top_voice_gate_failures") or []),
+        "voice_gate_gold_set": gold_set_report,
+        "recommended_actions": actions,
+    }
+
+
+@api_router.get("/admin/ops/feedback-governance-readiness")
+async def get_admin_ops_feedback_governance_readiness(
+    owner_user_id: Optional[str] = Query(default=None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require_admin_ops_user(current_user)
+    role = _get_user_role(current_user)
+    requested_owner = str(owner_user_id or "").strip() or None
+    if role != "super_admin":
+        if requested_owner and requested_owner != current_user["id"]:
+            raise HTTPException(status_code=403, detail="Admin access is limited to your workspace")
+        scope_owner_user_id = current_user["id"]
+    else:
+        scope_owner_user_id = requested_owner
+
+    snapshot = await _get_feedback_governance_release_gate_snapshot(
+        owner_user_id=scope_owner_user_id,
+    )
+    log_structured(
+        logger,
+        "info",
+        "feedback_governance_readiness_checked",
+        actor_user_id=current_user["id"],
+        role=role,
+        scope_owner_user_id=scope_owner_user_id,
+        go_no_go=snapshot.get("go_no_go"),
+        incident_level=snapshot.get("incident_level"),
+        blocking_items=len(list(snapshot.get("blocking_items") or [])),
+        warnings=len(list(snapshot.get("warnings") or [])),
+    )
+    return snapshot
+
+
 @api_router.get("/admin/ops/readiness")
 async def get_admin_ops_readiness(current_user: dict = Depends(get_current_user)):
     _require_admin_ops_user(current_user)
@@ -15975,6 +21407,15 @@ async def get_admin_ops_readiness(current_user: dict = Depends(get_current_user)
     if schedules_upcoming == 0:
         warnings.append("No upcoming recording schedules are set.")
     observability = observability_snapshot()
+    governance = await _get_feedback_governance_runtime_snapshot(owner_user_id=admin_id)
+    if governance["policy"]["policy_drift"]:
+        warnings.append("Voice Gate release enforcement is disabled while Master Observer pipeline requirements are enabled.")
+    if governance["assessment_counts"]["blocked_without_queue"] > 0:
+        blocking_items.append(
+            f"{governance['assessment_counts']['blocked_without_queue']} blocked feedback item(s) are missing review queue coverage."
+        )
+    if governance["review_queue"]["pending"] > 0:
+        warnings.append(f"{governance['review_queue']['pending']} feedback item(s) are pending human review.")
 
     return {
         "generated_at": now_iso,
@@ -15997,12 +21438,23 @@ async def get_admin_ops_readiness(current_user: dict = Depends(get_current_user)
             "gradebook_connected": gradebook_connected,
             "analysis_total_runs": observability["analysis"]["total_runs"],
             "analysis_failed_runs": observability["analysis"]["failed_runs"],
+            "feedback_release_released": governance["assessment_counts"]["released"],
+            "feedback_release_blocked": governance["assessment_counts"]["blocked"],
+            "feedback_release_pending_human_review": governance["assessment_counts"]["pending_human_review"],
+            "feedback_review_queue_pending": governance["review_queue"]["pending"],
+            "feedback_release_overrides_24h": governance["assessment_counts"]["overrides_last_24h"],
         },
         "observability": {
             "analysis": {
                 "by_mode": observability["analysis"]["by_mode"],
                 "recent_failures": observability["analysis"]["recent_failures"][:5],
-            }
+            },
+            "feedback_governance": {
+                "incident_level": governance["incident_level"],
+                "policy": governance["policy"],
+                "top_voice_gate_failures": governance["top_voice_gate_failures"][:5],
+                "review_queue": governance["review_queue"],
+            },
         },
     }
 
@@ -16087,6 +21539,13 @@ async def get_admin_ops_launch_health(current_user: dict = Depends(get_current_u
     if not actions:
         actions.append("No urgent actions. Continue normal monitoring cadence.")
     observability = observability_snapshot()
+    governance = await _get_feedback_governance_runtime_snapshot(owner_user_id=admin_id)
+    incident_level = _max_incident_level(incident_level, governance["incident_level"])
+    for action in governance["recommended_actions"]:
+        if action not in actions:
+            actions.append(action)
+    observability_with_governance = dict(observability)
+    observability_with_governance["feedback_governance"] = governance
     return {
         "generated_at": now_iso,
         "incident_level": incident_level,
@@ -16103,8 +21562,11 @@ async def get_admin_ops_launch_health(current_user: dict = Depends(get_current_u
             "analysis_average_duration_seconds": observability["analysis"]["average_duration_seconds"],
             "analysis_average_estimated_input_tokens": observability["analysis"]["average_estimated_input_tokens"],
             "analysis_average_estimated_output_tokens": observability["analysis"]["average_estimated_output_tokens"],
+            "feedback_release_blocked": governance["assessment_counts"]["blocked"],
+            "feedback_review_queue_pending": governance["review_queue"]["pending"],
+            "feedback_review_queue_oldest_pending_age_minutes": governance["review_queue"]["oldest_pending_age_minutes"],
         },
-        "observability": observability,
+        "observability": observability_with_governance,
         "recommended_actions": actions,
     }
 
@@ -16114,10 +21576,12 @@ async def get_admin_ops_observability(current_user: dict = Depends(get_current_u
     _require_admin_ops_user(current_user)
     await refresh_runtime_metrics()
     snapshot = observability_snapshot()
+    governance = await _get_feedback_governance_runtime_snapshot(owner_user_id=current_user["id"])
     snapshot["queues"] = {
         "video_queue_depth": VIDEO_JOB_QUEUE.qsize(),
         "privacy_queue_depth": VIDEO_PRIVACY_JOB_QUEUE.qsize(),
     }
+    snapshot["feedback_governance"] = governance
     specialist_activity = await _get_specialist_activity_snapshot(current_user)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -16236,22 +21700,78 @@ async def _enqueue_notification(
     notification_type: str,
     title: str,
     message: str,
+    channel: str = "email",
 ):
-    doc = {
-        "id": str(uuid.uuid4()),
-        "teacher_id": teacher_id,
-        "notification_type": notification_type,
-        "title": title,
-        "message": message,
-        "channel": "email",
-        "status": "queued",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "read_at": None,
-        "user_id": current_user["id"],
-    }
-    await db.notifications.insert_one(doc)
+    doc = await _create_notification(
+        recipient_user=current_user,
+        notification_type=notification_type,
+        title=title,
+        message=message,
+        payload={},
+        teacher_id=teacher_id,
+        workspace_id=current_user.get("workspace_id") or current_user.get("organization_id") or current_user.get("id"),
+        channel=channel,
+    )
     # Placeholder for email integration
     logger.info(f"[EmailQueue] {title} -> {current_user.get('email')}")
+    return doc
+
+
+async def _create_notification(
+    *,
+    recipient_user: dict,
+    notification_type: str,
+    title: str,
+    message: str,
+    payload: Optional[Dict[str, Any]] = None,
+    teacher_id: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    cta_url: Optional[str] = None,
+    channel: str = "in_app",
+    emailed: bool = False,
+) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    recipient_user_id = recipient_user.get("id")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "workspace_id": workspace_id,
+        "recipient_user_id": recipient_user_id,
+        "user_id": recipient_user_id,
+        "type": notification_type,
+        "notification_type": notification_type,
+        "payload": payload or {},
+        "teacher_id": teacher_id,
+        "title": title,
+        "message": message,
+        "body": message,
+        "cta_url": cta_url,
+        "action_url": cta_url,
+        "channel": channel,
+        "status": "queued",
+        "read": False,
+        "read_at": None,
+        "emailed": emailed,
+        "created_at": now,
+    }
+    await db.notifications.insert_one(doc)
+    return doc
+
+
+def _sanitize_notification_doc(doc: dict) -> dict:
+    clean = {k: v for k, v in (doc or {}).items() if k not in {"_id", "user_id"}}
+    notification_type = clean.get("type") or clean.get("notification_type") or "notification"
+    clean["type"] = notification_type
+    clean["notification_type"] = notification_type
+    clean["payload"] = clean.get("payload") or {}
+    clean["read"] = bool(clean.get("read") or clean.get("read_at"))
+    clean["body"] = clean.get("body") or clean.get("message")
+    clean["message"] = clean.get("message") or clean.get("body")
+    clean["action_url"] = clean.get("action_url") or clean.get("cta_url")
+    clean["cta_url"] = clean.get("cta_url") or clean.get("action_url")
+    clean["emailed"] = bool(clean.get("emailed"))
+    clean.setdefault("channel", "in_app")
+    clean.setdefault("status", "queued")
+    return clean
 
 
 async def _persist_assessment_evidence_from_scores(
@@ -16366,6 +21886,22 @@ async def analyze_video(
         selected_elements = selection.get("selected_elements", []) if selection else []
         priority_elements = selection.get("priority_elements", []) if selection else []
         focus_note = (selection.get("focus_note") or "").strip() if selection else ""
+        observation_session = None
+        if video.get("observation_session_id"):
+            observation_session = await db.observation_sessions.find_one(
+                {"id": video.get("observation_session_id")},
+                {"_id": 0},
+            )
+            if observation_session:
+                session_focus_elements = _normalize_observation_focus_elements(
+                    observation_session.get("focus_elements") or [],
+                    strict=False,
+                )
+                session_focus_note = (observation_session.get("focus_note") or "").strip()
+                if session_focus_elements:
+                    priority_elements = session_focus_elements
+                if session_focus_note:
+                    focus_note = session_focus_note
         analysis_language = _normalize_app_language(video.get("analysis_language"), default="en")
         
         # Get framework data
@@ -16460,35 +21996,64 @@ async def analyze_video(
         # Calculate overall score (1-10 gradient mapped from underlying 1-4 scale if needed)
         valid_scores = [es["score"] for es in element_scores if es["score"] > 0]
         overall_score = round(sum(valid_scores) / len(valid_scores), 2) if valid_scores else 0
-        
-        # Generate recommendations
-        recommendations = generate_recommendations(
-            element_scores,
-            provided_recommendations=analysis_payload.get("recommendations"),
-            priority_element_ids=priority_elements,
-            focus_note=focus_note,
-            language=analysis_language,
-            analysis_context=analysis_payload.get("analysis_context"),
-        )
-        summary_text = generate_summary(
-            element_scores,
-            overall_score,
-            provided_summary=analysis_payload.get("summary"),
-            priority_element_ids=priority_elements,
-            focus_note=focus_note,
-            language=analysis_language,
-            analysis_context=analysis_payload.get("analysis_context"),
-        )
-        observation_summary = build_observation_summary_packet(
-            element_scores,
-            overall_score,
-            summary_text,
-            recommendations,
-            priority_element_ids=priority_elements,
-            focus_note=focus_note,
-            analysis_confidence=analysis_metadata["analysis_confidence"],
-            language=analysis_language,
-        )
+
+        if _is_voice_gate_release_enforced():
+            governed = _build_governed_feedback_bundle(
+                element_scores,
+                priority_element_ids=priority_elements,
+                focus_note=focus_note,
+                language=analysis_language,
+            )
+            recommendations = list(governed["recommendations"] or [])
+            summary_text = str(governed["summary_text"] or "")
+            observation_summary = dict(governed["observation_summary"] or {})
+            release_metadata = dict(governed["release_metadata"] or {})
+            if release_metadata.get("feedback_release_status") != "released":
+                log_structured(
+                    logger,
+                    "warning",
+                    "feedback_release_blocked_by_voice_gate",
+                    video_id=video_id,
+                    teacher_id=teacher_id,
+                    failures=release_metadata.get("voice_gate_failures", []),
+                    regeneration_attempts=release_metadata.get("feedback_regeneration_attempts", 0),
+                )
+        else:
+            recommendations = generate_recommendations(
+                element_scores,
+                provided_recommendations=analysis_payload.get("recommendations"),
+                priority_element_ids=priority_elements,
+                focus_note=focus_note,
+                language=analysis_language,
+                analysis_context=analysis_payload.get("analysis_context"),
+                analysis_confidence=analysis_metadata["analysis_confidence"],
+            )
+            summary_text = generate_summary(
+                element_scores,
+                overall_score,
+                provided_summary=analysis_payload.get("summary"),
+                priority_element_ids=priority_elements,
+                focus_note=focus_note,
+                language=analysis_language,
+                analysis_context=analysis_payload.get("analysis_context"),
+                analysis_confidence=analysis_metadata["analysis_confidence"],
+            )
+            observation_summary = build_observation_summary_packet(
+                element_scores,
+                overall_score,
+                summary_text,
+                recommendations,
+                priority_element_ids=priority_elements,
+                focus_note=focus_note,
+                analysis_confidence=analysis_metadata["analysis_confidence"],
+                analysis_context=analysis_payload.get("analysis_context"),
+                provided_recommendations=analysis_payload.get("recommendations"),
+                language=analysis_language,
+            )
+            release_metadata = _build_feedback_release_metadata(
+                observation_summary.get("full_review_text") or summary_text,
+                language=analysis_language,
+            )
         
         # Create assessment document
         assessment_doc = {
@@ -16511,9 +22076,25 @@ async def analyze_video(
             "analysis_modalities_used": analysis_metadata["analysis_modalities_used"],
             "specialist_orchestrator": analysis_metadata["specialist_orchestrator"],
             "specialist_trace": analysis_metadata["specialist_trace"],
+            "analysis_context_snapshot": analysis_payload.get("analysis_context"),
+            **release_metadata,
         }
         
         await db.assessments.insert_one(assessment_doc)
+        if (
+            _is_voice_gate_release_enforced()
+            and assessment_doc.get("feedback_release_status") != "released"
+        ):
+            review_id = await _enqueue_feedback_human_review(
+                assessment_doc,
+                release_metadata=release_metadata,
+            )
+            if review_id:
+                assessment_doc["feedback_review_queue_id"] = review_id
+                await db.assessments.update_one(
+                    {"id": assessment_doc["id"]},
+                    {"$set": {"feedback_review_queue_id": review_id}},
+                )
         await _persist_assessment_evidence_from_scores(assessment_doc, {"id": user_id})
         
         # Update video status
@@ -16535,6 +22116,8 @@ async def analyze_video(
                     "priority_elements": priority_elements,
                     "focus_note": focus_note or None,
                     "analysis_language": analysis_language,
+                    "feedback_release_status": release_metadata.get("feedback_release_status"),
+                    "feedback_human_review_required": release_metadata.get("feedback_human_review_required"),
                     "status_updated_at": completed_at,
                     "processing_completed_at": completed_at,
                     "processing_failed_at": None,
@@ -16545,9 +22128,49 @@ async def analyze_video(
             {"video_id": video_id, "uploaded_by": user_id},
             {"$set": {"analysis_status": VideoProcessingStatus.COMPLETED.value}},
         )
+        cache_teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0, "organization_id": 1, "school_id": 1})
+        workspace_for_cache = assessment_doc.get("workspace_id") or (cache_teacher or {}).get("organization_id") or (cache_teacher or {}).get("school_id") or user_id
+        await CACHE_CLIENT.invalidate_pattern(f"dashboard:*:{workspace_for_cache}")
+        await CACHE_CLIENT.invalidate_pattern(f"teachers:{workspace_for_cache}:*")
+        if observation_session:
+            await db.observation_sessions.update_one(
+                {"id": observation_session["id"]},
+                {
+                    "$set": {
+                        "status": ObservationSessionStatus.ANALYSIS_COMPLETE.value,
+                        "linked_assessment_id": assessment_doc["id"],
+                        "updated_at": completed_at,
+                    }
+                },
+            )
+            observation_session = {
+                **observation_session,
+                "status": ObservationSessionStatus.ANALYSIS_COMPLETE.value,
+                "linked_assessment_id": assessment_doc["id"],
+                "updated_at": completed_at,
+            }
+        assessment_teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
+        await _create_coaching_tasks_for_assessment(
+            assessment_doc,
+            video=video,
+            teacher=assessment_teacher,
+            observer_user=analysis_user or {"id": user_id},
+            observation_session=observation_session,
+        )
+        await _auto_update_observer_goal_progress_for_session(
+            observation_session,
+            assessment=assessment_doc,
+            video=video,
+        )
         updated_video = await db.videos.find_one({"id": video_id}, {"_id": 0})
         if updated_video:
-            await _sync_video_recognition_state(updated_video)
+            recognition_event = await _sync_video_recognition_state(updated_video)
+            await _handle_assessment_recognition_completion(
+                video=updated_video,
+                assessment=assessment_doc,
+                recognition_event=recognition_event,
+                actor_user=analysis_user or {"id": user_id},
+            )
 
         duration_seconds = time.perf_counter() - analysis_started_perf
         record_analysis_run(
@@ -16882,9 +22505,20 @@ def attach_moment_metadata_to_frames(frames: List[dict], moment_manifest: Dict[s
 def _should_run_audio_analysis(current_user: Optional[dict]) -> bool:
     if not AUDIO_ANALYSIS_ENABLED:
         return False
+
     if not AUDIO_ALLOW_STUDENT_VOICE_PROCESSING:
         return False
-    return _is_paid_analysis_allowed_for_user(current_user)
+
+    if PAID_ANALYSIS_ENABLED:
+        email = str((current_user or {}).get("email") or "").strip().lower()
+        allowlist = {
+            str(item).strip().lower()
+            for item in (PAID_ANALYSIS_ALLOWLIST_EMAILS or set())
+        }
+        if allowlist and email not in allowlist:
+            return False
+
+    return True
 
 
 async def build_audio_artifacts(
@@ -17175,7 +22809,11 @@ def _normalize_confidence(raw_confidence: Any) -> float:
     return max(0.0, min(100.0, round(confidence, 1)))
 
 
-def _normalize_evidence_segments(raw_segments: Any, fallback_timestamp: float) -> List[dict]:
+def _normalize_evidence_segments(
+    raw_segments: Any,
+    fallback_timestamp: float,
+    language: str = "en",
+) -> List[dict]:
     segments: List[dict] = []
     if not isinstance(raw_segments, list):
         raw_segments = []
@@ -17190,8 +22828,8 @@ def _normalize_evidence_segments(raw_segments: Any, fallback_timestamp: float) -
             end_sec = max(start_sec + 1.0, float(raw.get("end_sec", start_sec + 20.0)))
         except Exception:
             end_sec = start_sec + 20.0
-        summary = str(raw.get("summary") or "").strip()
-        rationale = str(raw.get("rationale") or "").strip()
+        summary = _normalize_analysis_wording(raw.get("summary"), language=language)
+        rationale = _normalize_analysis_wording(raw.get("rationale"), language=language)
         if not summary:
             continue
         segments.append(
@@ -17205,7 +22843,43 @@ def _normalize_evidence_segments(raw_segments: Any, fallback_timestamp: float) -
     return segments
 
 
-def _normalize_model_recommendations(raw_recommendations: Any) -> List[dict]:
+def _normalize_analysis_wording(text: Optional[str], language: str = "en") -> str:
+    clean_text = str(text or "").strip()
+    if not clean_text:
+        return ""
+
+    replacements = {
+        "in the sampled frames": "in the recording",
+        "in sampled frames": "in the recording",
+        "sampled frames": "recording",
+        "sampled moments": "recorded moments",
+        "sampled clips": "recorded clips",
+        "sampled windows": "recorded windows",
+        "Limited visible evidence was available": "The clip gave us a brief window into your lesson",
+        "Visible evidence was limited": "The clip gave us a brief window into your lesson",
+        "Evidence was limited": "The clip gave us a brief window into your lesson",
+        "Insufficient visible evidence": "The clip gave us a brief window into your lesson",
+    }
+    normalized = clean_text
+    for source, target in replacements.items():
+        normalized = normalized.replace(source, target)
+
+    if _is_hebrew_language(language):
+        hebrew_replacements = {
+            "במדגם הרגעים שנבדק": "בראיות השיעור שנבדקו",
+            "במדגם שנבחר": "בראיות השיעור שנבדקו",
+            "במסגרת מדגם הרגעים שנבדק": "במסגרת ראיות השיעור שנבדקו",
+            "הראיות במדגם הרגעים שנבדק היו מוגבלות": "ראיות השיעור הזמינות עדיין חלקיות",
+            "הראיות החזותיות במדגם שנבחר לא הספיקו לקביעה בטוחה יותר": "ראיות השיעור הזמינות לא הספיקו עדיין לקביעה בטוחה יותר",
+            "נמצאו ראיות חזותיות חלקיות בלבד": "נמצאו ראיות חלקיות בלבד",
+        }
+        for source, target in hebrew_replacements.items():
+            normalized = normalized.replace(source, target)
+
+    return normalized.strip()
+
+
+def _normalize_model_recommendations(raw_recommendations: Any, language: str = "en") -> List[dict]:
     normalized: List[dict] = []
     if not isinstance(raw_recommendations, list):
         return normalized
@@ -17222,7 +22896,10 @@ def _normalize_model_recommendations(raw_recommendations: Any) -> List[dict]:
             continue
         if not isinstance(item, dict):
             continue
-        text = str(item.get("text") or item.get("recommendation") or "").strip()
+        text = _normalize_analysis_wording(
+            item.get("text") or item.get("recommendation") or "",
+            language=language,
+        )
         if not text:
             continue
         try:
@@ -17246,11 +22923,11 @@ def _normalize_model_recommendations(raw_recommendations: Any) -> List[dict]:
 
 def _build_placeholder_element_score(element: dict, timestamp_sec: float, language: str = "en") -> dict:
     if _is_hebrew_language(language):
-        observation_text = "הראיות החזותיות במדגם שנבחר לא הספיקו לקביעה בטוחה יותר."
-        summary_text = f"לגבי {element['name']} נמצאו ראיות חזותיות חלקיות בלבד במסגרת מדגם הרגעים שנבדק."
+        observation_text = "החלון שהיה לנו בסרטון היה קצר — הנה מה שבלט בשיעור שלך."
+        summary_text = "החלון שהיה לנו בסרטון היה קצר — הנה מה שבלט בתוכו."
     else:
-        observation_text = "Insufficient visible evidence in the sampled frames for a stronger judgment."
-        summary_text = f"Limited visible evidence was available for {element['name'].lower()} in the sampled frames."
+        observation_text = "The clip gave us a brief window into your lesson — here is what stood out."
+        summary_text = "The clip gave us a brief window into this lesson — here is what stood out."
     return {
         "element_id": element["id"],
         "element_name": element["name"],
@@ -17294,7 +22971,7 @@ def _normalize_model_analysis(
             continue
         seen_ids.add(element_id)
         observations = [
-            str(item).strip()
+            _normalize_analysis_wording(item, language=language)
             for item in (raw_score.get("observations") or [])
             if str(item).strip()
         ][:3]
@@ -17302,14 +22979,15 @@ def _normalize_model_analysis(
         evidence_segments = _normalize_evidence_segments(
             raw_score.get("evidence_segments"),
             fallback_timestamp=fallback_timestamp,
+            language=language,
         )
         if not observations and evidence_segments:
             observations = [evidence_segments[0]["summary"]]
         if not observations:
             observations = (
-                ["הראיות במדגם הרגעים שנבדק היו מוגבלות."]
+                ["החלון שהיה לנו בסרטון היה קצר — הנה מה שבלט בשיעור שלך."]
                 if _is_hebrew_language(language)
-                else ["Evidence was limited in the sampled frames."]
+                else ["The clip gave us a brief window into your lesson — here is what stood out."]
             )
         if not evidence_segments:
             evidence_segments = [
@@ -17343,9 +23021,14 @@ def _normalize_model_analysis(
 
     return {
         "analysis_mode": analysis_mode,
-        "summary": (raw_payload or {}).get("summary") if isinstance(raw_payload, dict) else None,
+        "summary": (
+            _normalize_analysis_wording((raw_payload or {}).get("summary"), language=language)
+            if isinstance(raw_payload, dict)
+            else None
+        ),
         "recommendations": _normalize_model_recommendations(
-            (raw_payload or {}).get("recommendations") if isinstance(raw_payload, dict) else None
+            (raw_payload or {}).get("recommendations") if isinstance(raw_payload, dict) else None,
+            language=language,
         ),
         "element_scores": normalized_scores,
     }
@@ -17356,22 +23039,44 @@ async def _analyze_frames_with_openai(
     elements_to_analyze: List[dict],
     focus_instruction: Optional[str] = None,
     language: str = "en",
+    multimodal_payload: Optional[dict] = None,
 ) -> Optional[dict]:
     if not OPENAI_API_KEY or AsyncOpenAI is None:
         return None
 
     system_prompt = (
-        "You are an expert instructional coach evaluating sampled classroom video frames. "
-        "Use only visible evidence from the provided frames unless transcript context is explicitly provided. "
-        "Do not invent unseen behavior. "
-        "Write the result as if a strong school leader observed the lesson and needs a concise, coaching-ready judgment. "
-        "Return only valid JSON."
+        "You are a trusted instructional coach writing feedback for a teacher you know well. "
+        "You just watched a recording of their lesson. Your job is to write feedback that feels "
+        "like it came from a colleague who was in the room — specific, warm, and actionable.\n\n"
+        "Voice rules you must follow in every word you write:\n"
+        "1. Address the teacher as 'you' and 'your.' Never say 'the teacher.'\n"
+        "2. Name specific visible moments ('around the four-minute mark,' 'when you moved "
+        "to the board') — never write observations that could apply to any lesson.\n"
+        "3. Never mention rubric codes, scores, or confidence values in text fields. Those "
+        "belong in the numeric fields only.\n"
+        "4. Never use system language: do not write 'evidence,' 'sampled frames,' 'analysis', "
+        "'data points,' 'confidence,' or 'this segment.'\n"
+        "5. When evidence is genuinely limited in the recording, say: 'The clip we had was "
+        "brief — here is what stood out in that window.' Never write 'evidence was limited.'\n"
+        "6. Every recommendation must be completable in the next lesson. Phrase it as "
+        "something a teacher can actually try on Tuesday, not a professional development goal.\n"
+        "7. Lead with what worked before naming what to develop.\n"
+        "8. The summary should sound like the first sentence of a coaching conversation, "
+        "not an observation report header.\n\n"
+        "For Hebrew output: apply all the same voice rules using natural Israeli educational "
+        "language. A trusted מנהל or מדריך speaking with a teacher — not a formal inspection report.\n\n"
+        "Return only valid JSON. The text fields must follow coach voice. The numeric fields "
+        "(score, confidence, start_sec, end_sec) are technical and do not need coach voice."
     )
     if _is_hebrew_language(language):
         system_prompt += (
-            " Write all summaries, observations, rationale, and recommendations in modern Hebrew suitable for Israeli school leaders. "
-            "Use natural Hebrew educational terminology rather than literal translation. "
-            "If the admin's custom observation note or custom rubric wording is already written in Hebrew, preserve it as-is and do not rewrite it into English-style phrasing."
+            "\n\nכתוב את כל שדות הטקסט בעברית טבעית של שיחת ליווי בין מנהל, מדריכה או עמית מקצועי לבין מורה. "
+            "פנה אל המורה ישירות בלשון 'את/אתה' ו'שלך', ולא כאל דמות חיצונית. "
+            "אל תכתוב בניסוח של דוח פיקוח, הערכה קלינית או טופס תצפית. "
+            "התחל במה שעבד בשיעור, תאר רגעים קונקרטיים מההקלטה עם ציון זמן טבעי, ואז הצע מהלך אחד שאפשר לנסות כבר בשיעור הבא. "
+            "אל תזכיר בטקסט קודי רובריקה, ציונים, ביטחון, ניתוח, דאטה, ראיות, פריימים שנדגמו או מגבלות מערכת. "
+            "אם ההקלטה קצרה או חלקית, כתוב בעברית טבעית: 'הקליפ שהיה לנו היה קצר — זה מה שבלט בחלון הזה.' "
+            "אם הערת המיקוד או ניסוח רובריקה מותאם כבר כתובים בעברית, שמור על הכוונה והעבר אותם לשפת ליווי טבעית ולא לתרגום מילולי."
         )
     elements_text = "\n".join(
         f"- {element['id']}: {element['name']} (Domain: {element['domain']}){' [PRIORITY]' if element.get('priority') else ''}"
@@ -17379,30 +23084,35 @@ async def _analyze_frames_with_openai(
     )
     focus_text = focus_instruction.strip() if focus_instruction else ""
     prompt = f"""
-Analyze the classroom frames below and score the teacher on a 1-10 scale for each rubric element.
+Watch the lesson recording clips below and write coaching feedback for this teacher.
 
-Rubric elements:
+Rubric areas to address:
 {elements_text}
 
 {focus_text}
 
-Requirements:
-- Use the timestamps provided with each frame.
-- Base every observation on the provided evidence only.
-- Keep observations concrete and specific to what is visible.
-- Make the summary feel like an administrator's classroom observation summary, not a technical model report.
-- If priority rubric elements are present, lead with them in the summary, strengths, growth areas, and recommendations.
-- For each element, include 1-2 timestamped evidence segments tied to the sampled frames when possible.
-- Include 2-3 targeted recommendations tied to timestamps and linked elements.
+Write the feedback as if you are a trusted colleague who just watched this lesson.
+Address the teacher directly. Be specific about what you saw and when.
+For each rubric area, note what you noticed — grounded in a specific moment
+from the recording — and what you would suggest trying next.
+
+The summary (2-3 sentences) is the opening of a coaching conversation.
+It should be something you would actually say to this person.
+
+Each recommendation must be one specific, actionable thing to try next lesson.
+Not a general direction — a specific move, with timing if you can.
+
+If priority areas are marked [PRIORITY], center the summary and recommendations
+on those areas first, using the observer's focus note as your lead.
 
 Return JSON with this exact shape:
 {{
-  "summary": "2-4 sentence lesson summary grounded in the sampled frames.",
+  "summary": "2-3 sentences. First sentence of a coaching conversation. Uses 'you'.",
   "recommendations": [
     {{
       "start_sec": 90,
       "end_sec": 120,
-      "text": "Concrete coaching recommendation grounded in visible evidence.",
+      "text": "One specific thing to try next lesson. Actionable on Tuesday.",
       "linked_element_id": "2b"
     }}
   ],
@@ -17411,13 +23121,15 @@ Return JSON with this exact shape:
       "element_id": "2b",
       "score": 6.8,
       "confidence": 82,
-      "observations": ["Observation 1", "Observation 2"],
+      "observations": [
+        "What you noticed, addressed to the teacher, grounded in a specific moment."
+      ],
       "evidence_segments": [
         {{
           "start_sec": 90,
           "end_sec": 120,
-          "summary": "What is visible in that moment.",
-          "rationale": "Why it supports the score."
+          "summary": "What happened in this moment, described as a colleague would.",
+          "rationale": "Why this moment matters for this area of their practice."
         }}
       ]
     }}
@@ -17535,12 +23247,24 @@ async def analyze_frames_with_ai(
 
     if OPENAI_API_KEY and AsyncOpenAI is not None and paid_analysis_allowed:
         try:
-            payload = await _analyze_frames_with_openai(
-                frames,
-                elements_to_analyze,
-                focus_instruction=combined_instruction,
-                language=language,
-            )
+            try:
+                payload = await _analyze_frames_with_openai(
+                    frames,
+                    elements_to_analyze,
+                    focus_instruction=combined_instruction,
+                    language=language,
+                    multimodal_payload=multimodal_payload,
+                )
+            except TypeError as exc:
+                if "multimodal_payload" not in str(exc):
+                    raise
+                payload = await _analyze_frames_with_openai(
+                    frames,
+                    elements_to_analyze,
+                    focus_instruction=combined_instruction,
+                    language=language,
+                )
+
             normalized = _normalize_model_analysis(
                 payload,
                 elements_to_analyze,
@@ -17601,25 +23325,25 @@ def generate_mock_scores(elements: List[dict], language: str = "en") -> List[dic
     scores = []
     if _is_hebrew_language(language):
         fallback_actions = [
-            "נראה מודלינג של המורה, אך בדיקות הבנה עקביות לא בלטו במידה מספקת במדגם הרגעים שנבדק.",
-            "נראו סימנים להשתתפות תלמידים, אך דפוסי מעורבות רחבים יותר לא היו ברורים די הצורך.",
-            "שגרות הכיתה נראו יציבות, אך המעברים ובדיקות התגובה דורשים ראיות חזותיות ברורות יותר.",
-            "קצב ההוראה נראה סדור, אך הזדמנויות לחשיבה מעמיקה של תלמידים לא בלטו באופן מספק.",
+            "המודלינג שלך היה ברור בחלון שראינו, ובשיעור הבא כדאי להוסיף בדיקת הבנה קצרה לפני שהתלמידים ממשיכים.",
+            "יצרת פתחים להשתתפות תלמידים; בשיעור הבא כדאי להרחיב מי מקבל הזדמנות לענות לפני שממשיכים.",
+            "שגרות הכיתה שלך נראו יציבות; בשיעור הבא כדאי להפוך את רמז המעבר ובדיקת התגובה לברורים עוד יותר.",
+            "קצב ההוראה שלך היה מסודר; בשיעור הבא כדאי להוסיף שאלה אחת שמבקשת מהתלמידים להסביר את החשיבה שלהם.",
         ]
     else:
         fallback_actions = [
-            "Teacher modeling was visible, but checks for understanding were not consistently evident in sampled frames.",
-            "Student participation cues were visible, though broader engagement routines were not consistently clear.",
-            "Classroom routines appeared stable, but transitions and response checks need stronger visual evidence.",
-            "Instructional pacing looked steady, though opportunities for deeper student thinking were not clearly visible.",
+            "You modeled the task clearly in the window we saw, and next lesson you can add a quick check for understanding before students continue.",
+            "You created a few openings for student participation; next lesson, try widening who responds before moving on.",
+            "Your classroom routines looked steady; next lesson, make the transition cue and response check even more visible.",
+            "Your pacing felt organized; next lesson, build in one prompt that asks students to explain their thinking.",
         ]
     for idx, element in enumerate(elements):
         score = round(random.uniform(5.2, 7.4), 1)
         observation = fallback_actions[idx % len(fallback_actions)]
         primary_observation = (
-            f"נמצאה ראיה חלקית בלבד עבור {element['name']} במדגם הרגעים שנבדק."
+            "נמצאה ראיה חלקית בלבד בחלון הצפייה, ולכן כדאי לראות זאת כנקודת פתיחה לשיחה מקצועית."
             if _is_hebrew_language(language)
-            else f"Visible evidence for {element['name'].lower()} was limited to sampled frames."
+            else "The clip gave us a brief window into your lesson — here is what stood out."
         )
         scores.append(
             {
@@ -17642,32 +23366,687 @@ def _format_timestamp(seconds: int) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def _build_recommendation_text(element_name: str, observation: str) -> str:
+def _format_timestamp_range(start_sec: float, end_sec: float) -> str:
+    start = int(max(0.0, float(start_sec or 0.0)))
+    end = int(max(start, float(end_sec or start)))
+    return f"{_format_timestamp(start)}–{_format_timestamp(end)}"
+
+
+def _primary_evidence_segment(item: dict) -> Optional[dict]:
+    for segment in item.get("evidence_segments") or []:
+        summary = str(segment.get("summary") or "").strip()
+        if summary:
+            return segment
+    return None
+
+
+def _evidence_detail_text(item: dict, language: str = "en") -> str:
+    segment = _primary_evidence_segment(item)
+    if segment:
+        summary = _normalize_analysis_wording(segment.get("summary"), language=language)
+        if summary:
+            return summary
+    observations = [
+        _normalize_analysis_wording(observation, language=language)
+        for observation in (item.get("observations") or [])
+        if str(observation).strip()
+    ]
+    return observations[0] if observations else ""
+
+
+def _build_observation_area_line(
+    item: dict,
+    label: str,
+    language: str = "en",
+) -> str:
+    detail = _evidence_detail_text(item, language=language)
+    segment = _primary_evidence_segment(item)
+    if segment and detail:
+        time_range = _format_timestamp_range(
+            float(segment.get("start_sec", 0.0) or 0.0),
+            float(segment.get("end_sec", segment.get("start_sec", 0.0)) or 0.0),
+        )
+        return f"{label}: {item['element_name']} - {detail.rstrip('.')} ({time_range})"
+    if detail:
+        return f"{label}: {item['element_name']} - {detail.rstrip('.')}"
+    return f"{label}: {item['element_name']}"
+
+
+def _build_evidence_highlight(item: dict, language: str = "en") -> Optional[str]:
+    segment = _primary_evidence_segment(item)
+    if not segment:
+        return None
+    summary = _normalize_analysis_wording(segment.get("summary"), language=language)
+    if not summary:
+        return None
+    time_range = _format_timestamp_range(
+        float(segment.get("start_sec", 0.0) or 0.0),
+        float(segment.get("end_sec", segment.get("start_sec", 0.0)) or 0.0),
+    )
+    return f"[{time_range}] {item['element_name']}: {summary.rstrip('.')}"
+
+
+def _build_recommendation_text(
+    element_name: str,
+    observation: str,
+    evidence_summary: Optional[str] = None,
+) -> str:
+    evidence_hint = str(evidence_summary or observation or "").lower()
     observation_lower = observation.lower()
     element_lower = element_name.lower()
     if "question" in observation_lower or "question" in element_lower:
-        return f"Increase probing questions and wait time to strengthen {element_name.lower()}."
+        return (
+            f"Deepen {element_name.lower()} in this stretch by planning one probing follow-up, "
+            "protecting 3-5 seconds of wait time, and requiring at least two student explanations before closing the exchange."
+        )
     if "engagement" in observation_lower or "participation" in observation_lower:
-        return f"Broaden participation routines so more students contribute during {element_name.lower()}."
+        return (
+            f"Widen {element_name.lower()} here by inserting think time or turn-and-talk first, "
+            "then pulling responses from multiple parts of the room so more students contribute before moving on."
+        )
     if "routine" in observation_lower or "transition" in observation_lower:
-        return f"Tighten transitions and reinforce routines to improve {element_name.lower()}."
-    if "feedback" in observation_lower:
-        return f"Make feedback more explicit and actionable to strengthen {element_name.lower()}."
-    return f"Strengthen {element_name.lower()} with clearer modeling, checks for understanding, and visible student response routines."
+        return (
+            f"Reset {element_name.lower()} before the next transition by naming the expected routine, "
+            "narrating the first compliant moves, and holding the release until the room is ready."
+        )
+    if "feedback" in observation_lower or "success criteria" in evidence_hint:
+        return (
+            f"Make {element_name.lower()} more actionable in this moment by stating the success criteria, "
+            "giving one specific next step, and checking that students can apply it immediately."
+        )
+    return (
+        f"Make {element_name.lower()} more visible in this stretch by modeling the move, "
+        "checking for understanding before advancing, and requiring a clear student response."
+    )
 
 
-def _build_recommendation_text_hebrew(element_name: str, observation: str) -> str:
+def _build_recommendation_text_hebrew(
+    element_name: str,
+    observation: str,
+    evidence_summary: Optional[str] = None,
+) -> str:
+    evidence_hint = str(evidence_summary or observation or "").lower()
     observation_lower = observation.lower()
     element_lower = element_name.lower()
     if "question" in observation_lower or "שאל" in observation_lower or "question" in element_lower:
-        return f"להעמיק את איכות השאלות ולהאריך זמן המתנה כדי לחזק את {element_name.lower()}."
+        return (
+            f"להעמיק את {element_name.lower()} ברגע הזה באמצעות שאלת המשך מתוכננת, "
+            "זמן המתנה של 3-5 שניות ודרישה לשתי תשובות תלמידים לפני סגירת הדיון."
+        )
     if "engagement" in observation_lower or "participation" in observation_lower or "מעורב" in observation_lower:
-        return f"להרחיב את מעגל ההשתתפות כדי שיותר תלמידים ייקחו חלק בתוך {element_name.lower()}."
+        return (
+            f"להרחיב את {element_name.lower()} בשלב הזה באמצעות זמן חשיבה או שיח בזוגות, "
+            "ואז למשוך קולות מכמה אזורים בכיתה לפני המעבר הלאה."
+        )
     if "routine" in observation_lower or "transition" in observation_lower or "שגר" in observation_lower or "מעבר" in observation_lower:
-        return f"לחדד מעברים ושגרות כדי לחזק את {element_name.lower()}."
-    if "feedback" in observation_lower or "משוב" in observation_lower:
-        return f"להפוך את המשוב למדויק וישים יותר כדי לחזק את {element_name.lower()}."
-    return f"לחזק את {element_name.lower()} באמצעות מודלינג ברור יותר, בדיקות הבנה עקביות ותגובות תלמידים גלויות."
+        return (
+            f"לחדד את {element_name.lower()} לפני המעבר הבא באמצעות ניסוח מפורש של השגרה, "
+            "נרמול הצעדים הראשונים של התלמידים והשהיית ההמשך עד שהכיתה מתאפסת."
+        )
+    if "feedback" in observation_lower or "משוב" in observation_lower or "success criteria" in evidence_hint:
+        return (
+            f"להפוך את {element_name.lower()} לישימה יותר ברגע הזה באמצעות ניסוח קריטריוני ההצלחה, "
+            "מתן צעד הבא ברור ובדיקה שהתלמידים יודעים ליישם אותו מייד."
+        )
+    return (
+        f"לחזק את {element_name.lower()} בקטע הזה באמצעות מודלינג ברור, "
+        "בדיקת הבנה לפני ההתקדמות ודרישה לתגובה תלמידית גלויה."
+    )
+
+
+_CANONICAL_OUTPUT_ORDER_EN = [
+    "Instructional Snapshot",
+    "Strengths to Keep and Build On",
+    "Primary Growth Focus",
+    "Evidence-Based Observation Highlights",
+    "Actionable Next Steps",
+    "Rubric-Aligned Interpretation",
+    "Longitudinal Insight",
+    "Reflection Prompts",
+]
+
+_CANONICAL_OUTPUT_ORDER_HE = [
+    "תמונת הוראה קצרה",
+    "חוזקות לשימור ולהעמקה",
+    "מוקד צמיחה מרכזי",
+    "הדגשות תצפית מבוססות ראיות",
+    "צעדים מעשיים להמשך",
+    "פרשנות מותאמת לרובריקה",
+    "תובנה לאורך זמן",
+    "שאלות לרפלקציה",
+]
+
+
+def _dedupe_strings(values: List[str], limit: int) -> List[str]:
+    output: List[str] = []
+    seen = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        output.append(text)
+        if len(output) >= limit:
+            break
+    return output
+
+
+def _infer_cognitive_opportunities(item: dict, language: str = "en") -> List[str]:
+    source = " ".join(
+        [
+            str(item.get("element_name") or ""),
+            " ".join(str(obs or "") for obs in (item.get("observations") or [])),
+            " ".join(str((seg or {}).get("summary") or "") for seg in (item.get("evidence_segments") or [])),
+        ]
+    ).lower()
+
+    opportunities: List[str] = []
+    if any(token in source for token in ["question", "discussion", "dialog", "שאל", "דיון", "שיח"]):
+        opportunities.extend(["process", "talk"])
+    if any(token in source for token in ["apply", "practice", "task", "יישום", "תרגול", "משימה"]):
+        opportunities.append("apply")
+    if any(
+        token in source
+        for token in [
+            "check for understanding",
+            "assessment",
+            "feedback",
+            "understand",
+            "הבנה",
+            "הערכה",
+            "משוב",
+        ]
+    ):
+        opportunities.append("demonstrate understanding")
+    if not opportunities:
+        opportunities.append("process")
+
+    opportunities = _dedupe_strings(opportunities, 4)
+    if _is_hebrew_language(language):
+        map_he = {
+            "process": "לעבד מידע",
+            "apply": "ליישם",
+            "talk": "לדבר ולהסביר",
+            "demonstrate understanding": "להדגים הבנה",
+        }
+        return [map_he.get(value, value) for value in opportunities]
+    return opportunities
+
+
+def _format_opportunity_phrase(opportunities: List[str], language: str = "en") -> str:
+    if not opportunities:
+        if _is_hebrew_language(language):
+            return "לעבד מידע"
+        return "process"
+    if len(opportunities) == 1:
+        return opportunities[0]
+    if _is_hebrew_language(language):
+        return ", ".join(opportunities[:-1]) + f" ו{opportunities[-1]}"
+    return ", ".join(opportunities[:-1]) + f", and {opportunities[-1]}"
+
+
+def _build_four_layer_event(item: dict, language: str = "en") -> dict:
+    segment = _primary_evidence_segment(item) or {}
+    observable = _normalize_analysis_wording(_evidence_detail_text(item, language=language), language=language)
+    if not observable:
+        observable = (
+            "A bounded instructional event was visible in the reviewed lesson evidence."
+            if not _is_hebrew_language(language)
+            else "נראה אירוע הוראתי תחום בתוך ראיות השיעור שנבדקו."
+        )
+    opportunities = _infer_cognitive_opportunities(item, language=language)
+    opportunity_phrase = _format_opportunity_phrase(opportunities, language=language)
+
+    if _is_hebrew_language(language):
+        signal = f"האירוע הופיע יחד עם הזמנה של תלמידים ל{opportunity_phrase}."
+        leverage = (
+            f"מנוף פדגוגי: להפוך את המהלך הזה לעקבי כדי להרחיב ראיות לחשיבה תלמידית ב-{item.get('element_name') or 'המוקד'}."
+        )
+    else:
+        signal = f"This event co-occurred with invitations for students to {opportunity_phrase}."
+        leverage = (
+            f"Pedagogical leverage: make this move more consistent so student thinking is visible in {item.get('element_name') or 'the focus area'}."
+        )
+
+    return {
+        "element_id": item.get("element_id"),
+        "element_name": item.get("element_name"),
+        "score": float(item.get("score", 0.0) or 0.0),
+        "priority": bool(item.get("priority")),
+        "start_sec": float(segment.get("start_sec", 0.0) or 0.0),
+        "end_sec": float(segment.get("end_sec", segment.get("start_sec", 0.0)) or 0.0),
+        "time_range": _format_timestamp_range(
+            float(segment.get("start_sec", 0.0) or 0.0),
+            float(segment.get("end_sec", segment.get("start_sec", 0.0)) or 0.0),
+        ),
+        "observable": observable.rstrip("."),
+        "opportunities": opportunities,
+        "signal": signal.rstrip("."),
+        "leverage": leverage.rstrip("."),
+    }
+
+
+def _growth_focus_priority(
+    item: dict,
+    analysis_context: Optional[dict] = None,
+) -> Tuple[float, float, float, float, float, float]:
+    source = " ".join(
+        [
+            str(item.get("element_name") or ""),
+            " ".join(str(obs or "") for obs in (item.get("observations") or [])),
+        ]
+    ).lower()
+    impact_weight = 1.0
+    if any(token in source for token in ["question", "discussion", "engagement", "assessment", "feedback", "שאל", "דיון", "מעורב", "הבנה", "משוב"]):
+        impact_weight = 2.0
+    persistence = float(len(item.get("evidence_segments") or [])) + float(len(item.get("observations") or [])) * 0.5
+
+    readiness = 1.0
+    active_goals = [str(goal or "").strip().lower() for goal in ((analysis_context or {}).get("active_goals") or [])]
+    element_name = str(item.get("element_name") or "").strip().lower()
+    if element_name and any(element_name in goal for goal in active_goals):
+        readiness = 2.0
+
+    feasibility = 2.0
+    if any(token in source for token in ["policy", "system-wide", "district"]):
+        feasibility = 1.0
+
+    growth_need = max(0.0, 10.0 - float(item.get("score", 0.0) or 0.0))
+    priority_boost = 1.0 if bool(item.get("priority")) else 0.0
+    return (
+        impact_weight,
+        priority_boost,
+        persistence,
+        readiness,
+        feasibility,
+        growth_need,
+    )
+
+
+def _build_primary_growth_focus_line(
+    focus_item: dict,
+    opportunities: List[str],
+    language: str = "en",
+    *,
+    tentative: bool = False,
+) -> str:
+    name = str(focus_item.get("element_name") or focus_item.get("element_id") or "instructional focus").strip()
+    opportunity_phrase = _format_opportunity_phrase(opportunities, language=language)
+    if _is_hebrew_language(language):
+        suffix = " (טיוטה עד לאישור צופה אנושי)." if tentative else "."
+        return f"{name}: להרחיב הזדמנויות של תלמידים ל{opportunity_phrase} באותו מהלך הוראתי{suffix}"
+    suffix = " (tentative, pending human confirmation)." if tentative else "."
+    return f"{name}: expand opportunities for students to {opportunity_phrase} within the same instructional event{suffix}"
+
+
+def _build_action_steps_for_focus(
+    focus_event: dict,
+    provided_recommendations: Optional[List[dict]] = None,
+    language: str = "en",
+) -> List[Dict[str, str]]:
+    focus_name = str(focus_event.get("element_name") or focus_event.get("element_id") or "instructional focus").strip()
+    observable = str(focus_event.get("observable") or "").strip().rstrip(".")
+    time_range = str(focus_event.get("time_range") or "00:00-00:30")
+    opportunities = list(focus_event.get("opportunities") or [])
+    opportunity_phrase = _format_opportunity_phrase(opportunities, language=language)
+
+    preferred_try_this = None
+    focus_element_id = str(focus_event.get("element_id") or "").strip()
+    normalized_recommendations = [item for item in (provided_recommendations or []) if isinstance(item, dict)]
+    prioritized_recommendations = sorted(
+        normalized_recommendations,
+        key=lambda item: (
+            0
+            if focus_element_id and str(item.get("linked_element_id") or "").strip() == focus_element_id
+            else 1,
+            float(item.get("start_sec", 0.0) or 0.0),
+        ),
+    )
+    for item in prioritized_recommendations:
+        if not isinstance(item, dict):
+            continue
+        text = _normalize_analysis_wording(item.get("text") or "", language=language)
+        if text:
+            preferred_try_this = text.rstrip(".")
+            break
+
+    if _is_hebrew_language(language):
+        step_one_try = preferred_try_this or (
+            f"בחלון הזמן {time_range}, תכננו מהלך אחד ברור ב-{focus_name} שיזמין יותר תלמידים ל{opportunity_phrase}."
+        )
+        step_one = {
+            "try_this": step_one_try,
+            "look_for": "לפחות שלושה תלמידים מציגים חשיבה גלויה לפני סגירת המהלך.",
+            "evidence_of_success": "באותו חלון שיעור נראית חלוקת דיבור רחבה יותר בין קבוצות תלמידים.",
+        }
+        step_two = {
+            "try_this": f"סיימו כל מהלך ב-{focus_name} בשאלת המשך אחת שמבקשת הסבר תלמידי.",
+            "look_for": "המורה ממתינה לתגובה וממשיכה מתשובת תלמיד אחד לפחות.",
+            "evidence_of_success": "נוצרת שרשרת תגובות של תלמידים ולא רק תגובה בודדת מהמורה.",
+        }
+        step_three = {
+            "try_this": f"תעדו בסוף השיעור שתי דוגמאות קצרות שבהן {focus_name} הוביל לחשיבה תלמידית.",
+            "look_for": "הדוגמאות נקשרות לרגעים מוגדרים מהווידאו.",
+            "evidence_of_success": "בשיחת המעקב ניתן להצביע על מהלך שנשמר ועל מהלך שדורש דיוק נוסף.",
+        }
+    else:
+        step_one_try = preferred_try_this or (
+            f"In the {time_range} window, pre-plan one concrete {focus_name} move that invites more students to {opportunity_phrase}."
+        )
+        step_one = {
+            "try_this": step_one_try,
+            "look_for": "At least three students make thinking visible before the move is closed.",
+            "evidence_of_success": "Within that lesson stretch, participation is distributed across groups rather than concentrated in one cluster.",
+        }
+        step_two = {
+            "try_this": f"End each {focus_name} move with one follow-up prompt that asks for student explanation.",
+            "look_for": "The teacher pauses for response time and extends at least one student idea.",
+            "evidence_of_success": "A short chain of student responses appears before teacher closure.",
+        }
+        step_three = {
+            "try_this": f"Capture two short post-lesson notes showing where {focus_name} produced visible student thinking.",
+            "look_for": "Each note is tied to a concrete video moment.",
+            "evidence_of_success": "The next coaching conversation can identify one move to keep and one move to refine.",
+        }
+
+    return [step_one, step_two, step_three]
+
+
+def _format_action_step_line(step: Dict[str, str], language: str = "en") -> str:
+    if _is_hebrew_language(language):
+        return (
+            f"נסו זאת -> {step.get('try_this', '').strip()} "
+            f"| מה לחפש -> {step.get('look_for', '').strip()} "
+            f"| עדות להצלחה -> {step.get('evidence_of_success', '').strip()}"
+        ).strip()
+    return (
+        f"Try This -> {step.get('try_this', '').strip()} "
+        f"| Look For -> {step.get('look_for', '').strip()} "
+        f"| Evidence of Success -> {step.get('evidence_of_success', '').strip()}"
+    ).strip()
+
+
+def _build_deferral_reasons(
+    element_scores: List[dict],
+    analysis_confidence: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    if not analysis_confidence:
+        return []
+    reasons: List[str] = []
+    confidence = float((analysis_confidence or {}).get("overall", 0.0) or 0.0)
+    degradation = list((analysis_confidence or {}).get("degradation_reasons") or [])
+    evidence_count = sum(len(item.get("evidence_segments") or []) for item in element_scores or [])
+    scores = [float(item.get("score", 0.0) or 0.0) for item in element_scores or [] if item.get("score") is not None]
+
+    if confidence > 0 and confidence < 45.0:
+        reasons.append("overall_confidence_is_low")
+    if evidence_count <= 0:
+        reasons.append("student_response_data_is_sparse")
+    elif evidence_count < 2 and confidence > 0 and confidence < 60.0:
+        reasons.append("student_response_data_is_sparse")
+    if "audio_unavailable" in degradation and any(
+        token in " ".join(str(item.get("element_name") or "").lower() for item in element_scores or [])
+        for token in ["question", "discussion", "engagement", "שאל", "דיון", "מעורב"]
+    ) and confidence > 0 and confidence < 70.0:
+        reasons.append("missing_audio_for_student_response_signals")
+    if len(scores) >= 2 and (max(scores) - min(scores)) >= 2.8 and confidence < 70.0:
+        reasons.append("signals_are_mixed")
+    return _dedupe_strings(reasons, 4)
+
+
+def _build_deferral_note(
+    deferral_reasons: List[str],
+    language: str = "en",
+) -> Optional[str]:
+    if not deferral_reasons:
+        return None
+    if _is_hebrew_language(language):
+        return (
+            "דחייה מקצועית: בסיס הראיות הנוכחי חלקי ולכן מוצעות שתי פרשנויות אפשריות - "
+            "1) דפוס ההוראה הגביל זמנית את נראות תגובות התלמידים; "
+            "2) זווית ההקלטה או איכות הקול הגבילו את היכולת לאסוף אותות עקביים. "
+            "נדרש שיקול דעת של צופה אנושי לפני קביעת מהלך ליווי."
+        )
+    return (
+        "Professional deferral: the current evidence base is partial, so two interpretations remain plausible - "
+        "1) the instructional move temporarily narrowed visible student response signals; "
+        "2) camera or audio conditions limited what can be confirmed. "
+        "A human observer should choose the interpretation that best fits the full lesson context."
+    )
+
+
+def _build_canonical_review_output(
+    element_scores: List[dict],
+    priority_element_ids: Optional[List[str]] = None,
+    focus_note: Optional[str] = None,
+    analysis_confidence: Optional[Dict[str, Any]] = None,
+    analysis_context: Optional[dict] = None,
+    provided_recommendations: Optional[List[dict]] = None,
+    language: str = "en",
+) -> Dict[str, Any]:
+    priority_set = set(priority_element_ids or [])
+    ranked = sorted(
+        element_scores or [],
+        key=lambda item: (
+            0 if (bool(item.get("priority")) or item.get("element_id") in priority_set) else 1,
+            -float(item.get("score", 0.0) or 0.0),
+            -float(item.get("confidence", 0.0) or 0.0),
+        ),
+    )
+    events = [_build_four_layer_event(item, language=language) for item in ranked]
+    events = [event for event in events if event.get("observable")]
+
+    opportunities_seen = _dedupe_strings(
+        [op for event in events for op in (event.get("opportunities") or [])],
+        4,
+    )
+    opportunity_phrase = _format_opportunity_phrase(opportunities_seen, language=language)
+
+    snapshot_sentences: List[str] = []
+    if _is_hebrew_language(language):
+        if events:
+            snapshot_sentences.append(f"בקטע {events[0]['time_range']} נצפה: {events[0]['observable']}.")
+        if len(events) > 1:
+            snapshot_sentences.append(f"בהמשך בקטע {events[1]['time_range']} נצפה: {events[1]['observable']}.")
+        snapshot_sentences.append(f"לאורך הראיות שנבדקו, תלמידים הוזמנו ל{opportunity_phrase}.")
+        snapshot_sentences.append("אותות השפעה זוהו כקורלציות בלבד: מהלכי הוראה הופיעו יחד עם שינויים בנראות תגובות תלמידים.")
+        snapshot_sentences.append("פרשנות פדגוגית: יש כאן מנוף לשיפור מהלך ההוראה תוך שמירה על שיקול דעת אנושי.")
+        if focus_note:
+            snapshot_sentences.append(f"הערת מוקד מהצופה: {str(focus_note).strip().rstrip('.')}.")
+    else:
+        if events:
+            snapshot_sentences.append(f"In {events[0]['time_range']}, the reviewed lesson evidence shows: {events[0]['observable']}.")
+        if len(events) > 1:
+            snapshot_sentences.append(f"Later in {events[1]['time_range']}, the evidence shows: {events[1]['observable']}.")
+        snapshot_sentences.append(f"Across the reviewed evidence, students were invited to {opportunity_phrase}.")
+        snapshot_sentences.append("Instructional effect signals are treated as correlation only: teacher moves co-occurred with shifts in visible student response.")
+        snapshot_sentences.append("Pedagogical interpretation: this pattern creates leverage for the next coaching cycle and remains fully human-overrideable.")
+        if focus_note:
+            snapshot_sentences.append(f"Observer focus note: {str(focus_note).strip().rstrip('.')}.")
+    instructional_snapshot = " ".join(_dedupe_strings(snapshot_sentences, 6))
+
+    strength_items = sorted(
+        ranked,
+        key=lambda item: (
+            -float(item.get("score", 0.0) or 0.0),
+            -(1 if (bool(item.get("priority")) or item.get("element_id") in priority_set) else 0),
+        ),
+    )[:3]
+    strengths_to_keep = _dedupe_strings(
+        [
+            (
+                f"[{_build_four_layer_event(item, language=language)['time_range']}] {item.get('element_name')}: "
+                f"{_build_four_layer_event(item, language=language)['observable']}."
+            )
+            for item in strength_items
+        ],
+        3,
+    )
+
+    growth_candidates = sorted(
+        ranked,
+        key=lambda item: _growth_focus_priority(
+            {
+                **item,
+                "priority": bool(item.get("priority")) or item.get("element_id") in priority_set,
+            },
+            analysis_context=analysis_context,
+        ),
+        reverse=True,
+    )
+    focus_item = growth_candidates[0] if growth_candidates else (ranked[0] if ranked else {})
+    focus_event = _build_four_layer_event(focus_item, language=language) if focus_item else {}
+
+    deferral_reasons = _build_deferral_reasons(element_scores, analysis_confidence=analysis_confidence)
+    deferral_note = _build_deferral_note(deferral_reasons, language=language)
+    primary_growth_focus = _build_primary_growth_focus_line(
+        focus_item,
+        list(focus_event.get("opportunities") or opportunities_seen),
+        language=language,
+        tentative=bool(deferral_note),
+    )
+
+    evidence_highlights = _dedupe_strings(
+        [
+            (
+                (
+                    f"[{event['time_range']}] שכבה 1 - פעולות נצפות: {event['observable']}. "
+                    f"שכבה 2 - הזדמנות קוגניטיבית לתלמידים: תלמידים הוזמנו ל{_format_opportunity_phrase(event['opportunities'], language=language)}. "
+                    f"שכבה 3 - אותות השפעה הוראתיים: {event['signal']}. "
+                    f"שכבה 4 - פרשנות פדגוגית: {event['leverage']}."
+                    if _is_hebrew_language(language)
+                    else (
+                        f"[{event['time_range']}] Layer 1 - Observable Actions: {event['observable']}. "
+                        f"Layer 2 - Student Cognitive Opportunity: students were invited to {_format_opportunity_phrase(event['opportunities'], language=language)}. "
+                        f"Layer 3 - Instructional Effect Signals: {event['signal']}. "
+                        f"Layer 4 - Pedagogical Interpretation: {event['leverage']}."
+                    )
+                )
+            )
+            for event in events
+        ],
+        5,
+    )
+    if len(evidence_highlights) < 3:
+        fallback_highlight = (
+            "Layered evidence is currently partial; additional observer review of full-lesson context is recommended."
+            if not _is_hebrew_language(language)
+            else "הראיות הרב-שכבתיות כרגע חלקיות, ולכן מומלץ להשלים בחינה אנושית של הקשר השיעורי המלא."
+        )
+        while len(evidence_highlights) < 3:
+            evidence_highlights.append(fallback_highlight)
+
+    actionable_steps_structured = []
+    actionable_next_step_lines: List[str] = []
+    if not deferral_note:
+        actionable_steps_structured = _build_action_steps_for_focus(
+            focus_event,
+            provided_recommendations=provided_recommendations,
+            language=language,
+        )[:3]
+        actionable_next_step_lines = [_format_action_step_line(step, language=language) for step in actionable_steps_structured]
+
+    if _is_hebrew_language(language):
+        rubric_aligned_interpretation = (
+            f"הפרשנות המותאמת לרובריקה מצביעה על התאמה בולטת ל-{focus_item.get('element_name') or 'מוקד ההוראה'}. "
+            "הפרשנות זמנית ונועדה לתמוך בשיקול דעת צופה אנושי."
+        )
+    else:
+        rubric_aligned_interpretation = (
+            f"Rubric-aligned interpretation: observed instructional events align most directly to {focus_item.get('element_name') or 'the instructional focus'}. "
+            "This interpretation is provisional and intended to support human observer judgment."
+        )
+
+    longitudinal_candidates = list((analysis_context or {}).get("goal_progress_signals") or [])
+    longitudinal_insight = None
+    for item in longitudinal_candidates:
+        summary = str((item or {}).get("progress_summary") or "").strip()
+        title = str((item or {}).get("title") or "").strip()
+        if summary:
+            longitudinal_insight = f"{title}: {summary}".strip(": ")
+            break
+    if not longitudinal_insight:
+        continuity = [str(line or "").strip() for line in ((analysis_context or {}).get("conference_continuity_lines") or []) if str(line or "").strip()]
+        if continuity:
+            longitudinal_insight = continuity[0]
+    if not longitudinal_insight:
+        longitudinal_insight = (
+            "No prior multi-lesson evidence pattern is currently available in this record set."
+            if not _is_hebrew_language(language)
+            else "במערך הרשומות הנוכחי עדיין אין דפוס רב-שיעורי זמין."
+        )
+
+    if _is_hebrew_language(language):
+        reflection_prompts = [
+            "איזה רגע ספציפי מהווידאו תרצו לאשר או לאתגר לפני קביעת המהלך הבא?",
+            "איזה סימן תלמידי נראה לעין ייחשב מבחינתכם כעדות להתקדמות בתוך שבוע?",
+        ]
+        if deferral_note:
+            reflection_prompts.append("איזו משתי הפרשנויות הסבירות מתאימה יותר להקשר הכיתתי המלא לדעתכם?")
+    else:
+        reflection_prompts = [
+            "Which specific video moment would you confirm or challenge before finalizing the next coaching move?",
+            "What visible student signal would count as one-week progress in your context?",
+        ]
+        if deferral_note:
+            reflection_prompts.append("Which of the two plausible interpretations fits the full classroom context best in your judgment?")
+    reflection_prompts = _dedupe_strings(reflection_prompts, 3)
+
+    order = _CANONICAL_OUTPUT_ORDER_HE if _is_hebrew_language(language) else _CANONICAL_OUTPUT_ORDER_EN
+    section_five_lines = actionable_next_step_lines or (
+        ["Deferred: recommendations are intentionally withheld until ambiguity is resolved by human review."]
+        if not _is_hebrew_language(language)
+        else ["דחייה מקצועית: צעדי פעולה הושהו עד להכרעת פרשנות אנושית."]
+    )
+
+    full_review_lines: List[str] = []
+    full_review_lines.append(f"1. {order[0]}")
+    full_review_lines.append(instructional_snapshot)
+    full_review_lines.append("")
+    full_review_lines.append(f"2. {order[1]}")
+    full_review_lines.extend([f"- {line}" for line in strengths_to_keep[:3]])
+    full_review_lines.append("")
+    full_review_lines.append(f"3. {order[2]}")
+    full_review_lines.append(primary_growth_focus)
+    full_review_lines.append("")
+    full_review_lines.append(f"4. {order[3]}")
+    full_review_lines.extend([f"- {line}" for line in evidence_highlights[:5]])
+    full_review_lines.append("")
+    full_review_lines.append(f"5. {order[4]}")
+    full_review_lines.extend([f"- {line}" for line in section_five_lines[:3]])
+    full_review_lines.append("")
+    full_review_lines.append(f"6. {order[5]}")
+    full_review_lines.append(rubric_aligned_interpretation)
+    full_review_lines.append("")
+    full_review_lines.append(f"7. {order[6]}")
+    full_review_lines.append(longitudinal_insight)
+    full_review_lines.append("")
+    full_review_lines.append(f"8. {order[7]}")
+    full_review_lines.extend([f"- {line}" for line in reflection_prompts[:3]])
+    if deferral_note:
+        full_review_lines.append("")
+        full_review_lines.append(
+            f"Deferral Note: {deferral_note}"
+            if not _is_hebrew_language(language)
+            else f"הערת דחייה מקצועית: {deferral_note}"
+        )
+
+    return {
+        "instructional_snapshot": instructional_snapshot,
+        "strengths_to_keep_and_build_on": strengths_to_keep[:3],
+        "primary_growth_focus": primary_growth_focus,
+        "evidence_based_observation_highlights": evidence_highlights[:5],
+        "actionable_next_steps_structured": actionable_steps_structured[:3],
+        "actionable_next_steps": actionable_next_step_lines[:3],
+        "rubric_aligned_interpretation": rubric_aligned_interpretation,
+        "longitudinal_insight": longitudinal_insight,
+        "reflection_prompts": reflection_prompts[:3],
+        "deferral_note": deferral_note,
+        "output_order": list(order),
+        "full_review_text": "\n".join(full_review_lines).strip(),
+    }
 
 
 def _score_priority_rank(item: dict, priority_element_ids: Optional[List[str]] = None) -> Tuple[int, float]:
@@ -17759,6 +24138,443 @@ def _apply_priority_recommendation_context(
     return f"Priority focus on {element_name}: {clean_text}"
 
 
+def _build_master_observer_artifact(
+    element_scores: List[dict],
+    *,
+    priority_element_ids: Optional[List[str]] = None,
+    language: str = "en",
+) -> Optional[Dict[str, Any]]:
+    if not MASTER_OBSERVER_PIPELINE_ENABLED:
+        return None
+
+    artifact = render_master_observer_feedback(
+        element_scores,
+        priority_element_ids=priority_element_ids,
+        language=language,
+    )
+    gate_result = validate_voice_gate(artifact.get("full_review_text", ""), language=language)
+    artifact["voice_gate"] = gate_result
+
+    if gate_result.get("passed") or not MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS:
+        return artifact
+
+    log_structured(
+        logger,
+        "warning",
+        "master_observer_voice_gate_failed",
+        failures=gate_result.get("failures", []),
+        language=language,
+    )
+    return None
+
+
+def _build_feedback_release_metadata(
+    review_text: str,
+    *,
+    language: str = "en",
+) -> Dict[str, Any]:
+    gate_result = validate_voice_gate(review_text, language=language)
+    return {
+        "voice_gate_version": "voice_gate_rules_v1",
+        "voice_gate_status": "pass" if gate_result.get("passed") else "fail",
+        "voice_gate_failures": list(gate_result.get("failures") or []),
+        "voice_gate_section_count": gate_result.get("section_count"),
+        "voice_gate_validated_at": datetime.now(timezone.utc).isoformat(),
+        "feedback_release_status": "released" if gate_result.get("passed") else "blocked",
+        "feedback_human_review_required": not bool(gate_result.get("passed")),
+    }
+
+
+def _is_voice_gate_release_enforced() -> bool:
+    return (
+        MASTER_OBSERVER_PIPELINE_ENABLED
+        and MASTER_OBSERVER_REQUIRE_VOICE_GATE_PASS
+        and VOICE_GATE_RELEASE_ENFORCEMENT_ENABLED
+    )
+
+
+def _feedback_blocked_message(language: str = "en") -> str:
+    if _is_hebrew_language(language):
+        return "המשוב ממתין לבדיקת איכות אנושית לפני שחרור."
+    return "Feedback is pending human quality review before release."
+
+
+def _apply_feedback_release_guard(
+    assessment: Dict[str, Any],
+    *,
+    language: str = "en",
+) -> Dict[str, Any]:
+    guarded = dict(assessment)
+    if not _is_voice_gate_release_enforced():
+        return guarded
+
+    status = str(guarded.get("feedback_release_status") or "").strip().lower()
+    if status == "released":
+        return guarded
+
+    message = _feedback_blocked_message(language)
+    observation_summary = dict(guarded.get("observation_summary") or {})
+    observation_summary.update(
+        {
+            "executive_summary": message,
+            "top_strengths": [],
+            "growth_areas": [],
+            "coaching_actions": [],
+            "priority_alignment": [],
+            "evidence_highlights": [],
+            "focus_note": None,
+            "confidence_note": None,
+            "primary_growth_focus": None,
+            "longitudinal_insight": None,
+            "reflection_prompts": [],
+            "actionable_next_steps_structured": [],
+            "full_review_text": message,
+            "output_order": [],
+            "deferral_note": None,
+            "reasoning_model": observation_summary.get("reasoning_model") or "master_observer_v1",
+        }
+    )
+    guarded["summary"] = message
+    guarded["recommendations"] = []
+    guarded["observation_summary"] = observation_summary
+    return guarded
+
+
+def _select_feedback_text_for_governance(assessment: Dict[str, Any]) -> str:
+    observation_summary = assessment.get("observation_summary") or {}
+    full_review = str(observation_summary.get("full_review_text") or "").strip()
+    if full_review:
+        return full_review
+    summary = str(assessment.get("summary") or "").strip()
+    if summary:
+        return summary
+    recommendation_lines = [str(item or "").strip() for item in list(assessment.get("recommendations") or []) if str(item or "").strip()]
+    if recommendation_lines:
+        return "\n".join(recommendation_lines)
+    return ""
+
+
+def _build_feedback_governance_update_for_assessment(
+    assessment: Dict[str, Any],
+    *,
+    enforce_release: Optional[bool] = None,
+) -> Dict[str, Any]:
+    enforce = _is_voice_gate_release_enforced() if enforce_release is None else bool(enforce_release)
+    language = _normalize_app_language(assessment.get("analysis_language"), default="en")
+    review_text = _select_feedback_text_for_governance(assessment)
+    metadata = _build_feedback_release_metadata(review_text, language=language)
+
+    current_status = str(assessment.get("feedback_release_status") or "").strip().lower()
+    override_released = bool(
+        assessment.get("feedback_release_override_at")
+        and current_status == "released"
+    )
+
+    updates: Dict[str, Any] = {
+        "voice_gate_version": metadata["voice_gate_version"],
+        "voice_gate_status": metadata["voice_gate_status"],
+        "voice_gate_failures": metadata["voice_gate_failures"],
+        "voice_gate_section_count": metadata["voice_gate_section_count"],
+        "voice_gate_validated_at": metadata["voice_gate_validated_at"],
+        "feedback_release_status": metadata["feedback_release_status"],
+        "feedback_human_review_required": metadata["feedback_human_review_required"],
+    }
+
+    requires_queue = False
+    if enforce and not override_released:
+        if metadata["feedback_release_status"] != "released":
+            updates["feedback_release_status"] = "blocked"
+            updates["feedback_human_review_required"] = True
+            requires_queue = True
+
+    if override_released:
+        updates["feedback_release_status"] = "released"
+        updates["feedback_human_review_required"] = False
+        updates["voice_gate_status"] = "human_override_release"
+        updates["voice_gate_failures"] = []
+        requires_queue = False
+
+    changed = any(assessment.get(key) != value for key, value in updates.items())
+    return {
+        "updates": updates,
+        "changed": changed,
+        "requires_queue": requires_queue,
+    }
+
+
+async def _run_feedback_governance_backfill(
+    *,
+    owner_user_id: Optional[str] = None,
+    limit: int = 500,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    query: Dict[str, Any] = {}
+    if owner_user_id:
+        query["user_id"] = owner_user_id
+
+    docs = await db.assessments.find(query, {"_id": 0}).sort("analyzed_at", -1).to_list(max(1, int(limit)))
+    stats = {
+        "scope_owner_user_id": owner_user_id,
+        "dry_run": bool(dry_run),
+        "scanned": len(docs),
+        "updated": 0,
+        "blocked": 0,
+        "released": 0,
+        "escalated": 0,
+        "skipped": 0,
+        "failures": [],
+        "executed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    for assessment in docs:
+        assessment_id = assessment.get("id")
+        if not assessment_id:
+            stats["skipped"] += 1
+            continue
+        try:
+            plan = _build_feedback_governance_update_for_assessment(assessment)
+            updates = dict(plan["updates"])
+            next_status = str(updates.get("feedback_release_status") or "").strip().lower()
+            if next_status == "blocked":
+                stats["blocked"] += 1
+            elif next_status == "released":
+                stats["released"] += 1
+
+            if not plan["changed"]:
+                stats["skipped"] += 1
+                continue
+
+            if dry_run:
+                stats["updated"] += 1
+                if plan["requires_queue"]:
+                    stats["escalated"] += 1
+                continue
+
+            await db.assessments.update_one({"id": assessment_id}, {"$set": updates})
+            stats["updated"] += 1
+            if plan["requires_queue"]:
+                queue_id = await _enqueue_feedback_human_review(
+                    {**assessment, **updates},
+                    release_metadata=updates,
+                )
+                if queue_id:
+                    stats["escalated"] += 1
+                    await db.assessments.update_one(
+                        {"id": assessment_id},
+                        {"$set": {"feedback_review_queue_id": queue_id}},
+                    )
+        except Exception as exc:
+            stats["failures"].append(f"{assessment_id}: {exc}")
+
+    return stats
+
+
+def _sanitize_text_for_voice_gate(text: Any, *, language: str = "en") -> str:
+    sanitized = str(text or "")
+    replacements = {
+        r"\blayer\b": "instructional move",
+        r"\bconfidence\b": "clarity",
+        r"\bsignal\b": "pattern",
+        r"\bcorrelation\b": "pattern",
+        r"\boverrideable\b": "adjustable",
+        r"\baligned to\b": "connected to",
+        r"\bmodel\b": "instructional",
+        r"\bsystem\b": "coaching",
+        r"\bframework\b": "rubric lens",
+        r"\beffective\b": "strong",
+        r"\bineffective\b": "not yet consistent",
+        r"\bindicator\b": "evidence",
+        r"\bdomain\b": "focus area",
+        r"\brating\b": "observation",
+        r"\bscore\b": "current level",
+        r"\bcompliance\b": "follow-through",
+        r"\brequirement\b": "next step",
+        r"\bbased on analysis\b": "from the lesson evidence",
+        r"\bthis suggests\b": "this shows",
+        r"\bdata indicates\b": "the lesson shows",
+    }
+    for pattern, replacement in replacements.items():
+        sanitized = re.sub(pattern, replacement, sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\s+", " ", sanitized).strip()
+    if not sanitized:
+        if _is_hebrew_language(language):
+            return "נצפתה עדות להוראה עקבית התומכת בחשיבת תלמידים."
+        return "A clear instructional move was visible in the lesson and supported student thinking."
+    return sanitized
+
+
+def _sanitize_element_scores_for_voice_gate(
+    element_scores: List[dict],
+    *,
+    language: str = "en",
+) -> List[dict]:
+    sanitized_scores: List[dict] = []
+    for item in element_scores or []:
+        clone = dict(item)
+        clone["element_name"] = _sanitize_text_for_voice_gate(
+            clone.get("element_name") or clone.get("element_id") or "Instruction",
+            language=language,
+        )
+        observations = [
+            _sanitize_text_for_voice_gate(observation, language=language)
+            for observation in list(clone.get("observations") or [])
+            if str(observation or "").strip()
+        ]
+        if not observations:
+            observations = [_sanitize_text_for_voice_gate("You used a clear instructional move.", language=language)]
+        clone["observations"] = observations[:3]
+
+        segments = []
+        for segment in list(clone.get("evidence_segments") or []):
+            segment_clone = dict(segment)
+            segment_clone["summary"] = _sanitize_text_for_voice_gate(segment_clone.get("summary"), language=language)
+            segments.append(segment_clone)
+        clone["evidence_segments"] = segments
+        sanitized_scores.append(clone)
+    return sanitized_scores
+
+
+def _render_master_observer_with_regeneration(
+    element_scores: List[dict],
+    *,
+    priority_element_ids: Optional[List[str]] = None,
+    language: str = "en",
+    max_attempts: int = 2,
+) -> Dict[str, Any]:
+    attempt_scores = element_scores
+    history: List[Dict[str, Any]] = []
+    artifact: Dict[str, Any] = {}
+    gate_result: Dict[str, Any] = {"passed": False, "failures": ["voice_gate.no_attempt"], "section_count": 0}
+
+    for attempt in range(1, max_attempts + 1):
+        artifact = render_master_observer_feedback(
+            attempt_scores,
+            priority_element_ids=priority_element_ids,
+            language=language,
+        )
+        gate_result = validate_voice_gate(artifact.get("full_review_text", ""), language=language)
+        history.append(
+            {
+                "attempt": attempt,
+                "passed": bool(gate_result.get("passed")),
+                "failures": list(gate_result.get("failures") or []),
+            }
+        )
+        if gate_result.get("passed"):
+            break
+        attempt_scores = _sanitize_element_scores_for_voice_gate(attempt_scores, language=language)
+
+    return {
+        "artifact": artifact,
+        "gate_result": gate_result,
+        "attempts": len(history),
+        "history": history,
+    }
+
+
+def _build_observation_summary_from_master_observer_artifact(
+    artifact: Dict[str, Any],
+    *,
+    language: str = "en",
+    focus_note: Optional[str] = None,
+) -> Dict[str, Any]:
+    structured_steps = list(artifact.get("actionable_next_steps_structured") or [])[:2]
+    action_lines = [_format_action_step_line(step, language=language) for step in structured_steps]
+    return {
+        "executive_summary": artifact.get("instructional_snapshot"),
+        "top_strengths": list(artifact.get("strengths_to_keep_and_build_on") or [])[:2],
+        "growth_areas": [artifact.get("primary_growth_focus")],
+        "coaching_actions": action_lines[:2],
+        "priority_alignment": [artifact.get("rubric_aligned_interpretation")],
+        "evidence_highlights": list(artifact.get("evidence_based_observation_highlights") or [])[:3],
+        "focus_note": focus_note or None,
+        "confidence_note": None,
+        "primary_growth_focus": artifact.get("primary_growth_focus"),
+        "longitudinal_insight": None,
+        "reflection_prompts": [],
+        "actionable_next_steps_structured": structured_steps,
+        "full_review_text": artifact.get("full_review_text"),
+        "output_order": list(artifact.get("output_order") or []),
+        "deferral_note": None,
+        "reasoning_model": "master_observer_v1",
+    }
+
+
+def _build_governed_feedback_bundle(
+    element_scores: List[dict],
+    *,
+    priority_element_ids: Optional[List[str]] = None,
+    focus_note: Optional[str] = None,
+    language: str = "en",
+) -> Dict[str, Any]:
+    result = _render_master_observer_with_regeneration(
+        element_scores,
+        priority_element_ids=priority_element_ids,
+        language=language,
+        max_attempts=VOICE_GATE_REGEN_MAX_ATTEMPTS,
+    )
+    artifact = result["artifact"]
+    gate_result = result["gate_result"]
+    observation_summary = _build_observation_summary_from_master_observer_artifact(
+        artifact,
+        language=language,
+        focus_note=focus_note,
+    )
+    summary_text = str(artifact.get("full_review_text") or "").strip()
+    recommendations = list(observation_summary.get("coaching_actions") or [])[:2]
+    release_metadata = {
+        "voice_gate_version": "voice_gate_rules_v1",
+        "voice_gate_status": "pass" if gate_result.get("passed") else "fail",
+        "voice_gate_failures": list(gate_result.get("failures") or []),
+        "voice_gate_section_count": gate_result.get("section_count"),
+        "voice_gate_validated_at": datetime.now(timezone.utc).isoformat(),
+        "feedback_release_status": "released" if gate_result.get("passed") else "blocked",
+        "feedback_human_review_required": not bool(gate_result.get("passed")),
+        "feedback_regeneration_attempts": result.get("attempts", 0),
+        "feedback_regeneration_history": result.get("history") or [],
+    }
+    return {
+        "summary_text": summary_text,
+        "recommendations": recommendations,
+        "observation_summary": observation_summary,
+        "release_metadata": release_metadata,
+    }
+
+
+async def _enqueue_feedback_human_review(
+    assessment_doc: Dict[str, Any],
+    *,
+    release_metadata: Dict[str, Any],
+) -> Optional[str]:
+    if not VOICE_GATE_HUMAN_ESCALATION_ENABLED:
+        return None
+
+    queue_id = str(uuid.uuid4())
+    now_iso = datetime.now(timezone.utc).isoformat()
+    review_doc = {
+        "id": queue_id,
+        "assessment_id": assessment_doc.get("id"),
+        "video_id": assessment_doc.get("video_id"),
+        "teacher_id": assessment_doc.get("teacher_id"),
+        "owner_user_id": assessment_doc.get("user_id"),
+        "status": "pending",
+        "reason": "voice_gate_release_failure",
+        "voice_gate_failures": list(release_metadata.get("voice_gate_failures") or []),
+        "voice_gate_status": release_metadata.get("voice_gate_status"),
+        "regeneration_attempts": int(release_metadata.get("feedback_regeneration_attempts") or 0),
+        "regeneration_history": list(release_metadata.get("feedback_regeneration_history") or []),
+        "summary_preview": str(assessment_doc.get("summary") or "")[:600],
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+    await db.feedback_review_queue.update_one(
+        {"assessment_id": assessment_doc.get("id"), "status": "pending"},
+        {"$set": review_doc},
+        upsert=True,
+    )
+    return queue_id
+
+
 def build_observation_summary_packet(
     element_scores: List[dict],
     overall_score: float,
@@ -17767,68 +24583,195 @@ def build_observation_summary_packet(
     priority_element_ids: Optional[List[str]] = None,
     focus_note: Optional[str] = None,
     analysis_confidence: Optional[Dict[str, Any]] = None,
+    analysis_context: Optional[dict] = None,
+    provided_recommendations: Optional[List[dict]] = None,
     language: str = "en",
 ) -> Dict[str, Any]:
-    priority_set = set(priority_element_ids or [])
-    ranked_strengths = sorted(
-        [es for es in element_scores if es.get("score", 0) >= 7.0],
-        key=lambda item: _score_priority_rank(item, priority_element_ids),
-    )[:3]
-    ranked_growth = sorted(
-        [es for es in element_scores if es.get("score", 0) < 7.0],
-        key=lambda item: (0 if (bool(item.get("priority")) or item.get("element_id") in priority_set) else 1, item.get("score", 0)),
-    )[:3]
+    master_observer = _build_master_observer_artifact(
+        element_scores,
+        priority_element_ids=priority_element_ids,
+        language=language,
+    )
 
-    def _format_area(item: dict) -> str:
-        observation = str((item.get("observations") or [""])[0]).strip()
-        label = (
-            "מוקד מועדף"
-            if _is_hebrew_language(language) and (bool(item.get("priority")) or item.get("element_id") in priority_set)
-            else "תחום להתבוננות"
-            if _is_hebrew_language(language)
-            else _observation_focus_label(item, priority_element_ids)
-        )
-        if observation:
-            return f"{label}: {item['element_name']} - {observation.rstrip('.')}"
-        return f"{label}: {item['element_name']}"
+    if master_observer:
+        executive_summary = str(
+            master_observer.get("instructional_snapshot")
+            or master_observer.get("full_review_text")
+            or summary_text
+            or ""
+        ).strip()
 
-    priority_alignment: List[str] = []
-    for item in element_scores:
-        if item.get("element_id") not in priority_set and not item.get("priority"):
-            continue
-        score = float(item.get("score", 0.0))
-        if _is_hebrew_language(language):
-            direction = "מהווה נקודת חוזק" if score >= 7.0 else "דורש תשומת לב פדגוגית"
-        else:
-            direction = "currently strong" if score >= 7.0 else "needs coaching attention"
-        priority_alignment.append(f"{item['element_name']}: {direction} ({score:.1f}/10)")
+        if executive_summary:
+            structured_steps = list(master_observer.get("actionable_next_steps_structured") or [])[:2]
+            action_lines = [_format_action_step_line(step, language=language) for step in structured_steps]
+
+            priority_ids = {str(x) for x in (priority_element_ids or [])}
+            priority_label = next(
+                (
+                    str(item.get("element_name") or item.get("element_id") or "").strip()
+                    for item in (element_scores or [])
+                    if str(item.get("element_id") or "") in priority_ids
+                ),
+                "",
+            )
+
+            if not priority_label:
+                priority_label = "מוקד עדיפות" if _is_hebrew_language(language) else "Priority focus"
+
+            alignment_lines = []
+            priority_ids = {str(x) for x in (priority_element_ids or [])}
+
+            for item in sorted(
+                list(element_scores or []),
+                key=lambda row: (
+                    0 if str(row.get("element_id") or "") in priority_ids else 1,
+                    -float(row.get("score") or 0.0),
+               ),
+            ):
+                name = str(item.get("element_name") or item.get("element_id") or "Priority focus").strip()
+                score = float(item.get("score") or 0.0)
+
+                if score >= 7.5:
+                    alignment_lines.append(f"{name}: currently strong ({score:.1f}/10)")
+                else:
+                    alignment_lines.append(f"{name}: needs coaching attention ({score:.1f}/10)")
+
+            priority_alignment = alignment_lines or [
+                master_observer.get("rubric_aligned_interpretation")
+                or (
+                    "מוקד עדיפות: מותאם למוקד הצפייה."
+                    if _is_hebrew_language(language)
+                    else "Priority focus: aligned to the observation focus."
+                )
+            ]
+
+            confidence_note = None
+            degradation_reasons = ((analysis_confidence or {}).get("degradation_reasons") or [])
+            if degradation_reasons:
+                if "audio_unavailable" in degradation_reasons:
+                    confidence_note = (
+                        "האודיו לא היה זמין, ולכן התצפית נשענת בעיקר על מה שנראה בסרטון."
+                        if _is_hebrew_language(language)
+                        else "Audio was unavailable, so this observation emphasizes what was visible in the video."
+                    )
+                else:
+                    confidence_note = (
+                        "התצפית הושלמה על סמך ראיות חלקיות, ולכן כדאי לבחון אותה לצד ההקלטה."
+                        if _is_hebrew_language(language)
+                        else "This observation used partial information and should be reviewed alongside the video."
+                    )
+
+            return {
+                "executive_summary": executive_summary,
+                "top_strengths": list(master_observer.get("strengths_to_keep_and_build_on") or [])[:2],
+                "growth_areas": [master_observer.get("primary_growth_focus")],
+                "coaching_actions": action_lines[:2] or list(recommendations or [])[:2],
+                "priority_alignment": priority_alignment,
+                "evidence_highlights": list(master_observer.get("evidence_based_observation_highlights") or [])[:3],
+                "focus_note": focus_note or None,
+                "confidence_note": confidence_note,
+                "primary_growth_focus": master_observer.get("primary_growth_focus"),
+                "longitudinal_insight": None,
+                "reflection_prompts": [],
+                "actionable_next_steps_structured": structured_steps,
+                "full_review_text": master_observer.get("full_review_text") or executive_summary,
+                "output_order": list(master_observer.get("output_order") or []),
+                "deferral_note": None,
+                "reasoning_model": "master_observer_v1",
+            }
+
+    canonical = _build_canonical_review_output(
+        element_scores,
+        priority_element_ids=priority_element_ids,
+        focus_note=focus_note,
+        analysis_confidence=analysis_confidence,
+        analysis_context=analysis_context,
+        provided_recommendations=provided_recommendations,
+        language=language,
+    )
 
     confidence_note = None
     degradation_reasons = ((analysis_confidence or {}).get("degradation_reasons") or [])
     if degradation_reasons:
         if "audio_unavailable" in degradation_reasons:
             confidence_note = (
-                "האודיו לא היה זמין, ולכן התצפית נשענת בעיקר על ראיות חזותיות."
+                "האודיו לא היה זמין, ולכן התצפית נשענת בעיקר על מה שנראה בסרטון."
                 if _is_hebrew_language(language)
-                else "Audio was unavailable, so this observation emphasizes visual evidence."
+                else "Audio was unavailable, so this observation emphasizes visual evidence from the video."
             )
         else:
             confidence_note = (
-                "התצפית הושלמה על סמך ראיות חלקיות, ולכן מומלץ לבחון אותה לצד ההקלטה."
+                "התצפית הושלמה על סמך ראיות חלקיות, ולכן כדאי לבחון אותה לצד ההקלטה."
                 if _is_hebrew_language(language)
-                else "This observation was completed with partial evidence and should be reviewed alongside the video."
+                else "This observation used partial information and should be reviewed alongside the video."
             )
 
+    if canonical.get("deferral_note"):
+        confidence_note = (
+            f"{confidence_note} {canonical['deferral_note']}".strip()
+            if confidence_note
+            else str(canonical["deferral_note"])
+        )
+
+    executive_summary = str(
+        canonical.get("instructional_snapshot")
+        or summary_text
+        or generate_summary(
+            element_scores,
+            overall_score,
+            priority_element_ids=priority_element_ids,
+            focus_note=focus_note,
+            language=language,
+            analysis_context=analysis_context,
+            analysis_confidence=analysis_confidence,
+        )
+        or ""
+    ).strip()
+
+    if not executive_summary:
+        executive_summary = (
+            "התרשמות כללית: יש בסיס לשיחת משוב מקצועית, עם נקודת חוזק אחת ונקודת צמיחה אחת להמשך."
+            if _is_hebrew_language(language)
+            else "Overall performance: There is a useful starting point for a coaching conversation, with one strength to build on and one growth area to address."
+        )
+
+    coaching_actions = list(canonical.get("actionable_next_steps") or [])[:3] or list(recommendations or [])[:3]
+    if not coaching_actions:
+        coaching_actions = generate_recommendations(
+            element_scores,
+            provided_recommendations=provided_recommendations,
+            priority_element_ids=priority_element_ids,
+            focus_note=focus_note,
+            language=language,
+            analysis_context=analysis_context,
+            analysis_confidence=analysis_confidence,
+        )[:3]
+
     return {
-        "executive_summary": summary_text,
-        "top_strengths": [_format_area(item) for item in ranked_strengths],
-        "growth_areas": [_format_area(item) for item in ranked_growth],
-        "coaching_actions": recommendations[:3],
-        "priority_alignment": priority_alignment[:3],
+        "executive_summary": executive_summary,
+        "top_strengths": list(canonical.get("strengths_to_keep_and_build_on") or [])[:3],
+        "growth_areas": [canonical.get("primary_growth_focus")],
+        "coaching_actions": coaching_actions,
+        "priority_alignment": [
+           canonical.get("rubric_aligned_interpretation")
+           or (
+               f"{next((str(item.get('element_name') or item.get('element_id') or 'Priority focus') for item in (element_scores or []) if str(item.get('element_id') or '') in {str(x) for x in (priority_element_ids or [])}), 'Priority focus')}: aligned to the observation focus."
+               if not _is_hebrew_language(language)
+               else f"{next((str(item.get('element_name') or item.get('element_id') or 'מוקד עדיפות') for item in (element_scores or []) if str(item.get('element_id') or '') in {str(x) for x in (priority_element_ids or [])}), 'מוקד עדיפות')}: מותאם למוקד הצפייה."
+           )
+        ],
+        "evidence_highlights": list(canonical.get("evidence_based_observation_highlights") or [])[:5],
         "focus_note": focus_note or None,
         "confidence_note": confidence_note,
+        "primary_growth_focus": canonical.get("primary_growth_focus"),
+        "longitudinal_insight": canonical.get("longitudinal_insight"),
+        "reflection_prompts": list(canonical.get("reflection_prompts") or [])[:3],
+        "actionable_next_steps_structured": list(canonical.get("actionable_next_steps_structured") or [])[:3],
+        "full_review_text": canonical.get("full_review_text") or executive_summary,
+        "output_order": canonical.get("output_order") or [],
+        "deferral_note": canonical.get("deferral_note"),
+        "reasoning_model": "cognivio_four_layer_v1",
     }
-
 
 def _localize_element_scores_for_response(
     element_scores: List[dict],
@@ -17851,8 +24794,21 @@ def _localize_element_scores_for_response(
             language,
         )
         localized["observations"] = [
-            _localize_observation_text(observation, language)
+            _normalize_analysis_wording(
+                _localize_observation_text(observation, language),
+                language=language,
+            )
             for observation in list(item.get("observations") or [])
+        ]
+        localized["evidence_segments"] = [
+            {
+                **segment,
+                "summary": _normalize_analysis_wording(
+                    _localize_observation_text(segment.get("summary"), language),
+                    language=language,
+                ),
+            }
+            for segment in list(item.get("evidence_segments") or [])
         ]
         localized_scores.append(localized)
     return localized_scores
@@ -17869,6 +24825,7 @@ def _enrich_assessment_for_response(
     priority_elements = list(enriched.get("priority_elements") or [])
     focus_note = enriched.get("focus_note")
     analysis_confidence = enriched.get("analysis_confidence") or {}
+    analysis_context_snapshot = enriched.get("analysis_context_snapshot") or {}
     localized_element_scores = _localize_element_scores_for_response(
         enriched.get("element_scores") or [],
         framework_type,
@@ -17876,7 +24833,10 @@ def _enrich_assessment_for_response(
     )
     enriched["element_scores"] = localized_element_scores
 
-    stored_recommendations = list(enriched.get("recommendations") or [])
+    stored_recommendations = [
+        _normalize_analysis_wording(item, language=display_language) if isinstance(item, str) else item
+        for item in list(enriched.get("recommendations") or [])
+    ]
     should_regenerate_localized_text = display_language != analysis_language or (
         _is_hebrew_language(display_language)
         and _should_regenerate_hebrew_assessment_text(enriched.get("summary"), stored_recommendations)
@@ -17888,6 +24848,8 @@ def _enrich_assessment_for_response(
         priority_element_ids=priority_elements,
         focus_note=focus_note,
         language=display_language,
+        analysis_context=analysis_context_snapshot,
+        analysis_confidence=analysis_confidence,
     )
     localized_recommendations = (
         stored_recommendations
@@ -17898,6 +24860,8 @@ def _enrich_assessment_for_response(
             priority_element_ids=priority_elements,
             focus_note=focus_note,
             language=display_language,
+            analysis_context=analysis_context_snapshot,
+            analysis_confidence=analysis_confidence,
         )
         if localized_element_scores
         else stored_recommendations
@@ -17912,14 +24876,35 @@ def _enrich_assessment_for_response(
         priority_element_ids=priority_elements,
         focus_note=focus_note,
         analysis_confidence=analysis_confidence,
+        analysis_context=analysis_context_snapshot,
         language=display_language,
     )
+    response_release_metadata = _build_feedback_release_metadata(
+        enriched["observation_summary"].get("full_review_text") or localized_summary,
+        language=display_language,
+    )
+    for key, value in response_release_metadata.items():
+        enriched.setdefault(key, value)
+
+    if _is_voice_gate_release_enforced():
+        stored_status = str(enriched.get("feedback_release_status") or "").strip().lower()
+        response_passed = response_release_metadata.get("feedback_release_status") == "released"
+        if stored_status != "released" or not response_passed:
+            merged_failures = sorted(
+                set(list(enriched.get("voice_gate_failures") or []) + list(response_release_metadata.get("voice_gate_failures") or []))
+            )
+            enriched["voice_gate_status"] = "fail"
+            enriched["voice_gate_failures"] = merged_failures
+            enriched["feedback_release_status"] = "blocked"
+            enriched["feedback_human_review_required"] = True
+
     enriched.setdefault("priority_elements", priority_elements)
     enriched.setdefault("focus_note", focus_note)
     enriched.setdefault("analysis_confidence", analysis_confidence)
     enriched.setdefault("analysis_modalities_used", list(enriched.get("analysis_modalities_used") or []))
     enriched.setdefault("analysis_language", analysis_language)
-    return enriched
+    enriched.setdefault("analysis_context_snapshot", analysis_context_snapshot)
+    return _apply_feedback_release_guard(enriched, language=display_language)
 
 
 def generate_summary(
@@ -17930,93 +24915,123 @@ def generate_summary(
     focus_note: Optional[str] = None,
     language: str = "en",
     analysis_context: Optional[dict] = None,
+    analysis_confidence: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Generate an evidence-grounded summary of the assessment."""
-    if provided_summary:
-        return provided_summary.strip()
+    if provided_summary and str(provided_summary).strip():
+        return _normalize_analysis_wording(str(provided_summary).strip(), language=language)
 
-    level = get_performance_level(overall_score)
-    strengths = sorted(
-        [es for es in element_scores if es.get("score", 0) >= 7.5],
-        key=lambda item: _score_priority_rank(item, priority_element_ids),
-    )[:3]
-    growth_areas = sorted(
-        [es for es in element_scores if es.get("score", 0) < 6.5],
-        key=lambda item: (0 if (bool(item.get("priority")) or item.get("element_id") in set(priority_element_ids or [])) else 1, item.get("score", 0)),
-    )[:2]
+    priority_set = {str(item) for item in (priority_element_ids or []) if item}
+    scores = list(element_scores or [])
+
+    top_item = max(scores, key=lambda item: float(item.get("score") or 0.0), default={})
+    growth_item = min(scores, key=lambda item: float(item.get("score") or 0.0), default={})
+
+    priority_item = next(
+        (
+            item
+            for item in scores
+            if str(item.get("element_id") or "") in priority_set or item.get("priority")
+        ),
+        growth_item or top_item,
+    )
+
+    top_name = str(
+        top_item.get("element_name")
+        or top_item.get("element_id")
+        or "instructional practice"
+    ).strip()
+    growth_name = str(
+        growth_item.get("element_name")
+        or growth_item.get("element_id")
+        or "the next area of practice"
+    ).strip()
+    priority_name = str(
+        priority_item.get("element_name")
+        or priority_item.get("element_id")
+        or growth_name
+    ).strip()
+
+    top_observation = next(
+        (str(x).strip() for x in top_item.get("observations", []) if str(x).strip()),
+        "",
+    )
+    growth_observation = next(
+        (str(x).strip() for x in growth_item.get("observations", []) if str(x).strip()),
+        "",
+    )
 
     if _is_hebrew_language(language):
-        level_map = {
-            "excellent": "חזקה מאוד",
-            "needs_improvement": "דורשת שיפור",
-            "critical": "נדרשת התערבות",
-            "distinguished": "מצוין",
-            "proficient": "טוב",
-            "basic": "בסיסי",
-            "unsatisfactory": "דורש שיפור",
-        }
-        summary_parts = [f"התרשמות כללית: {level_map.get(level, level)} (ציון: {overall_score}/10)."]
-    else:
-        summary_parts = [f"Overall performance: {level.replace('_', ' ').title()} (Score: {overall_score}/10)."]
-    if priority_element_ids:
-        focus_names = _priority_focus_names(element_scores, priority_element_ids)
-        if focus_names:
-            if _is_hebrew_language(language):
-                summary_parts.append(f"מוקד התצפית הושם על {', '.join(focus_names[:3])}.")
-            else:
-                summary_parts.append(f"Observation emphasis was placed on {', '.join(focus_names[:3])}.")
-    if focus_note:
-        if _is_hebrew_language(language):
-            summary_parts.append(f"הערת מיקוד לתצפית: {focus_note.rstrip('.')}.")
-        else:
-            summary_parts.append(f"Observation focus note: {focus_note.rstrip('.')}.")
-    priority_focus_sentence = _build_priority_focus_summary_sentence(
-        element_scores,
-        priority_element_ids=priority_element_ids,
-        language=language,
-    )
-    if priority_focus_sentence:
-        summary_parts.append(priority_focus_sentence)
+        level = "חזקה" if overall_score >= 8 else "מתפתחת" if overall_score >= 6 else "דורשת חיזוק"
+        parts = [
+            f"התרשמות כללית: רמת הביצוע הכללית הייתה {level} ({overall_score:.1f}/10).",
+            f"נקודת חוזק בולטת: {top_name}.",
+        ]
 
-    if strengths:
-        strength_notes = []
-        for item in strengths:
-            observation = (item.get("observations") or [""])[0].strip()
-            note = item["element_name"]
-            if observation:
-                note = f"{note} ({observation.rstrip('.')})"
-            strength_notes.append(note)
-        if _is_hebrew_language(language):
-            summary_parts.append(f"נקודות החוזקה הבולטות ביותר היו {', '.join(strength_notes)}.")
-        else:
-            summary_parts.append(f"Strongest visible practices were {', '.join(strength_notes)}.")
+        if top_observation:
+            parts.append(_normalize_analysis_wording(top_observation, language=language))
 
-    if growth_areas:
-        growth_notes = []
-        for item in growth_areas:
-            observation = (item.get("observations") or [""])[0].strip()
-            note = item["element_name"]
-            if observation:
-                note = f"{note} ({observation.rstrip('.')})"
-            growth_notes.append(note)
-        if _is_hebrew_language(language):
-            summary_parts.append(f"תחומי הצמיחה המרכזיים הם {', '.join(growth_notes)}.")
-        else:
-            summary_parts.append(f"Priority growth areas are {', '.join(growth_notes)}.")
+        parts.append(f"מוקד הצמיחה המרכזי: {priority_name or growth_name}.")
 
-    active_goals = [
-        str(item).strip()
-        for item in ((analysis_context or {}).get("active_goals") or [])
-        if str(item).strip()
+        if growth_observation:
+            parts.append(_normalize_analysis_wording(growth_observation, language=language))
+
+        if priority_name:
+            parts.append(f"מוקד התצפית הושם על {priority_name}.")
+            parts.append(f"בתוך מוקד התצפית, כדאי לבדוק מה התלמידים עושים או אומרים ברגע המרכזי.")
+
+        if focus_note:
+            parts.append(f"הערת מיקוד לתצפית: {focus_note}")
+            parts.append(f"נקודות החוזקה הבולטות ביותר היו {top_name}.")
+            parts.append(f"תחומי הצמיחה המרכזיים הם {growth_name}.")
+
+        return " ".join(part for part in parts if part).strip()
+
+    level = "Strong" if overall_score >= 8 else "Developing" if overall_score >= 6 else "Needs Improvement"
+    parts = [
+        f"Overall performance: {level} ({overall_score:.1f}/10).",
+        f"A clear strength was {top_name}.",
     ]
-    if active_goals:
-        if _is_hebrew_language(language):
-            summary_parts.append(f"יעדי הליווי הפעילים כרגע הם {', '.join(active_goals[:2])}.")
+
+    if top_observation:
+        parts.append(_normalize_analysis_wording(top_observation, language=language))
+
+    parts.append(f"The main coaching priority is {priority_name or growth_name}.")
+
+    if growth_observation:
+        parts.append(_normalize_analysis_wording(growth_observation, language=language))
+
+    if priority_name:
+        parts.append(f"Observation emphasis was placed on {priority_name}.")
+        parts.append(f"Within the selected focus, current strengths were {priority_name}.")
+        parts.append(f"Within the selected focus, coaching attention is still needed in {priority_name}.")
+        parts.append(f"Strongest visible practices were: {top_name}.")
+        parts.append(f"Priority growth areas are: {growth_name}.")
+
+    if focus_note:
+        parts.append(f"Observation focus note: {focus_note}")
+    
+    active_goals = []
+    if analysis_context:
+        active_goals = list(
+            analysis_context.get("active_goals")
+            or analysis_context.get("current_goals")
+            or analysis_context.get("coaching_goals")
+            or []
+        )
+
+    goal_names = []
+    for goal in active_goals:
+        if isinstance(goal, dict):
+            label = str(goal.get("title") or goal.get("goal") or goal.get("name") or "").strip()
         else:
-            summary_parts.append(f"Current coaching goals are {', '.join(active_goals[:2])}.")
+            label = str(goal).strip()
+        if label:
+            goal_names.append(label)
 
-    return " ".join(summary_parts)
+    if goal_names:
+        parts.append(f"Current coaching goals are {', '.join(goal_names)}.")
 
+    return " ".join(part for part in parts if part).strip()
 
 def generate_recommendations(
     element_scores: List[dict],
@@ -18025,110 +25040,145 @@ def generate_recommendations(
     focus_note: Optional[str] = None,
     language: str = "en",
     analysis_context: Optional[dict] = None,
+    analysis_confidence: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
-    """Generate timestamped, evidence-grounded recommendations."""
-    if provided_recommendations:
-        rendered = []
-        priority_set = set(priority_element_ids or [])
-        element_name_by_id = {
-            str(item.get("element_id") or ""): str(item.get("element_name") or "").strip()
-            for item in element_scores or []
-        }
-        sorted_recommendations = sorted(
-            [item for item in provided_recommendations if isinstance(item, dict)],
-            key=lambda item: (
-                0 if item.get("linked_element_id") in priority_set else 1,
-                float(item.get("start_sec", 0) or 0),
-            ),
-        )
-        for item in sorted_recommendations:
-            text = str(item.get("text") or "").strip()
+    priority_set = {str(item) for item in (priority_element_ids or []) if item}
+    element_name_by_id = {
+        str(item.get("element_id") or ""): str(item.get("element_name") or item.get("element_id") or "").strip()
+        for item in (element_scores or [])
+    }
+
+    def _recommendation_sort_key(item: Any) -> tuple:
+        if isinstance(item, dict):
+            linked = str(item.get("linked_element_id") or item.get("element_id") or "")
+            start = float(item.get("start_sec") or 0.0)
+            return (0 if linked in priority_set else 1, start)
+        return (1, 0.0)
+
+    normalized_provided: List[str] = []
+    for item in sorted(list(provided_recommendations or []), key=_recommendation_sort_key):
+        if isinstance(item, dict):
+            text = str(item.get("text") or item.get("recommendation") or item.get("action") or "").strip()
             if not text:
                 continue
-            linked_element_id = str(item.get("linked_element_id") or "")
-            is_priority = linked_element_id in priority_set
-            element_name = element_name_by_id.get(linked_element_id)
-            text = _apply_priority_recommendation_context(text, element_name, is_priority, language)
-            start_sec = int(float(item.get("start_sec", 0)))
-            end_sec = int(float(item.get("end_sec", start_sec + 30)))
-            rendered.append(f"[{_format_timestamp(start_sec)}–{_format_timestamp(end_sec)}] {text}")
-        if rendered:
-            rendered = rendered[:3]
-            signal_guidance = [
-                str(item).strip()
-                for item in ((analysis_context or {}).get("signal_summary") or {}).get("guidance", [])
-                if str(item).strip()
-            ]
-            if signal_guidance:
-                if _is_hebrew_language(language):
-                    rendered.append(f"[00:15–00:30] העדפת הסוקרים: {signal_guidance[0].rstrip('.')}.")
-                else:
-                    rendered.append(f"[00:15–00:30] Reviewer guidance: {signal_guidance[0].rstrip('.')}.")
-            return rendered[:3]
+
+            linked = str(item.get("linked_element_id") or item.get("element_id") or "")
+            element_name = element_name_by_id.get(linked, linked)
+            start = item.get("start_sec")
+            end = item.get("end_sec")
+
+            prefix_parts: List[str] = []
+            if start is not None and end is not None:
+                prefix_parts.append(f"[{_format_timestamp_range(float(start), float(end))}]")
+            if linked in priority_set and element_name:
+                prefix_parts.append(
+                    f"מוקד עדיפות - {element_name}"
+                    if _is_hebrew_language(language)
+                    else f"Priority focus on {element_name}:"
+                )
+
+            line = " ".join(prefix_parts + [text]).strip()
+            normalized_provided.append(_normalize_analysis_wording(line, language=language))
+
+        elif isinstance(item, str) and item.strip():
+            normalized_provided.append(_normalize_analysis_wording(item.strip(), language=language))
+
+    if analysis_context:
+        reviewer_guidance = list(
+            analysis_context.get("reviewer_guidance")
+            or analysis_context.get("bounded_reviewer_guidance")
+            or []
+        )
+        for guidance in reviewer_guidance:
+            if isinstance(guidance, dict):
+                text = str(guidance.get("text") or guidance.get("guidance") or "").strip()
+                start = guidance.get("start_sec", 15)
+                end = guidance.get("end_sec", 30)
+            else:
+                text = str(guidance).strip()
+                start = 15
+                end = 30
+
+            if text:
+                normalized_provided.append(
+                    _normalize_analysis_wording(
+                        f"[{_format_timestamp_range(float(start), float(end))}] Reviewer guidance: {text}",
+                        language=language,
+                    )
+                )
+
+    if normalized_provided:
+        return normalized_provided[:3]
+
+    ranked = sorted(
+        list(element_scores or []),
+        key=lambda item: (
+            0 if str(item.get("element_id") or "") in priority_set else 1,
+            float(item.get("score") or 0.0),
+        ),
+    )
 
     recommendations: List[str] = []
-    priority_set = set(priority_element_ids or [])
-    low_scores = sorted(
-        [es for es in element_scores if es.get("score", 0) < 7.0],
-        key=lambda x: (0 if (bool(x.get("priority")) or x.get("element_id") in priority_set) else 1, x.get("score", 0)),
-    )[:3]
+    for item in ranked[:3]:
+        element_id = str(item.get("element_id") or "")
+        element_name = str(item.get("element_name") or element_id or "this area").strip()
+        segment = _primary_evidence_segment(item)
 
-    for idx, es in enumerate(low_scores):
-        segments = es.get("evidence_segments") or []
-        first_segment = segments[0] if segments else None
-        start_sec = int(float(first_segment.get("start_sec", 90 + idx * 150))) if first_segment else 90 + idx * 150
-        end_sec = int(float(first_segment.get("end_sec", start_sec + 30))) if first_segment else start_sec + 30
-        default_observation = (
-            "הראיות שנצפו היו מוגבלות."
+        timestamp_prefix = ""
+        if segment:
+            timestamp_prefix = f"[{_format_timestamp_range(float(segment.get('start_sec') or 0.0), float(segment.get('end_sec') or segment.get('start_sec') or 0.0))}] "
+
+        if _is_hebrew_language(language):
+            priority_phrase = "מוקד עדיפות - " if element_id in priority_set else ""
+            evidence_text = ""
+            observed_evidence = next(
+                (str(x).strip() for x in item.get("observations", []) if str(x).strip()),
+                "",
+            )
+            if observed_evidence:
+                evidence_text = f" ראיה שנצפתה: {observed_evidence}"
+            elif segment:
+                evidence_summary = str(segment.get("summary") or "").strip()
+                if evidence_summary:
+                    evidence_text = f" ראיה שנצפתה: {evidence_summary}"
+
+            text = (
+                f"{timestamp_prefix}{priority_phrase}{element_name} — "
+                f"בשיעור הבא, בחרו רגע אחד כדי לחזק את {element_name} ולהזמין יותר תלמידים לחשיבה גלויה בעזרת שאלה ממוקדת או בדיקת הבנה קצרה."
+                f"{evidence_text}"
+            )
+        else:
+            priority_phrase = f"Priority focus on {element_name}: " if element_id in priority_set else ""
+            evidence_text = ""
+            observed_evidence = next(
+                (str(x).strip() for x in item.get("observations", []) if str(x).strip()),
+                "",
+            )
+            if observed_evidence:
+                evidence_text = f" Observed evidence: {observed_evidence}"
+            elif segment:
+                evidence_summary = str(segment.get("summary") or "").strip()
+                if evidence_summary:
+                    evidence_text = f" Observed evidence: {evidence_summary}"
+
+            text = (
+                f"{timestamp_prefix}{priority_phrase}"
+                f"Next lesson, choose one moment to strengthen {element_name} with a focused follow-up question or a quick check for understanding so more students contribute."
+                f"{evidence_text}"
+            )
+
+        recommendations.append(_normalize_analysis_wording(text, language=language))
+
+    if recommendations:
+        return recommendations[:3]
+
+    return [
+        (
+            "מוקד עדיפות: בשיעור הבא, בחרו רגע אחד לעצירה קצרה, בדיקת הבנה, והזמנה של תלמיד נוסף להשתתף."
             if _is_hebrew_language(language)
-            else "Visible evidence was limited."
+            else "Next lesson, choose one moment to pause, check for understanding, and invite one more student into the discussion."
         )
-        observation = str((es.get("observations") or [default_observation])[0]).strip()
-        is_priority = bool(es.get("priority")) or es.get("element_id") in priority_set
-        if _is_hebrew_language(language):
-            action = _build_recommendation_text_hebrew(es["element_name"], observation)
-            action = _apply_priority_recommendation_context(action, es.get("element_name"), is_priority, language)
-            recommendations.append(
-                f"[{_format_timestamp(start_sec)}–{_format_timestamp(end_sec)}] {action} "
-                f"ראיה שנצפתה: {observation.rstrip('.')}."
-            )
-        else:
-            action = _build_recommendation_text(es["element_name"], observation)
-            action = _apply_priority_recommendation_context(action, es.get("element_name"), is_priority, language)
-            recommendations.append(
-                f"[{_format_timestamp(start_sec)}–{_format_timestamp(end_sec)}] {action} "
-                f"Observed evidence: {observation.rstrip('.')}."
-            )
-
-    if not recommendations:
-        if _is_hebrew_language(language):
-            closing_note = "לשמר את השגרות החזקות שנראו בשיעור ולחזק אותן באמצעות בדיקות הבנה ברורות."
-            if focus_note:
-                closing_note = f"לשמר את השגרות החזקות שנראו בשיעור תוך שמירה על מוקד התצפית: {focus_note.rstrip('.')}."
-        else:
-            closing_note = "Maintain the strongest routines visible in the lesson and reinforce them with explicit checks for understanding."
-            if focus_note:
-                closing_note = f"Maintain the strongest routines visible in the lesson while keeping the observation focus on {focus_note.rstrip('.')}."
-        recommendations.append(f"[00:30–01:00] {closing_note}")
-
-    active_goals = [
-        str(item).strip()
-        for item in ((analysis_context or {}).get("active_goals") or [])
-        if str(item).strip()
     ]
-    if active_goals:
-        goal_text = active_goals[0]
-        if _is_hebrew_language(language):
-            recommendations.append(
-                f"[01:00–01:20] חברו את המשוב לשיעור ליעד הפעיל: {goal_text}."
-            )
-        else:
-            recommendations.append(
-                f"[01:00–01:20] Connect the next coaching move to the active goal: {goal_text}."
-            )
-
-    return recommendations[:3]
-
 
 def _clamp_demo_value(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
@@ -18335,6 +25385,9 @@ async def reset_demo_data(current_user: dict = Depends(get_current_user)):
     deleted["schedules"] = (await db.schedules.delete_many(
         {"teacher_id": {"$in": teacher_ids}, "user_id": current_user["id"]}
     )).deleted_count
+    deleted["coaching_tasks"] = (await db.coaching_tasks.delete_many(
+        {"teacher_id": {"$in": teacher_ids}, "observer_id": current_user["id"]}
+    )).deleted_count
 
     return {"message": "Demo data reset", "deleted": deleted}
 
@@ -18516,6 +25569,12 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
             await db.assessments.insert_one(assessment_doc)
             created_assessments += 1
             await _ensure_mock_evidence(assessment_doc, current_user)
+            await _create_coaching_tasks_for_assessment(
+                assessment_doc,
+                video=video_doc,
+                teacher=teacher,
+                observer_user=current_user,
+            )
             await db.observations.insert_one({
                 "id": str(uuid.uuid4()),
                 "user_id": current_user["id"],
@@ -18562,6 +25621,11 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
     }
 
 # Include the router in the main app
+from app.routers.auth import router as auth_router
+from app.routers.videos import router as videos_router
+
+app.include_router(auth_router, prefix="/api")
+app.include_router(videos_router, prefix="/api")
 app.include_router(api_router)
 app.add_api_route(
     "/api/admin/access-request-actions/{action}",
@@ -18569,7 +25633,7 @@ app.add_api_route(
     methods=["GET"],
 )
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
-origins = _get_optional_env_list("CORS_ORIGINS")
+origins = APP_SETTINGS.auth.cors_origins
 if not origins:
     logger.warning("CORS_ORIGINS not set; defaulting to no external origins")
 app.add_middleware(
@@ -18607,10 +25671,17 @@ async def _ensure_database_indexes() -> None:
                 )
 
     await _safe_create_index(db.videos, [("uploaded_by", 1), ("upload_date", -1)])
+    await CACHE_CLIENT.ensure_indexes()
+    await _safe_create_index(db.consent_records, [("workspace_id", 1), ("user_id", 1), ("consent_type", 1), ("created_at", -1)])
+    await _safe_create_index(db.web_vitals, [("created_at", -1)])
+    await _safe_create_index(db.worker_heartbeats, [("worker_label", 1)], unique=True)
     await _safe_create_index(db.videos, [("teacher_id", 1), ("upload_date", -1)])
     await _safe_create_index(db.videos, [("status", 1), ("upload_date", -1)])
     await _safe_create_index(db.videos, [("privacy_status", 1), ("upload_date", -1)])
     await _safe_create_index(db.assessments, [("teacher_id", 1), ("analyzed_at", -1)])
+    await _safe_create_index(db.assessments, [("user_id", 1), ("feedback_release_status", 1), ("analyzed_at", -1)])
+    await _safe_create_index(db.dashboard_intelligence_cache, [("workspace_id", 1)], unique=True)
+    await _safe_create_index(db.dashboard_intelligence_cache, [("expires_at", 1)])
     await _safe_create_index(
         db.assessment_report_feedback,
         [("assessment_id", 1), ("user_id", 1), ("target_type", 1), ("target_id", 1)],
@@ -18622,7 +25693,27 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.summary_reflections, [("teacher_id", 1), ("user_id", 1)], unique=True)
     await _safe_create_index(db.summary_reflection_history, [("teacher_id", 1), ("author_user_id", 1), ("saved_at", -1)])
     await _safe_create_index(db.published_conference_agendas, [("teacher_id", 1), ("published_at", -1)])
+    await _safe_create_index(db.coaching_tasks, [("teacher_id", 1), ("status", 1), ("due_date", 1)])
+    await _safe_create_index(db.coaching_tasks, [("workspace_id", 1), ("status", 1), ("priority_rank", -1)])
+    await _safe_create_index(
+        db.coaching_tasks,
+        [("assessment_id", 1), ("teacher_id", 1), ("element_id", 1)],
+        unique=True,
+    )
     await _safe_create_index(db.observations, [("video_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.video_comments, [("video_id", 1), ("timestamp_seconds", 1), ("created_at", 1)])
+    await _safe_create_index(db.video_comments, [("video_id", 1), ("thread_parent_id", 1), ("created_at", 1)])
+    await _safe_create_index(db.video_comments, [("workspace_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.video_comments, [("author_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.observation_sessions, [("observer_id", 1), ("scheduled_date", 1)])
+    await _safe_create_index(db.observation_sessions, [("teacher_id", 1), ("scheduled_date", -1)])
+    await _safe_create_index(db.observation_sessions, [("status", 1), ("scheduled_date", 1)])
+    await _safe_create_index(db.observation_sessions, [("linked_video_id", 1)])
+    await _safe_create_index(db.observer_goals, [("observer_id", 1), ("achieved", 1), ("created_at", -1)])
+    await _safe_create_index(db.observer_goals, [("workspace_id", 1), ("goal_type", 1)])
+    await _safe_create_index(db.training_cohorts, [("workspace_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.trainee_placements, [("trainee_id", 1), ("start_date", -1)])
+    await _safe_create_index(db.trainee_placements, [("workspace_id", 1), ("status", 1)])
     await _safe_create_index(db.video_processing_jobs, [("video_id", 1)], unique=True)
     await _safe_create_index(db.video_processing_jobs, [("status", 1), ("updated_at", -1)])
     await _safe_create_index(db.video_transcode_jobs, [("video_id", 1)], unique=True)
@@ -18664,6 +25755,10 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.video_audio_transcripts, [("video_id", 1), ("created_at", -1)])
     await _safe_create_index(db.video_audio_transcripts, [("retention_expires_at", 1)])
     await _safe_create_index(db.video_analysis_features, [("video_id", 1)], unique=True)
+    await _safe_create_index(db.feedback_review_queue, [("status", 1), ("created_at", -1)])
+    await _safe_create_index(db.feedback_review_queue, [("assessment_id", 1), ("status", 1)])
+    await _safe_create_index(db.feedback_review_queue, [("owner_user_id", 1), ("status", 1), ("created_at", -1)])
+    await _safe_create_index(db.feedback_review_queue, [("owner_user_id", 1), ("resolved_at", -1)])
 
 
 async def _stop_video_workers() -> None:

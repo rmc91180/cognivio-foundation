@@ -3,6 +3,13 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "sh -c 'uvicorn server:app --host 0.0.0.0 --port ${PORT:-8080}'"
 healthcheckPath = "/health"
 restartPolicyType = "ON_FAILURE"
+
+[[services]]
+name = "api"
+startCommand = "sh -c 'VIDEO_WORKER_COUNT=0 VIDEO_TRANSCODE_WORKER_COUNT=0 PRIVACY_WORKER_COUNT=0 uvicorn server:app --host 0.0.0.0 --port ${PORT:-8080}'"
+
+[[services]]
+name = "worker"
+startCommand = "sh -c 'VIDEO_WORKER_COUNT=${VIDEO_WORKER_COUNT:-3} python worker_entrypoint.py'"

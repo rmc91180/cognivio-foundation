@@ -1,22 +1,30 @@
 import React from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "@/hooks/useAuth";
-import {
-  canAccessTenantRole,
-  getDefaultHomeRoute,
-  isAdminUser,
-  isSuperAdminUser,
-} from "@/lib/userRoutes";
+import { RoleMismatchPage } from "@/pages/RoleMismatchPage";
+import { canAccess, getHomeRoute } from "@/lib/roleRouter";
+import { consentApi, onboardingApi } from "@/lib/api";
+import { getUserTenantRole } from "@/lib/userRoutes";
 
-export function ProtectedRoute({
-  children,
-  adminOnly = false,
-  superAdminOnly = false,
-  allowedTenantRoles = null,
-}) {
+export function ProtectedRoute({ children }) {
   const { t } = useTranslation();
+  const location = useLocation();
   const { user, initializing } = useAuth();
+  const tenantRole = getUserTenantRole(user);
+  const onboardingQuery = useQuery({
+    queryKey: ["protected-onboarding-status"],
+    enabled: Boolean(user) && ["school_admin", "training_admin"].includes(tenantRole) && location.pathname !== "/onboarding",
+    queryFn: () => onboardingApi.status().then((res) => res.data),
+    staleTime: 60_000,
+  });
+  const consentQuery = useQuery({
+    queryKey: ["protected-consent-status"],
+    enabled: Boolean(user) && tenantRole === "teacher" && !["/consent", "/privacy"].includes(location.pathname),
+    queryFn: () => consentApi.status().then((res) => res.data),
+    staleTime: 60_000,
+  });
 
   if (initializing) {
     return (
@@ -32,16 +40,41 @@ export function ProtectedRoute({
     return <Navigate to="/login" replace />;
   }
 
-  if (superAdminOnly && !isSuperAdminUser(user)) {
-    return <Navigate to={getDefaultHomeRoute(user)} replace />;
+  if (
+    ["school_admin", "training_admin"].includes(tenantRole) &&
+    location.pathname !== "/onboarding" &&
+    onboardingQuery.data &&
+    !onboardingQuery.data.is_complete
+  ) {
+    return <Navigate to="/onboarding" replace state={{ from: location.pathname }} />;
   }
 
-  if (adminOnly && !isAdminUser(user)) {
-    return <Navigate to={getDefaultHomeRoute(user)} replace />;
+  if (
+    tenantRole === "teacher" &&
+    !["/consent", "/privacy"].includes(location.pathname) &&
+    consentQuery.data &&
+    !consentQuery.data.all_granted
+  ) {
+    return <Navigate to="/consent" replace state={{ from: location.pathname }} />;
   }
 
-  if (allowedTenantRoles && !canAccessTenantRole(user, allowedTenantRoles)) {
-    return <Navigate to={getDefaultHomeRoute(user)} replace />;
+  if (!canAccess(user, location.pathname)) {
+    if (process.env.NODE_ENV === "development") {
+      const role = user?.tenant_role || user?.role || "unknown";
+      console.warn(`Role ${role} attempted to access ${location.pathname} — redirected`);
+    }
+
+    return (
+      <Navigate
+        to={getHomeRoute(user)}
+        replace
+        state={{ roleMismatch: true, attemptedPath: location.pathname }}
+      />
+    );
+  }
+
+  if (location.state?.roleMismatch) {
+    return <RoleMismatchPage />;
   }
 
   return children;
