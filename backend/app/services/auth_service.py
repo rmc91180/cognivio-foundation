@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 import bcrypt
 import jwt
 import server as legacy
-from fastapi import HTTPException, Request, Response, status
+from fastapi import HTTPException, Request, Response
 
 
 def _now_iso() -> str:
@@ -374,6 +374,25 @@ def _build_user_response(user_doc: Dict[str, Any]) -> Any:
         return legacy.UserResponse(**{key: value for key, value in public_doc.items() if key in allowed})
 
 
+def _resolve_requested_role(user: Any) -> Dict[str, str]:
+    requested_role = str(getattr(user, "role", "") or "").strip().lower()
+    organization_type = str(getattr(user, "organization_type", "") or "").strip().lower()
+
+    if requested_role in {"administrator", "admin", "principal", "school_admin"}:
+        return {"role": "admin", "tenant_role": "school_admin"}
+
+    if requested_role == "training_admin":
+        return {"role": "admin", "tenant_role": "training_admin"}
+
+    if requested_role == "teacher":
+        return {"role": "teacher", "tenant_role": "teacher"}
+
+    if organization_type == "training" and requested_role in {"training", "training_teacher"}:
+        return {"role": "teacher", "tenant_role": "teacher"}
+
+    return {"role": "teacher", "tenant_role": "teacher"}
+
+
 async def register_user(user: Any) -> Any:
     if getattr(legacy, "DEMO_MODE", False):
         raise HTTPException(status_code=403, detail="Registration is disabled for demo mode")
@@ -384,12 +403,14 @@ async def register_user(user: Any) -> Any:
         raise HTTPException(status_code=400, detail="Email already registered")
 
     user_id = str(uuid.uuid4())
+    now = _now_iso()
     user_doc = {
         "id": user_id,
         "email": email,
         "name": user.name,
         "password": hash_password(user.password),
-        "created_at": _now_iso(),
+        "created_at": now,
+        "updated_at": now,
         "role": "admin" if email in getattr(legacy, "ADMIN_EMAILS", set()) else "teacher",
         "approval_status": "approved",
         "tenant_status": "approved",
@@ -479,8 +500,86 @@ async def login_user(user: Any, request: Request, response: Optional[Response] =
     )
 
 
-async def request_access(user: Any, request: Optional[Request] = None) -> Any:
-    raise HTTPException(status_code=501, detail="Access request flow is not available")
+async def request_access(user: Any, request: Optional[Request] = None) -> Dict[str, Any]:
+    if getattr(legacy, "DEMO_MODE", False):
+        raise HTTPException(status_code=403, detail="Access requests are disabled for demo mode")
+
+    email = str(getattr(user, "email", "") or "").strip().lower()
+    password = str(getattr(user, "password", "") or "")
+    name = str(getattr(user, "name", "") or email).strip()
+
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    if not password:
+        raise HTTPException(status_code=400, detail="Password is required")
+
+    role_info = _resolve_requested_role(user)
+    role = role_info["role"]
+    tenant_role = role_info["tenant_role"]
+
+    organization_type = str(getattr(user, "organization_type", "") or "school").strip().lower()
+    if organization_type not in {"school", "training"}:
+        organization_type = "school"
+
+    organization_name = str(getattr(user, "organization_name", "") or "").strip()
+    school_name = str(getattr(user, "school_name", "") or "").strip()
+    requested_manager_email = str(getattr(user, "requested_manager_email", "") or "").strip().lower()
+
+    existing = await legacy.db.users.find_one({"email": email}, {"_id": 0})
+    if existing:
+        existing_status = str(existing.get("approval_status") or "").lower()
+        if existing_status == "pending":
+            return {
+                "status": "pending",
+                "message": "Access request is already pending review.",
+                "user_id": existing.get("id"),
+            }
+
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    user_id = str(uuid.uuid4())
+    now = _now_iso()
+
+    user_doc = {
+        "id": user_id,
+        "email": email,
+        "name": name,
+        "password": hash_password(password),
+        "created_at": now,
+        "updated_at": now,
+        "role": role,
+        "tenant_role": tenant_role,
+        "approval_status": "pending",
+        "tenant_status": "pending",
+        "is_active": False,
+        "organization_type": organization_type,
+        "organization_name": organization_name or None,
+        "school_name": school_name or None,
+        "requested_organization_name": organization_name or None,
+        "requested_school_name": school_name or None,
+        "requested_manager_email": requested_manager_email or None,
+        "manager_email": requested_manager_email or None,
+        "uploads_total": 0,
+        "assessments_total": 0,
+    }
+
+    await legacy.db.users.insert_one(user_doc)
+
+    await _maybe_log_auth_event(
+        "access_request_submitted",
+        email=email,
+        user_id=user_id,
+        result="success",
+        reason=f"requested_role={tenant_role}",
+        request=request,
+    )
+
+    return {
+        "status": "pending",
+        "message": "Access request submitted for master-admin review.",
+        "user_id": user_id,
+    }
 
 
 async def logout_user(response: Optional[Response] = None, request: Optional[Request] = None) -> Dict[str, str]:

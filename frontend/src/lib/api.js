@@ -92,8 +92,10 @@ export const adminApi = {
   feedbackDigest: () => api.get("/api/admin/feedback-digest"),
   organizationMemory: (params) => api.get("/api/admin/organization-memory", { params }),
   accessUsers: () => api.get("/api/admin/access-users"),
-  approveAccessUser: (userId, payload = {}) => api.post(`/api/admin/access-users/${userId}/approve`, payload),
-  revokeAccessUser: (userId, payload = {}) => api.post(`/api/admin/access-users/${userId}/revoke`, payload),
+  approveAccessUser: (userId, payload = {}) =>
+    api.post(`/api/admin/access-users/${userId}/approve`, payload),
+  revokeAccessUser: (userId, payload = {}) =>
+    api.post(`/api/admin/access-users/${userId}/revoke`, payload),
 };
 
 export const onboardingApi = {
@@ -115,29 +117,67 @@ export const masterAdminApi = {
   overview: () => api.get("/api/master-admin/overview"),
   users: (params = {}) => api.get("/api/master-admin/users", { params }),
   userDetail: (userId) => api.get(`/api/master-admin/users/${userId}`),
+
+  approveUser: (userId, payload = {}) =>
+    api.post(`/api/master-admin/users/${userId}/approve`, payload),
+
+  deleteUser: (userId, payload = {}) =>
+    api.post(`/api/master-admin/users/${userId}/revoke`, payload),
+
+  revokeUser: (userId, payload = {}) =>
+    api.post(`/api/master-admin/users/${userId}/revoke`, payload),
+
+  freezeUser: (userId, payload = {}) =>
+    api.post(`/api/master-admin/users/${userId}/freeze`, payload).catch((error) => {
+      if (error?.response?.status === 404 || error?.response?.status === 405) {
+        return api.post(`/api/master-admin/users/${userId}/revoke`, {
+          ...payload,
+          lifecycle_action: "freeze",
+        });
+      }
+      throw error;
+    }),
+
+  unfreezeUser: (userId, payload = {}) =>
+    api.post(`/api/master-admin/users/${userId}/unfreeze`, payload).catch((error) => {
+      if (error?.response?.status === 404 || error?.response?.status === 405) {
+        return api.post(`/api/master-admin/users/${userId}/reactivate`, {
+          ...payload,
+          lifecycle_action: "unfreeze",
+        });
+      }
+      throw error;
+    }),
+
+  reactivateUser: (userId, payload = {}) =>
+    api.post(`/api/master-admin/users/${userId}/reactivate`, payload),
+
   organizations: (params = {}) => api.get("/api/master-admin/organizations", { params }),
-  organizationDetail: (organizationId) => api.get(`/api/master-admin/organizations/${organizationId}`),
+  organizationDetail: (organizationId) =>
+    api.get(`/api/master-admin/organizations/${organizationId}`),
   updateOrganizationSeatPolicy: (organizationId, payload) =>
     api.post(`/api/master-admin/organizations/${organizationId}/seat-policy`, payload),
   workspaces: (params = {}) => api.get("/api/master-admin/workspaces", { params }),
   workspaceDetail: (ownerUserId) => api.get(`/api/master-admin/workspaces/${ownerUserId}`),
   authEvents: (params = {}) => api.get("/api/master-admin/auth-events", { params }),
   auditEvents: (params = {}) => api.get("/api/master-admin/audit-events", { params }),
-  approveUser: (userId, payload = {}) => api.post(`/api/master-admin/users/${userId}/approve`, payload),
-  deleteUser: (userId, payload = {}) => api.post(`/api/master-admin/users/${userId}/revoke`, payload),
-  reactivateUser: (userId, payload = {}) => api.post(`/api/master-admin/users/${userId}/reactivate`, payload),
   incidents: (params = {}) => api.get("/api/master-admin/incidents", { params }),
   videos: (params = {}) => api.get("/api/master-admin/videos", { params }),
   videoDetail: (videoId) => api.get(`/api/master-admin/videos/${videoId}`),
-  retryVideoAnalysis: (videoId) => api.post(`/api/master-admin/videos/${videoId}/retry-analysis`),
-  retryVideoPrivacy: (videoId) => api.post(`/api/master-admin/videos/${videoId}/retry-privacy`),
-  retryVideoTranscode: (videoId) => api.post(`/api/master-admin/videos/${videoId}/retry-transcode`),
+  retryVideoAnalysis: (videoId) =>
+    api.post(`/api/master-admin/videos/${videoId}/retry-analysis`),
+  retryVideoPrivacy: (videoId) =>
+    api.post(`/api/master-admin/videos/${videoId}/retry-privacy`),
+  retryVideoTranscode: (videoId) =>
+    api.post(`/api/master-admin/videos/${videoId}/retry-transcode`),
   storage: () => api.get("/api/master-admin/storage"),
   dependencies: () => api.get("/api/master-admin/dependencies"),
   aiQuality: () => api.get("/api/master-admin/ai-quality"),
   support: (params = {}) => api.get("/api/master-admin/support", { params }),
-  revokeSessions: (userId, payload = {}) => api.post(`/api/master-admin/users/${userId}/sessions/revoke`, payload),
-  exportDiagnosticBundle: (payload) => api.post("/api/master-admin/diagnostic-bundles/export", payload),
+  revokeSessions: (userId, payload = {}) =>
+    api.post(`/api/master-admin/users/${userId}/sessions/revoke`, payload),
+  exportDiagnosticBundle: (payload) =>
+    api.post("/api/master-admin/diagnostic-bundles/export", payload),
 };
 
 export const opsApi = {
