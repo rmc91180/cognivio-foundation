@@ -1,140 +1,189 @@
-const normalizeRole = (value) => String(value || "").trim().toLowerCase();
+import {
+  ROLE,
+  canAccessTenantRole,
+  getDefaultHomeRoute,
+  getUserTenantRole,
+  isAdminUser,
+  isSchoolAdminUser,
+  isSuperAdminUser,
+  isTeacherUser,
+  isTrainingAdminUser,
+  normalizePath,
+} from "@/lib/userRoutes";
 
-const normalizePath = (value) => {
-  const path = String(value || "").trim();
-  if (!path) return "/";
-  return path.startsWith("/") ? path : `/${path}`;
-};
+const ADMIN_ROUTES = [
+  "/dashboard",
+  "/teachers",
+  "/cohorts",
+  "/coaching",
+  "/master-schedule",
+  "/my-insights",
+  "/observation",
+  "/record",
+  "/reports",
+  "/videos",
+  "/all-star-library",
+  "/school-setup",
+  "/privacy-review",
+  "/recognition-review",
+  "/ops",
+  "/settings/notifications",
+  "/notifications",
+];
 
-export const getUserRole = (user) => {
-  if (!user) return "guest";
+const TEACHER_ROUTES = [
+  "/my-workspace",
+  "/my-badges",
+  "/videos",
+  "/all-star-library",
+  "/settings/notifications",
+  "/notifications",
+  "/consent",
+  "/privacy",
+];
 
-  const tenantRole = normalizeRole(user.tenant_role || user.tenantRole);
-  const role = normalizeRole(user.role);
+const SUPER_ADMIN_ROUTES = [
+  "/master-admin",
+  "/teachers",
+  "/my-insights",
+  "/settings/notifications",
+  "/notifications",
+];
 
-  if (tenantRole) return tenantRole;
-  if (role) return role;
+const PUBLIC_ROUTES = [
+  "/login",
+  "/request-access",
+  "/forgot-password",
+  "/reset-password",
+  "/privacy",
+];
 
-  return "guest";
-};
+const startsWithAny = (path, prefixes) =>
+  prefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
 
-export const isSuperAdmin = (user) => {
-  const role = getUserRole(user);
-  const email = String(user?.email || "").trim().toLowerCase();
+export const getUserRole = (user) => getUserTenantRole(user);
 
-  return (
-    role === "super_admin" ||
-    role === "master_admin" ||
-    email === "rmc91180@gmail.com"
-  );
-};
+export const isSuperAdmin = (user) => isSuperAdminUser(user);
 
-export const isAdmin = (user) => {
-  const role = getUserRole(user);
+export const isAdmin = (user) => isAdminUser(user);
 
-  return [
-    "admin",
-    "school_admin",
-    "training_admin",
-    "principal",
-    "super_admin",
-    "master_admin",
-  ].includes(role);
-};
+export const isTeacher = (user) => isTeacherUser(user);
 
-export const isTeacher = (user) => {
-  const role = getUserRole(user);
-  return role === "teacher";
-};
+export const getHomeRoute = (user) => getDefaultHomeRoute(user);
 
-export const getHomeRoute = (user) => {
-  const role = getUserRole(user);
+export const getDefaultRouteForUser = getDefaultHomeRoute;
 
-  if (isSuperAdmin(user)) return "/master-admin";
-  if (["school_admin", "training_admin", "admin", "principal"].includes(role)) {
-    return "/admin";
-  }
-  if (role === "teacher") return "/teacher";
+export const getRoleHomePath = getDefaultHomeRoute;
 
-  return "/login";
-};
-
-export const getDefaultRouteForUser = getHomeRoute;
-export const getRoleHomePath = getHomeRoute;
-
-export const canAccess = (user, routePath = "") => {
+export const canAccess = (user, routePath = "", allowedTenantRoles = []) => {
   const path = normalizePath(routePath).toLowerCase();
 
-  if (!path || path === "/") return true;
-  if (
-    path.startsWith("/login") ||
-    path.startsWith("/request-access") ||
-    path.startsWith("/forgot-password") ||
-    path.startsWith("/reset-password") ||
-    path.startsWith("/privacy") ||
-    path.startsWith("/consent")
-  ) {
+  if (path === "/") {
+    return Boolean(user);
+  }
+
+  if (startsWithAny(path, PUBLIC_ROUTES)) {
     return true;
   }
 
-  if (!user) return false;
+  if (!user) {
+    return false;
+  }
 
-  if (path.startsWith("/master-admin")) return isSuperAdmin(user);
-  if (path.startsWith("/admin")) return isAdmin(user);
-  if (path.startsWith("/teacher")) return isTeacher(user) || isAdmin(user);
+  if (Array.isArray(allowedTenantRoles) && allowedTenantRoles.length > 0) {
+    return canAccessTenantRole(user, allowedTenantRoles);
+  }
 
-  return true;
+  if (isSuperAdminUser(user)) {
+    return startsWithAny(path, SUPER_ADMIN_ROUTES);
+  }
+
+  if (isSchoolAdminUser(user)) {
+    return startsWithAny(path, ADMIN_ROUTES);
+  }
+
+  if (isTrainingAdminUser(user)) {
+    return startsWithAny(
+      path,
+      ADMIN_ROUTES.filter((prefix) => !["/school-setup", "/privacy-review", "/recognition-review", "/ops"].includes(prefix))
+    );
+  }
+
+  if (isTeacherUser(user)) {
+    return startsWithAny(path, TEACHER_ROUTES);
+  }
+
+  return false;
 };
 
 export const canAccessRoute = canAccess;
 
 export const getRoleShell = (user) => {
-  const role = getUserRole(user);
+  const role = getUserTenantRole(user);
 
-  if (isSuperAdmin(user)) {
+  if (role === ROLE.SUPER_ADMIN) {
     return {
-      role: "super_admin",
+      role,
+      navKey: "master",
       homeRoute: "/master-admin",
       dashboardRoute: "/master-admin",
       label: "Master Admin",
       navItems: [
         { label: "Dashboard", to: "/master-admin" },
         { label: "Organizations", to: "/master-admin/organizations" },
-        { label: "Approvals", to: "/master-admin/access" },
+        { label: "Users", to: "/master-admin/users" },
       ],
     };
   }
 
-  if (["school_admin", "training_admin", "admin", "principal"].includes(role)) {
+  if (role === ROLE.TRAINING_ADMIN) {
     return {
       role,
-      homeRoute: "/admin",
-      dashboardRoute: "/admin",
-      label: "Admin",
+      navKey: "training",
+      homeRoute: "/dashboard",
+      dashboardRoute: "/dashboard",
+      label: "Training Admin",
       navItems: [
-        { label: "Dashboard", to: "/admin" },
-        { label: "Teachers", to: "/admin/teachers" },
-        { label: "Reports", to: "/admin/reports" },
+        { label: "Dashboard", to: "/dashboard" },
+        { label: "Cohorts", to: "/cohorts" },
+        { label: "Trainees", to: "/teachers" },
       ],
     };
   }
 
-  if (role === "teacher") {
+  if (role === ROLE.SCHOOL_ADMIN) {
     return {
-      role: "teacher",
-      homeRoute: "/teacher",
-      dashboardRoute: "/teacher",
+      role,
+      navKey: "admin",
+      homeRoute: "/dashboard",
+      dashboardRoute: "/dashboard",
+      label: "School Admin",
+      navItems: [
+        { label: "Dashboard", to: "/dashboard" },
+        { label: "Teachers", to: "/teachers" },
+        { label: "Reports", to: "/reports" },
+      ],
+    };
+  }
+
+  if (role === ROLE.TEACHER) {
+    return {
+      role,
+      navKey: "teacher",
+      homeRoute: "/my-workspace",
+      dashboardRoute: "/my-workspace",
       label: "Teacher",
       navItems: [
-        { label: "Dashboard", to: "/teacher" },
-        { label: "My Videos", to: "/teacher/videos" },
-        { label: "My Feedback", to: "/teacher/feedback" },
+        { label: "My Workspace", to: "/my-workspace" },
+        { label: "My Lessons", to: "/videos" },
+        { label: "My Coaching", to: "/my-workspace/coaching" },
       ],
     };
   }
 
   return {
-    role: "guest",
+    role: ROLE.GUEST,
+    navKey: "guest",
     homeRoute: "/login",
     dashboardRoute: "/login",
     label: "Guest",

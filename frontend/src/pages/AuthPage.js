@@ -9,7 +9,7 @@ import { InstitutionSuggestionList } from "@/components/ui/InstitutionSuggestion
 import { Button, Field, Input, Panel } from "@/components/ui";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 import { authApi } from "@/lib/api";
-import { getDefaultHomeRoute } from "@/lib/userRoutes";
+import { getDefaultHomeRoute, normalizePath } from "@/lib/userRoutes";
 
 function SegmentButton({ active, onClick, children }) {
   return (
@@ -34,6 +34,7 @@ export function AuthPage() {
   const location = useLocation();
   const {
     user,
+    initializing,
     login,
     register,
     requestAccessAsync,
@@ -45,6 +46,7 @@ export function AuthPage() {
     requestingPasswordReset,
     confirmingPasswordReset,
   } = useAuth();
+
   const isDemo = runtimeConfig.demoMode;
   const approvalRequired = runtimeConfig.registrationApprovalRequired;
   const [mode, setMode] = useState("login");
@@ -68,18 +70,27 @@ export function AuthPage() {
   const subgroupInputId = "auth-subgroup";
   const managerEmailInputId = "auth-manager-email";
   const passwordConfirmInputId = "auth-password-confirm";
+
   const resetToken = useMemo(
     () => new URLSearchParams(location.search).get("reset_token") || "",
     [location.search]
   );
+
   const isResetConfirmMode = Boolean(resetToken);
   const isResetRequestMode = mode === "login" && showPasswordResetRequest && !isResetConfirmMode;
 
   useEffect(() => {
-    if (user) {
-      navigate(getDefaultHomeRoute(user), { replace: true });
+    if (initializing || !user) {
+      return;
     }
-  }, [navigate, user]);
+
+    const target = normalizePath(getDefaultHomeRoute(user));
+    const current = normalizePath(location.pathname);
+
+    if (current !== target) {
+      navigate(target, { replace: true });
+    }
+  }, [initializing, location.pathname, navigate, user]);
 
   useEffect(() => {
     if (isResetConfirmMode) {
@@ -92,12 +103,11 @@ export function AuthPage() {
     if (accessType === "administrator") {
       return institutionType === "training" ? "training_admin" : "school_admin";
     }
+
     return "teacher";
   }, [accessType, institutionType]);
 
   const isTeacherRole = derivedRole === "teacher";
-  const isSchoolAdminRole = derivedRole === "school_admin";
-  const isTrainingAdminRole = derivedRole === "training_admin";
   const requiresOrganizationFields = mode === "signup" && !isDemo;
   const showInstitutionTypeRubric = !isDemo && (mode === "signup" || accessType === "administrator");
   const requiresSubgroupName = requiresOrganizationFields && institutionType === "school";
@@ -113,11 +123,13 @@ export function AuthPage() {
         ? t("auth.loginAdministratorHint")
         : t("auth.loginTeacherHint");
     }
+
     if (accessType === "administrator") {
       return institutionType === "training"
         ? t("auth.signUpAdministratorTrainingHint")
         : t("auth.signUpAdministratorSchoolHint");
     }
+
     return institutionType === "training"
       ? t("auth.signUpTeacherTrainingHint")
       : t("auth.signUpTeacherSchoolHint");
@@ -129,6 +141,7 @@ export function AuthPage() {
         ? t("auth.approvalRequiredTrainingAdminDescription")
         : t("auth.approvalRequiredSchoolAdminDescription");
     }
+
     return institutionType === "training"
       ? t("auth.approvalRequiredTrainingTeacherDescription")
       : t("auth.approvalRequiredTeacherDescription");
@@ -195,10 +208,12 @@ export function AuthPage() {
 
   const onSubmit = async (e) => {
     e.preventDefault();
+
     if (isResetConfirmMode) {
       if (form.password !== form.password_confirm) {
         return;
       }
+
       try {
         await confirmPasswordResetAsync({
           token: resetToken,
@@ -213,6 +228,7 @@ export function AuthPage() {
       } catch {
         return;
       }
+
       return;
     }
 
@@ -223,6 +239,7 @@ export function AuthPage() {
       } catch {
         return;
       }
+
       return;
     }
 
@@ -252,6 +269,7 @@ export function AuthPage() {
       } catch {
         return;
       }
+
       return;
     }
 
@@ -274,6 +292,7 @@ export function AuthPage() {
     requestingAccess ||
     requestingPasswordReset ||
     confirmingPasswordReset;
+
   const submitLabel = isResetConfirmMode
     ? busy
       ? t("auth.resetPasswordSubmitting")
@@ -291,11 +310,13 @@ export function AuthPage() {
         : mode === "login"
           ? t("auth.signIn")
           : t("auth.signUpCta");
+
   const pageTitle = isResetConfirmMode
     ? t("auth.resetPasswordTitle")
     : isResetRequestMode
       ? t("auth.forgotPasswordTitle")
       : t("auth.title");
+
   const pageSubtitle = isResetConfirmMode
     ? t("auth.resetPasswordSubtitle")
     : isResetRequestMode
@@ -320,36 +341,36 @@ export function AuthPage() {
 
         {!isResetConfirmMode ? (
           <div className="mb-4 flex gap-2 rounded-xl bg-slate-100 p-1 text-xs">
-          <button
-            type="button"
-            onClick={() => {
-              setMode("login");
-              setShowPasswordResetRequest(false);
-            }}
-            className={`flex-1 rounded px-3 py-2 ${
-              mode === "login" && !showPasswordResetRequest
-                ? "bg-white text-slate-900 shadow-sm font-semibold"
-                : "text-slate-500 hover:text-slate-700"
-            }`}
-          >
-            {t("auth.loginTab")}
-          </button>
-          {!isDemo && (
             <button
               type="button"
               onClick={() => {
-                setMode("signup");
+                setMode("login");
                 setShowPasswordResetRequest(false);
               }}
               className={`flex-1 rounded px-3 py-2 ${
-                mode === "signup"
+                mode === "login" && !showPasswordResetRequest
                   ? "bg-white text-slate-900 shadow-sm font-semibold"
                   : "text-slate-500 hover:text-slate-700"
               }`}
             >
-              {t("auth.signUpTab")}
+              {t("auth.loginTab")}
             </button>
-          )}
+            {!isDemo && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMode("signup");
+                  setShowPasswordResetRequest(false);
+                }}
+                className={`flex-1 rounded px-3 py-2 ${
+                  mode === "signup"
+                    ? "bg-white text-slate-900 shadow-sm font-semibold"
+                    : "text-slate-500 hover:text-slate-700"
+                }`}
+              >
+                {t("auth.signUpTab")}
+              </button>
+            )}
           </div>
         ) : null}
 
@@ -520,13 +541,13 @@ export function AuthPage() {
               label={isResetConfirmMode ? t("auth.newPassword") : t("auth.password")}
               htmlFor={passwordInputId}
             >
-            <Input
-              id={passwordInputId}
-              type="password"
-              required
-              value={form.password}
-              onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
-            />
+              <Input
+                id={passwordInputId}
+                type="password"
+                required
+                value={form.password}
+                onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
+              />
             </Field>
           ) : null}
 

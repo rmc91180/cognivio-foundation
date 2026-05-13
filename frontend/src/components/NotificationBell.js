@@ -44,14 +44,21 @@ export default function NotificationBell({
 
     const loadNotifications = async () => {
       try {
-        const response = await api.get("/notifications");
+        const response = await api.get("/api/notifications");
         if (!active) return;
         setNotifications(normalizeNotifications(response?.data));
-      } catch {
+      } catch (error) {
         if (!active) return;
+
+        if (error?.response?.status !== 404 && process.env.NODE_ENV === "development") {
+          console.warn("NotificationBell could not load notifications", error);
+        }
+
         setNotifications([]);
       } finally {
-        if (active) setLoaded(true);
+        if (active) {
+          setLoaded(true);
+        }
       }
     };
 
