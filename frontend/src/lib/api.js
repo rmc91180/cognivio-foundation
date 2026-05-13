@@ -54,6 +54,10 @@ export {
 };
 export { evidenceApi, videoApi };
 
+export const notificationApi = {
+  list: () => api.get("/api/notifications"),
+};
+
 export const privacyReviewApi = {
   queue: () => api.get("/api/privacy/review-queue"),
   resolve: (videoId, payload) => api.post(`/api/videos/${videoId}/privacy/review`, payload),

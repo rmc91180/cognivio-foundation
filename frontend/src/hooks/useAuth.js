@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -9,50 +9,92 @@ const AuthContext = createContext(null);
 
 function getErrorMessage(error, fallback) {
   const detail = error?.response?.data?.detail;
+
   if (typeof detail === "string" && detail.trim()) {
     return detail;
   }
+
   if (Array.isArray(detail) && detail.length > 0) {
     const first = detail[0];
+
     if (typeof first === "string" && first.trim()) {
       return first;
     }
+
     if (first && typeof first.msg === "string" && first.msg.trim()) {
       return first.msg;
     }
   }
+
   return fallback;
+}
+
+function clearStoredAuth() {
+  localStorage.removeItem("cognivio_token");
+  clearPreviewSession();
 }
 
 export function AuthProvider({ children }) {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const [user, setUser] = useState(null);
   const [initializing, setInitializing] = useState(true);
-  const queryClient = useQueryClient();
 
-  const refreshUser = () =>
-    authApi
-      .me()
-      .then((res) => {
-        setUser(res.data);
-        return res.data;
-      })
-      .catch((error) => {
-        localStorage.removeItem("cognivio_token");
-        setUser(null);
-        throw error;
-      });
+  const refreshUser = useCallback(async () => {
+    const token = localStorage.getItem("cognivio_token");
+
+    if (!token) {
+      setUser(null);
+      return null;
+    }
+
+    try {
+      const res = await authApi.me();
+      setUser(res.data);
+      return res.data;
+    } catch (error) {
+      clearStoredAuth();
+      setUser(null);
+      throw error;
+    }
+  }, []);
 
   useEffect(() => {
-    const token = localStorage.getItem("cognivio_token");
-    if (!token) {
-      setInitializing(false);
-      return;
-    }
-    refreshUser()
-      .catch(() => {})
-      .finally(() => setInitializing(false));
-  }, []);
+    let active = true;
+
+    const initialize = async () => {
+      const token = localStorage.getItem("cognivio_token");
+
+      if (!token) {
+        if (active) {
+          setUser(null);
+          setInitializing(false);
+        }
+        return;
+      }
+
+      try {
+        const nextUser = await refreshUser();
+        if (active) {
+          setUser(nextUser);
+        }
+      } catch {
+        if (active) {
+          setUser(null);
+        }
+      } finally {
+        if (active) {
+          setInitializing(false);
+        }
+      }
+    };
+
+    initialize();
+
+    return () => {
+      active = false;
+    };
+  }, [refreshUser]);
 
   const loginMutation = useMutation({
     mutationFn: authApi.login,
@@ -60,8 +102,8 @@ export function AuthProvider({ children }) {
       clearPreviewSession();
       localStorage.setItem("cognivio_token", res.data.token);
       setUser(res.data.user);
-      toast.success(t("auth.loggedInSuccessfully"));
       queryClient.clear();
+      toast.success(t("auth.loggedInSuccessfully"));
     },
     onError: (error) => {
       toast.error(getErrorMessage(error, t("auth.loginFailed")));
@@ -74,8 +116,8 @@ export function AuthProvider({ children }) {
       clearPreviewSession();
       localStorage.setItem("cognivio_token", res.data.token);
       setUser(res.data.user);
-      toast.success(t("auth.accountCreated"));
       queryClient.clear();
+      toast.success(t("auth.accountCreated"));
     },
     onError: (error) => {
       toast.error(getErrorMessage(error, t("auth.registrationFailed")));
@@ -112,42 +154,60 @@ export function AuthProvider({ children }) {
     },
   });
 
-  const logout = () => {
-    localStorage.removeItem("cognivio_token");
-    clearPreviewSession();
+  const logout = useCallback(() => {
+    clearStoredAuth();
     setUser(null);
     queryClient.clear();
-  };
+  }, [queryClient]);
 
-  const value = {
-    user,
-    initializing,
-    login: (payload) => loginMutation.mutate(payload),
-    register: (payload) => registerMutation.mutate(payload),
-    requestAccess: (payload) => requestAccessMutation.mutate(payload),
-    requestAccessAsync: (payload) => requestAccessMutation.mutateAsync(payload),
-    requestPasswordReset: (payload) => requestPasswordResetMutation.mutate(payload),
-    requestPasswordResetAsync: (payload) => requestPasswordResetMutation.mutateAsync(payload),
-    confirmPasswordReset: (payload) => confirmPasswordResetMutation.mutate(payload),
-    confirmPasswordResetAsync: (payload) => confirmPasswordResetMutation.mutateAsync(payload),
-    loggingIn: loginMutation.isPending,
-    registering: registerMutation.isPending,
-    requestingAccess: requestAccessMutation.isPending,
-    requestingPasswordReset: requestPasswordResetMutation.isPending,
-    confirmingPasswordReset: confirmPasswordResetMutation.isPending,
-    logout,
-    refreshUser,
-    setUserProfile: (nextUser) => setUser(nextUser),
-  };
+  const value = useMemo(
+    () => ({
+      user,
+      initializing,
+      loading: initializing,
+      isLoading: initializing,
+      isAuthenticated: Boolean(user),
+      login: (payload) => loginMutation.mutate(payload),
+      loginAsync: (payload) => loginMutation.mutateAsync(payload),
+      register: (payload) => registerMutation.mutate(payload),
+      registerAsync: (payload) => registerMutation.mutateAsync(payload),
+      requestAccess: (payload) => requestAccessMutation.mutate(payload),
+      requestAccessAsync: (payload) => requestAccessMutation.mutateAsync(payload),
+      requestPasswordReset: (payload) => requestPasswordResetMutation.mutate(payload),
+      requestPasswordResetAsync: (payload) => requestPasswordResetMutation.mutateAsync(payload),
+      confirmPasswordReset: (payload) => confirmPasswordResetMutation.mutate(payload),
+      confirmPasswordResetAsync: (payload) => confirmPasswordResetMutation.mutateAsync(payload),
+      loggingIn: loginMutation.isPending,
+      registering: registerMutation.isPending,
+      requestingAccess: requestAccessMutation.isPending,
+      requestingPasswordReset: requestPasswordResetMutation.isPending,
+      confirmingPasswordReset: confirmPasswordResetMutation.isPending,
+      logout,
+      refreshUser,
+      setUserProfile: (nextUser) => setUser(nextUser),
+    }),
+    [
+      user,
+      initializing,
+      loginMutation,
+      registerMutation,
+      requestAccessMutation,
+      requestPasswordResetMutation,
+      confirmPasswordResetMutation,
+      logout,
+      refreshUser,
+    ]
+  );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
 export function useAuth() {
   const ctx = useContext(AuthContext);
+
   if (!ctx) {
     throw new Error("useAuth must be used within AuthProvider");
   }
+
   return ctx;
 }
-

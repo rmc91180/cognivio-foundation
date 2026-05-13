@@ -6,22 +6,14 @@ import { useAuth } from "@/hooks/useAuth";
 import { RoleMismatchPage } from "@/pages/RoleMismatchPage";
 import { canAccess, getHomeRoute } from "@/lib/roleRouter";
 import { consentApi, onboardingApi } from "@/lib/api";
-import { getUserTenantRole } from "@/lib/userRoutes";
+import {
+  canAccessTenantRole,
+  getUserTenantRole,
+  isSuperAdminUser,
+  normalizePath,
+} from "@/lib/userRoutes";
 
-const normalizePath = (value) => {
-  const path = String(value || "").trim();
-  if (!path) return "/";
-  return path.startsWith("/") ? path : `/${path}`;
-};
-
-const stripTrailingSlash = (value) => {
-  const path = normalizePath(value);
-  if (path === "/") return path;
-  return path.replace(/\/+$/, "");
-};
-
-const isSamePath = (left, right) =>
-  stripTrailingSlash(left) === stripTrailingSlash(right);
+const isSamePath = (left, right) => normalizePath(left) === normalizePath(right);
 
 const loadingScreen = (message) => (
   <div className="flex h-screen items-center justify-center bg-slate-950 text-slate-50">
@@ -29,24 +21,42 @@ const loadingScreen = (message) => (
   </div>
 );
 
-export function ProtectedRoute({ children }) {
+function safeRedirect(to, currentPath, state = undefined) {
+  const target = normalizePath(to);
+
+  if (isSamePath(target, currentPath)) {
+    return null;
+  }
+
+  return <Navigate to={target} replace state={state} />;
+}
+
+export function ProtectedRoute({
+  children,
+  superAdminOnly = false,
+  allowedTenantRoles = [],
+}) {
   const { t } = useTranslation();
   const location = useLocation();
   const { user, initializing, loading, isLoading } = useAuth();
 
   const currentPath = normalizePath(location.pathname);
   const tenantRole = getUserTenantRole(user);
-
   const authIsLoading = Boolean(initializing || loading || isLoading);
+
+  const isOnboardingRoute = isSamePath(currentPath, "/onboarding");
+  const isConsentRoute = isSamePath(currentPath, "/consent");
+  const isPrivacyRoute = isSamePath(currentPath, "/privacy");
 
   const onboardingQuery = useQuery({
     queryKey: ["protected-onboarding-status", user?.id],
     enabled:
       Boolean(user) &&
       ["school_admin", "training_admin"].includes(tenantRole) &&
-      !isSamePath(currentPath, "/onboarding"),
+      !isOnboardingRoute,
     queryFn: () => onboardingApi.status().then((res) => res.data),
     staleTime: 60_000,
+    retry: 1,
   });
 
   const consentQuery = useQuery({
@@ -54,9 +64,11 @@ export function ProtectedRoute({ children }) {
     enabled:
       Boolean(user) &&
       tenantRole === "teacher" &&
-      !["/consent", "/privacy"].some((path) => isSamePath(currentPath, path)),
+      !isConsentRoute &&
+      !isPrivacyRoute,
     queryFn: () => consentApi.status().then((res) => res.data),
     staleTime: 60_000,
+    retry: 1,
   });
 
   if (authIsLoading) {
@@ -77,55 +89,63 @@ export function ProtectedRoute({ children }) {
     );
   }
 
+  if (superAdminOnly && !isSuperAdminUser(user)) {
+    const homeRoute = getHomeRoute(user);
+    const redirect = safeRedirect(homeRoute, currentPath, {
+      roleMismatch: true,
+      attemptedPath: currentPath,
+    });
+
+    return redirect || <RoleMismatchPage user={user} currentRole={tenantRole} />;
+  }
+
+  if (
+    Array.isArray(allowedTenantRoles) &&
+    allowedTenantRoles.length > 0 &&
+    !canAccessTenantRole(user, allowedTenantRoles)
+  ) {
+    const homeRoute = getHomeRoute(user);
+    const redirect = safeRedirect(homeRoute, currentPath, {
+      roleMismatch: true,
+      attemptedPath: currentPath,
+    });
+
+    return redirect || <RoleMismatchPage user={user} currentRole={tenantRole} />;
+  }
+
   if (
     ["school_admin", "training_admin"].includes(tenantRole) &&
-    !isSamePath(currentPath, "/onboarding") &&
+    !isOnboardingRoute &&
+    !onboardingQuery.isLoading &&
+    !onboardingQuery.isFetching &&
     onboardingQuery.data &&
-    !onboardingQuery.data.is_complete
+    onboardingQuery.data.is_complete === false
   ) {
-    return (
-      <Navigate
-        to="/onboarding"
-        replace
-        state={{ from: currentPath }}
-      />
-    );
+    const redirect = safeRedirect("/onboarding", currentPath, { from: currentPath });
+    return redirect || children;
   }
 
   if (
     tenantRole === "teacher" &&
-    !["/consent", "/privacy"].some((path) => isSamePath(currentPath, path)) &&
+    !isConsentRoute &&
+    !isPrivacyRoute &&
+    !consentQuery.isLoading &&
+    !consentQuery.isFetching &&
     consentQuery.data &&
-    !consentQuery.data.all_granted
+    consentQuery.data.all_granted === false
   ) {
-    return (
-      <Navigate
-        to="/consent"
-        replace
-        state={{ from: currentPath }}
-      />
-    );
+    const redirect = safeRedirect("/consent", currentPath, { from: currentPath });
+    return redirect || children;
   }
 
-  if (!canAccess(user, currentPath)) {
-    const homeRoute = normalizePath(getHomeRoute(user));
+  if (!canAccess(user, currentPath, allowedTenantRoles)) {
+    const homeRoute = getHomeRoute(user);
+    const redirect = safeRedirect(homeRoute, currentPath, {
+      roleMismatch: true,
+      attemptedPath: currentPath,
+    });
 
-    if (isSamePath(currentPath, homeRoute)) {
-      return <RoleMismatchPage user={user} currentRole={tenantRole} />;
-    }
-
-    if (process.env.NODE_ENV === "development") {
-      const role = user?.tenant_role || user?.role || "unknown";
-      console.warn(`Role ${role} attempted to access ${currentPath} — redirected`);
-    }
-
-    return (
-      <Navigate
-        to={homeRoute}
-        replace
-        state={{ roleMismatch: true, attemptedPath: currentPath }}
-      />
-    );
+    return redirect || <RoleMismatchPage user={user} currentRole={tenantRole} />;
   }
 
   if (location.state?.roleMismatch) {

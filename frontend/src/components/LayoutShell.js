@@ -36,6 +36,7 @@ import { clearPreviewSession } from "@/lib/previewMode";
 
 const ROLE_NAV_ITEMS = {
   master: [
+    { to: "/master-admin", icon: ShieldCheck, label: "Ops", end: true },
     { to: "/master-admin/organizations", icon: Database, label: "Organizations" },
     { to: "/master-admin/users", icon: Users, label: "Users" },
     { to: "/master-admin/videos", icon: PlayCircle, label: "Videos" },
@@ -44,7 +45,6 @@ const ROLE_NAV_ITEMS = {
     { to: "/master-admin/storage", icon: Database, label: "Storage" },
     { to: "/master-admin/support", icon: MessageSquareText, label: "Support" },
     { to: "/settings/notifications", icon: Bell, label: "Notifications" },
-    { to: "/master-admin", icon: ShieldCheck, label: "Ops", end: true },
   ],
   admin: [
     { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard", end: true },
@@ -88,7 +88,7 @@ export function LayoutShell({ children }) {
   const isTrainingAdmin = isTrainingAdminUser(user);
   const tenantRole = getUserTenantRole(user);
   const isPreviewMode = Boolean(user?.is_preview_mode);
-  const navItems = ROLE_NAV_ITEMS[roleShell] || [];
+  const navItems = ROLE_NAV_ITEMS[roleShell.navKey] || [];
 
   const organizationListQuery = useQuery({
     queryKey: ["layout-shell-master-admin-organizations"],
@@ -118,6 +118,7 @@ export function LayoutShell({ children }) {
           ["school_admin", "training_admin", "super_admin", "admin"].includes(member.tenant_role)
         );
         const teachers = activeUsers.filter((member) => member.tenant_role === "teacher");
+
         return {
           organization,
           loading: Boolean(detailQuery?.isLoading || detailQuery?.isFetching),
@@ -132,12 +133,19 @@ export function LayoutShell({ children }) {
   const exitPreviewMode = async () => {
     clearPreviewSession();
     queryClient.clear();
+
     try {
       await refreshUser();
     } catch {
       return;
     }
+
     navigate("/master-admin", { replace: true });
+  };
+
+  const handleLogout = () => {
+    logout();
+    navigate("/login", { replace: true });
   };
 
   return (
@@ -147,6 +155,7 @@ export function LayoutShell({ children }) {
           <BrandMark to="/" />
           <LanguageSwitcher compact />
         </div>
+
         <div className="mt-5 flex-1 overflow-y-auto px-3">
           <nav className="space-y-1.5 text-sm">
             {navItems.map((item) => (
@@ -165,21 +174,25 @@ export function LayoutShell({ children }) {
               <div className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
                 {t("nav.organizationDirectory")}
               </div>
+
               {organizationListQuery.isLoading ? (
                 <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
                   {t("nav.organizationsLoading")}
                 </div>
               ) : null}
+
               {organizationListQuery.isError ? (
                 <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
                   {t("nav.organizationsLoadFailed")}
                 </div>
               ) : null}
+
               {!organizationListQuery.isLoading && !organizationTree.length ? (
                 <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
                   {t("nav.organizationsEmpty")}
                 </div>
               ) : null}
+
               {organizationTree.map((entry) => (
                 <div key={entry.organization.id} className="rounded-xl border border-slate-200 bg-slate-50/70 p-2.5">
                   <NavLink
@@ -193,12 +206,15 @@ export function LayoutShell({ children }) {
                       ? t("nav.trainingAdminScope")
                       : t("nav.schoolAdminScope")}
                   </div>
+
                   {entry.loading ? (
                     <div className="mt-2 px-2 text-xs text-slate-500">{t("nav.organizationsLoading")}</div>
                   ) : null}
+
                   {entry.error ? (
                     <div className="mt-2 px-2 text-xs text-rose-700">{t("nav.organizationsLoadFailed")}</div>
                   ) : null}
+
                   {!entry.loading && !entry.error ? (
                     <div className="mt-2 space-y-2 px-2">
                       <RoleMemberList
@@ -224,6 +240,7 @@ export function LayoutShell({ children }) {
             </div>
           ) : null}
         </div>
+
         {isSchoolAdmin && (
           <div className="mx-3 mt-4 rounded-xl border border-sky-200 bg-sky-50 p-3">
             <div className="text-[11px] font-semibold uppercase tracking-wide text-sky-700">
@@ -234,6 +251,7 @@ export function LayoutShell({ children }) {
             </div>
           </div>
         )}
+
         {isTrainingAdmin && (
           <div className="mx-3 mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-3">
             <div className="text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
@@ -244,6 +262,7 @@ export function LayoutShell({ children }) {
             </div>
           </div>
         )}
+
         <div className="mt-auto border-t border-slate-200 px-4 py-3 text-xs text-slate-500 bg-slate-50/70">
           {user ? (
             <div className="flex items-center justify-between gap-2">
@@ -264,7 +283,7 @@ export function LayoutShell({ children }) {
               </div>
               <button
                 type="button"
-                onClick={logout}
+                onClick={handleLogout}
                 className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-white"
               >
                 {t("nav.logout")}
@@ -276,6 +295,7 @@ export function LayoutShell({ children }) {
           )}
         </div>
       </aside>
+
       <main className="flex-1 overflow-y-auto bg-slate-50">
         <OfflineBanner />
         <ProductTourOverlay />
@@ -350,3 +370,4 @@ function RoleMemberList({ title, members, emptyLabel }) {
   );
 }
 
+export default LayoutShell;
