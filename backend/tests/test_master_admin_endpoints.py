@@ -143,7 +143,7 @@ def test_master_admin_overview_returns_global_counts(monkeypatch):
     assert any(card.id == "pending-users" and card.value == 1 for card in result.cards)
     assert any(card.id == "pipeline-failures" and card.value == 1 for card in result.cards)
     assert result.queue_summary["transcode_queue_depth"] == 3
-    assert "storage" in result.dependency_summary["unhealthy"]
+    assert "Cloudflare R2" in result.dependency_summary["unhealthy"]
     assert result.pending_approvals_preview[0].id == "teacher-1"
 
 
