@@ -58,6 +58,7 @@ try:
 except Exception:
     canvas = None
 from app.cache import CacheClient, cached
+from app.services.dependency_health import get_dependency_health
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -1426,62 +1427,48 @@ async def _build_master_admin_video_records() -> List["MasterAdminVideoRecord"]:
 
 
 async def _build_dependency_health_snapshot() -> List["MasterAdminDependencyRecord"]:
-    await refresh_runtime_metrics()
-    now_iso = datetime.now(timezone.utc).isoformat()
-    dependency_values = app_metrics.snapshot_summary().get("dependencies") or {}
-    storage_healthy = _upload_storage_is_healthy() and bool(S3_BUCKET)
-    return [
-        MasterAdminDependencyRecord(
-            id="atlas",
-            name="MongoDB Atlas",
-            healthy=bool(dependency_values.get("mongodb")),
-            status="healthy" if dependency_values.get("mongodb") else "unhealthy",
-            latest_probe_at=now_iso,
-            latest_failure_note=None if dependency_values.get("mongodb") else "Latest Atlas ping probe failed.",
-            remediation="Verify Atlas credentials, cluster availability, and network access.",
-            metadata={"database_name": APP_SETTINGS.database.db_name},
-        ),
-        MasterAdminDependencyRecord(
-            id="r2",
-            name="Cloudflare R2",
-            healthy=storage_healthy,
-            status="healthy" if storage_healthy else "unhealthy",
-            latest_probe_at=now_iso,
-            latest_failure_note=None if storage_healthy else "Object storage is unavailable or not configured.",
-            remediation="Verify R2 endpoint, bucket, and access keys in Railway.",
-            metadata={"bucket": S3_BUCKET, "endpoint": S3_ENDPOINT},
-        ),
-        MasterAdminDependencyRecord(
-            id="resend",
-            name="Resend",
-            healthy=bool(RESEND_API_KEY and RESEND_FROM_EMAIL),
-            status="healthy" if (RESEND_API_KEY and RESEND_FROM_EMAIL) else "unhealthy",
-            latest_probe_at=now_iso,
-            latest_failure_note=None if (RESEND_API_KEY and RESEND_FROM_EMAIL) else "Resend is missing API configuration.",
-            remediation="Set RESEND_API_KEY and RESEND_FROM_EMAIL in the backend environment.",
-            metadata={"from_email": RESEND_FROM_EMAIL},
-        ),
-        MasterAdminDependencyRecord(
-            id="openai",
-            name="OpenAI",
-            healthy=bool(dependency_values.get("openai")),
-            status="healthy" if dependency_values.get("openai") else "unhealthy",
-            latest_probe_at=now_iso,
-            latest_failure_note=None if dependency_values.get("openai") else "OpenAI client or API key is not available.",
-            remediation="Verify OPENAI_API_KEY and backend OpenAI runtime access.",
-            metadata={"configured": bool(OPENAI_API_KEY)},
-        ),
-        MasterAdminDependencyRecord(
-            id="railway",
-            name="Railway Runtime",
-            healthy=bool(dependency_values.get("railway_runtime", 1.0)),
-            status="healthy" if dependency_values.get("railway_runtime", 1.0) else "unhealthy",
-            latest_probe_at=now_iso,
-            latest_failure_note=None,
-            remediation="Check Railway deploy logs and service restart state.",
-            metadata={"environment": APP_SETTINGS.operations.railway_environment_name},
-        ),
-    ]
+    health = await get_dependency_health(db)
+
+    records: List[MasterAdminDependencyRecord] = []
+
+    id_by_name = {
+        "MongoDB Atlas": "atlas",
+        "Cloudflare R2": "r2",
+        "Resend": "resend",
+        "OpenAI": "openai",
+        "Railway Runtime": "railway",
+    }
+
+    for item in health.get("dependencies", []):
+        name = item.get("name") or "Unknown dependency"
+        records.append(
+            MasterAdminDependencyRecord(
+                id=id_by_name.get(name, name.lower().replace(" ", "-")),
+                name=name,
+                healthy=bool(item.get("healthy")),
+                status=item.get("status") or ("healthy" if item.get("healthy") else "unhealthy"),
+                latest_probe_at=item.get("last_probe") or health.get("generated_at"),
+                latest_failure_note=item.get("failure_note"),
+                remediation=item.get("suggested_remediation") or "Review backend logs and runtime configuration.",
+                metadata=item.get("details") or {},
+            )
+        )
+
+    if not any(record.id == "railway" for record in records):
+        records.append(
+            MasterAdminDependencyRecord(
+                id="railway",
+                name="Railway Runtime",
+                healthy=True,
+                status="healthy",
+                latest_probe_at=health.get("generated_at") or datetime.now(timezone.utc).isoformat(),
+                latest_failure_note=None,
+                remediation="Check Railway deploy logs and service restart state.",
+                metadata={"environment": APP_SETTINGS.operations.railway_environment_name},
+            )
+        )
+
+    return records
 
 
 async def _build_global_ai_quality_snapshot() -> Dict[str, Any]:
@@ -19722,9 +19709,16 @@ async def get_master_admin_overview(current_user: dict = Depends(get_current_use
     )
     analysis_failed_total = await db.videos.count_documents({"analysis_status": VideoProcessingStatus.FAILED.value})
 
-    persistent_metrics = app_metrics.snapshot_summary()
-    dependencies = persistent_metrics.get("dependencies", {})
-    unhealthy_dependencies = [name for name, value in dependencies.items() if float(value or 0) <= 0]
+    dependency_records = await _build_dependency_health_snapshot()
+    dependencies = {
+        item.id: 1.0 if item.healthy else 0.0
+        for item in dependency_records
+    }
+    unhealthy_dependencies = [
+        item.name
+        for item in dependency_records
+        if not item.healthy
+    ]
     queues = {
         "video_queue_depth": VIDEO_JOB_QUEUE.qsize(),
         "privacy_queue_depth": VIDEO_PRIVACY_JOB_QUEUE.qsize(),
@@ -19900,7 +19894,7 @@ async def get_master_admin_overview(current_user: dict = Depends(get_current_use
         cards=cards,
         alerts=alerts,
         dependency_summary={
-            "healthy_count": len([value for value in dependencies.values() if float(value or 0) > 0]),
+            "healthy_count": sum(1 for item in dependency_records if item.healthy),
             "unhealthy": unhealthy_dependencies,
         },
         queue_summary=queues,
