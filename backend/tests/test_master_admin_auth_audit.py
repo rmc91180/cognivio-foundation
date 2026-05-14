@@ -194,7 +194,7 @@ def test_login_writes_failure_auth_event(fake_db):
     )
 
 
-def test_master_admin_revoke_requires_exact_confirmation_text(fake_db):
+def test_master_admin_delete_requires_exact_confirmation_text(fake_db):
     fake_db.users.docs.extend(
         [
             {
@@ -220,7 +220,7 @@ def test_master_admin_revoke_requires_exact_confirmation_text(fake_db):
 
     with pytest.raises(server.HTTPException) as exc:
         asyncio.run(
-            server.master_admin_revoke_user(
+            server.master_admin_delete_user(
                 "u1",
                 server.MasterAdminUserActionPayload(reason="Remove access", confirmation_text="wrong@example.com"),
                 current_user={"id": "super-1", "email": "rmc91180@gmail.com", "role": "super_admin"},
@@ -265,7 +265,7 @@ def test_master_admin_approve_and_delete_write_audit_events(fake_db):
     assert approved.approval_status == "approved"
 
     deleted = asyncio.run(
-        server.master_admin_revoke_user(
+        server.master_admin_delete_user(
             "u1",
             server.MasterAdminUserActionPayload(
                 reason="Access paused",

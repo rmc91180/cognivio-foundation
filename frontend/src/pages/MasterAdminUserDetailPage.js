@@ -209,8 +209,20 @@ export function MasterAdminUserDetailPage() {
       queryClient.invalidateQueries({ queryKey: ["master-admin-user-detail", userId] });
       queryClient.invalidateQueries({ queryKey: ["master-admin-users"] });
       queryClient.invalidateQueries({ queryKey: ["master-admin-overview"] });
+      queryClient.invalidateQueries({ queryKey: ["master-admin-organizations"] });
+      queryClient.invalidateQueries({ queryKey: ["master-admin-workspaces"] });
+      queryClient.invalidateQueries({ queryKey: ["layout-shell-master-admin-organizations"] });
+      queryClient.invalidateQueries({ queryKey: ["teachers"] });
       queryClient.invalidateQueries({ queryKey: ["master-admin-auth-events"] });
       queryClient.invalidateQueries({ queryKey: ["master-admin-audit-events"] });
+      queryClient.invalidateQueries({ predicate: (query) => {
+        const key = query.queryKey?.[0];
+        return [
+          "master-admin-organization-detail",
+          "master-admin-workspace-detail",
+          "layout-shell-master-admin-organization-detail",
+        ].includes(key);
+      } });
 
       if (variables.mode === "delete") {
         closeDialog();

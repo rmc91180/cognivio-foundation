@@ -2,14 +2,6 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import api from "@/lib/api";
 
-const normalizeNotifications = (payload) => {
-  if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload?.notifications)) return payload.notifications;
-  if (Array.isArray(payload?.items)) return payload.items;
-  if (Array.isArray(payload?.data)) return payload.data;
-  return [];
-};
-
 const getUnreadCount = (notifications) =>
   notifications.filter((item) => {
     if (item?.read === false) return true;
@@ -29,6 +21,7 @@ export default function NotificationBell({
   const [notifications, setNotifications] = useState(
     Array.isArray(providedNotifications) ? providedNotifications : []
   );
+  const [fetchedUnreadCount, setFetchedUnreadCount] = useState(null);
   const [loaded, setLoaded] = useState(Boolean(providedNotifications));
 
   useEffect(() => {
@@ -36,6 +29,7 @@ export default function NotificationBell({
 
     if (Array.isArray(providedNotifications)) {
       setNotifications(providedNotifications);
+      setFetchedUnreadCount(null);
       setLoaded(true);
       return () => {
         active = false;
@@ -44,9 +38,9 @@ export default function NotificationBell({
 
     const loadNotifications = async () => {
       try {
-        const response = await api.get("/api/notifications");
+        const response = await api.get("/api/notifications/unread-count");
         if (!active) return;
-        setNotifications(normalizeNotifications(response?.data));
+        setFetchedUnreadCount(Number(response?.data?.count || 0));
       } catch (error) {
         if (!active) return;
 
@@ -55,6 +49,7 @@ export default function NotificationBell({
         }
 
         setNotifications([]);
+        setFetchedUnreadCount(0);
       } finally {
         if (active) {
           setLoaded(true);
@@ -72,8 +67,9 @@ export default function NotificationBell({
   const resolvedCount = useMemo(() => {
     if (typeof count === "number") return count;
     if (typeof unreadCount === "number") return unreadCount;
+    if (typeof fetchedUnreadCount === "number") return fetchedUnreadCount;
     return getUnreadCount(notifications);
-  }, [count, unreadCount, notifications]);
+  }, [count, fetchedUnreadCount, unreadCount, notifications]);
 
   const label =
     resolvedCount > 0

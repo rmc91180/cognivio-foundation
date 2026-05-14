@@ -122,32 +122,16 @@ export const masterAdminApi = {
     api.post(`/api/master-admin/users/${userId}/approve`, payload),
 
   deleteUser: (userId, payload = {}) =>
-    api.post(`/api/master-admin/users/${userId}/revoke`, payload),
+    api.post(`/api/master-admin/users/${userId}/delete`, payload),
 
   revokeUser: (userId, payload = {}) =>
     api.post(`/api/master-admin/users/${userId}/revoke`, payload),
 
   freezeUser: (userId, payload = {}) =>
-    api.post(`/api/master-admin/users/${userId}/freeze`, payload).catch((error) => {
-      if (error?.response?.status === 404 || error?.response?.status === 405) {
-        return api.post(`/api/master-admin/users/${userId}/revoke`, {
-          ...payload,
-          lifecycle_action: "freeze",
-        });
-      }
-      throw error;
-    }),
+    api.post(`/api/master-admin/users/${userId}/freeze`, payload),
 
   unfreezeUser: (userId, payload = {}) =>
-    api.post(`/api/master-admin/users/${userId}/unfreeze`, payload).catch((error) => {
-      if (error?.response?.status === 404 || error?.response?.status === 405) {
-        return api.post(`/api/master-admin/users/${userId}/reactivate`, {
-          ...payload,
-          lifecycle_action: "unfreeze",
-        });
-      }
-      throw error;
-    }),
+    api.post(`/api/master-admin/users/${userId}/unfreeze`, payload),
 
   reactivateUser: (userId, payload = {}) =>
     api.post(`/api/master-admin/users/${userId}/reactivate`, payload),
