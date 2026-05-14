@@ -107,20 +107,21 @@ class NotificationService:
         **kwargs: Any,
     ) -> Dict[str, Any]:
         resolved_reason = approval_note if approval_note is not None else reason
+        email_delivered = False
 
         if hasattr(legacy, "_send_access_approved_confirmation"):
             try:
-                legacy._send_access_approved_confirmation(target_user)
+                email_delivered = bool(legacy._send_access_approved_confirmation(target_user))
             except TypeError:
                 try:
-                    legacy._send_access_approved_confirmation(target_user, reason=resolved_reason)
+                    email_delivered = bool(legacy._send_access_approved_confirmation(target_user, reason=resolved_reason))
                 except TypeError:
                     try:
-                        legacy._send_access_approved_confirmation(
+                        email_delivered = bool(legacy._send_access_approved_confirmation(
                             target_user,
                             workspace_name,
                             resolved_reason,
-                        )
+                        ))
                     except Exception:
                         legacy.logger.warning("Access approval email helper failed", exc_info=True)
                 except Exception:
@@ -134,6 +135,7 @@ class NotificationService:
             reason=resolved_reason,
             workspace_name=workspace_name,
             actor={"label": actor_label},
+            email_delivery_succeeded=email_delivered,
             **kwargs,
         )
 
@@ -148,6 +150,18 @@ class NotificationService:
         **kwargs: Any,
     ) -> Dict[str, Any]:
         resolved_reason = rejection_note if rejection_note is not None else reason
+        email_delivered = False
+
+        if hasattr(legacy, "_send_access_denied_confirmation"):
+            try:
+                email_delivered = bool(legacy._send_access_denied_confirmation(target_user))
+            except TypeError:
+                try:
+                    email_delivered = bool(legacy._send_access_denied_confirmation(target_user, reason=resolved_reason))
+                except Exception:
+                    legacy.logger.warning("Access rejection email helper failed", exc_info=True)
+            except Exception:
+                legacy.logger.warning("Access rejection email helper failed", exc_info=True)
 
         return await self.send_access_request_notification(
             target_user=target_user,
@@ -155,6 +169,7 @@ class NotificationService:
             reason=resolved_reason,
             workspace_name=workspace_name,
             actor={"label": actor_label},
+            email_delivery_succeeded=email_delivered,
             **kwargs,
         )
 

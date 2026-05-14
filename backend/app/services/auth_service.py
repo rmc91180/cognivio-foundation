@@ -18,6 +18,68 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+DELETED_APPROVAL_STATUSES = {"deleted", "hard_deleted", "account_deleted", "approval_deleted"}
+REUSABLE_APPROVAL_STATUSES = DELETED_APPROVAL_STATUSES | {"rejected", "denied"}
+LOGIN_ALLOWED_APPROVAL_STATUSES = {"approved", "active"}
+
+
+def _normalize_email(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _normalize_status(value: Any, fallback: str = "") -> str:
+    return str(value or fallback or "").strip().lower()
+
+
+def _is_deleted_or_tombstoned_user(user_doc: Optional[Dict[str, Any]]) -> bool:
+    if not user_doc:
+        return False
+    status = _normalize_status(user_doc.get("approval_status"))
+    return (
+        status in DELETED_APPROVAL_STATUSES
+        or user_doc.get("account_deleted") is True
+        or user_doc.get("approval_deleted") is True
+        or user_doc.get("deleted_at") is not None
+    )
+
+
+def _blocks_new_access_request(user_doc: Optional[Dict[str, Any]]) -> bool:
+    if not user_doc:
+        return False
+    status = _normalize_status(user_doc.get("approval_status"), "approved")
+    if _is_deleted_or_tombstoned_user(user_doc) or status in {"rejected", "denied"}:
+        return False
+    return status in {"pending", "approved", "active", "revoked"} or user_doc.get("is_active") is False
+
+
+async def _remove_reusable_user_record(email: str) -> None:
+    if not email or not hasattr(legacy, "db") or getattr(legacy.db, "users", None) is None:
+        return
+    query = {
+        "email": email,
+        "$or": [
+            {"approval_status": {"$in": list(REUSABLE_APPROVAL_STATUSES)}},
+            {"account_deleted": True},
+            {"approval_deleted": True},
+            {"deleted_at": {"$ne": None}},
+        ],
+    }
+    users = legacy.db.users
+    try:
+        if hasattr(users, "delete_many"):
+            await users.delete_many(query)
+        elif hasattr(users, "delete_one"):
+            await users.delete_one({"email": email})
+        elif hasattr(users, "docs"):
+            users.docs = [
+                doc
+                for doc in getattr(users, "docs", [])
+                if _normalize_email(doc.get("email")) != email or _blocks_new_access_request(doc)
+            ]
+    except Exception:
+        pass
+
+
 def _jwt_secret() -> str:
     return getattr(legacy, "JWT_SECRET", None) or os.getenv("JWT_SECRET", "")
 
@@ -393,14 +455,20 @@ def _resolve_requested_role(user: Any) -> Dict[str, str]:
     return {"role": "teacher", "tenant_role": "teacher"}
 
 
-async def register_user(user: Any) -> Any:
+async def register_user(
+    user: Any,
+    request: Optional[Request] = None,
+    response: Optional[Response] = None,
+) -> Any:
     if getattr(legacy, "DEMO_MODE", False):
         raise HTTPException(status_code=403, detail="Registration is disabled for demo mode")
 
-    email = str(user.email or "").strip().lower()
+    email = _normalize_email(user.email)
     existing = await legacy.db.users.find_one({"email": email})
-    if existing:
+    if _blocks_new_access_request(existing):
         raise HTTPException(status_code=400, detail="Email already registered")
+    if existing:
+        await _remove_reusable_user_record(email)
 
     user_id = str(uuid.uuid4())
     now = _now_iso()
@@ -418,7 +486,10 @@ async def register_user(user: Any) -> Any:
     }
     await legacy.db.users.insert_one(user_doc)
 
-    token = create_access_token(user_id, email=user_doc["email"], role=user_doc["role"])
+    session_id = await create_user_session(user=user_doc, role=user_doc["role"], request=request)
+    token = create_access_token(user_id, session_id=session_id, email=user_doc["email"], role=user_doc["role"])
+    if response is not None:
+        set_auth_cookies(response, token, build_csrf_token(session_id))
     return legacy.TokenResponse(
         token=token,
         user=_build_user_response(user_doc),
@@ -426,11 +497,15 @@ async def register_user(user: Any) -> Any:
 
 
 async def login_user(user: Any, request: Request, response: Optional[Response] = None) -> Any:
-    email = str(user.email or "").strip().lower()
+    email = _normalize_email(user.email)
     requested_role = str(getattr(user, "role", "") or "").strip().lower()
 
     db_user = await legacy.db.users.find_one({"email": email})
-    if not db_user or not verify_password(user.password, db_user.get("password", "")):
+    if (
+        not db_user
+        or _is_deleted_or_tombstoned_user(db_user)
+        or not verify_password(user.password, db_user.get("password", ""))
+    ):
         await _maybe_log_auth_event(
             "login_failed",
             email=email,
@@ -440,9 +515,9 @@ async def login_user(user: Any, request: Request, response: Optional[Response] =
         )
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    approval_status = str(db_user.get("approval_status") or "approved").lower()
+    approval_status = _normalize_status(db_user.get("approval_status"), "approved")
     is_active = db_user.get("is_active", True)
-    if approval_status not in {"approved", "active"} or is_active is False:
+    if approval_status not in LOGIN_ALLOWED_APPROVAL_STATUSES or is_active is False:
         await _maybe_log_auth_event(
             "login_failed",
             email=email,
@@ -504,7 +579,7 @@ async def request_access(user: Any, request: Optional[Request] = None) -> Dict[s
     if getattr(legacy, "DEMO_MODE", False):
         raise HTTPException(status_code=403, detail="Access requests are disabled for demo mode")
 
-    email = str(getattr(user, "email", "") or "").strip().lower()
+    email = _normalize_email(getattr(user, "email", ""))
     password = str(getattr(user, "password", "") or "")
     name = str(getattr(user, "name", "") or email).strip()
 
@@ -527,8 +602,8 @@ async def request_access(user: Any, request: Optional[Request] = None) -> Dict[s
     requested_manager_email = str(getattr(user, "requested_manager_email", "") or "").strip().lower()
 
     existing = await legacy.db.users.find_one({"email": email}, {"_id": 0})
-    if existing:
-        existing_status = str(existing.get("approval_status") or "").lower()
+    if _blocks_new_access_request(existing):
+        existing_status = _normalize_status(existing.get("approval_status"))
         if existing_status == "pending":
             return {
                 "status": "pending",
@@ -537,6 +612,8 @@ async def request_access(user: Any, request: Optional[Request] = None) -> Dict[s
             }
 
         raise HTTPException(status_code=400, detail="Email already registered")
+    if existing:
+        await _remove_reusable_user_record(email)
 
     user_id = str(uuid.uuid4())
     now = _now_iso()
@@ -656,7 +733,11 @@ async def confirm_password_reset(payload: Any, request: Optional[Request] = None
     return {"status": "ok", "message": "Password updated successfully"}
 
 
-async def get_current_user_profile(current_user: dict) -> Any:
+async def get_current_user_profile(
+    current_user: dict,
+    request: Optional[Request] = None,
+    response: Optional[Response] = None,
+) -> Any:
     return _build_user_response(current_user)
 
 

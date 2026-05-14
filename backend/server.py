@@ -205,9 +205,36 @@ def _get_user_role(user: dict) -> str:
 
 def _get_user_approval_status(user: Optional[dict]) -> str:
     status = str((user or {}).get("approval_status") or "").strip().lower()
-    if status in {"pending", "approved", "revoked", "deleted"}:
+    if status in {"pending", "approved", "revoked", "deleted", "rejected", "denied"}:
         return status
     return "approved"
+
+
+DELETED_USER_STATUSES = {"deleted", "hard_deleted", "account_deleted", "approval_deleted"}
+
+
+def _is_user_deleted_or_tombstoned(user: Optional[dict]) -> bool:
+    if not user:
+        return False
+    return (
+        str(user.get("approval_status") or "").strip().lower() in DELETED_USER_STATUSES
+        or user.get("account_deleted") is True
+        or user.get("approval_deleted") is True
+        or user.get("deleted_at") is not None
+    )
+
+
+def _is_active_roster_user(user: Optional[dict]) -> bool:
+    return bool(user) and not _is_user_deleted_or_tombstoned(user) and _is_user_access_active(user)
+
+
+def _linked_user_hides_teacher_roster_record(user: Optional[dict]) -> bool:
+    if not user:
+        return False
+    status = _get_user_approval_status(user)
+    if _is_user_deleted_or_tombstoned(user) or status in {"revoked", "rejected", "denied"}:
+        return True
+    return status == "approved" and user.get("is_active", True) is False
 
 
 def _is_user_access_active(user: Optional[dict]) -> bool:
@@ -418,8 +445,7 @@ async def _get_organization_seat_snapshot(*, organization_id: str, exclude_user_
         doc
         for doc in user_docs
         if (doc.get("id") != exclude_user_id)
-        and doc.get("approval_status") == "approved"
-        and doc.get("is_active", True) is not False
+        and _is_active_roster_user(doc)
     ]
     pending_docs = [
         doc
@@ -795,8 +821,38 @@ async def _build_master_admin_organization_record(organization_doc: dict) -> "Ma
     seats_remaining = None if not seat_limit else max(seat_limit - seat_snapshot["active_user_count"], 0)
     teacher_docs = await db.teachers.find(
         {"organization_id": organization_doc["id"]},
-        {"_id": 0, "id": 1},
+        {"_id": 0, "id": 1, "email": 1},
     ).to_list(5000)
+    if teacher_docs:
+        teacher_ids_for_users = [doc.get("id") for doc in teacher_docs if doc.get("id")]
+        teacher_emails_for_users = [
+            str(doc.get("email") or "").strip().lower()
+            for doc in teacher_docs
+            if doc.get("email")
+        ]
+        linked_user_docs = await db.users.find(
+            {
+                "$or": [
+                    {"teacher_id": {"$in": teacher_ids_for_users}},
+                    {"email": {"$in": teacher_emails_for_users}},
+                ]
+            },
+            {"_id": 0, "id": 1, "email": 1, "teacher_id": 1, "approval_status": 1, "is_active": 1},
+        ).to_list(5000)
+        users_by_teacher_id = {doc.get("teacher_id"): doc for doc in linked_user_docs if doc.get("teacher_id")}
+        users_by_email = {
+            str(doc.get("email") or "").strip().lower(): doc
+            for doc in linked_user_docs
+            if doc.get("email")
+        }
+        teacher_docs = [
+            teacher
+            for teacher in teacher_docs
+            if not _linked_user_hides_teacher_roster_record(
+                users_by_teacher_id.get(teacher.get("id"))
+                or users_by_email.get(str(teacher.get("email") or "").strip().lower())
+            )
+        ]
     teacher_ids = [doc.get("id") for doc in teacher_docs if doc.get("id")]
     active_incidents = [item for item in await _refresh_processing_incidents() if item.get("state") == "active"]
     active_incident_count = sum(1 for item in active_incidents if item.get("teacher_id") in teacher_ids)
@@ -1112,6 +1168,24 @@ async def _build_master_admin_workspace_records() -> List["MasterAdminWorkspaceR
     ).to_list(2000)
     teacher_docs = await db.teachers.find({}, {"_id": 0}).to_list(5000)
     user_docs = await db.users.find({}, {"_id": 0, "password": 0}).to_list(5000)
+    users_by_teacher_id = {
+        doc.get("teacher_id"): doc
+        for doc in user_docs
+        if doc.get("teacher_id")
+    }
+    users_by_email = {
+        str(doc.get("email") or "").strip().lower(): doc
+        for doc in user_docs
+        if doc.get("email")
+    }
+    teacher_docs = [
+        teacher
+        for teacher in teacher_docs
+        if not _linked_user_hides_teacher_roster_record(
+            users_by_teacher_id.get(teacher.get("id"))
+            or users_by_email.get(str(teacher.get("email") or "").strip().lower())
+        )
+    ]
     video_docs = await db.videos.find(
         {},
         {"_id": 0, "id": 1, "teacher_id": 1, "created_at": 1, "status_updated_at": 1, "transcode_status": 1, "privacy_status": 1, "analysis_status": 1},
@@ -1697,12 +1771,15 @@ async def _hard_delete_user_access(
 ) -> dict:
     user_id = target["id"]
     email = str(target.get("email") or "").strip().lower()
+    deleted_counts: Dict[str, int] = {}
     deleted_snapshot = {
         **{key: value for key, value in target.items() if key != "_id"},
         "approval_status": "deleted",
         "is_active": False,
         "deleted_at": datetime.now(timezone.utc).isoformat(),
         "deleted_by": actor.get("email") or actor.get("id"),
+        "account_deleted": True,
+        "approval_deleted": _get_user_approval_status(target) == "pending",
     }
 
     linked_teacher = None
@@ -1713,33 +1790,35 @@ async def _hard_delete_user_access(
         linked_teacher = await db.teachers.find_one({"email": email}, {"_id": 0})
 
     if linked_teacher:
-        await _cleanup_teacher_smoke_artifacts(linked_teacher, delete_user_emails=[email] if email else None)
+        cleanup_result = await _cleanup_teacher_smoke_artifacts(
+            linked_teacher,
+            delete_user_emails=[email] if email else None,
+        )
+        deleted_counts.update(getattr(cleanup_result, "deleted_counts", {}) or {})
     else:
         if hasattr(db.users, "delete_one"):
-            await db.users.delete_one({"id": user_id})
+            result = await db.users.delete_one({"id": user_id})
+            deleted_counts["users"] = getattr(result, "deleted_count", 0)
         elif hasattr(db.users, "delete_many"):
-            await db.users.delete_many({"id": user_id})
+            result = await db.users.delete_many({"id": user_id})
+            deleted_counts["users"] = getattr(result, "deleted_count", 0)
         elif hasattr(db.users, "record"):
             if getattr(db.users, "record", None) and db.users.record.get("id") == user_id:
                 db.users.record = None
+                deleted_counts["users"] = 1
         else:
             docs = list(getattr(db.users, "docs", []))
             db.users.docs = [doc for doc in docs if doc.get("id") != user_id]
+            deleted_counts["users"] = len(docs) - len(getattr(db.users, "docs", []))
 
     if hasattr(db, "user_sessions"):
         if hasattr(db.user_sessions, "delete_many"):
-            await db.user_sessions.delete_many({"user_id": user_id})
+            result = await db.user_sessions.delete_many({"user_id": user_id})
+            deleted_counts["user_sessions"] = getattr(result, "deleted_count", 0)
         else:
+            before = len(getattr(db.user_sessions, "docs", []))
             db.user_sessions.docs = [doc for doc in getattr(db.user_sessions, "docs", []) if doc.get("user_id") != user_id]
-    if hasattr(db, "auth_event_log"):
-        if hasattr(db.auth_event_log, "delete_many"):
-            await db.auth_event_log.delete_many({"$or": [{"user_id": user_id}, {"email": email}]})
-        else:
-            db.auth_event_log.docs = [
-                doc
-                for doc in getattr(db.auth_event_log, "docs", [])
-                if doc.get("user_id") != user_id and doc.get("email") != email
-            ]
+            deleted_counts["user_sessions"] = before - len(getattr(db.user_sessions, "docs", []))
 
     if hasattr(db, "schools"):
         await db.schools.update_many(
@@ -1777,7 +1856,8 @@ async def _hard_delete_user_access(
             user_count = await db.users.count_documents({"organization_id": org_id})
             school_count = await db.schools.count_documents({"organization_id": org_id}) if hasattr(db, "schools") else 0
             if user_count == 0 and school_count == 0:
-                await db.organizations.delete_one({"id": org_id})
+                result = await db.organizations.delete_one({"id": org_id})
+                deleted_counts["organizations"] = deleted_counts.get("organizations", 0) + getattr(result, "deleted_count", 0)
 
     event_type = "approval_deleted" if _get_user_approval_status(target) == "pending" else "account_deleted"
     await _log_auth_event(
@@ -1787,6 +1867,18 @@ async def _hard_delete_user_access(
         result="success",
         reason=reason,
     )
+    if event_type == "approval_deleted":
+        try:
+            from app.services.notification_service import NotificationService
+
+            await NotificationService().send_access_rejected(
+                target,
+                reason=reason,
+                actor_label=actor.get("email") or actor.get("id"),
+            )
+        except Exception:
+            logger.warning("Access rejection notification failed during hard delete", exc_info=True)
+    deleted_snapshot["deleted_counts"] = deleted_counts
     return deleted_snapshot
 
 
@@ -2770,6 +2862,44 @@ async def _get_visible_school_ids_for_user(current_user: dict) -> List[str]:
     return [item["id"] for item in schools if item.get("id")]
 
 
+async def _filter_active_teacher_roster_docs(teachers: List[dict]) -> List[dict]:
+    if not teachers or not hasattr(db, "users"):
+        return teachers
+    teacher_ids = [teacher.get("id") for teacher in teachers if teacher.get("id")]
+    teacher_emails = [
+        str(teacher.get("email") or "").strip().lower()
+        for teacher in teachers
+        if teacher.get("email")
+    ]
+    if not teacher_ids and not teacher_emails:
+        return teachers
+    user_docs = await db.users.find(
+        {
+            "$or": [
+                {"teacher_id": {"$in": teacher_ids}},
+                {"email": {"$in": teacher_emails}},
+            ]
+        },
+        {"_id": 0, "id": 1, "email": 1, "teacher_id": 1, "approval_status": 1, "is_active": 1},
+    ).to_list(5000)
+    users_by_teacher_id = {doc.get("teacher_id"): doc for doc in user_docs if doc.get("teacher_id")}
+    users_by_email = {
+        str(doc.get("email") or "").strip().lower(): doc
+        for doc in user_docs
+        if doc.get("email")
+    }
+    filtered = []
+    for teacher in teachers:
+        linked_user = (
+            users_by_teacher_id.get(teacher.get("id"))
+            or users_by_email.get(str(teacher.get("email") or "").strip().lower())
+        )
+        if _linked_user_hides_teacher_roster_record(linked_user):
+            continue
+        filtered.append(teacher)
+    return filtered
+
+
 async def _list_teacher_ids_for_user(current_user: dict) -> List[str]:
     tenant_role = _get_user_tenant_role(current_user)
     teachers_collection = getattr(db, "teachers", None)
@@ -2778,7 +2908,8 @@ async def _list_teacher_ids_for_user(current_user: dict) -> List[str]:
         return []
 
     if tenant_role == "super_admin":
-        teachers = await teachers_collection.find({}, {"_id": 0, "id": 1}).to_list(5000)
+        teachers = await teachers_collection.find({}, {"_id": 0, "id": 1, "email": 1}).to_list(5000)
+        teachers = await _filter_active_teacher_roster_docs(teachers)
         return [teacher["id"] for teacher in teachers if teacher.get("id")]
 
     if tenant_role == "teacher":
@@ -2787,7 +2918,8 @@ async def _list_teacher_ids_for_user(current_user: dict) -> List[str]:
         if email:
             clauses.insert(0, {"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
         query = clauses[0] if len(clauses) == 1 else {"$or": clauses}
-        teachers = await teachers_collection.find(query, {"_id": 0, "id": 1}).to_list(200)
+        teachers = await teachers_collection.find(query, {"_id": 0, "id": 1, "email": 1}).to_list(200)
+        teachers = await _filter_active_teacher_roster_docs(teachers)
         return [teacher["id"] for teacher in teachers if teacher.get("id")]
 
     clauses: List[Dict[str, Any]] = [{"created_by": current_user["id"]}]
@@ -2799,7 +2931,12 @@ async def _list_teacher_ids_for_user(current_user: dict) -> List[str]:
             clauses.append({"school_id": {"$in": school_ids}})
     if tenant_role == "training_admin" and organization_id and users_collection is not None:
         teacher_user_docs = await users_collection.find(
-            {"tenant_role": "teacher", "organization_id": organization_id},
+            {
+                "tenant_role": "teacher",
+                "organization_id": organization_id,
+                "approval_status": "approved",
+                "is_active": {"$ne": False},
+            },
             {"_id": 0, "email": 1},
         ).to_list(5000)
         teacher_emails = [str(doc.get("email") or "").strip().lower() for doc in teacher_user_docs if doc.get("email")]
@@ -2807,7 +2944,8 @@ async def _list_teacher_ids_for_user(current_user: dict) -> List[str]:
             clauses.append({"email": {"$in": teacher_emails}})
 
     query = clauses[0] if len(clauses) == 1 else {"$or": clauses}
-    teachers = await teachers_collection.find(query, {"_id": 0, "id": 1}).to_list(5000)
+    teachers = await teachers_collection.find(query, {"_id": 0, "id": 1, "email": 1}).to_list(5000)
+    teachers = await _filter_active_teacher_roster_docs(teachers)
     return [teacher["id"] for teacher in teachers if teacher.get("id")]
 
 
@@ -3083,10 +3221,6 @@ async def _cleanup_teacher_smoke_artifacts(
     observation_query: Dict[str, Any] = {"teacher_id": teacher_id}
     if video_ids:
         observation_query = {"$or": [{"teacher_id": teacher_id}, {"video_id": {"$in": video_ids}}]}
-    audit_query: Dict[str, Any] = {"target_id": teacher_id}
-    if video_ids:
-        audit_query = {"$or": [{"target_id": teacher_id}, {"target_id": {"$in": video_ids}}]}
-
     deleted_counts["curriculum_adherence"] = (
         await db.curriculum_adherence.delete_many({"assessment_id": {"$in": assessment_ids}})
     ).deleted_count if assessment_ids else 0
@@ -3137,12 +3271,6 @@ async def _cleanup_teacher_smoke_artifacts(
     ).deleted_count
     deleted_counts["lesson_recognition_events"] = (
         await db.lesson_recognition_events.delete_many({"teacher_id": teacher_id})
-    ).deleted_count
-    deleted_counts["privacy_audit_events"] = (
-        await db.privacy_audit_events.delete_many(audit_query)
-    ).deleted_count
-    deleted_counts["recognition_audit_events"] = (
-        await db.recognition_audit_events.delete_many(audit_query)
     ).deleted_count
     deleted_counts["teacher_face_references"] = (
         await db.teacher_face_references.delete_many({"teacher_id": teacher_id})
@@ -6266,6 +6394,7 @@ class MasterAdminAuditEventListResponse(BaseModel):
 class MasterAdminUserActionPayload(BaseModel):
     reason: Optional[str] = None
     confirmation_text: Optional[str] = None
+    confirmation_email: Optional[str] = None
     organization_name: Optional[str] = None
     organization_type: Optional[str] = None
     school_name: Optional[str] = None
@@ -7641,7 +7770,7 @@ async def login(user: "UserLogin", request: Request, response: Response = None):
 
 
 async def logout(request: Request, response: Response):
-    return await _auth_service.logout_user(request, response)
+    return await _auth_service.logout_user(response=response, request=request)
 
 
 async def request_password_reset(payload: "PasswordResetRequestPayload", request: Request):
@@ -12046,7 +12175,6 @@ async def process_access_request_action(action: str, token: str):
         result="success",
         reason="email_link_denial",
     )
-    _send_access_denied_confirmation(target)
     return Response(
         _render_access_request_action_result_page(
             "Applicant denied",
@@ -20155,10 +20283,49 @@ async def master_admin_revoke_user(
     target = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
-    expected_confirmation = str(target.get("email") or "").strip().lower()
-    actual_confirmation = str(payload.confirmation_text or "").strip().lower()
     if not payload.reason:
         raise HTTPException(status_code=400, detail="A reason is required before access can be revoked")
+    updated = await _revoke_user_access(
+        target,
+        actor_label=current_user.get("email") or current_user["id"],
+        reason=payload.reason,
+    )
+    await _log_master_admin_audit_event(
+        actor=current_user,
+        action="revoke_user_access",
+        target_type="user",
+        target_id=user_id,
+        reason=payload.reason,
+        metadata={"email": updated.get("email"), "approval_status": updated.get("approval_status")},
+    )
+    return _to_access_user_record(updated)
+
+
+@api_router.post("/master-admin/users/{user_id}/freeze", response_model=AccessUserRecord)
+async def master_admin_freeze_user(
+    user_id: str,
+    payload: MasterAdminUserActionPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    return await master_admin_revoke_user(user_id, payload, current_user=current_user)
+
+
+@api_router.post("/master-admin/users/{user_id}/delete", response_model=AccessUserRecord)
+async def master_admin_delete_user(
+    user_id: str,
+    payload: MasterAdminUserActionPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_master_admin_user(current_user)
+    if user_id == current_user.get("id"):
+        raise HTTPException(status_code=400, detail="You cannot delete your own access")
+    target = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    expected_confirmation = str(target.get("email") or "").strip().lower()
+    actual_confirmation = str(payload.confirmation_text or payload.confirmation_email or "").strip().lower()
+    if not payload.reason:
+        raise HTTPException(status_code=400, detail="A reason is required before access can be deleted")
     if expected_confirmation and actual_confirmation != expected_confirmation:
         raise HTTPException(status_code=400, detail="Confirmation text must match the target email exactly")
     deleted = await _hard_delete_user_access(
@@ -20172,7 +20339,11 @@ async def master_admin_revoke_user(
         target_type="user",
         target_id=user_id,
         reason=payload.reason,
-        metadata={"email": deleted.get("email"), "approval_status": deleted.get("approval_status")},
+        metadata={
+            "email": deleted.get("email"),
+            "approval_status": deleted.get("approval_status"),
+            "deleted_counts": deleted.get("deleted_counts") or {},
+        },
     )
     return _to_access_user_record(deleted)
 
@@ -20203,6 +20374,15 @@ async def master_admin_reactivate_user(
         metadata={"email": updated.get("email"), "approval_status": updated.get("approval_status")},
     )
     return _to_access_user_record(updated)
+
+
+@api_router.post("/master-admin/users/{user_id}/unfreeze", response_model=AccessUserRecord)
+async def master_admin_unfreeze_user(
+    user_id: str,
+    payload: MasterAdminUserActionPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    return await master_admin_reactivate_user(user_id, payload, current_user=current_user)
 
 
 @api_router.get("/master-admin/auth-events", response_model=AuthEventListResponse)
