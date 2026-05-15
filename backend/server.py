@@ -7614,6 +7614,11 @@ class CoachingTaskCompleteRequest(BaseModel):
     completion_note: Optional[str] = None
 
 
+class CoachingTaskReflectionCreate(BaseModel):
+    tried: str
+    happened: str
+
+
 class CoachingHistoryResponse(BaseModel):
     teacher_id: str
     teacher_name: Optional[str] = None
@@ -16904,6 +16909,77 @@ async def list_overdue_coaching_tasks(current_user: dict = Depends(get_current_u
     return CoachingTaskListResponse(tasks=[CoachingTask(**task) for task in tasks])
 
 
+async def _get_current_teacher_for_workspace(current_user: dict) -> dict:
+    if _get_user_tenant_role(current_user) != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher access required")
+    teacher_id = current_user.get("teacher_id")
+    if teacher_id:
+        return await _get_teacher_or_404(teacher_id, current_user)
+    email = str(current_user.get("email") or "").strip().lower()
+    if email:
+        teacher = await db.teachers.find_one({"email": email}, {"_id": 0})
+        if teacher:
+            return await _get_teacher_or_404(teacher["id"], current_user)
+    raise HTTPException(status_code=404, detail="Teacher profile not found")
+
+
+def _coaching_action_text(item: Any) -> Optional[str]:
+    if isinstance(item, str):
+        return item.strip() or None
+    if isinstance(item, dict):
+        return (
+            str(item.get("text") or item.get("title") or item.get("action") or "").strip()
+            or None
+        )
+    return None
+
+
+@api_router.get("/teachers/me/latest-lesson")
+async def get_my_latest_lesson(current_user: dict = Depends(get_current_user)):
+    teacher = await _get_current_teacher_for_workspace(current_user)
+    assessment = await db.assessments.find_one(
+        {"teacher_id": teacher["id"]},
+        {"_id": 0, "element_scores": 0, "overall_score": 0, "analysis_confidence": 0},
+        sort=[("analyzed_at", -1), ("created_at", -1)],
+    )
+    if not assessment:
+        return {"lesson": None}
+    video = await db.videos.find_one({"id": assessment.get("video_id")}, {"_id": 0}) if assessment.get("video_id") else None
+    observation_summary = assessment.get("observation_summary") or {}
+    actions = [
+        text
+        for text in (
+            _coaching_action_text(item)
+            for item in (
+                observation_summary.get("actionable_next_steps_structured")
+                or observation_summary.get("coaching_actions")
+                or assessment.get("recommendations")
+                or []
+            )
+        )
+        if text
+    ][:2]
+    talk_time_summary = (
+        (video or {}).get("audio_summary")
+        or (assessment.get("audio_summary") if isinstance(assessment.get("audio_summary"), str) else None)
+    )
+    return {
+        "lesson": {
+            "id": assessment.get("id"),
+            "assessment_id": assessment.get("id"),
+            "video_id": assessment.get("video_id"),
+            "title": (video or {}).get("filename") or assessment.get("subject") or teacher.get("subject"),
+            "subject": assessment.get("subject") or (video or {}).get("subject") or teacher.get("subject"),
+            "lesson_date": assessment.get("analyzed_at") or assessment.get("recorded_at") or (video or {}).get("recorded_at"),
+            "reviewed_at": assessment.get("analyzed_at"),
+            "recorded_at": assessment.get("recorded_at") or (video or {}).get("recorded_at"),
+            "summary": observation_summary.get("executive_summary") or assessment.get("summary"),
+            "actions": actions,
+            "talk_time_summary": talk_time_summary,
+        }
+    }
+
+
 @api_router.patch("/coaching/tasks/{task_id}", response_model=CoachingTask)
 async def update_coaching_task(
     task_id: str,
@@ -16969,6 +17045,78 @@ async def complete_coaching_task(
     if not updated:
         raise HTTPException(status_code=404, detail="Coaching task not found")
     return CoachingTask(**_serialize_coaching_task_doc(updated))
+
+
+@api_router.post("/coaching/tasks/{task_id}/reflection")
+async def submit_coaching_task_reflection(
+    task_id: str,
+    payload: CoachingTaskReflectionCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    task = await _get_visible_coaching_task_or_404(task_id, current_user)
+    if _get_user_tenant_role(current_user) != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher access required")
+    teacher = await _get_current_teacher_for_workspace(current_user)
+    if task.get("teacher_id") != teacher.get("id"):
+        raise HTTPException(status_code=403, detail="Cannot reflect on another teacher's goal")
+    tried = str(payload.tried or "").strip()
+    happened = str(payload.happened or "").strip()
+    if not tried or not happened:
+        raise HTTPException(status_code=400, detail="Reflection responses are required")
+    now = datetime.now(timezone.utc).isoformat()
+    reflection_doc = {
+        "id": str(uuid.uuid4()),
+        "task_id": task_id,
+        "teacher_id": teacher["id"],
+        "author_user_id": current_user["id"],
+        "observer_id": task.get("observer_id"),
+        "tried": tried,
+        "happened": happened,
+        "created_at": now,
+        "updated_at": None,
+    }
+    await db.coaching_task_reflections.insert_one(reflection_doc)
+    await db.coaching_tasks.update_one(
+        {"id": task_id},
+        {
+            "$set": {"status": "in_progress", "updated_at": now},
+            "$inc": {"reflection_count": 1},
+        },
+    )
+    if task.get("observer_id"):
+        await db.notifications.insert_one(
+            {
+                "id": str(uuid.uuid4()),
+                "workspace_id": task.get("workspace_id"),
+                "recipient_user_id": task.get("observer_id"),
+                "teacher_id": teacher["id"],
+                "notification_type": "reflection_submitted",
+                "type": "reflection_submitted",
+                "title": f"{teacher.get('name') or 'A teacher'} shared a reflection",
+                "message": "Read what they tried and decide what to follow up on next.",
+                "body": "Read what they tried and decide what to follow up on next.",
+                "cta_url": f"/teachers/{teacher['id']}/coaching",
+                "read": False,
+                "read_at": None,
+                "channel": "in_app",
+                "status": "queued",
+                "created_at": now,
+                "payload": {"task_id": task_id, "reflection_id": reflection_doc["id"]},
+            }
+        )
+        _notification_unread_count_cache.pop(task.get("observer_id"), None)
+    reflection_doc.pop("_id", None)
+    return {"reflection": reflection_doc}
+
+
+@api_router.get("/coaching/reflections/my")
+async def list_my_coaching_reflections(current_user: dict = Depends(get_current_user)):
+    teacher = await _get_current_teacher_for_workspace(current_user)
+    docs = await db.coaching_task_reflections.find(
+        {"teacher_id": teacher["id"]},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(100)
+    return {"reflections": docs}
 
 
 @api_router.get("/teachers/{teacher_id}/coaching-history", response_model=CoachingHistoryResponse)
@@ -18257,6 +18405,26 @@ async def list_upcoming_observation_sessions(
         {"_id": 0},
     ).sort("scheduled_date", 1).to_list(100)
     return [ObservationSession(**(await _serialize_observation_session(doc))) for doc in docs]
+
+
+@api_router.post("/observations/sessions", response_model=ObservationSession)
+async def create_observation_session_alias(
+    payload: ObservationSessionCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    return await create_observation_session(payload=payload, current_user=current_user)
+
+
+@api_router.get("/observations/sessions/pending", response_model=List[ObservationSession])
+async def list_pending_observation_sessions_alias(
+    teacher_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    return await list_observation_sessions(
+        teacher_id=teacher_id,
+        status=ObservationSessionStatus.PLANNED,
+        current_user=current_user,
+    )
 
 
 @api_router.get("/observation-sessions/{session_id}", response_model=ObservationSession)
@@ -19739,6 +19907,7 @@ async def get_master_admin_bootstrap(current_user: dict = Depends(get_current_us
             "name": current_user.get("name"),
             "role": _get_user_role(current_user),
         },
+        "demo_mode": DEMO_MODE,
         "sections": [
             {
                 "id": "command-center",
@@ -25520,6 +25689,35 @@ def _generate_demo_adherence_score(
 
 
 # ==================== SEED DATA ENDPOINT ====================
+@api_router.post("/demo/reset")
+async def reset_pilot_demo_data(
+    persona: str = Query("all", pattern="^(k12|training|all)$"),
+    current_user: dict = Depends(get_current_user),
+):
+    if not DEMO_MODE:
+        raise HTTPException(status_code=403, detail="Demo reset is only available when demo mode is enabled")
+    _require_master_admin_user(current_user)
+    from scripts.seed_demo_data import reset_demo_data_for_persona
+
+    result = await reset_demo_data_for_persona(db, persona)
+    await db.demo_reset_events.insert_one(
+        {
+            "id": str(uuid.uuid4()),
+            "actor_user_id": current_user["id"],
+            "persona": persona,
+            "reset_at": result["reset_at"],
+            "counts": {
+                "teachers_seeded": result.get("teachers_seeded", 0),
+                "assessments_seeded": result.get("assessments_seeded", 0),
+                "tasks_seeded": result.get("tasks_seeded", 0),
+                "badges_seeded": result.get("badges_seeded", 0),
+            },
+            "demo_data": True,
+        }
+    )
+    return result
+
+
 @api_router.post("/seed-demo-data/reset")
 async def reset_demo_data(current_user: dict = Depends(get_current_user)):
     """Delete demo data for the current user and return counts."""
@@ -25877,6 +26075,8 @@ async def _ensure_database_indexes() -> None:
     await _safe_create_index(db.published_conference_agendas, [("teacher_id", 1), ("published_at", -1)])
     await _safe_create_index(db.coaching_tasks, [("teacher_id", 1), ("status", 1), ("due_date", 1)])
     await _safe_create_index(db.coaching_tasks, [("workspace_id", 1), ("status", 1), ("priority_rank", -1)])
+    await _safe_create_index(db.coaching_task_reflections, [("teacher_id", 1), ("created_at", -1)])
+    await _safe_create_index(db.coaching_task_reflections, [("task_id", 1), ("created_at", -1)])
     await _safe_create_index(
         db.coaching_tasks,
         [("assessment_id", 1), ("teacher_id", 1), ("element_id", 1)],

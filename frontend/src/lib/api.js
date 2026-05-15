@@ -56,6 +56,8 @@ export { evidenceApi, videoApi };
 
 export const notificationApi = {
   list: () => api.get("/api/notifications"),
+  unreadCount: () => api.get("/api/notifications/unread-count"),
+  markAllRead: () => api.post("/api/notifications/read-all"),
 };
 
 export const privacyReviewApi = {
@@ -70,6 +72,7 @@ export const scheduleApi = {
 };
 
 export const reportApi = {
+  history: () => api.get("/api/reports/history"),
   export: (format, params = {}) =>
     api.post(
       "/api/reports/export",
@@ -79,6 +82,23 @@ export const reportApi = {
         responseType: "blob",
       }
     ),
+};
+
+export const teacherWorkspaceApi = {
+  latestLesson: () => api.get("/api/teachers/me/latest-lesson"),
+  coachingTasks: () => api.get("/api/coaching/tasks"),
+  taskReflection: (taskId, payload) =>
+    api.post(`/api/coaching/tasks/${taskId}/reflection`, payload),
+  reflections: () => api.get("/api/coaching/reflections/my"),
+  recognition: () => api.get("/api/recognition/my-badges"),
+};
+
+export const trainingApi = {
+  supervisorSummary: () => api.get("/api/training/supervisor-summary"),
+};
+
+export const demoApi = {
+  reset: (persona) => api.post("/api/demo/reset", null, { params: { persona } }),
 };
 
 export const gradebookApi = {

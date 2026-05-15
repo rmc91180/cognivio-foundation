@@ -1,170 +1,147 @@
-import React, { useEffect, useMemo, useState } from "react";
-import api from "@/lib/api";
+import React, { useMemo } from "react";
+import { Navigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { LayoutShell } from "@/components/LayoutShell";
+import { EmptyState, LoadingState, PageHeader, Panel, SectionHeader } from "@/components/ui";
+import { assessmentApi, reportApi, teacherApi, trainingApi } from "@/lib/api";
+import { useAuth } from "@/hooks/useAuth";
+import { getEffectiveWorkspaceMode, getHomeRoute } from "@/lib/roleRouter";
 
-const normalizeReports = (payload) => {
-  if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload?.reports)) return payload.reports;
-  if (Array.isArray(payload?.items)) return payload.items;
-  if (Array.isArray(payload?.data)) return payload.data;
-  return [];
+const countReviewedLessons = (payload) => {
+  const roster = payload?.roster || [];
+  return roster.reduce((total, row) => total + Number(row.assessment_count || 0), 0);
 };
 
-const formatDate = (value) => {
-  if (!value) return "";
-  try {
-    return new Date(value).toLocaleDateString();
-  } catch {
-    return "";
+function SnapshotCard({ label, value, hint }) {
+  return (
+    <Panel className="min-h-[118px]">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</div>
+      <div className="mt-3 text-3xl font-semibold text-slate-950">{value}</div>
+      {hint ? <div className="mt-2 text-sm text-slate-600">{hint}</div> : null}
+    </Panel>
+  );
+}
+
+export function ReportsPage() {
+  const { user } = useAuth();
+  const mode = getEffectiveWorkspaceMode(user);
+
+  const rosterQuery = useQuery({
+    queryKey: ["reports-roster"],
+    enabled: mode === "school",
+    queryFn: () => assessmentApi.roster({}).then((res) => res.data),
+  });
+  const tasksQuery = useQuery({
+    queryKey: ["reports-coaching-tasks"],
+    enabled: mode === "school",
+    queryFn: () => teacherApi.coachingTasks().then((res) => res.data),
+  });
+  const trainingQuery = useQuery({
+    queryKey: ["reports-training-summary"],
+    enabled: mode === "training",
+    queryFn: () => trainingApi.supervisorSummary().then((res) => res.data),
+  });
+  const historyQuery = useQuery({
+    queryKey: ["reports-history"],
+    enabled: mode === "school",
+    queryFn: () => reportApi.history().then((res) => res.data),
+    retry: 1,
+  });
+
+  const roster = rosterQuery.data?.roster || [];
+  const openTasks = tasksQuery.data?.tasks?.filter((task) => task.status !== "completed") || [];
+  const patterns = useMemo(() => {
+    const needsDiscussion = roster.filter((row) => (row.action_items || []).length || row.trend_30d === "declining");
+    return needsDiscussion.length
+      ? [
+          {
+            title: "Student discussion is a common growth area this period.",
+            body: `${needsDiscussion.length} teacher${needsDiscussion.length === 1 ? "" : "s"} would benefit from a focused follow-up conversation.`,
+          },
+        ]
+      : [];
+  }, [roster]);
+
+  if (mode === "teacher") {
+    return <Navigate to={getHomeRoute(user)} replace />;
   }
-};
-
-const getReportTitle = (report) =>
-  report?.title ||
-  report?.name ||
-  report?.teacher_name ||
-  report?.teacherName ||
-  "Observation Report";
-
-const getReportSubtitle = (report) =>
-  report?.summary ||
-  report?.description ||
-  report?.framework_type ||
-  report?.frameworkType ||
-  "Review classroom evidence, feedback, and growth signals.";
-
-const getReportDate = (report) =>
-  report?.created_at ||
-  report?.createdAt ||
-  report?.updated_at ||
-  report?.updatedAt ||
-  report?.completed_at ||
-  report?.completedAt;
-
-export default function ReportsPage() {
-  const [reports, setReports] = useState([]);
-  const [status, setStatus] = useState("loading");
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    let active = true;
-
-    const loadReports = async () => {
-      setStatus("loading");
-      setError("");
-
-      try {
-        const response = await api.get("/reports");
-        if (!active) return;
-
-        setReports(normalizeReports(response?.data));
-        setStatus("ready");
-      } catch (err) {
-        if (!active) return;
-
-        setError(
-          err?.response?.data?.detail ||
-            err?.message ||
-            "Reports are not available right now."
-        );
-        setReports([]);
-        setStatus("error");
-      }
-    };
-
-    loadReports();
-
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  const reportCount = useMemo(() => reports.length, [reports]);
 
   return (
-    <div className="min-h-screen bg-slate-50 px-4 py-8">
-      <div className="mx-auto max-w-6xl">
-        <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-          <p className="text-sm font-semibold uppercase tracking-wide text-slate-500">
-            Cognivio
-          </p>
-          <h1 className="mt-1 text-3xl font-bold text-slate-900">Reports</h1>
-          <p className="mt-2 max-w-2xl text-slate-600">
-            Review observation summaries, feedback cycles, teacher growth trends, and evidence-based coaching outputs.
-          </p>
-          <div className="mt-4 inline-flex rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700">
-            {reportCount} report{reportCount === 1 ? "" : "s"}
-          </div>
-        </div>
+    <LayoutShell>
+      <div className="mx-auto max-w-6xl px-6 py-6">
+        <PageHeader
+          title={mode === "training" ? "Cohort Snapshot" : "Coaching Snapshot"}
+          description={mode === "training" ? "A concise view of cohort observation progress." : "A concise view of reviewed lessons, open coaching work, and patterns worth discussing."}
+        />
 
-        {status === "loading" && (
-          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <p className="text-slate-600">Loading reports…</p>
-          </div>
-        )}
-
-        {status === "error" && (
-          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-6 shadow-sm">
-            <h2 className="font-semibold text-amber-900">Reports could not be loaded</h2>
-            <p className="mt-2 text-sm text-amber-800">{error}</p>
-          </div>
-        )}
-
-        {status === "ready" && reports.length === 0 && (
-          <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm">
-            <h2 className="text-lg font-semibold text-slate-900">No reports yet</h2>
-            <p className="mx-auto mt-2 max-w-md text-sm text-slate-600">
-              Reports will appear here after observations, assessments, or feedback cycles are completed.
-            </p>
-          </div>
-        )}
-
-        {status === "ready" && reports.length > 0 && (
-          <div className="grid gap-4 lg:grid-cols-2">
-            {reports.map((report, index) => {
-              const id = report?.id || report?._id || index;
-              const date = getReportDate(report);
-              const score = report?.overall_score ?? report?.overallScore ?? report?.score;
-
-              return (
-                <article
-                  key={id}
-                  className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
-                >
-                  <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                    <div>
-                      <h2 className="text-lg font-semibold text-slate-900">
-                        {getReportTitle(report)}
-                      </h2>
-                      <p className="mt-2 text-sm leading-6 text-slate-600">
-                        {getReportSubtitle(report)}
-                      </p>
-                    </div>
-
-                    {score !== undefined && score !== null && (
-                      <div className="rounded-xl bg-slate-100 px-3 py-2 text-center">
-                        <div className="text-lg font-bold text-slate-900">{score}</div>
-                        <div className="text-xs uppercase tracking-wide text-slate-500">
-                          Score
+        {mode === "training" ? (
+          <>
+            {trainingQuery.isLoading ? <LoadingState message="Preparing cohort report..." /> : null}
+            {!trainingQuery.isLoading ? (
+              <div className="space-y-6">
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                  <SnapshotCard label="Active trainees" value={trainingQuery.data?.total_trainees ?? 0} />
+                  <SnapshotCard label="Completed observations" value={trainingQuery.data?.observations_this_cycle ?? 0} />
+                  <SnapshotCard label="At-risk trainees" value={trainingQuery.data?.trainees_at_risk ?? 0} />
+                  <SnapshotCard label="Upcoming observations" value={(trainingQuery.data?.upcoming_observations || []).length} />
+                </div>
+                <Panel className="space-y-4">
+                  <SectionHeader title="Recent observation summaries" description="Use these notes to plan your next supervisor check-ins." />
+                  {(trainingQuery.data?.recent_observations || []).length ? (
+                    <div className="space-y-3">
+                      {trainingQuery.data.recent_observations.map((item, index) => (
+                        <div key={`${item.trainee_id}-${index}`} className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                          <div className="font-semibold text-slate-900">{item.trainee_name}</div>
+                          <div className="mt-1 text-sm leading-6 text-slate-600">{item.summary || "A short summary will appear after the observation is reviewed."}</div>
                         </div>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-slate-500">
-                    {date && <span>{formatDate(date)}</span>}
-                    {report?.status && (
-                      <span className="rounded-full bg-slate-100 px-3 py-1 font-medium text-slate-700">
-                        {report.status}
-                      </span>
-                    )}
-                    {report?.teacher_email && <span>{report.teacher_email}</span>}
-                  </div>
-                </article>
-              );
-            })}
-          </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <EmptyState title="No recent cohort summaries yet" message="Recent observation summaries will appear here after lessons are reviewed." />
+                  )}
+                </Panel>
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <>
+            {rosterQuery.isLoading ? <LoadingState message="Preparing coaching report..." /> : null}
+            {!rosterQuery.isLoading ? (
+              <div className="space-y-6">
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                  <SnapshotCard label="Reviewed lessons" value={countReviewedLessons(rosterQuery.data)} />
+                  <SnapshotCard label="Open coaching tasks" value={openTasks.length} />
+                  <SnapshotCard label="Teachers with recent feedback" value={roster.filter((row) => row.last_assessment_date).length} />
+                  <SnapshotCard label="Recognition earned" value={roster.reduce((total, row) => total + Number(row.recognition_count || 0), 0)} />
+                </div>
+                <Panel className="space-y-4">
+                  <SectionHeader title="Patterns worth noticing" description="Use these as starting points for grade-team or one-on-one coaching conversations." />
+                  {patterns.length ? (
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {patterns.map((pattern) => (
+                        <div key={pattern.title} className="rounded-md border border-slate-200 bg-slate-50 p-4">
+                          <div className="font-semibold text-slate-900">{pattern.title}</div>
+                          <div className="mt-2 text-sm leading-6 text-slate-600">{pattern.body}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <EmptyState title="Patterns will appear after reviewed lessons build up." />
+                  )}
+                </Panel>
+                <Panel className="space-y-4">
+                  <SectionHeader title="Exports" description="Use existing exports when you need a portable record." />
+                  {(historyQuery.data?.reports || historyQuery.data?.items || []).length ? (
+                    <div className="text-sm text-slate-600">Recent exports are available in report history.</div>
+                  ) : (
+                    <div className="text-sm text-slate-600">CSV export is available from existing report tools when report history is present.</div>
+                  )}
+                </Panel>
+              </div>
+            ) : null}
+          </>
         )}
       </div>
-    </div>
+    </LayoutShell>
   );
 }

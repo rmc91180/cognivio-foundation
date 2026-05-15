@@ -14,7 +14,6 @@ import {
 const ADMIN_ROUTES = [
   "/dashboard",
   "/teachers",
-  "/cohorts",
   "/coaching",
   "/master-schedule",
   "/my-insights",
@@ -29,6 +28,23 @@ const ADMIN_ROUTES = [
   "/ops",
   "/settings/notifications",
   "/notifications",
+];
+
+const TRAINING_ROUTES = [
+  "/dashboard",
+  "/teachers",
+  "/cohorts",
+  "/coaching",
+  "/master-schedule",
+  "/my-insights",
+  "/observation",
+  "/record",
+  "/reports",
+  "/videos",
+  "/all-star-library",
+  "/settings/notifications",
+  "/notifications",
+  "/onboarding",
 ];
 
 const TEACHER_ROUTES = [
@@ -75,6 +91,25 @@ export const getDefaultRouteForUser = getDefaultHomeRoute;
 
 export const getRoleHomePath = getDefaultHomeRoute;
 
+export const getRoleShell = (user) => {
+  const role = getUserTenantRole(user);
+
+  if (role === ROLE.SUPER_ADMIN) return "master";
+  if (role === ROLE.TRAINING_ADMIN) return "training";
+  if (role === ROLE.SCHOOL_ADMIN) return "admin";
+  if (role === ROLE.TEACHER) return "teacher";
+  return "teacher";
+};
+
+export const getEffectiveWorkspaceMode = (user) => {
+  const role = getUserTenantRole(user);
+
+  if (role === ROLE.SUPER_ADMIN) return "master";
+  if (role === ROLE.TRAINING_ADMIN) return "training";
+  if (role === ROLE.SCHOOL_ADMIN) return "school";
+  return "teacher";
+};
+
 export const canAccess = (user, routePath = "", allowedTenantRoles = []) => {
   const path = normalizePath(routePath).toLowerCase();
 
@@ -91,6 +126,13 @@ export const canAccess = (user, routePath = "", allowedTenantRoles = []) => {
   }
 
   if (Array.isArray(allowedTenantRoles) && allowedTenantRoles.length > 0) {
+    if (
+      isSuperAdminUser(user) &&
+      !allowedTenantRoles.includes(ROLE.SUPER_ADMIN) &&
+      !user?.is_preview_mode
+    ) {
+      return startsWithAny(path, SUPER_ADMIN_ROUTES);
+    }
     return canAccessTenantRole(user, allowedTenantRoles);
   }
 
@@ -103,10 +145,7 @@ export const canAccess = (user, routePath = "", allowedTenantRoles = []) => {
   }
 
   if (isTrainingAdminUser(user)) {
-    return startsWithAny(
-      path,
-      ADMIN_ROUTES.filter((prefix) => !["/school-setup", "/privacy-review", "/recognition-review", "/ops"].includes(prefix))
-    );
+    return startsWithAny(path, TRAINING_ROUTES);
   }
 
   if (isTeacherUser(user)) {
@@ -118,13 +157,13 @@ export const canAccess = (user, routePath = "", allowedTenantRoles = []) => {
 
 export const canAccessRoute = canAccess;
 
-export const getRoleShell = (user) => {
+export const getRoleShellConfig = (user) => {
   const role = getUserTenantRole(user);
 
   if (role === ROLE.SUPER_ADMIN) {
     return {
       role,
-      navKey: "master",
+      navKey: getRoleShell(user),
       homeRoute: "/master-admin",
       dashboardRoute: "/master-admin",
       label: "Master Admin",
@@ -139,7 +178,7 @@ export const getRoleShell = (user) => {
   if (role === ROLE.TRAINING_ADMIN) {
     return {
       role,
-      navKey: "training",
+      navKey: getRoleShell(user),
       homeRoute: "/dashboard",
       dashboardRoute: "/dashboard",
       label: "Training Admin",
@@ -154,7 +193,7 @@ export const getRoleShell = (user) => {
   if (role === ROLE.SCHOOL_ADMIN) {
     return {
       role,
-      navKey: "admin",
+      navKey: getRoleShell(user),
       homeRoute: "/dashboard",
       dashboardRoute: "/dashboard",
       label: "School Admin",
@@ -169,7 +208,7 @@ export const getRoleShell = (user) => {
   if (role === ROLE.TEACHER) {
     return {
       role,
-      navKey: "teacher",
+      navKey: getRoleShell(user),
       homeRoute: "/my-workspace",
       dashboardRoute: "/my-workspace",
       label: "Teacher",
@@ -199,9 +238,11 @@ const roleRouter = {
   getHomeRoute,
   getDefaultRouteForUser,
   getRoleHomePath,
+  getRoleShell,
+  getRoleShellConfig,
+  getEffectiveWorkspaceMode,
   canAccess,
   canAccessRoute,
-  getRoleShell,
 };
 
 export default roleRouter;

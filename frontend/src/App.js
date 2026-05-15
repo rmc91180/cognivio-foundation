@@ -5,7 +5,7 @@ import { ProtectedRoute } from "@/components/ProtectedRoute";
 import { AuthPage } from "@/pages/AuthPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { SkeletonTable } from "@/components/ui";
-import { getDefaultHomeRoute } from "@/lib/userRoutes";
+import { getHomeRoute } from "@/lib/roleRouter";
 
 const lazyPage = (loader, exportName) =>
   lazy(() => loader().then((mod) => ({ default: mod[exportName] })));
@@ -74,7 +74,7 @@ function HomeRedirect() {
     return <Navigate to="/login" replace />;
   }
 
-  return <Navigate to={getDefaultHomeRoute(user)} replace />;
+  return <Navigate to={getHomeRoute(user)} replace />;
 }
 
 function AppRoutes() {

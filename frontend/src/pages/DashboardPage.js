@@ -15,6 +15,8 @@ import {
 import { LayoutShell } from "@/components/LayoutShell";
 import { LeadershipInsightsCard } from "@/components/dashboard/LeadershipInsightsCard";
 import { DomainTrendsChart } from "@/components/dashboard/DomainTrendsChart";
+import { SchoolAdminPilotDashboard } from "@/components/dashboard/SchoolAdminPilotDashboard";
+import { TrainingDashboard } from "@/components/dashboard/TrainingDashboard";
 import {
   Bar,
   BarChart,
@@ -33,6 +35,7 @@ import { Link } from "react-router-dom";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 import { resolveCoachingLink } from "@/lib/coachingRoutes";
 import { getDefaultHomeRoute, getUserTenantRole } from "@/lib/userRoutes";
+import { getEffectiveWorkspaceMode } from "@/lib/roleRouter";
 
 const DASHBOARD_SIGNAL_WINDOW_DAYS = 14;
 
@@ -82,7 +85,7 @@ export function DashboardPage({ forcedWorkspaceMode = null }) {
   const isSuperAdmin = tenantRole === "super_admin";
   const isAdmin = isSchoolAdmin || isTrainingAdmin || isSuperAdmin;
   const effectiveWorkspaceMode =
-    forcedWorkspaceMode || (isTrainingAdmin ? "training" : user?.workspace_mode || "school");
+    forcedWorkspaceMode || getEffectiveWorkspaceMode(user);
   const dashboardHomeRoute = getDefaultHomeRoute(user);
   const buildSha = runtimeConfig.buildSha;
   const buildTime = runtimeConfig.buildTime;
@@ -1043,6 +1046,14 @@ export function DashboardPage({ forcedWorkspaceMode = null }) {
     sky: "border-sky-200 bg-sky-50/70",
     emerald: "border-emerald-200 bg-emerald-50/70",
   };
+
+  if (effectiveWorkspaceMode === "training") {
+    return <TrainingDashboard />;
+  }
+
+  if (effectiveWorkspaceMode === "school") {
+    return <SchoolAdminPilotDashboard />;
+  }
 
   return (
     <LayoutShell>

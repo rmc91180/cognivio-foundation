@@ -140,6 +140,14 @@ export function ProtectedRoute({
 
   if (!canAccess(user, currentPath, allowedTenantRoles)) {
     const homeRoute = getHomeRoute(user);
+    if (process.env.NODE_ENV === "development") {
+      // eslint-disable-next-line no-console
+      console.warn("Role route mismatch", {
+        role: tenantRole,
+        attemptedPath: currentPath,
+        homeRoute,
+      });
+    }
     const redirect = safeRedirect(homeRoute, currentPath, {
       roleMismatch: true,
       attemptedPath: currentPath,
