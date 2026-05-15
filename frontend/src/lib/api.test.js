@@ -1,5 +1,5 @@
 import api from "@/lib/apiClient";
-import { masterAdminApi } from "@/lib/api";
+import { demoApi, masterAdminApi } from "@/lib/api";
 
 jest.mock("@/lib/apiClient", () => ({
   __esModule: true,
@@ -34,5 +34,13 @@ describe("masterAdminApi user lifecycle endpoints", () => {
       expect.stringContaining("/delete"),
       expect.objectContaining({ reason: "pause access" })
     );
+  });
+
+  it("routes demo reset through the protected demo endpoint", () => {
+    demoApi.reset("training");
+
+    expect(api.post).toHaveBeenCalledWith("/api/demo/reset", null, {
+      params: { persona: "training" },
+    });
   });
 });

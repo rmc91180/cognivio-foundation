@@ -3,7 +3,6 @@ import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NavLink, useNavigate } from "react-router-dom";
 import {
   BookOpen,
-  Bell,
   ClipboardList,
   Database,
   History,
@@ -31,49 +30,43 @@ import {
   isSuperAdminUser,
   isTrainingAdminUser,
 } from "@/lib/userRoutes";
-import { getRoleShell } from "@/lib/roleRouter";
+import { getRoleShellConfig } from "@/lib/roleRouter";
 import { clearPreviewSession } from "@/lib/previewMode";
 
 const ROLE_NAV_ITEMS = {
   master: [
-    { to: "/master-admin", icon: ShieldCheck, label: "Ops", end: true },
+    { to: "/master-admin", icon: ShieldCheck, label: "Overview", end: true },
     { to: "/master-admin/organizations", icon: Database, label: "Organizations" },
     { to: "/master-admin/users", icon: Users, label: "Users" },
+    { to: "/master-admin/workspaces", icon: Layers, label: "Workspaces" },
     { to: "/master-admin/videos", icon: PlayCircle, label: "Videos" },
+    { to: "/master-admin/dependencies", icon: Database, label: "Dependencies" },
     { to: "/master-admin/audit", icon: ClipboardList, label: "Audit" },
     { to: "/master-admin/incidents", icon: History, label: "Incidents" },
-    { to: "/master-admin/storage", icon: Database, label: "Storage" },
     { to: "/master-admin/support", icon: MessageSquareText, label: "Support" },
-    { to: "/settings/notifications", icon: Bell, label: "Notifications" },
   ],
   admin: [
     { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard", end: true },
     { to: "/teachers", icon: Users, label: "Teachers" },
-    { to: "/master-schedule", icon: ClipboardList, label: "Schedule" },
-    { to: "/teachers?focus=coaching", icon: MessageSquareText, label: "Coaching" },
-    { to: "/my-insights", icon: Target, label: "My Insights" },
+    { to: "/observation/new", icon: Target, label: "Observation" },
+    { to: "/coaching", icon: MessageSquareText, label: "Coaching" },
     { to: "/recognition-review", icon: Trophy, label: "Recognition" },
     { to: "/reports", icon: BookOpen, label: "Reports" },
-    { to: "/settings/notifications", icon: Bell, label: "Notifications" },
     { to: "/school-setup", icon: Layers, label: "Settings" },
   ],
   training: [
     { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard", end: true },
     { to: "/cohorts", icon: Layers, label: "Cohorts" },
     { to: "/teachers", icon: Users, label: "Trainees" },
-    { to: "/master-schedule", icon: ClipboardList, label: "Schedule" },
-    { to: "/my-insights", icon: Target, label: "My Insights" },
+    { to: "/observation/new", icon: Target, label: "Observation" },
+    { to: "/coaching", icon: MessageSquareText, label: "Coaching" },
     { to: "/reports", icon: BookOpen, label: "Reports" },
-    { to: "/settings/notifications", icon: Bell, label: "Notifications" },
-    { to: "/dashboard?view=settings", icon: Layers, label: "Settings" },
   ],
   teacher: [
     { to: "/my-workspace", icon: LayoutDashboard, label: "My Workspace", end: true },
     { to: "/videos", icon: PlayCircle, label: "My Lessons" },
     { to: "/my-workspace/coaching", icon: MessageSquareText, label: "My Coaching" },
     { to: "/my-badges", icon: Trophy, label: "My Recognition" },
-    { to: "/settings/notifications", icon: Bell, label: "Notifications" },
-    { to: "/my-workspace/settings", icon: Layers, label: "Settings" },
   ],
 };
 
@@ -82,7 +75,7 @@ export function LayoutShell({ children }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { user, logout, refreshUser } = useAuth();
-  const roleShell = getRoleShell(user);
+  const roleShell = getRoleShellConfig(user);
   const isSuperAdmin = isSuperAdminUser(user);
   const isSchoolAdmin = isSchoolAdminUser(user);
   const isTrainingAdmin = isTrainingAdminUser(user);

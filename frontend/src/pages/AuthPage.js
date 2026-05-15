@@ -9,7 +9,8 @@ import { InstitutionSuggestionList } from "@/components/ui/InstitutionSuggestion
 import { Button, Field, Input, Panel } from "@/components/ui";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 import { authApi } from "@/lib/api";
-import { getDefaultHomeRoute, normalizePath } from "@/lib/userRoutes";
+import { normalizePath } from "@/lib/userRoutes";
+import { getHomeRoute } from "@/lib/roleRouter";
 
 function SegmentButton({ active, onClick, children }) {
   return (
@@ -84,7 +85,7 @@ export function AuthPage() {
       return;
     }
 
-    const target = normalizePath(getDefaultHomeRoute(user));
+    const target = normalizePath(getHomeRoute(user));
     const current = normalizePath(location.pathname);
 
     if (current !== target) {

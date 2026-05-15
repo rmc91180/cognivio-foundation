@@ -1,10 +1,12 @@
 import React from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 import { Badge, ErrorState, LoadingState, Panel } from "@/components/ui";
 import { MasterAdminMetricCard, MasterAdminMetricGrid, MasterAdminPageScaffold } from "@/components/master-admin/MasterAdminPageScaffold";
-import { masterAdminApi } from "@/lib/api";
+import { demoApi, masterAdminApi } from "@/lib/api";
+import { runtimeConfig } from "@/lib/runtimeConfig";
 
 function SectionCard({ section, t }) {
   return (
@@ -33,6 +35,7 @@ function SectionCard({ section, t }) {
 
 export function MasterAdminPage() {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
 
   const { data: bootstrapData } = useQuery({
     queryKey: ["master-admin-bootstrap"],
@@ -42,6 +45,18 @@ export function MasterAdminPage() {
     queryKey: ["master-admin-overview"],
     queryFn: () => masterAdminApi.overview().then((res) => res.data),
   });
+  const demoMode = Boolean(runtimeConfig.demoMode || bootstrapData?.demo_mode);
+  const demoResetMutation = useMutation({
+    mutationFn: (persona) => demoApi.reset(persona).then((res) => res.data),
+    onSuccess: (result) => {
+      toast.success("Demo data reset.");
+      queryClient.invalidateQueries();
+      refetch();
+      queryClient.setQueryData(["master-admin-demo-last-reset"], result);
+    },
+    onError: () => toast.error("Demo reset is not available right now."),
+  });
+  const lastReset = queryClient.getQueryData(["master-admin-demo-last-reset"]);
 
   return (
     <MasterAdminPageScaffold
@@ -49,14 +64,21 @@ export function MasterAdminPage() {
       description={t("masterAdmin.description")}
       meta={t("masterAdmin.meta", { email: bootstrapData?.user?.email || "—" })}
       actions={
-        <button
-          type="button"
-          onClick={() => refetch()}
-          disabled={isFetching}
-          className="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-sm text-white hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {isFetching ? t("masterAdmin.refreshing") : t("masterAdmin.refresh")}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {demoMode ? (
+            <span className="rounded-full border border-amber-200 bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-900">
+              Demo Mode
+            </span>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => refetch()}
+            disabled={isFetching}
+            className="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-sm text-white hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isFetching ? t("masterAdmin.refreshing") : t("masterAdmin.refresh")}
+          </button>
+        </div>
       }
       railNoteTitle={t("masterAdmin.internalOnlyTitle")}
       railNote={t("masterAdmin.internalOnlyDescription")}
@@ -72,6 +94,39 @@ export function MasterAdminPage() {
 
         {!isLoading && !isError ? (
           <>
+            {demoMode ? (
+              <Panel className="space-y-4 border-amber-200 bg-amber-50">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div>
+                    <h2 className="text-lg font-semibold text-amber-950">Pilot demo controls</h2>
+                    <p className="mt-1 text-sm text-amber-900">
+                      Reset only the marked demo records for a repeatable walkthrough.
+                    </p>
+                    {lastReset?.reset_at ? (
+                      <p className="mt-2 text-xs text-amber-800">Last reset: {lastReset.reset_at}</p>
+                    ) : null}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      ["k12", "Reset K-12 demo"],
+                      ["training", "Reset Training demo"],
+                      ["all", "Reset all"],
+                    ].map(([persona, label]) => (
+                      <button
+                        key={persona}
+                        type="button"
+                        onClick={() => demoResetMutation.mutate(persona)}
+                        disabled={demoResetMutation.isPending}
+                        className="rounded-md border border-amber-200 bg-white px-3 py-2 text-sm font-semibold text-amber-950 hover:bg-amber-100 disabled:opacity-60"
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </Panel>
+            ) : null}
+
             <MasterAdminMetricGrid>
               {(data?.cards || []).map((card) => (
                 <MasterAdminMetricCard
