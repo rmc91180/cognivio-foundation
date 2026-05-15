@@ -131,7 +131,7 @@ export function TeacherWorkspacePage() {
 
   return (
     <LayoutShell>
-      <div className="mx-auto max-w-6xl px-6 py-6">
+      <div className="mx-auto max-w-6xl px-4 py-5 sm:px-6 sm:py-6">
         <PageContextHeader
           breadcrumbs={[{ label: "My Workspace", to: "/my-workspace" }]}
           title={`Welcome back${user?.name ? `, ${user.name.split(" ")[0]}` : ""}`}
@@ -156,7 +156,7 @@ export function TeacherWorkspacePage() {
                       <div className="mt-1 text-xs text-slate-500">{formatDate(lesson.lesson_date || lesson.recorded_at || lesson.reviewed_at)}</div>
                     </div>
                     {lesson.video_id ? (
-                      <Link to={`/videos/${lesson.video_id}`} className="text-sm font-medium text-primary hover:text-primary/80">
+                      <Link to={`/videos/${lesson.video_id}`} className="inline-flex min-h-[44px] items-center text-sm font-medium text-primary hover:text-primary/80">
                         Watch the lesson
                       </Link>
                     ) : null}
@@ -172,7 +172,7 @@ export function TeacherWorkspacePage() {
                 {actions.length ? (
                   <div className="grid gap-3 md:grid-cols-2">
                     {actions.slice(0, 2).map((action, index) => (
-                      <div key={`${action}-${index}`} className="rounded-md border border-emerald-100 bg-emerald-50 p-4 text-sm leading-6 text-emerald-950">
+                    <div key={`${action}-${index}`} className="min-h-[44px] rounded-md border border-emerald-100 bg-emerald-50 p-4 text-sm leading-6 text-emerald-950">
                         {typeof action === "string" ? action : action.text || action.title}
                       </div>
                     ))}
@@ -258,7 +258,7 @@ export function TeacherWorkspacePage() {
             <button
               type="button"
               onClick={() => setShowReflections((current) => !current)}
-              className="flex w-full items-center justify-between text-left"
+            className="flex min-h-[44px] w-full items-center justify-between gap-3 text-left"
             >
               <div>
                 <div className="text-base font-semibold text-slate-900">Your reflections</div>

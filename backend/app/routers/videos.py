@@ -28,9 +28,19 @@ async def upload_video_route(
     teacher_id: str = Form(...),
     subject: Optional[str] = Form(None),
     recorded_at: Optional[str] = Form(None),
+    observation_session_id: Optional[str] = Form(None),
+    session_id: Optional[str] = Form(None),
     current_user: dict = Depends(get_current_user),
 ):
-    return await upload_video(request, file, teacher_id, subject, recorded_at, current_user)
+    return await upload_video(
+        file=file,
+        teacher_id=teacher_id,
+        session_id=observation_session_id or session_id,
+        request=request,
+        subject=subject,
+        recorded_at=recorded_at,
+        current_user=current_user,
+    )
 
 
 @router.get("/videos")

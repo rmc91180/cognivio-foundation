@@ -70,6 +70,36 @@ const ROLE_NAV_ITEMS = {
   ],
 };
 
+const ROLE_MOBILE_NAV_ITEMS = {
+  master: [
+    { to: "/master-admin", icon: ShieldCheck, label: "Overview", end: true },
+    { to: "/master-admin/users", icon: Users, label: "Users" },
+    { to: "/master-admin/organizations", icon: Database, label: "Orgs" },
+    { to: "/master-admin/dependencies", icon: Database, label: "Health" },
+    { to: "/master-admin/audit", icon: ClipboardList, label: "Audit" },
+  ],
+  admin: [
+    { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard", end: true },
+    { to: "/teachers", icon: Users, label: "Teachers" },
+    { to: "/observation/new", icon: Target, label: "Observe" },
+    { to: "/coaching", icon: MessageSquareText, label: "Coaching" },
+    { to: "/reports", icon: BookOpen, label: "Reports" },
+  ],
+  training: [
+    { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard", end: true },
+    { to: "/teachers", icon: Users, label: "Trainees" },
+    { to: "/observation/new", icon: Target, label: "Observe" },
+    { to: "/coaching", icon: MessageSquareText, label: "Coaching" },
+    { to: "/reports", icon: BookOpen, label: "Reports" },
+  ],
+  teacher: [
+    { to: "/my-workspace", icon: LayoutDashboard, label: "Home", end: true },
+    { to: "/videos", icon: PlayCircle, label: "Lessons" },
+    { to: "/my-workspace/coaching", icon: MessageSquareText, label: "Coaching" },
+    { to: "/my-badges", icon: Trophy, label: "Recognition" },
+  ],
+};
+
 export function LayoutShell({ children }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -82,6 +112,7 @@ export function LayoutShell({ children }) {
   const tenantRole = getUserTenantRole(user);
   const isPreviewMode = Boolean(user?.is_preview_mode);
   const navItems = ROLE_NAV_ITEMS[roleShell.navKey] || [];
+  const mobileNavItems = ROLE_MOBILE_NAV_ITEMS[roleShell.navKey] || [];
 
   const organizationListQuery = useQuery({
     queryKey: ["layout-shell-master-admin-organizations"],
@@ -143,7 +174,7 @@ export function LayoutShell({ children }) {
 
   return (
     <div className="flex h-screen bg-slate-50 text-slate-900">
-      <aside className="w-72 border-r border-slate-200 bg-white/95 backdrop-blur-sm shadow-panel flex flex-col">
+      <aside className="hidden w-72 border-r border-slate-200 bg-white/95 backdrop-blur-sm shadow-panel md:flex md:flex-col">
         <div className="flex h-16 items-center justify-between px-5 border-b border-slate-200">
           <BrandMark to="/" />
           <LanguageSwitcher compact />
@@ -289,7 +320,14 @@ export function LayoutShell({ children }) {
         </div>
       </aside>
 
-      <main className="flex-1 overflow-y-auto bg-slate-50">
+      <main className="flex-1 overflow-y-auto bg-slate-50 pb-20 md:pb-0">
+        <div className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-slate-200 bg-white/95 px-4 shadow-sm backdrop-blur md:hidden">
+          <BrandMark to="/" />
+          <div className="flex items-center gap-2">
+            <NotificationBell />
+            <LanguageSwitcher compact />
+          </div>
+        </div>
         <OfflineBanner />
         <ProductTourOverlay />
         {isPreviewMode ? (
@@ -316,6 +354,7 @@ export function LayoutShell({ children }) {
         ) : null}
         {children}
       </main>
+      {mobileNavItems.length ? <MobileBottomNav items={mobileNavItems} /> : null}
     </div>
   );
 }
@@ -337,6 +376,39 @@ function NavItem({ to, icon: Icon, label, end = false }) {
       <Icon className="h-4 w-4 stroke-[2.25]" />
       <span>{label}</span>
     </NavLink>
+  );
+}
+
+function MobileBottomNav({ items }) {
+  return (
+    <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 px-2 pb-[max(env(safe-area-inset-bottom),0.5rem)] pt-2 shadow-[0_-10px_24px_rgba(15,23,42,0.08)] backdrop-blur md:hidden">
+      <div
+        className="mx-auto grid max-w-md gap-1"
+        style={{ gridTemplateColumns: `repeat(${items.length}, minmax(0, 1fr))` }}
+      >
+        {items.map((item) => {
+          const Icon = item.icon;
+          return (
+            <NavLink
+              key={`${item.to}-${item.label}`}
+              to={item.to}
+              end={item.end}
+              className={({ isActive }) =>
+                [
+                  "flex min-h-[48px] flex-col items-center justify-center gap-1 rounded-lg px-1 text-[10px] font-medium transition-colors",
+                  isActive
+                    ? "bg-primary/10 text-primary"
+                    : "text-slate-500 hover:bg-slate-100 hover:text-slate-900",
+                ].join(" ")
+              }
+            >
+              <Icon className="h-5 w-5 stroke-[2.25]" />
+              <span className="max-w-full truncate">{item.label}</span>
+            </NavLink>
+          );
+        })}
+      </div>
+    </nav>
   );
 }
 

@@ -68,7 +68,7 @@ export function ReportsPage() {
 
   return (
     <LayoutShell>
-      <div className="mx-auto max-w-6xl px-6 py-6">
+      <div className="mx-auto max-w-6xl px-4 py-5 sm:px-6 sm:py-6">
         <PageHeader
           title={mode === "training" ? "Cohort Snapshot" : "Coaching Snapshot"}
           description={mode === "training" ? "A concise view of cohort observation progress." : "A concise view of reviewed lessons, open coaching work, and patterns worth discussing."}

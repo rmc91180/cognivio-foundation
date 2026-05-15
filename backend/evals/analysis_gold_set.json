@@ -58,7 +58,8 @@
             "Students said"
           ]
         }
-      }
+      },
+      "expected_coach_voice_min": 0.75
     },
     {
       "id": "summary_priority_alignment_he",
@@ -117,7 +118,8 @@
             "התלמידים אמרו"
           ]
         }
-      }
+      },
+      "expected_coach_voice_min": 0.75
     },
     {
       "id": "recommendations_priority_alignment_en",
@@ -129,7 +131,7 @@
           {
             "element_id": "3c",
             "element_name": "Engagement",
-            "score": 6.0,
+            "score": 6,
             "observations": [
               "Student participation cues were uneven across the sampled frames."
             ],
@@ -171,7 +173,8 @@
             "students said"
           ]
         }
-      }
+      },
+      "expected_coach_voice_min": 0.75
     },
     {
       "id": "recommendations_priority_alignment_he",
@@ -183,7 +186,7 @@
           {
             "element_id": "3c",
             "element_name": "מעורבות תלמידים בלמידה",
-            "score": 6.0,
+            "score": 6,
             "observations": [
               "נראו סימני השתתפות לא אחידים בין קבוצות התלמידים."
             ],
@@ -225,7 +228,8 @@
             "התלמידים אמרו"
           ]
         }
-      }
+      },
+      "expected_coach_voice_min": 0.75
     },
     {
       "id": "packet_confidence_note_audio_unavailable_en",
@@ -274,7 +278,8 @@
             "students said"
           ]
         }
-      }
+      },
+      "expected_coach_voice_min": 0.75
     },
     {
       "id": "packet_priority_alignment_en",
@@ -303,7 +308,7 @@
             ]
           }
         ],
-        "overall_score": 7.0,
+        "overall_score": 7,
         "summary_text": "Questioning was stronger than engagement in the sampled lesson.",
         "recommendations": [
           "[01:35–02:05] Priority focus on Engagement: Expand participation cues."
@@ -326,7 +331,8 @@
             "needs coaching attention"
           ]
         }
-      }
+      },
+      "expected_coach_voice_min": 0.75
     },
     {
       "id": "summary_active_goals_en",
@@ -353,7 +359,7 @@
             ]
           }
         ],
-        "overall_score": 7.0,
+        "overall_score": 7,
         "priority_element_ids": [
           "2b"
         ],
@@ -390,7 +396,8 @@
             "students said"
           ]
         }
-      }
+      },
+      "expected_coach_voice_min": 0.75
     },
     {
       "id": "recommendations_with_reviewer_guidance_en",
@@ -465,7 +472,8 @@
             "students said"
           ]
         }
-      }
+      },
+      "expected_coach_voice_min": 0.75
     },
     {
       "id": "recommendations_active_goal_fallback_en",
@@ -525,7 +533,8 @@
             "students said"
           ]
         }
-      }
+      },
+      "expected_coach_voice_min": 0.75
     },
     {
       "id": "packet_partial_evidence_he",
@@ -572,7 +581,8 @@
             "התלמידים אמרו"
           ]
         }
-      }
+      },
+      "expected_coach_voice_min": 0.75
     }
   ]
 }

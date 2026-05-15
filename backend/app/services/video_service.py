@@ -132,6 +132,7 @@ async def upload_video(
             "processed_content_type": None,
             "processed_file_size_bytes": None,
             "teacher_id": teacher_id,
+            "observation_session_id": session_id,
             "uploaded_by": current_user["id"],
             "status": legacy.VideoProcessingStatus.QUEUED.value,
             "privacy_status": legacy.PrivacyProcessingStatus.QUEUED.value,
@@ -184,6 +185,7 @@ async def upload_video(
                 "id": str(legacy.uuid.uuid4()),
                 "video_id": video_id,
                 "teacher_id": teacher_id,
+                "observation_session_id": session_id,
                 "file_path": relative_path,
                 "subject": subject,
                 "recorded_at": normalized_recorded_at,
@@ -195,6 +197,18 @@ async def upload_video(
                 "session_id": session_id,
             }
         )
+
+        if observation_session:
+            await legacy.db.observation_sessions.update_one(
+                {"id": observation_session["id"]},
+                {
+                    "$set": {
+                        "linked_video_id": video_id,
+                        "status": legacy.ObservationSessionStatus.RECORDING_UPLOADED.value,
+                        "updated_at": upload_time,
+                    }
+                },
+            )
 
         try:
             admin_id = teacher.get("created_by") or current_user["id"]

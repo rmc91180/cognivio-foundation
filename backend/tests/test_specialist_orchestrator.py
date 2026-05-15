@@ -24,6 +24,7 @@ def test_default_specialist_contracts_are_ordered_and_product_bounded():
         "priority_coach",
         "longitudinal_pattern",
         "recommendation_sequence",
+        "tone_coach",
     ]
     assert all(item.owned_fields for item in contracts)
     assert all(item.guardrails for item in contracts)
@@ -111,15 +112,42 @@ def test_orchestrate_specialists_dedupes_sorts_and_links_active_goal():
     )
 
     assert result["specialist_orchestrator"]["enabled"] is True
-    assert len(result["specialist_trace"]) == 4
+    assert len(result["specialist_trace"]) == 5
     assert result["specialist_trace"][2]["specialist_id"] == "longitudinal_pattern"
+    assert result["specialist_trace"][-1]["specialist_id"] == "tone_coach"
     assert result["element_scores"][0]["element_id"] == "2b"
-    assert "Teacher asked mostly short recall questions." in result["element_scores"][0]["observations"][0]
+    assert "short recall questions" in result["element_scores"][0]["observations"][0]
     assert len(result["recommendations"]) == 3
     assert result["recommendations"][0]["linked_element_id"] == "2b"
     assert result["recommendations"][1]["linked_element_id"] == "2b"
     assert "Connect the next move to the active goal" in result["recommendations"][0]["text"]
     assert result["summary"].startswith("Across recent lessons")
+
+
+def test_tone_coach_rewrites_visible_text_without_touching_scores_or_ids():
+    payload = {
+        "summary": "The teacher demonstrated a score of 6 in this segment.",
+        "recommendations": [
+            {"start_sec": 12.5, "end_sec": 20.0, "text": "The teacher used a rubric element well.", "linked_element_id": "2b"}
+        ],
+        "element_scores": [
+            {
+                "element_id": "2b",
+                "score": 6.1,
+                "observations": ["Evidence was limited in the sampled frames."],
+                "evidence_segments": [{"start_sec": 12.5, "summary": "Teacher asked one follow-up question."}],
+            }
+        ],
+    }
+
+    result = orchestrate_specialists(payload, language="en", priority_element_ids=["2b"])
+
+    rendered = str(result)
+    assert "the teacher demonstrated" not in rendered.lower()
+    assert "sampled frames" not in rendered.lower()
+    assert result["element_scores"][0]["element_id"] == "2b"
+    assert result["element_scores"][0]["score"] == 6.1
+    assert result["recommendations"][0]["start_sec"] == 12.5
 
 
 def test_orchestrate_conference_prep_centers_recurring_goal():
