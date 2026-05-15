@@ -2591,15 +2591,23 @@ def _build_transcoded_raw_cleanup_fields(video: dict, completed_at_iso: str) -> 
 async def _save_upload_file(upload: UploadFile, target_path: Path) -> None:
     size = 0
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    async with aiofiles.open(target_path, "wb") as out:
-        while True:
-            chunk = await upload.read(1024 * 1024)
-            if not chunk:
-                break
-            size += len(chunk)
-            if size > MAX_UPLOAD_BYTES:
-                raise HTTPException(status_code=413, detail="File exceeds 10MB limit")
-            await out.write(chunk)
+    try:
+        async with aiofiles.open(target_path, "wb") as out:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="File exceeds 10MB limit")
+                await out.write(chunk)
+    except Exception:
+        try:
+            if target_path.exists():
+                target_path.unlink()
+        except Exception:
+            logger.warning("Unable to remove partial upload %s", target_path, exc_info=True)
+        raise
 
 def _get_s3_client():
     if not S3_BUCKET:

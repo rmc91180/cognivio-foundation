@@ -39,6 +39,10 @@ def _status(
     }
 
 
+def _failure_message(service_name: str, exc: Exception) -> str:
+    return f"{service_name} probe failed due to {exc.__class__.__name__}."
+
+
 async def probe_mongodb(db: Any) -> Dict[str, Any]:
     settings = get_settings()
 
@@ -70,9 +74,9 @@ async def probe_mongodb(db: Any) -> Dict[str, Any]:
         return _status(
             "MongoDB Atlas",
             False,
-            f"MongoDB probe failed: {exc}",
+            _failure_message("MongoDB", exc),
             "Verify Atlas credentials, cluster availability, IP access list, and MONGO_URL.",
-            {"database_name": settings.database.db_name},
+            {"database_name": settings.database.db_name, "error_type": exc.__class__.__name__},
         )
 
 
@@ -158,13 +162,14 @@ async def probe_r2() -> Dict[str, Any]:
         return _status(
             "Cloudflare R2",
             False,
-            f"R2 probe failed: {error_code or error_message}",
+            f"R2 probe failed: {error_code or exc.__class__.__name__}",
             "Verify the R2 bucket name, endpoint, access key permissions, and secret key in Railway.",
             {
                 "configured": True,
                 "bucket": storage.s3_bucket,
                 "endpoint_configured": bool(storage.s3_endpoint),
                 "error_code": error_code,
+                "error_type": exc.__class__.__name__,
             },
         )
 
@@ -388,11 +393,12 @@ async def probe_openai() -> Dict[str, Any]:
         return _status(
             "OpenAI",
             False,
-            f"OpenAI probe failed: {exc}",
+            _failure_message("OpenAI", exc),
             "Verify OPENAI_API_KEY, account billing/access, selected model, and Railway outbound network access.",
             {
                 "configured": True,
                 "model": ai.openai_vision_model,
+                "error_type": exc.__class__.__name__,
             },
         )
 
@@ -413,8 +419,9 @@ async def get_dependency_health(db: Any = None) -> Dict[str, Any]:
                 _status(
                     "Unknown dependency",
                     False,
-                    f"Dependency probe crashed: {result}",
+                    _failure_message("Dependency", result),
                     "Check backend logs for the failed dependency probe.",
+                    {"error_type": result.__class__.__name__},
                 )
             )
         else:
