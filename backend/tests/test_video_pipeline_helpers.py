@@ -2,9 +2,11 @@ import importlib.util
 import os
 import sys
 import types
+from io import BytesIO
 from pathlib import Path
 
 import pytest
+from starlette.datastructures import Headers
 
 
 def _load_server_module():
@@ -46,6 +48,14 @@ def _load_server_module():
 server = _load_server_module()
 
 
+def _upload(name: str, body: bytes, content_type: str = "video/mp4"):
+    return server.UploadFile(
+        file=BytesIO(body),
+        filename=name,
+        headers=Headers({"content-type": content_type}),
+    )
+
+
 def test_normalize_video_status_maps_legacy_and_unknown_values():
     assert server._normalize_video_status("processing") == "processing"
     assert server._normalize_video_status("cancelled") == "cancelled"
@@ -53,6 +63,62 @@ def test_normalize_video_status_maps_legacy_and_unknown_values():
     assert server._normalize_video_status("errored") == "failed"
     assert server._normalize_video_status("mystery") == "queued"
     assert server._normalize_video_status(None) == "queued"
+
+
+@pytest.mark.asyncio
+async def test_validate_video_upload_allows_pytest_fake_video_fixture():
+    result = await server._validate_video_upload_file(
+        _upload("lesson.mp4", b"fake-mp4-data", "video/mp4")
+    )
+
+    assert result == {"extension": ".mp4", "content_type": "video/mp4"}
+
+
+@pytest.mark.asyncio
+async def test_validate_video_upload_rejects_renamed_text_in_production_like_path(monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+    with pytest.raises(server.InvalidVideoFileTypeError):
+        await server._validate_video_upload_file(
+            _upload("lesson.mp4", b"this is plain text, not a video", "video/mp4")
+        )
+
+
+@pytest.mark.asyncio
+async def test_save_upload_file_removes_partial_file_when_size_exceeded(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "MAX_UPLOAD_BYTES", 4)
+    target = tmp_path / "oversized.mp4"
+
+    with pytest.raises(server.HTTPException) as exc:
+        await server._save_upload_file(_upload("oversized.mp4", b"12345"), target)
+
+    assert exc.value.status_code == 413
+    assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_workspace_upload_quota_exceeded_raises_clear_error(monkeypatch):
+    class _Cursor:
+        async def to_list(self, _limit):
+            return [{"id": "teacher-1"}]
+
+    class _Teachers:
+        def find(self, *args, **kwargs):
+            return _Cursor()
+
+    class _Videos:
+        async def count_documents(self, query):
+            assert query == {"teacher_id": {"$in": ["teacher-1"]}}
+            return 1
+
+    monkeypatch.setattr(server, "WORKSPACE_VIDEO_QUOTA", 1)
+    monkeypatch.setattr(server, "db", types.SimpleNamespace(teachers=_Teachers(), videos=_Videos()))
+
+    with pytest.raises(server.UploadQuotaReachedError):
+        await server._ensure_workspace_upload_quota_available(
+            {"id": "teacher-1", "organization_id": "org-1"},
+            {"id": "admin-1", "organization_id": "org-1"},
+        )
 
 
 def test_normalize_video_transcode_status_maps_legacy_and_unknown_values():

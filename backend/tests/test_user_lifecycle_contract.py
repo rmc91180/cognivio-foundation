@@ -349,6 +349,66 @@ def test_pending_hard_delete_sends_rejection_email(monkeypatch, lifecycle_db):
     assert sent["denied"] == "pending@example.com"
 
 
+def test_approval_email_failure_is_non_transactional(monkeypatch, lifecycle_db):
+    lifecycle_db.users.docs.append(
+        {
+            "id": "teacher-1",
+            "email": "teacher@example.com",
+            "name": "Teacher One",
+            "password": server.hash_password("StrongPassword123"),
+            "role": "teacher",
+            "tenant_role": "teacher",
+            "approval_status": "pending",
+            "is_active": False,
+            "created_at": "2026-05-01T10:00:00+00:00",
+        }
+    )
+    monkeypatch.setattr(server, "_send_access_approved_confirmation", lambda _user: False)
+
+    approved = asyncio.run(
+        server._approve_user_access(
+            lifecycle_db.users.docs[0],
+            actor_label="master@example.com",
+            reason="Approved even if email provider is down",
+        )
+    )
+
+    assert approved["approval_status"] == "approved"
+    assert approved["is_active"] is True
+    assert lifecycle_db.notifications.docs[-1]["payload"]["email_delivery_succeeded"] is False
+
+
+def test_rejection_email_failure_is_non_transactional(monkeypatch, lifecycle_db):
+    lifecycle_db.users.docs.append(
+        {
+            "id": "pending-1",
+            "email": "pending@example.com",
+            "name": "Pending User",
+            "password": server.hash_password("StrongPassword123"),
+            "role": "teacher",
+            "approval_status": "pending",
+            "is_active": False,
+            "created_at": "2026-05-01T10:00:00+00:00",
+        }
+    )
+    monkeypatch.setattr(server, "_send_access_denied_confirmation", lambda _user: False)
+
+    deleted = asyncio.run(
+        server.master_admin_delete_user(
+            "pending-1",
+            server.MasterAdminUserActionPayload(
+                reason="Rejected while email provider is down",
+                confirmation_text="pending@example.com",
+            ),
+            current_user={"id": "super-1", "email": "master@example.com", "role": "super_admin"},
+        )
+    )
+
+    assert deleted.approval_status == "deleted"
+    assert lifecycle_db.users.docs == []
+    assert lifecycle_db.notifications.docs[-1]["payload"]["email_delivery_succeeded"] is False
+
+
 def test_self_delete_protection_remains_intact(lifecycle_db):
     lifecycle_db.users.docs.append(
         {

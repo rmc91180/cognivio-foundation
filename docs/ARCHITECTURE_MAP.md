@@ -108,3 +108,11 @@ This document describes the current active Cognivio architecture after the repos
 
 The app still runs through the bridged legacy backend object in [server.py](C:/Projects/Cognivio/backend/server.py). The refactor work has extracted the canonical domain modules, but final mounted-router/runtime cutover is still a later phase.
 
+## Bridge Rules
+
+- [server.py](C:/Projects/Cognivio/backend/server.py) remains the runtime legacy app bridge and owns the mounted `/api` router in production.
+- [app/main.py](C:/Projects/Cognivio/backend/app/main.py) attaches settings, metrics, observability, worker registry metadata, and safe extracted-router registry metadata to the legacy app.
+- Extracted routers listed in [app/routers/\_\_init\_\_.py](C:/Projects/Cognivio/backend/app/routers/__init__.py) are intentionally marked `extracted_unmounted` unless a route has a migration plan.
+- Do not add the same active route to both `server.py` and `app/routers/*` without documenting shadowing, expected precedence, and rollback.
+- Dynamic route mounting must be idempotent. Repeated imports or repeated `create_app()` calls must not duplicate runtime routes.
+- Final router cutover is future work and should be handled as a dedicated migration PR, not mixed into foundation stabilization.
