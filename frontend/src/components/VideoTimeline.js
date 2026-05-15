@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
  * @param {Array} observations - Array of observations with timestamp_seconds
  * @param {function} onSeek - Callback when user clicks to seek
  */
-export function VideoTimeline({ duration, currentTime, observations = [], onSeek }) {
+export function VideoTimeline({ duration, currentTime, observations = [], onSeek, showTechnicalDetails = false }) {
   const { t, i18n } = useTranslation();
   const [hoveredMarker, setHoveredMarker] = useState(null);
   const isRtl = i18n.dir() === "rtl";
@@ -43,7 +43,7 @@ export function VideoTimeline({ duration, currentTime, observations = [], onSeek
     <div className="relative">
       {/* Timeline bar */}
       <div
-        className="relative h-2 cursor-pointer rounded-full bg-slate-800"
+        className="relative h-4 cursor-pointer rounded-full bg-slate-800 sm:h-2"
         onClick={handleTimelineClick}
       >
         {/* Progress bar */}
@@ -72,7 +72,7 @@ export function VideoTimeline({ duration, currentTime, observations = [], onSeek
                   e.stopPropagation();
                   if (onSeek) onSeek(obs.timestamp_seconds);
                 }}
-                className={`-ml-1.5 h-3 w-3 rounded-full border-2 border-slate-950 transition-transform hover:scale-150 ${getScoreColor(obs.score)}`}
+                className={`-ml-3 h-6 w-6 rounded-full border-2 border-slate-950 transition-transform hover:scale-125 sm:-ml-1.5 sm:h-3 sm:w-3 sm:hover:scale-150 ${getScoreColor(obs.score)}`}
                 title={obs.admin_comment || t("videoTimeline.observation")}
               />
 
@@ -83,7 +83,7 @@ export function VideoTimeline({ duration, currentTime, observations = [], onSeek
                     <span className="font-semibold text-slate-100">
                       {formatTime(obs.timestamp_seconds)}
                     </span>
-                    {obs.score != null && (
+                    {showTechnicalDetails && obs.score != null && (
                       <span
                         className={`rounded-full px-2 py-0.5 text-[10px] font-medium text-white ${getScoreColor(obs.score)}`}
                       >
@@ -91,7 +91,7 @@ export function VideoTimeline({ duration, currentTime, observations = [], onSeek
                       </span>
                     )}
                   </div>
-                  {obs.element_id && (
+                  {showTechnicalDetails && obs.element_id && (
                     <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-500">
                       {obs.element_id}
                     </div>

@@ -24,6 +24,8 @@ BANNED_PHRASES: Tuple[str, ...] = (
     "based on the evidence",
     "this segment",
     "sampled moment",
+    "no summary data available",
+    "no data available",
     "timestamped evidence",
     "evidence segment",
 )
@@ -32,7 +34,8 @@ SYSTEM_LANGUAGE_RE = re.compile(
     r"\b("
     r"evidence|sampled frames?|analysis mode|confidence score|confidence value|"
     r"rubric element|data suggests|based on the evidence|this segment|"
-    r"sampled moment|timestamped evidence|evidence segment"
+    r"sampled moment|no summary data available|no data available|"
+    r"timestamped evidence|evidence segment"
     r")\b",
     re.IGNORECASE,
 )
@@ -433,6 +436,8 @@ def _deterministic_rewrite(text: str, *, language: Optional[str] = "en", path: s
             "based on the evidence": "ממה שנראה",
             "this segment": "הרגע הזה",
             "sampled moment": "הרגע הזה",
+            "no summary data available": "סיכום השיעור יופיע כאן אחרי שההקלטה תיבדק",
+            "no data available": "המידע יופיע כאן אחרי שההקלטה תיבדק",
             "the teacher demonstrated": "ראינו אצלך",
             "the teacher used": "השתמשת",
             "the teacher showed": "הראית",
@@ -451,6 +456,8 @@ def _deterministic_rewrite(text: str, *, language: Optional[str] = "en", path: s
             "based on the evidence": "from what was visible",
             "this segment": "this moment",
             "sampled moment": "moment",
+            "no summary data available": "Your lesson summary will appear here after the recording is reviewed",
+            "no data available": "Your lesson information will appear here after the recording is reviewed",
             "timestamped evidence segment": "moment",
             "timestamped evidence": "moment",
             "evidence segment": "moment",

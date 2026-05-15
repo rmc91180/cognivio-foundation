@@ -1600,6 +1600,94 @@ async def _build_global_ai_quality_snapshot() -> Dict[str, Any]:
     }
 
 
+QUALITY_HISTORY_PATH = ROOT_DIR / "evals" / "quality_history.json"
+
+
+def _empty_ai_quality_eval_snapshot() -> Dict[str, Any]:
+    from app.analysis.eval_harness import QUALITY_THRESHOLDS
+
+    return {
+        "run_at": None,
+        "git_sha": None,
+        "triggered_by": None,
+        "scores": {},
+        "thresholds": dict(QUALITY_THRESHOLDS),
+        "passed": None,
+        "failures": [],
+        "banned_phrases": [],
+        "no_data": True,
+    }
+
+
+def _sanitize_ai_quality_eval_run(raw: Any) -> Dict[str, Any]:
+    from app.analysis.eval_harness import QUALITY_THRESHOLDS
+
+    if not isinstance(raw, dict):
+        return _empty_ai_quality_eval_snapshot()
+    allowed_dimensions = set(QUALITY_THRESHOLDS)
+    scores = {
+        key: float(value)
+        for key, value in (raw.get("scores") or {}).items()
+        if key in allowed_dimensions and isinstance(value, (int, float))
+    }
+    thresholds = {
+        key: float(value)
+        for key, value in (raw.get("thresholds") or QUALITY_THRESHOLDS).items()
+        if key in allowed_dimensions and isinstance(value, (int, float))
+    }
+    failures = []
+    for failure in list(raw.get("failures") or [])[:25]:
+        if not isinstance(failure, dict):
+            continue
+        failures.append(
+            {
+                "case_id": str(failure.get("case_id") or ""),
+                "dimension": str(failure.get("dimension") or ""),
+                "score": float(failure.get("score") or 0.0),
+                "threshold": float(failure.get("threshold") or thresholds.get(str(failure.get("dimension") or ""), 0.0)),
+            }
+        )
+    banned_phrases = []
+    for item in list(raw.get("banned_phrases") or [])[:25]:
+        if not isinstance(item, dict):
+            continue
+        banned_phrases.append(
+            {
+                "case_id": str(item.get("case_id") or ""),
+                "phrase": str(item.get("phrase") or ""),
+            }
+        )
+    return {
+        "run_at": raw.get("run_at") or raw.get("generated_at"),
+        "git_sha": str(raw.get("git_sha") or raw.get("sha") or "")[:40] or None,
+        "triggered_by": str(raw.get("triggered_by") or raw.get("source") or "manual"),
+        "scores": scores,
+        "thresholds": thresholds,
+        "passed": bool(raw.get("passed")) if raw.get("passed") is not None else None,
+        "failures": failures,
+        "banned_phrases": banned_phrases,
+        "no_data": False,
+    }
+
+
+def _read_ai_quality_history(path: Optional[Path] = None) -> List[Dict[str, Any]]:
+    history_path = Path(path or QUALITY_HISTORY_PATH)
+    if not history_path.exists():
+        return []
+    try:
+        payload = json.loads(history_path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("Unable to read AI quality history file", exc_info=True)
+        return []
+    raw_runs = payload.get("runs") if isinstance(payload, dict) else payload
+    if isinstance(raw_runs, dict):
+        raw_runs = [raw_runs]
+    if not isinstance(raw_runs, list):
+        return []
+    sanitized = [_sanitize_ai_quality_eval_run(item) for item in raw_runs]
+    return [item for item in sanitized if not item.get("no_data")]
+
+
 def _build_support_bundle(
     *,
     target_type: str,
@@ -21152,6 +21240,26 @@ async def get_master_admin_dependency_health(current_user: dict = Depends(get_cu
 async def get_master_admin_ai_quality(current_user: dict = Depends(get_current_user)):
     _require_master_admin_user(current_user)
     return MasterAdminAIQualityResponse(**(await _build_global_ai_quality_snapshot()))
+
+
+@api_router.get("/admin/ai-quality/latest")
+async def get_admin_ai_quality_latest(current_user: dict = Depends(get_current_user)):
+    _require_master_admin_user(current_user)
+    history = _read_ai_quality_history()
+    if not history:
+        return _empty_ai_quality_eval_snapshot()
+    return sorted(history, key=lambda item: str(item.get("run_at") or ""), reverse=True)[0]
+
+
+@api_router.get("/admin/ai-quality/history")
+async def get_admin_ai_quality_history(current_user: dict = Depends(get_current_user)):
+    _require_master_admin_user(current_user)
+    history = sorted(
+        _read_ai_quality_history(),
+        key=lambda item: str(item.get("run_at") or ""),
+        reverse=True,
+    )
+    return {"items": history[:50], "count": len(history)}
 
 
 @api_router.get("/master-admin/support", response_model=MasterAdminSupportResponse)

@@ -61,7 +61,7 @@ export function ObservationSetupPage() {
 
   return (
     <LayoutShell>
-      <div className="mx-auto max-w-5xl px-6 py-6">
+      <div className="mx-auto max-w-5xl px-4 py-5 sm:px-6 sm:py-6">
         <PageHeader
           title="Plan an observation"
           description="Choose the teacher, name what you want to watch for, and connect the next recording to a clear coaching focus."
@@ -73,15 +73,15 @@ export function ObservationSetupPage() {
             <p className="mt-2 max-w-2xl text-sm leading-6 text-emerald-900">
               When the lesson recording is uploaded, Cognivio will connect the feedback to what you were watching for.
             </p>
-            <div className="mt-4 flex flex-wrap gap-2">
-              <Link to="/record" className="rounded-md bg-emerald-950 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-900">
+            <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+              <Link to={`/record?teacher_id=${savedSession.teacher_id || ""}&session_id=${savedSession.id || ""}`} className="inline-flex min-h-[44px] items-center justify-center rounded-md bg-emerald-950 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-900">
                 Upload or record video
               </Link>
-              <Link to="/dashboard" className="rounded-md border border-emerald-200 bg-white px-3 py-2 text-sm font-semibold text-emerald-950 hover:bg-emerald-100">
+              <Link to="/dashboard" className="inline-flex min-h-[44px] items-center justify-center rounded-md border border-emerald-200 bg-white px-3 py-2 text-sm font-semibold text-emerald-950 hover:bg-emerald-100">
                 Go back to dashboard
               </Link>
               {savedSession.teacher_id ? (
-                <Link to={`/teachers/${savedSession.teacher_id}`} className="rounded-md border border-emerald-200 bg-white px-3 py-2 text-sm font-semibold text-emerald-950 hover:bg-emerald-100">
+                <Link to={`/teachers/${savedSession.teacher_id}`} className="inline-flex min-h-[44px] items-center justify-center rounded-md border border-emerald-200 bg-white px-3 py-2 text-sm font-semibold text-emerald-950 hover:bg-emerald-100">
                   View teacher profile
                 </Link>
               ) : null}
@@ -115,7 +115,7 @@ export function ObservationSetupPage() {
                 <select
                   value={selectedTeacherId}
                   onChange={(event) => setSelectedTeacherId(event.target.value)}
-                  className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                  className="min-h-[44px] w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
                 >
                   <option value="">Choose a teacher</option>
                   {teachers.map((teacher) => (
@@ -138,7 +138,7 @@ export function ObservationSetupPage() {
                         type="button"
                         onClick={() => toggleFocusArea(area)}
                         className={[
-                          "rounded-md border px-3 py-2 text-left text-sm transition-colors",
+                          "min-h-[44px] rounded-md border px-3 py-2 text-left text-sm transition-colors",
                           active
                             ? "border-primary/30 bg-primary/10 font-semibold text-primary"
                             : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
@@ -173,7 +173,7 @@ export function ObservationSetupPage() {
                 </div>
               ) : null}
 
-              <Button type="submit" disabled={!canSave || createSessionMutation.isPending}>
+              <Button type="submit" fullWidth disabled={!canSave || createSessionMutation.isPending}>
                 {createSessionMutation.isPending ? "Saving..." : "Save and continue"}
               </Button>
             </form>

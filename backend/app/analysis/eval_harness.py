@@ -10,11 +10,30 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.analysis.voice_gate import BANNED_PHRASES, validate_payload_text
+
 DIMENSIONS = (
     "specificity",
     "evidence_grounding",
     "usefulness",
     "modality_discipline",
+    "coach_voice",
+)
+
+QUALITY_THRESHOLDS = {
+    "specificity": 0.70,
+    "evidence_grounding": 0.75,
+    "usefulness": 0.72,
+    "modality_discipline": 0.65,
+    "coach_voice": 0.80,
+}
+
+COACH_VOICE_RUBRIC = (
+    "Addresses the teacher directly as you/your when the text is teacher-facing.",
+    "References at least one specific visible moment when available.",
+    "Contains no banned clinical/system language.",
+    "Reads naturally aloud.",
+    "Makes recommendations doable in the next lesson.",
 )
 
 
@@ -69,6 +88,15 @@ def load_gold_set(path: Optional[Path] = None) -> Dict[str, Any]:
     gold_set_path = Path(path or _default_gold_set_path())
     with gold_set_path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def check_banned_phrases(assessment_text: str) -> Dict[str, Any]:
+    lowered = str(assessment_text or "").lower()
+    banned_found = [phrase for phrase in BANNED_PHRASES if phrase in lowered]
+    return {
+        "banned_found": banned_found,
+        "coach_voice_penalty": min(1.0, 0.1 * len(banned_found)),
+    }
 
 
 def _render_output_text(output: Any, output_key: Optional[str] = None, output_keys: Optional[List[str]] = None) -> str:
@@ -152,6 +180,37 @@ def _evaluate_dimension(text: str, checks: Optional[Dict[str, Any]]) -> Dict[str
     }
 
 
+def _evaluate_coach_voice(text: str, output: Any, language: str = "en") -> Dict[str, Any]:
+    banned_result = check_banned_phrases(text)
+    payload_issues = validate_payload_text(
+        output,
+        language=language,
+        require_direct_address=False,
+        visible_only=True,
+    )
+    third_person_issues = [
+        issue for issue in payload_issues
+        if issue.get("issue_type") in {"third_person_teacher_voice", "summary_starts_with_the_teacher"}
+    ]
+    penalty = float(banned_result["coach_voice_penalty"]) + (0.1 * len(third_person_issues))
+    normalized = max(0.0, min(1.0, 1.0 - penalty))
+    score = round(normalized * 5)
+    failures = []
+    for phrase in banned_result["banned_found"]:
+        failures.append(f'banned phrase "{phrase}"')
+    for issue in third_person_issues:
+        failures.append(f"{issue.get('issue_type')} at {issue.get('path')}")
+    return {
+        "score": score,
+        "normalized_score": round(normalized, 3),
+        "passed": normalized >= QUALITY_THRESHOLDS["coach_voice"],
+        "passed_checks": 0 if failures else 1,
+        "total_checks": 1,
+        "failures": failures,
+        "banned_found": banned_result["banned_found"],
+    }
+
+
 def _run_case(case: Dict[str, Any], server_module: Any) -> Any:
     kind = case["kind"]
     payload = case.get("input", {})
@@ -201,7 +260,10 @@ def evaluate_case(case: Dict[str, Any], server_module: Optional[Any] = None) -> 
     dimension_results: Dict[str, Dict[str, Any]] = {}
     thresholds = case.get("thresholds", {})
     for dimension in DIMENSIONS:
-        result = _evaluate_dimension(output_text, (case.get("checks") or {}).get(dimension))
+        if dimension == "coach_voice":
+            result = _evaluate_coach_voice(output_text, output, case.get("language", "en"))
+        else:
+            result = _evaluate_dimension(output_text, (case.get("checks") or {}).get(dimension))
         dimension_results[dimension] = result
 
     failed_dimensions = [
@@ -235,6 +297,66 @@ def evaluate_gold_set(path: Optional[Path] = None) -> Dict[str, Any]:
         "passed_count": passed_count,
         "failed_count": len(results) - passed_count,
         "passed": passed_count == len(results),
+        "results": results,
+    }
+
+
+def _limit_gold_set(gold_set: Dict[str, Any], max_cases: Optional[int]) -> Dict[str, Any]:
+    if not max_cases or max_cases <= 0:
+        return gold_set
+    limited = dict(gold_set)
+    limited["cases"] = list(gold_set.get("cases", []))[:max_cases]
+    return limited
+
+
+def _normalized_dimension_score(result: Dict[str, Any], dimension: str) -> float:
+    value = result["dimensions"][dimension].get("normalized_score")
+    if value is not None:
+        return float(value)
+    score = float(result["dimensions"][dimension].get("score", 0))
+    if score >= 5:
+        return 1.0
+    if score >= 3:
+        return 0.75
+    if score >= 1:
+        return 0.2
+    return 0.0
+
+
+def run_quality_gate(path: Optional[Path] = None, max_cases: Optional[int] = None) -> Dict[str, Any]:
+    gold_set = _limit_gold_set(load_gold_set(path), max_cases)
+    server_module = load_server_module()
+    results = [evaluate_case(case, server_module=server_module) for case in gold_set.get("cases", [])]
+    scores: Dict[str, float] = {}
+    failures: List[Dict[str, Any]] = []
+    banned_phrases: List[Dict[str, str]] = []
+
+    for dimension in QUALITY_THRESHOLDS:
+        values = [_normalized_dimension_score(result, dimension) for result in results]
+        scores[dimension] = round(sum(values) / len(values), 3) if values else 0.0
+
+    for result in results:
+        for dimension, threshold in QUALITY_THRESHOLDS.items():
+            score = _normalized_dimension_score(result, dimension)
+            if score < threshold:
+                failures.append(
+                    {
+                        "case_id": result.get("id"),
+                        "dimension": dimension,
+                        "score": score,
+                        "threshold": threshold,
+                    }
+                )
+        for phrase in result["dimensions"].get("coach_voice", {}).get("banned_found", []):
+            banned_phrases.append({"case_id": result.get("id"), "phrase": phrase})
+
+    return {
+        "passed": len(failures) == 0,
+        "scores": scores,
+        "thresholds": dict(QUALITY_THRESHOLDS),
+        "failures": failures,
+        "banned_phrases": banned_phrases,
+        "case_count": len(results),
         "results": results,
     }
 

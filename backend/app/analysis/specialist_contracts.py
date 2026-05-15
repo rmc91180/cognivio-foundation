@@ -89,6 +89,20 @@ def get_default_specialist_contracts() -> List[SpecialistContract]:
             ),
             execution_order=4,
         ),
+        SpecialistContract(
+            specialist_id="tone_coach",
+            name="Tone Coach Specialist",
+            purpose="Keep teacher-visible feedback warm, direct, and free of system language.",
+            owned_fields=("summary", "recommendations", "element_scores"),
+            inputs=("summary", "recommendations", "element_scores"),
+            guardrails=(
+                "Do not change scores, timestamps, IDs, or element IDs.",
+                "Do not invent new evidence or lesson moments.",
+                "Rewrite only teacher-visible text fields.",
+                "Never add rubric codes or numeric scores into user-visible text.",
+            ),
+            execution_order=5,
+        ),
     ]
 
 

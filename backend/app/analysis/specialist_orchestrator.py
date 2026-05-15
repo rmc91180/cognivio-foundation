@@ -10,6 +10,7 @@ from app.analysis.specialist_contracts import (
     get_conference_prep_specialist_contracts,
     get_default_specialist_contracts,
 )
+from app.analysis.voice_gate import rewrite_payload_deterministically, validate_payload_text
 
 
 SPECIALIST_ORCHESTRATOR_ENABLED = (
@@ -341,6 +342,48 @@ def _apply_conference_prep_synthesis(
     )
 
 
+def _apply_tone_coach(payload: Dict[str, Any], context: SpecialistContext) -> SpecialistResult:
+    issues = validate_payload_text(
+        payload,
+        language=context.language,
+        require_direct_address=False,
+        visible_only=True,
+    )
+    actionable = [
+        issue for issue in issues
+        if issue.get("issue_type") in {
+            "banned_phrase",
+            "system_language",
+            "third_person_teacher_voice",
+            "score_or_confidence_leak",
+            "summary_starts_with_the_teacher",
+        }
+    ]
+    if not actionable:
+        return SpecialistResult(
+            specialist_id="tone_coach",
+            notes=[],
+            payload_delta={"rewritten": False, "issue_count": 0},
+        )
+
+    rewritten = rewrite_payload_deterministically(
+        payload,
+        language=context.language,
+        visible_only=True,
+    )
+    payload.clear()
+    payload.update(rewritten)
+    return SpecialistResult(
+        specialist_id="tone_coach",
+        notes=[f"Applied rule-based coach voice cleanup to {len(actionable)} visible text issue(s)."],
+        payload_delta={
+            "rewritten": True,
+            "issue_count": len(actionable),
+            "issue_types": sorted({issue.get("issue_type") for issue in actionable}),
+        },
+    )
+
+
 def orchestrate_specialists(
     payload: Dict[str, Any],
     *,
@@ -386,6 +429,7 @@ def orchestrate_specialists(
         "priority_coach": _apply_priority_coach,
         "longitudinal_pattern": _apply_longitudinal_pattern,
         "recommendation_sequence": _apply_recommendation_sequence,
+        "tone_coach": _apply_tone_coach,
     }
     for contract in sorted(get_default_specialist_contracts(), key=lambda item: item.execution_order):
         apply_fn = specialist_functions.get(contract.specialist_id)

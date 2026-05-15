@@ -524,7 +524,7 @@ export function VideoPlayerPage() {
 
   return (
     <LayoutShell>
-      <div className="mx-auto max-w-6xl px-6 py-6">
+      <div className="mx-auto max-w-6xl px-4 py-5 sm:px-6 sm:py-6">
         <PageContextHeader
           breadcrumbs={[
             { label: t("nav.videos"), to: "/videos" },
@@ -601,7 +601,7 @@ export function VideoPlayerPage() {
                   <video
                     ref={videoRef}
                     controls
-                    className="h-full w-full bg-black"
+                    className="aspect-video w-full bg-black object-contain"
                     src={videoUrl}
                     poster={thumbnailUrl || undefined}
                     onTimeUpdate={handleTimeUpdate}
@@ -616,10 +616,11 @@ export function VideoPlayerPage() {
                           currentTime={currentTime}
                           observations={observations}
                           onSeek={handleSeek}
+                          showTechnicalDetails={isAdmin}
                         />
                       </div>
                     )}
-                    <div className="flex items-center justify-between">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                       <span className="text-[11px] text-slate-500">
                         {t("videoPlayer.currentTime", {
                           time: formatClock(currentTime),
@@ -672,7 +673,7 @@ export function VideoPlayerPage() {
                       {t("videoPlayer.observationSummaryDescription")}
                     </p>
                   </div>
-                  {assessmentRes?.overall_score != null && (
+                  {isAdmin && assessmentRes?.overall_score != null && (
                     <Badge variant="success">
                       {t("videoPlayer.scoreSummary", { score: scoreFormatter.format(assessmentRes.overall_score) })}
                     </Badge>
@@ -1121,6 +1122,7 @@ export function VideoPlayerPage() {
               </Panel>
             )}
 
+            {isAdmin ? (
             <Panel className="p-4 text-xs">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 {t("videoPlayer.timestampedObservations")}
@@ -1150,6 +1152,7 @@ export function VideoPlayerPage() {
                 </ul>
               )}
             </Panel>
+            ) : null}
 
             <Panel className="p-4 text-xs">
               {videoRes?.teacher_id ? (

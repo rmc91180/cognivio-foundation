@@ -177,6 +177,8 @@ export const masterAdminApi = {
   storage: () => api.get("/api/master-admin/storage"),
   dependencies: () => api.get("/api/master-admin/dependencies"),
   aiQuality: () => api.get("/api/master-admin/ai-quality"),
+  aiQualityLatest: () => api.get("/api/admin/ai-quality/latest"),
+  aiQualityHistory: () => api.get("/api/admin/ai-quality/history"),
   support: (params = {}) => api.get("/api/master-admin/support", { params }),
   revokeSessions: (userId, payload = {}) =>
     api.post(`/api/master-admin/users/${userId}/sessions/revoke`, payload),

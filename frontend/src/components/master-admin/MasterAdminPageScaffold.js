@@ -15,7 +15,7 @@ export function MasterAdminPageScaffold({
 }) {
   return (
     <LayoutShell>
-      <div className="space-y-6 p-6">
+      <div className="space-y-6 p-4 sm:p-6">
         <Panel className="overflow-hidden border-slate-200 bg-[radial-gradient(circle_at_top_left,_rgba(59,130,246,0.18),_transparent_32%),linear-gradient(135deg,#020617_0%,#0f172a_65%,#1e293b_100%)] text-white shadow-[0_24px_80px_-32px_rgba(15,23,42,0.85)]">
           <div className="space-y-5">
             <div className="flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-300">

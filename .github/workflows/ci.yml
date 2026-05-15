@@ -119,3 +119,60 @@ jobs:
           else
             echo "No frontend lint script configured; passing lint check."
           fi
+
+  ai-quality:
+    name: AI Quality Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect analysis changes
+        id: changes
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+            CHANGED="$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD)"
+          else
+            CHANGED="$(git diff --name-only HEAD^ HEAD || true)"
+          fi
+          echo "$CHANGED"
+          if echo "$CHANGED" | grep -E '^(backend/app/analysis/|backend/server.py|backend/evals/|backend/scripts/run_quality_gate.py|docs/ANALYSIS_EVAL_RUBRIC.md)' >/dev/null; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Python
+        if: steps.changes.outputs.should_run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install backend dependencies
+        if: steps.changes.outputs.should_run == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements-dev.txt
+
+      - name: Run bounded quality gate
+        if: steps.changes.outputs.should_run == 'true'
+        env:
+          PYTHONPATH: backend
+          EVAL_GOLD_SET_MAX_CASES: "5"
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          MONGO_URL: mongodb://localhost:27017
+          DB_NAME: cognivio_test
+          JWT_SECRET: test-jwt-secret
+          BACKEND_PUBLIC_BASE_URL: https://api.example.com
+        run: python backend/scripts/run_quality_gate.py
+
+      - name: Skip quality gate
+        if: steps.changes.outputs.should_run != 'true'
+        run: echo "No analysis-quality paths changed; skipping bounded AI quality gate."
