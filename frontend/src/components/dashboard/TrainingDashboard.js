@@ -3,13 +3,7 @@ import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { LayoutShell } from "@/components/LayoutShell";
 import { EmptyState, LoadingState, PageHeader, Panel, SectionHeader } from "@/components/ui";
-import { trainingApi } from "@/lib/api";
-
-const STATUS_LABELS = {
-  on_track: "On track",
-  at_risk: "At risk",
-  not_started: "Not started",
-};
+import { reportApi } from "@/lib/api";
 
 const formatDate = (value) => {
   if (!value) return "Not scheduled";
@@ -30,9 +24,22 @@ function StatCard({ label, value, hint }) {
 
 export function TrainingDashboard() {
   const { data, isLoading, isError } = useQuery({
-    queryKey: ["training-supervisor-summary"],
-    queryFn: () => trainingApi.supervisorSummary().then((res) => res.data),
+    queryKey: ["training-cohort-snapshot"],
+    queryFn: () => reportApi.cohortSnapshot().then((res) => res.data),
   });
+  const summary = data?.summary || {};
+  const trainees = data?.trainee_rows || [];
+  const upcomingObservations =
+    data?.upcoming_observations ||
+    trainees
+      .filter((trainee) => trainee.next_observation_at)
+      .map((trainee) => ({
+        trainee_id: trainee.trainee_id,
+        trainee_name: trainee.trainee_name,
+        school_site: trainee.placement_site,
+        scheduled_date: trainee.next_observation_at,
+        focus_elements: [],
+      }));
 
   return (
     <LayoutShell>
@@ -54,10 +61,10 @@ export function TrainingDashboard() {
         {!isLoading && !isError ? (
           <div className="space-y-6">
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-              <StatCard label="Total trainees" value={data?.total_trainees ?? 0} hint="Student teachers connected to your program." />
-              <StatCard label="Observations this cycle" value={data?.observations_this_cycle ?? 0} hint={`Target: ${data?.required_per_trainee ?? 0} per trainee.`} />
-              <StatCard label="On track" value={data?.trainees_on_track ?? 0} hint="Trainees with steady observation progress." />
-              <StatCard label="Needs attention" value={data?.trainees_at_risk ?? 0} hint="Start here when planning your next check-ins." />
+              <StatCard label="Total trainees" value={summary.active_trainees ?? 0} hint="Student teachers connected to your program." />
+              <StatCard label="Observations this cycle" value={summary.completed_observations ?? 0} hint={`${summary.upcoming_observations ?? 0} upcoming observations planned.`} />
+              <StatCard label="On track" value={summary.trainees_on_track ?? 0} hint="Trainees with steady observation progress." />
+              <StatCard label="Needs attention" value={summary.trainees_at_risk ?? 0} hint="Start here when planning your next check-ins." />
             </div>
 
             <Panel className="space-y-4">
@@ -65,27 +72,27 @@ export function TrainingDashboard() {
                 title="Compliance table"
                 description="Use this as the quick planning list for your observation cycle."
               />
-              {(data?.trainees || []).length ? (
+              {trainees.length ? (
                 <>
                 <div className="space-y-3 md:hidden">
-                  {data.trainees.map((trainee) => (
+                  {trainees.map((trainee) => (
                     <div key={trainee.trainee_id} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                       <div className="flex items-start justify-between gap-3">
                         <div>
                           <div className="font-semibold text-slate-900">{trainee.trainee_name}</div>
-                          <div className="mt-1 text-sm text-slate-600">{trainee.school_site || "Placement not set"}</div>
+                          <div className="mt-1 text-sm text-slate-600">{trainee.placement_site || "Placement not set"}</div>
                         </div>
                         <span className="shrink-0 rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-700">
-                          {STATUS_LABELS[trainee.status] || trainee.status}
+                          {trainee.status}
                         </span>
                       </div>
                       <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-600">
                         <div className="rounded-md bg-white px-3 py-2">
-                          <div className="font-semibold text-slate-900">{trainee.required}</div>
+                          <div className="font-semibold text-slate-900">{trainee.required_observations}</div>
                           <div>Required</div>
                         </div>
                         <div className="rounded-md bg-white px-3 py-2">
-                          <div className="font-semibold text-slate-900">{trainee.completed}</div>
+                          <div className="font-semibold text-slate-900">{trainee.completed_observations}</div>
                           <div>Completed</div>
                         </div>
                       </div>
@@ -111,15 +118,15 @@ export function TrainingDashboard() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {data.trainees.map((trainee) => (
+                      {trainees.map((trainee) => (
                         <tr key={trainee.trainee_id}>
                           <td className="py-3 pr-4 font-medium text-slate-900">{trainee.trainee_name}</td>
-                          <td className="py-3 pr-4 text-slate-600">{trainee.school_site || "Placement not set"}</td>
-                          <td className="py-3 pr-4 text-slate-600">{trainee.required}</td>
-                          <td className="py-3 pr-4 text-slate-600">{trainee.completed}</td>
+                          <td className="py-3 pr-4 text-slate-600">{trainee.placement_site || "Placement not set"}</td>
+                          <td className="py-3 pr-4 text-slate-600">{trainee.required_observations}</td>
+                          <td className="py-3 pr-4 text-slate-600">{trainee.completed_observations}</td>
                           <td className="py-3 pr-4">
                             <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">
-                              {STATUS_LABELS[trainee.status] || trainee.status}
+                              {trainee.status}
                             </span>
                           </td>
                           <td className="py-3 pr-4">
@@ -144,9 +151,9 @@ export function TrainingDashboard() {
             <div className="grid gap-6 xl:grid-cols-2">
               <Panel className="space-y-4">
                 <SectionHeader title="Upcoming observations" description="The next planned touchpoints across placements." />
-                {(data?.upcoming_observations || []).length ? (
+                {upcomingObservations.length ? (
                   <div className="space-y-3">
-                    {data.upcoming_observations.map((item, index) => (
+                    {upcomingObservations.map((item, index) => (
                       <div key={`${item.trainee_id}-${item.scheduled_date || index}`} className="rounded-md border border-slate-200 bg-slate-50 p-3">
                         <div className="font-semibold text-slate-900">{item.trainee_name}</div>
                         <div className="mt-1 text-sm text-slate-600">{item.school_site || "Placement site not set"} • {formatDate(item.scheduled_date)}</div>
@@ -155,7 +162,7 @@ export function TrainingDashboard() {
                     ))}
                   </div>
                 ) : (
-                  <EmptyState title="No planned observations" message="Scheduled observations for this week will appear here." />
+                  <EmptyState title="Planned observations will appear here." message="Scheduled observations for this week will appear here." />
                 )}
               </Panel>
 

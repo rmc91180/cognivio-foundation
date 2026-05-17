@@ -14893,9 +14893,48 @@ def _dashboard_score_bucket(score: Optional[float]) -> str:
     return "critical"
 
 
-def _dashboard_recommended_action_for_element(element_code: Optional[str], element_name: Optional[str]) -> str:
-    label = f"{element_code} {element_name}".strip() if element_code else (element_name or "this element")
-    return f"Open a targeted coaching cycle for {label}"
+def _dashboard_workspace_mode(current_user: dict) -> str:
+    tenant_role = _get_user_tenant_role(current_user)
+    if tenant_role == "training_admin":
+        return "training"
+    if tenant_role == "super_admin":
+        return "master"
+    return "school"
+
+
+DASHBOARD_PLAIN_LANGUAGE_FOCUS_LABELS = {
+    "1a": "lesson purpose and content clarity",
+    "1b": "knowing students as learners",
+    "1c": "meaningful lesson outcomes",
+    "1d": "learning resources",
+    "1e": "lesson design",
+    "1f": "checking for understanding",
+    "2a": "classroom relationships",
+    "2b": "classroom routines",
+    "2c": "lesson procedures",
+    "2d": "student behavior supports",
+    "2e": "classroom space and materials",
+    "3a": "clear explanations",
+    "3b": "student discussion",
+    "3c": "student engagement",
+    "3d": "checking student understanding",
+    "3e": "responsive teaching",
+}
+
+
+def _dashboard_plain_focus_label(element_code: Optional[str], element_name: Optional[str] = None) -> str:
+    raw_code = str(element_code or "").strip().lower()
+    raw_name = str(element_name or "").strip()
+    code_key = raw_code.replace("danielson_", "").replace("component_", "")
+    if code_key in DASHBOARD_PLAIN_LANGUAGE_FOCUS_LABELS:
+        return DASHBOARD_PLAIN_LANGUAGE_FOCUS_LABELS[code_key]
+    if raw_name and not re.fullmatch(r"\d[a-z]", raw_name.lower()):
+        return raw_name
+    return "student learning moves"
+
+
+def _dashboard_recommended_action_for_focus(label: str) -> str:
+    return f"Plan one short observation focused on {label}, then choose one follow-up move with the teacher."
 
 
 async def _get_cached_dashboard_intelligence(workspace_id: str) -> Optional[dict]:
@@ -14948,91 +14987,168 @@ async def _store_dashboard_intelligence_cache(workspace_id: str, payload: dict) 
     )
 
 
-async def _build_dashboard_intelligence(current_user: dict) -> dict:
+async def _dashboard_collection_docs(
+    collection_name: str,
+    query: Optional[dict] = None,
+    projection: Optional[dict] = None,
+    limit: int = 5000,
+    sort_field: Optional[str] = None,
+    sort_direction: int = -1,
+) -> List[dict]:
+    collection = getattr(db, collection_name, None)
+    if collection is None:
+        return []
+    cursor = collection.find(query or {}, projection or {"_id": 0})
+    if sort_field and hasattr(cursor, "sort"):
+        cursor = cursor.sort(sort_field, sort_direction)
+    return await cursor.to_list(limit)
+
+
+def _dashboard_is_open_task(task: dict) -> bool:
+    return str(task.get("status") or "").strip().lower() not in {"completed", "done", "archived", "deleted"}
+
+
+def _dashboard_teacher_name(teacher: Optional[dict]) -> str:
+    return (teacher or {}).get("name") or (teacher or {}).get("email") or "Teacher"
+
+
+def _dashboard_summary_text(assessment: dict) -> str:
+    for key in ("coach_voice_summary", "coaching_summary", "summary", "teacher_summary", "lesson_summary"):
+        value = str(assessment.get(key) or "").strip()
+        if value:
+            return value
+    return "A coaching summary is ready to review with one strength and one next move."
+
+
+def _dashboard_video_href(video_id: Optional[str], teacher_id: Optional[str] = None) -> Optional[str]:
+    if video_id:
+        return f"/videos/{video_id}"
+    if teacher_id:
+        return f"/teachers/{teacher_id}/latest-lesson"
+    return None
+
+
+async def _build_dashboard_base(current_user: dict) -> dict:
+    tenant_role = _get_user_tenant_role(current_user)
+    if tenant_role == "teacher":
+        raise HTTPException(status_code=403, detail="Dashboard intelligence is available to administrator accounts.")
+
     now_utc = datetime.now(timezone.utc)
     recent_start = now_utc - timedelta(days=90)
     cycle_start, cycle_end = _current_observation_cycle_window(now_utc)
+    workspace_mode = _dashboard_workspace_mode(current_user)
 
     visible_teacher_ids = await _list_teacher_ids_for_user(current_user)
-    teachers = await db.teachers.find(
+    teachers = await _dashboard_collection_docs(
+        "teachers",
         {"id": {"$in": visible_teacher_ids or ["__none__"]}},
-        {
-            "_id": 0,
-            "id": 1,
-            "name": 1,
-            "subject": 1,
-            "department": 1,
-        },
-    ).to_list(5000)
+        {"_id": 0},
+        5000,
+        "name",
+        1,
+    )
     teacher_by_id = {teacher.get("id"): teacher for teacher in teachers if teacher.get("id")}
     teacher_ids = list(teacher_by_id.keys())
 
-    if not teacher_ids:
-        return {
-            "patterns": [],
-            "highlights": [],
-            "observation_gaps": [],
-            "cycle_summary": {
-                "total_observations": 0,
-                "avg_score": None,
-                "score_distribution": {
-                    "excellent": 0,
-                    "proficient": 0,
-                    "developing": 0,
-                    "critical": 0,
-                    "unknown": 0,
-                },
-                "coverage_pct": 0,
-                "observed_teacher_count": 0,
-                "total_teachers": 0,
-                "days_remaining_in_cycle": max(0, (cycle_end - now_utc).days),
-            },
-        }
-
-    assessments = await db.assessments.find(
-        {
-            "teacher_id": {"$in": teacher_ids},
-            "analyzed_at": {"$gte": recent_start.isoformat()},
-        },
+    assessments = await _dashboard_collection_docs(
+        "assessments",
+        {"teacher_id": {"$in": teacher_ids or ["__none__"]}},
         {"_id": 0},
-    ).sort("analyzed_at", 1).to_list(10000)
+        10000,
+        "analyzed_at",
+        -1,
+    )
     assessments = [
         assessment
         for assessment in assessments
-        if _dashboard_assessment_date(assessment) is not None
+        if (assessment.get("teacher_id") in teacher_by_id)
+        and (
+            _dashboard_assessment_date(assessment) is None
+            or _dashboard_assessment_date(assessment) >= recent_start
+        )
     ]
-    assessments.sort(key=lambda assessment: _dashboard_assessment_date(assessment) or datetime.min.replace(tzinfo=timezone.utc))
+    assessments.sort(
+        key=lambda assessment: _dashboard_assessment_date(assessment) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
 
-    observations = await db.observations.find(
+    observations = await _dashboard_collection_docs(
+        "observations",
+        {"teacher_id": {"$in": teacher_ids or ["__none__"]}},
+        {"_id": 0},
+        10000,
+        "created_at",
+        -1,
+    )
+    sessions = await _dashboard_collection_docs(
+        "observation_sessions",
+        {"teacher_id": {"$in": teacher_ids or ["__none__"]}},
+        {"_id": 0},
+        10000,
+        "created_at",
+        -1,
+    )
+    tasks = await _dashboard_collection_docs(
+        "coaching_tasks",
+        {"teacher_id": {"$in": teacher_ids or ["__none__"]}},
+        {"_id": 0},
+        10000,
+        "created_at",
+        -1,
+    )
+    badges = await _dashboard_collection_docs(
+        "recognition_badges",
+        {"teacher_id": {"$in": teacher_ids or ["__none__"]}},
+        {"_id": 0},
+        5000,
+        "awarded_at",
+        -1,
+    )
+    video_comments = await _dashboard_collection_docs(
+        "video_comments",
         {
-            "teacher_id": {"$in": teacher_ids},
-            "created_at": {"$gte": recent_start.isoformat()},
+            "teacher_id": {"$in": teacher_ids or ["__none__"]},
+            "deleted_at": {"$exists": False},
         },
-        {"_id": 0, "teacher_id": 1, "created_at": 1},
-    ).to_list(10000)
+        {"_id": 0},
+        5000,
+        "created_at",
+        -1,
+    )
+    audio_features = await _dashboard_collection_docs(
+        "video_analysis_features",
+        {"teacher_id": {"$in": teacher_ids or ["__none__"]}},
+        {"_id": 0},
+        5000,
+        "created_at",
+        -1,
+    )
 
     assessments_by_teacher: Dict[str, List[dict]] = {}
-    cycle_assessments: List[dict] = []
     latest_activity_by_teacher: Dict[str, datetime] = {}
     observation_counts_this_cycle: Dict[str, int] = {teacher_id: 0 for teacher_id in teacher_ids}
+    cycle_assessments: List[dict] = []
 
     for assessment in assessments:
         teacher_id = assessment.get("teacher_id")
         assessed_at = _dashboard_assessment_date(assessment)
-        if not teacher_id or not assessed_at:
+        if not teacher_id:
             continue
         assessments_by_teacher.setdefault(teacher_id, []).append(assessment)
-        latest_activity_by_teacher[teacher_id] = max(
-            latest_activity_by_teacher.get(teacher_id, assessed_at),
-            assessed_at,
-        )
-        if cycle_start <= assessed_at < cycle_end:
-            cycle_assessments.append(assessment)
-            observation_counts_this_cycle[teacher_id] = observation_counts_this_cycle.get(teacher_id, 0) + 1
+        if assessed_at:
+            latest_activity_by_teacher[teacher_id] = max(
+                latest_activity_by_teacher.get(teacher_id, assessed_at),
+                assessed_at,
+            )
+            if cycle_start <= assessed_at < cycle_end:
+                cycle_assessments.append(assessment)
+                observation_counts_this_cycle[teacher_id] = observation_counts_this_cycle.get(teacher_id, 0) + 1
 
-    for observation in observations:
+    for observation in [*observations, *sessions]:
         teacher_id = observation.get("teacher_id")
-        observed_at = _dashboard_assessment_date({"analyzed_at": observation.get("created_at")})
+        observed_at = _dashboard_assessment_date(
+            {"analyzed_at": observation.get("created_at") or observation.get("scheduled_date") or observation.get("updated_at")}
+        )
         if not teacher_id or not observed_at:
             continue
         latest_activity_by_teacher[teacher_id] = max(
@@ -15042,230 +15158,498 @@ async def _build_dashboard_intelligence(current_user: dict) -> dict:
         if cycle_start <= observed_at < cycle_end:
             observation_counts_this_cycle[teacher_id] = observation_counts_this_cycle.get(teacher_id, 0) + 1
 
-    patterns: List[dict] = []
-    highlights: List[dict] = []
+    return {
+        "tenant_role": tenant_role,
+        "workspace_id": _get_dashboard_workspace_id(current_user),
+        "workspace_mode": workspace_mode,
+        "generated_at": now_utc.isoformat(),
+        "cycle_start": cycle_start,
+        "cycle_end": cycle_end,
+        "now_utc": now_utc,
+        "teachers": teachers,
+        "teacher_by_id": teacher_by_id,
+        "teacher_ids": teacher_ids,
+        "assessments": assessments,
+        "assessments_by_teacher": assessments_by_teacher,
+        "cycle_assessments": cycle_assessments,
+        "observations": observations,
+        "sessions": sessions,
+        "tasks": tasks,
+        "badges": badges,
+        "video_comments": video_comments,
+        "audio_features": audio_features,
+        "latest_activity_by_teacher": latest_activity_by_teacher,
+        "observation_counts_this_cycle": observation_counts_this_cycle,
+    }
 
-    element_low: Dict[str, dict] = {}
-    element_totals: Dict[str, int] = {}
+
+def _build_dashboard_patterns(base: dict) -> List[dict]:
+    teacher_ids = base["teacher_ids"]
+    teacher_by_id = base["teacher_by_id"]
+    assessments = base["assessments"]
+    audio_features = base["audio_features"]
+    video_comments = base["video_comments"]
+    now_utc = base["now_utc"]
+    patterns: List[dict] = []
+
+    focus_low: Dict[str, dict] = {}
     for assessment in assessments:
         teacher_id = assessment.get("teacher_id")
         if teacher_id not in teacher_by_id:
             continue
-        for element_score in assessment.get("element_scores", []):
-            element_code = element_score.get("element_id") or element_score.get("element_code")
-            if not element_code:
-                continue
+        for element_score in assessment.get("element_scores") or []:
             score = element_score.get("adjusted_score", element_score.get("score"))
-            if score is None:
+            if score is None or score >= 6:
                 continue
-            element_totals[element_code] = element_totals.get(element_code, 0) + 1
-            if score >= 6:
-                continue
-            low_record = element_low.setdefault(
-                element_code,
-                {
-                    "element_code": element_code,
-                    "element_name": element_score.get("element_name") or element_code,
-                    "teacher_ids": set(),
-                    "evidence_count": 0,
-                    "departments": {},
-                },
+            label = _dashboard_plain_focus_label(
+                element_score.get("element_id") or element_score.get("element_code"),
+                element_score.get("element_name") or element_score.get("label"),
             )
-            low_record["teacher_ids"].add(teacher_id)
-            low_record["evidence_count"] += 1
-            department = teacher_by_id.get(teacher_id, {}).get("department")
-            if department:
-                low_record["departments"][department] = low_record["departments"].get(department, 0) + 1
+            bucket = focus_low.setdefault(label, {"teacher_ids": set(), "count": 0})
+            bucket["teacher_ids"].add(teacher_id)
+            bucket["count"] += 1
 
-    for low_record in element_low.values():
-        affected_ids = sorted(low_record["teacher_ids"])
+    for label, bucket in focus_low.items():
+        affected_ids = sorted(bucket["teacher_ids"])
         if len(affected_ids) < 3:
             continue
-        department_label = "Schoolwide"
-        if low_record["departments"]:
-            department_label = max(low_record["departments"].items(), key=lambda item: item[1])[0]
-        affected_names = [teacher_by_id[teacher_id].get("name", "Unknown") for teacher_id in affected_ids]
-        total_observations = element_totals.get(low_record["element_code"], low_record["evidence_count"])
-        severity = "critical" if len(affected_ids) >= 5 or low_record["evidence_count"] >= 6 else "warning"
         patterns.append(
             {
+                "id": f"cluster-{re.sub(r'[^a-z0-9]+', '-', label.lower()).strip('-') or 'focus'}",
                 "type": "cluster",
-                "title": f"{department_label} shows pattern of low {low_record['element_name']} ({low_record['element_code']})",
+                "title": f"{label.capitalize()} is showing up as a common growth area.",
                 "description": (
-                    f"{len(affected_ids)} of {len(teacher_ids)} teachers have recent low evidence on "
-                    f"{low_record['element_name']} across {low_record['evidence_count']} of "
-                    f"{total_observations} observations."
+                    f"{len(affected_ids)} teachers have recent lesson feedback pointing toward {label}. "
+                    "Use this as a starting point for focused walkthroughs and short coaching conversations."
                 ),
                 "affected_teacher_ids": affected_ids,
-                "affected_teacher_names": affected_names,
-                "element_code": low_record["element_code"],
-                "element_name": low_record["element_name"],
-                "severity": severity,
-                "recommended_action": _dashboard_recommended_action_for_element(
-                    low_record["element_code"],
-                    low_record["element_name"],
-                ),
-                "evidence_count": low_record["evidence_count"],
+                "affected_teacher_names": [_dashboard_teacher_name(teacher_by_id.get(item)) for item in affected_ids],
+                "severity": "critical" if len(affected_ids) >= 5 else "warning",
+                "recommended_action": _dashboard_recommended_action_for_focus(label),
+                "recommended_href": "/observation/new",
+                "supporting_count": bucket["count"],
+                "window_label": "Last 90 days",
             }
         )
 
-    for teacher_id, teacher_assessments in assessments_by_teacher.items():
-        if len(teacher_assessments) >= 3:
-            recent = teacher_assessments[-3:]
-            recent_scores = [assessment.get("overall_score") for assessment in recent]
-            if all(score is not None for score in recent_scores) and recent_scores[0] > recent_scores[1] > recent_scores[2]:
-                teacher_name = teacher_by_id.get(teacher_id, {}).get("name", "Unknown")
-                drop = round(recent_scores[0] - recent_scores[-1], 2)
-                patterns.append(
-                    {
-                        "type": "trend",
-                        "title": f"{teacher_name}'s classroom performance is declining for 3 consecutive sessions",
-                        "description": f"Overall score moved from {recent_scores[0]:.1f} to {recent_scores[-1]:.1f} across the last three observations.",
-                        "affected_teacher_ids": [teacher_id],
-                        "affected_teacher_names": [teacher_name],
-                        "element_code": None,
-                        "element_name": None,
-                        "severity": "critical" if drop >= 2 else "warning",
-                        "recommended_action": "Schedule a coaching conference and review the last three observations",
-                        "evidence_count": 3,
-                    }
-                )
-
-        if len(teacher_assessments) >= 2:
-            first = teacher_assessments[0]
-            latest = teacher_assessments[-1]
-            first_score = first.get("overall_score")
-            latest_score = latest.get("overall_score")
-            if first_score is not None and latest_score is not None and latest_score - first_score >= 1.5:
-                teacher_name = teacher_by_id.get(teacher_id, {}).get("name", "Unknown")
-                delta = round((latest_score - first_score) * 10, 1)
-                highlights.append(
-                    {
-                        "type": "improvement",
-                        "teacher_id": teacher_id,
-                        "teacher_name": teacher_name,
-                        "description": f"{teacher_name} improved significantly after targeted coaching.",
-                        "element_code": None,
-                        "delta": delta,
-                    }
-                )
-
-            first_elements = {
-                (score.get("element_id") or score.get("element_code")): score
-                for score in first.get("element_scores", [])
-                if score.get("element_id") or score.get("element_code")
-            }
-            for latest_element in latest.get("element_scores", []):
-                element_code = latest_element.get("element_id") or latest_element.get("element_code")
-                first_element = first_elements.get(element_code)
-                if not element_code or not first_element:
-                    continue
-                first_element_score = first_element.get("adjusted_score", first_element.get("score"))
-                latest_element_score = latest_element.get("adjusted_score", latest_element.get("score"))
-                if (
-                    first_element_score is not None
-                    and latest_element_score is not None
-                    and latest_element_score - first_element_score >= 1.5
-                ):
-                    teacher_name = teacher_by_id.get(teacher_id, {}).get("name", "Unknown")
-                    delta = round((latest_element_score - first_element_score) * 10, 1)
-                    highlights.append(
-                        {
-                            "type": "improvement",
-                            "teacher_id": teacher_id,
-                            "teacher_name": teacher_name,
-                            "description": (
-                                f"{teacher_name} improved significantly in "
-                                f"{latest_element.get('element_name') or element_code} after targeted coaching."
-                            ),
-                            "element_code": element_code,
-                            "delta": delta,
-                        }
-                    )
-                    break
-
-    observation_gaps = []
-    for teacher_id, teacher in teacher_by_id.items():
-        latest_activity = latest_activity_by_teacher.get(teacher_id)
-        days_since = (now_utc - latest_activity).days if latest_activity else 999
-        if days_since >= 60:
-            observation_gaps.append(
-                {
-                    "teacher_id": teacher_id,
-                    "teacher_name": teacher.get("name", "Unknown"),
-                    "days_since_last_observation": days_since,
-                    "observation_count_this_cycle": observation_counts_this_cycle.get(teacher_id, 0),
-                }
-            )
-    observation_gaps.sort(key=lambda item: item["days_since_last_observation"], reverse=True)
-
-    if observation_gaps:
-        severity = "critical" if len(observation_gaps) >= 5 else "warning"
-        title = (
-            f"{len(observation_gaps)} teachers haven't been observed this cycle"
-            if len(observation_gaps) > 1
-            else f"{observation_gaps[0]['teacher_name']} hasn't been observed this cycle"
-        )
+    shared_comments = [
+        comment
+        for comment in video_comments
+        if comment.get("visibility") == "shared_with_teacher" and comment.get("teacher_id") in teacher_by_id
+    ]
+    if len(shared_comments) >= 2:
+        affected_ids = sorted({comment.get("teacher_id") for comment in shared_comments if comment.get("teacher_id")})
         patterns.append(
             {
-                "type": "risk",
-                "title": title,
-                "description": (
-                    f"{len(observation_gaps)} teachers are at least 60 days from their last observation "
-                    "or have not yet been observed."
-                ),
-                "affected_teacher_ids": [item["teacher_id"] for item in observation_gaps],
-                "affected_teacher_names": [item["teacher_name"] for item in observation_gaps],
-                "element_code": None,
-                "element_name": None,
-                "severity": severity,
-                "recommended_action": "Plan observations for overdue teachers this week",
-                "evidence_count": len(observation_gaps),
+                "id": "shared-moments",
+                "type": "discussion",
+                "title": "Several recent observations include moments to revisit.",
+                "description": "Shared lesson notes are creating clear openings for follow-up conversations.",
+                "affected_teacher_ids": affected_ids,
+                "affected_teacher_names": [_dashboard_teacher_name(teacher_by_id.get(item)) for item in affected_ids],
+                "severity": "info",
+                "recommended_action": "Open the shared notes and choose one next step for each teacher.",
+                "recommended_href": "/coaching",
+                "supporting_count": len(shared_comments),
+                "window_label": "Last 90 days",
             }
         )
 
-    score_distribution = {
-        "excellent": 0,
-        "proficient": 0,
-        "developing": 0,
-        "critical": 0,
-        "unknown": 0,
-    }
-    cycle_scores: List[float] = []
-    for assessment in cycle_assessments:
-        score = assessment.get("overall_score")
-        if score is not None:
-            cycle_scores.append(score)
-        score_distribution[_dashboard_score_bucket(score)] += 1
-
-    observed_teacher_ids = {
-        teacher_id
-        for teacher_id, count in observation_counts_this_cycle.items()
-        if count > 0
-    }
-    coverage_pct = round((len(observed_teacher_ids) / len(teacher_ids)) * 100, 1) if teacher_ids else 0
-    patterns.sort(
-        key=lambda item: (
-            {"critical": 0, "warning": 1, "info": 2}.get(item.get("severity"), 3),
-            -int(item.get("evidence_count") or 0),
+    high_talk_features = []
+    for feature in audio_features:
+        ratio = feature.get("teacher_talk_ratio")
+        teacher_id = feature.get("teacher_id")
+        if ratio is None or teacher_id not in teacher_by_id:
+            continue
+        try:
+            if float(ratio) >= 0.7:
+                high_talk_features.append(feature)
+        except (TypeError, ValueError):
+            continue
+    if len(high_talk_features) >= 2:
+        affected_ids = sorted({feature.get("teacher_id") for feature in high_talk_features if feature.get("teacher_id")})
+        patterns.append(
+            {
+                "id": "talk-time-discussion",
+                "type": "discussion",
+                "title": "Talk-time is a useful coaching topic this week.",
+                "description": "A few recent recordings can support conversations about wait time, student discussion, and when to step back in.",
+                "affected_teacher_ids": affected_ids,
+                "affected_teacher_names": [_dashboard_teacher_name(teacher_by_id.get(item)) for item in affected_ids],
+                "severity": "info",
+                "recommended_action": "Review one talk-time summary before the next coaching conversation.",
+                "recommended_href": "/videos",
+                "supporting_count": len(high_talk_features),
+                "window_label": "Last 90 days",
+            }
         )
-    )
-    highlights.sort(key=lambda item: item.get("delta") or 0, reverse=True)
+
+    observation_gaps = _build_dashboard_observation_gaps(base)
+    if observation_gaps:
+        affected_ids = [item["teacher_id"] for item in observation_gaps]
+        patterns.append(
+            {
+                "id": "observation-gap",
+                "type": "observation_gap",
+                "title": "Some teachers are ready for a fresh observation.",
+                "description": (
+                    f"{len(observation_gaps)} teacher{'s' if len(observation_gaps) != 1 else ''} have not had a recent observation. "
+                    "Start with one focused visit and connect it to a small next step."
+                ),
+                "affected_teacher_ids": affected_ids,
+                "affected_teacher_names": [item["teacher_name"] for item in observation_gaps],
+                "severity": "warning" if len(observation_gaps) < 5 else "critical",
+                "recommended_action": "Plan observations for the teachers with the longest gap.",
+                "recommended_href": "/observation/new",
+                "supporting_count": len(observation_gaps),
+                "window_label": "Current cycle",
+            }
+        )
+
+    severity_rank = {"critical": 0, "warning": 1, "info": 2}
+    patterns.sort(key=lambda item: (severity_rank.get(item.get("severity"), 3), -int(item.get("supporting_count") or 0)))
+    return patterns[:8]
+
+
+def _build_dashboard_observation_gaps(base: dict) -> List[dict]:
+    gaps = []
+    now_utc = base["now_utc"]
+    for teacher_id, teacher in base["teacher_by_id"].items():
+        latest_activity = base["latest_activity_by_teacher"].get(teacher_id)
+        days_since = (now_utc - latest_activity).days if latest_activity else None
+        count_this_cycle = base["observation_counts_this_cycle"].get(teacher_id, 0)
+        if count_this_cycle == 0 or days_since is None or days_since >= 60:
+            gaps.append(
+                {
+                    "teacher_id": teacher_id,
+                    "teacher_name": _dashboard_teacher_name(teacher),
+                    "days_since_last_observation": days_since,
+                    "observation_count_this_cycle": count_this_cycle,
+                    "recommended_href": f"/observation/new?teacher_id={teacher_id}",
+                }
+            )
+    gaps.sort(key=lambda item: item["days_since_last_observation"] if item["days_since_last_observation"] is not None else 9999, reverse=True)
+    return gaps[:12]
+
+
+async def _build_dashboard_intelligence(current_user: dict) -> dict:
+    base = await _build_dashboard_base(current_user)
+    teacher_ids = base["teacher_ids"]
+    patterns = _build_dashboard_patterns(base)
+    observation_gaps = _build_dashboard_observation_gaps(base)
+    open_tasks = [task for task in base["tasks"] if _dashboard_is_open_task(task)]
+    completed_tasks = [task for task in base["tasks"] if not _dashboard_is_open_task(task)]
+    shared_comments = [
+        comment
+        for comment in base["video_comments"]
+        if comment.get("visibility") == "shared_with_teacher" and comment.get("teacher_id") in base["teacher_by_id"]
+    ]
+    recognition_count = len([badge for badge in base["badges"] if str(badge.get("status") or "awarded").lower() != "revoked"])
+    observed_teacher_ids = {teacher_id for teacher_id, count in base["observation_counts_this_cycle"].items() if count > 0}
+    coverage_pct = round((len(observed_teacher_ids) / len(teacher_ids)) * 100, 1) if teacher_ids else 0
+
+    task_teacher_ids = {task.get("teacher_id") for task in open_tasks}
+    lessons_ready = [
+        assessment
+        for assessment in base["assessments"][:50]
+        if assessment.get("teacher_id") in base["teacher_by_id"]
+        and assessment.get("teacher_id") not in task_teacher_ids
+    ]
+
+    priority_cards = []
+    if observation_gaps:
+        priority_cards.append(
+            {
+                "id": "observation-gaps",
+                "type": "observation_gap",
+                "title": "Teachers ready for a fresh observation",
+                "summary": f"{len(observation_gaps)} teacher{'s' if len(observation_gaps) != 1 else ''} would benefit from a focused visit this cycle.",
+                "count": len(observation_gaps),
+                "severity": "warning" if len(observation_gaps) < 5 else "critical",
+                "cta_label": "Plan observation",
+                "cta_href": "/observation/new",
+            }
+        )
+    if lessons_ready:
+        priority_cards.append(
+            {
+                "id": "lesson-ready",
+                "type": "lesson_ready",
+                "title": "Lessons ready for follow-up",
+                "summary": "Recent lesson feedback is ready to turn into a coaching conversation.",
+                "count": len(lessons_ready),
+                "severity": "info",
+                "cta_label": "Review lessons",
+                "cta_href": "/videos",
+            }
+        )
+    if open_tasks:
+        priority_cards.append(
+            {
+                "id": "coaching-backlog",
+                "type": "coaching_task",
+                "title": "Open coaching tasks",
+                "summary": "Use these tasks to keep next steps visible between observations.",
+                "count": len(open_tasks),
+                "severity": "warning" if len(open_tasks) >= 5 else "info",
+                "cta_label": "Open coaching",
+                "cta_href": "/coaching",
+            }
+        )
+    if shared_comments:
+        priority_cards.append(
+            {
+                "id": "moments-to-revisit",
+                "type": "follow_up",
+                "title": "Moments to revisit",
+                "summary": "Shared video notes are ready to anchor short, specific follow-up conversations.",
+                "count": len(shared_comments),
+                "severity": "info",
+                "cta_label": "Open notes",
+                "cta_href": "/coaching",
+            }
+        )
+    if recognition_count:
+        priority_cards.append(
+            {
+                "id": "recognition-earned",
+                "type": "recognition",
+                "title": "Recognition to celebrate",
+                "summary": "Strong lesson moments are ready to keep visible for teachers and teams.",
+                "count": recognition_count,
+                "severity": "info",
+                "cta_label": "Open recognition",
+                "cta_href": "/recognition",
+            }
+        )
+
+    recent_lessons = []
+    for assessment in base["assessments"][:8]:
+        teacher_id = assessment.get("teacher_id")
+        teacher = base["teacher_by_id"].get(teacher_id)
+        if not teacher:
+            continue
+        recent_lessons.append(
+            {
+                "video_id": assessment.get("video_id"),
+                "assessment_id": assessment.get("id"),
+                "teacher_id": teacher_id,
+                "teacher_name": _dashboard_teacher_name(teacher),
+                "lesson_date": assessment.get("lesson_date") or assessment.get("analyzed_at") or assessment.get("created_at"),
+                "title": assessment.get("title") or assessment.get("subject") or teacher.get("subject") or "Recent lesson",
+                "summary": _dashboard_summary_text(assessment),
+                "href": _dashboard_video_href(assessment.get("video_id"), teacher_id),
+            }
+        )
+
+    highlights = []
+    for teacher_id, teacher_assessments in base["assessments_by_teacher"].items():
+        if len(teacher_assessments) >= 2:
+            latest = teacher_assessments[0]
+            previous = teacher_assessments[1]
+            latest_score = latest.get("overall_score")
+            previous_score = previous.get("overall_score")
+            if latest_score is not None and previous_score is not None and latest_score > previous_score:
+                teacher_name = _dashboard_teacher_name(base["teacher_by_id"].get(teacher_id))
+                highlights.append(
+                    {
+                        "id": f"growth-{teacher_id}",
+                        "type": "growth",
+                        "teacher_id": teacher_id,
+                        "teacher_name": teacher_name,
+                        "description": f"{teacher_name} has a recent lesson showing growth after earlier feedback.",
+                        "href": f"/teachers/{teacher_id}/latest-lesson",
+                    }
+                )
+    for badge in base["badges"][:4]:
+        teacher_id = badge.get("teacher_id")
+        teacher_name = _dashboard_teacher_name(base["teacher_by_id"].get(teacher_id))
+        highlights.append(
+            {
+                "id": f"recognition-{badge.get('id') or teacher_id}",
+                "type": "recognition",
+                "teacher_id": teacher_id,
+                "teacher_name": teacher_name,
+                "description": badge.get("description") or f"{teacher_name} earned recognition for a strong lesson moment.",
+                "href": "/recognition",
+            }
+        )
 
     return {
-        "patterns": patterns[:8],
-        "highlights": highlights[:8],
-        "observation_gaps": observation_gaps[:12],
+        "workspace_id": base["workspace_id"],
+        "workspace_mode": base["workspace_mode"],
+        "generated_at": base["generated_at"],
         "cycle_summary": {
-            "total_observations": len(cycle_assessments),
-            "avg_score": _average(cycle_scores),
-            "score_distribution": score_distribution,
-            "coverage_pct": coverage_pct,
-            "observed_teacher_count": len(observed_teacher_ids),
             "total_teachers": len(teacher_ids),
-            "days_remaining_in_cycle": max(0, (cycle_end - now_utc).days),
+            "active_teachers": len(teacher_ids),
+            "total_observations": len(base["cycle_assessments"]),
+            "reviewed_lessons": len(base["cycle_assessments"]),
+            "teachers_observed": len(observed_teacher_ids),
+            "coverage_pct": coverage_pct,
+            "open_coaching_tasks": len(open_tasks),
+            "completed_coaching_tasks": len(completed_tasks),
+            "recognition_count": recognition_count,
+            "days_remaining_in_cycle": max(0, (base["cycle_end"] - base["now_utc"]).days),
         },
+        "priority_cards": priority_cards[:6],
+        "patterns": patterns,
+        "highlights": highlights[:8],
+        "observation_gaps": observation_gaps,
+        "recent_lessons": recent_lessons,
     }
+
+
+async def _build_coaching_snapshot(current_user: dict) -> dict:
+    tenant_role = _get_user_tenant_role(current_user)
+    if tenant_role == "teacher":
+        raise HTTPException(status_code=403, detail="Coaching reports are available to administrator accounts.")
+    base = await _build_dashboard_base(current_user)
+    patterns = _build_dashboard_patterns(base)
+    observation_gaps = _build_dashboard_observation_gaps(base)
+    open_tasks = [task for task in base["tasks"] if _dashboard_is_open_task(task)]
+    completed_tasks = [task for task in base["tasks"] if not _dashboard_is_open_task(task)]
+    recognition_count = len([badge for badge in base["badges"] if str(badge.get("status") or "awarded").lower() != "revoked"])
+
+    teacher_rows = []
+    for teacher_id, teacher in base["teacher_by_id"].items():
+        teacher_assessments = base["assessments_by_teacher"].get(teacher_id, [])
+        latest = teacher_assessments[0] if teacher_assessments else None
+        teacher_open_tasks = [task for task in open_tasks if task.get("teacher_id") == teacher_id]
+        latest_activity = base["latest_activity_by_teacher"].get(teacher_id)
+        gap = next((item for item in observation_gaps if item["teacher_id"] == teacher_id), None)
+        if gap:
+            next_action = "Plan a focused observation."
+        elif teacher_open_tasks:
+            next_action = "Check progress on the open coaching task."
+        elif latest:
+            next_action = "Review the latest lesson feedback and choose one follow-up move."
+        else:
+            next_action = "Start with a short observation."
+        teacher_rows.append(
+            {
+                "teacher_id": teacher_id,
+                "teacher_name": _dashboard_teacher_name(teacher),
+                "reviewed_lessons": len(teacher_assessments),
+                "open_tasks": len(teacher_open_tasks),
+                "last_observation_at": latest_activity.isoformat() if latest_activity else None,
+                "latest_summary": _dashboard_summary_text(latest) if latest else None,
+                "next_action": next_action,
+            }
+        )
+
+    teacher_rows.sort(key=lambda item: (item["open_tasks"] == 0, item["teacher_name"]))
+    return {
+        "generated_at": base["generated_at"],
+        "period": {
+            "start": base["cycle_start"].isoformat(),
+            "end": base["cycle_end"].isoformat(),
+            "label": "Current coaching cycle",
+        },
+        "summary": {
+            "reviewed_lessons": len(base["cycle_assessments"]),
+            "teachers_with_feedback": len(base["assessments_by_teacher"]),
+            "open_coaching_tasks": len(open_tasks),
+            "completed_coaching_tasks": len(completed_tasks),
+            "recognition_earned": recognition_count,
+            "observation_gaps": len(observation_gaps),
+        },
+        "patterns": patterns,
+        "teacher_rows": teacher_rows,
+    }
+
+
+async def _build_cohort_snapshot(current_user: dict) -> dict:
+    tenant_role = _get_user_tenant_role(current_user)
+    if tenant_role not in {"training_admin", "super_admin"}:
+        raise HTTPException(status_code=403, detail="Cohort reports are available to training administrator accounts.")
+    base = await _build_dashboard_base(current_user)
+    required_per_trainee = await _training_required_per_trainee(current_user) if tenant_role == "training_admin" else 1
+    schedules = await _dashboard_collection_docs(
+        "schedules",
+        {"teacher_id": {"$in": base["teacher_ids"] or ["__none__"]}},
+        {"_id": 0},
+        5000,
+        "start_time",
+        1,
+    )
+
+    upcoming_by_teacher: Dict[str, List[dict]] = {}
+    now_utc = base["now_utc"]
+    for schedule in schedules:
+        start_time = _parse_iso_datetime(schedule.get("start_time"))
+        if start_time and start_time >= now_utc:
+            upcoming_by_teacher.setdefault(schedule.get("teacher_id"), []).append(schedule)
+
+    trainee_rows = []
+    status_counts = {"On track": 0, "At risk": 0, "Not started": 0}
+    for trainee_id, teacher in base["teacher_by_id"].items():
+        completed = base["observation_counts_this_cycle"].get(trainee_id, 0)
+        if completed == 0:
+            status = "Not started"
+        elif completed < required_per_trainee:
+            status = "At risk"
+        else:
+            status = "On track"
+        status_counts[status] += 1
+        latest = (base["assessments_by_teacher"].get(trainee_id) or [None])[0]
+        next_observation = (upcoming_by_teacher.get(trainee_id) or [None])[0]
+        trainee_rows.append(
+            {
+                "trainee_id": trainee_id,
+                "trainee_name": _dashboard_teacher_name(teacher),
+                "placement_site": _training_placement_site(teacher),
+                "required_observations": required_per_trainee,
+                "completed_observations": completed,
+                "status": status,
+                "next_observation_at": (next_observation or {}).get("start_time"),
+                "latest_summary": _dashboard_summary_text(latest) if latest else None,
+                "next_action": "Schedule observation" if status != "On track" else "Review the latest observation summary.",
+            }
+        )
+
+    trainee_rows.sort(key=lambda item: ({"At risk": 0, "Not started": 1, "On track": 2}.get(item["status"], 3), item["trainee_name"]))
+    recent_observations = []
+    for assessment in base["assessments"][:5]:
+        trainee_id = assessment.get("teacher_id")
+        teacher = base["teacher_by_id"].get(trainee_id)
+        if not teacher:
+            continue
+        recent_observations.append(
+            {
+                "trainee_id": trainee_id,
+                "trainee_name": _dashboard_teacher_name(teacher),
+                "completed_at": assessment.get("analyzed_at") or assessment.get("created_at"),
+                "summary": _dashboard_summary_text(assessment),
+            }
+        )
+
+    return {
+        "generated_at": base["generated_at"],
+        "cohort_name": current_user.get("organization_name") or current_user.get("school_name") or "Training cohort",
+        "summary": {
+            "active_trainees": len(base["teacher_ids"]),
+            "completed_observations": sum(base["observation_counts_this_cycle"].values()),
+            "upcoming_observations": sum(len(items) for items in upcoming_by_teacher.values()),
+            "trainees_on_track": status_counts["On track"],
+            "trainees_at_risk": status_counts["At risk"],
+            "trainees_not_started": status_counts["Not started"],
+        },
+        "trainee_rows": trainee_rows,
+        "recent_observations": recent_observations,
+    }
+
+
+def _csv_response(filename: str, headers: List[str], rows: List[List[Any]]) -> Response:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(headers)
+    for row in rows:
+        writer.writerow(["" if value is None else value for value in row])
+    return Response(
+        content=buffer.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def _coerce_insight_priority(value: Any) -> str:
@@ -15754,21 +16138,72 @@ async def get_dashboard_leadership_insights(
 
 @api_router.get("/dashboard/intelligence")
 async def get_dashboard_intelligence(current_user: dict = Depends(get_current_user)):
-    workspace_id = _get_dashboard_workspace_id(current_user)
-    cache_key = f"dashboard:intelligence:{workspace_id}"
-    cached_value = await CACHE_CLIENT.get(cache_key)
-    if cached_value is not None:
-        return {**cached_value, "cache": {"hit": True, "store": "mongodb"}}
-    cached_payload = await _get_cached_dashboard_intelligence(workspace_id)
-    if cached_payload:
-        await CACHE_CLIENT.set(cache_key, cached_payload, 1800)
-        return cached_payload
-
     payload = await _build_dashboard_intelligence(current_user)
-    payload["cache"] = {"hit": False}
-    await _store_dashboard_intelligence_cache(workspace_id, payload)
-    await CACHE_CLIENT.set(cache_key, payload, 1800)
+    payload["cache"] = {"hit": False, "store": "fresh"}
     return payload
+
+
+@api_router.get("/reports/coaching-snapshot")
+async def get_coaching_snapshot_report(current_user: dict = Depends(get_current_user)):
+    return await _build_coaching_snapshot(current_user)
+
+
+@api_router.get("/reports/cohort-snapshot")
+async def get_cohort_snapshot_report(current_user: dict = Depends(get_current_user)):
+    return await _build_cohort_snapshot(current_user)
+
+
+@api_router.get("/reports/export/coaching-snapshot.csv")
+async def export_coaching_snapshot_csv(current_user: dict = Depends(get_current_user)):
+    snapshot = await _build_coaching_snapshot(current_user)
+    rows = [
+        [
+            row.get("teacher_name"),
+            row.get("reviewed_lessons"),
+            row.get("open_tasks"),
+            row.get("last_observation_at"),
+            row.get("latest_summary"),
+            row.get("next_action"),
+        ]
+        for row in snapshot.get("teacher_rows", [])
+    ]
+    return _csv_response(
+        "coaching-snapshot.csv",
+        ["Teacher", "Reviewed lessons", "Open coaching tasks", "Last observation", "Latest coaching summary", "Next action"],
+        rows,
+    )
+
+
+@api_router.get("/reports/export/cohort-snapshot.csv")
+async def export_cohort_snapshot_csv(current_user: dict = Depends(get_current_user)):
+    snapshot = await _build_cohort_snapshot(current_user)
+    rows = [
+        [
+            row.get("trainee_name"),
+            row.get("placement_site"),
+            row.get("required_observations"),
+            row.get("completed_observations"),
+            row.get("status"),
+            row.get("next_observation_at"),
+            row.get("latest_summary"),
+            row.get("next_action"),
+        ]
+        for row in snapshot.get("trainee_rows", [])
+    ]
+    return _csv_response(
+        "cohort-snapshot.csv",
+        [
+            "Trainee",
+            "Placement site",
+            "Required observations",
+            "Completed observations",
+            "Status",
+            "Next observation",
+            "Latest coaching summary",
+            "Next action",
+        ],
+        rows,
+    )
 
 
 @api_router.get("/dashboard/summary")
