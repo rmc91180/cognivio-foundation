@@ -73,6 +73,12 @@ export const scheduleApi = {
 
 export const reportApi = {
   history: () => api.get("/api/reports/history"),
+  coachingSnapshot: () => api.get("/api/reports/coaching-snapshot"),
+  cohortSnapshot: () => api.get("/api/reports/cohort-snapshot"),
+  exportCoachingSnapshotCsv: () =>
+    api.get("/api/reports/export/coaching-snapshot.csv", { responseType: "blob" }),
+  exportCohortSnapshotCsv: () =>
+    api.get("/api/reports/export/cohort-snapshot.csv", { responseType: "blob" }),
   export: (format, params = {}) =>
     api.post(
       "/api/reports/export",
@@ -82,6 +88,10 @@ export const reportApi = {
         responseType: "blob",
       }
     ),
+};
+
+export const dashboardApi = {
+  intelligence: () => api.get("/api/dashboard/intelligence"),
 };
 
 export const teacherWorkspaceApi = {

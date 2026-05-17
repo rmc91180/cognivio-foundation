@@ -32,6 +32,18 @@ Use this short sequence inside either walkthrough after opening a reviewed lesso
 6. Open the transcript tab and click a timestamp.
 7. If asked about turning notes into coaching tasks, say: "That connection is planned, but this PR keeps task creation out until the backend exposes a safe create endpoint."
 
+## Dashboard and Reports Intelligence Moment
+
+Use this sequence when showing the internal-testing admin flow:
+
+1. Open `/dashboard` as the school admin and start with "Today's coaching priorities."
+2. Open a "Patterns worth noticing" card and point to the recommended next action.
+3. Use an observation gap row to plan a focused observation for one teacher.
+4. Open `/reports` and show the Coaching Snapshot summary.
+5. Export the coaching snapshot CSV and explain that it is an internal planning artifact, not a teacher-facing score report.
+6. Switch to the training admin persona, open `/dashboard`, and show the cohort status view.
+7. Open `/reports` as the training admin and show the Cohort Snapshot with trainee status rows.
+
 ## 8-minute Training Walkthrough
 
 1. Training dashboard: show trainee progress, on-track counts, and who needs attention.

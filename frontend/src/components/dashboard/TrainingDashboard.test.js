@@ -3,15 +3,15 @@ import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import { TrainingDashboard } from "@/components/dashboard/TrainingDashboard";
-import { trainingApi } from "@/lib/api";
+import { reportApi } from "@/lib/api";
 
 jest.mock("@/components/LayoutShell", () => ({
   LayoutShell: ({ children }) => <div>{children}</div>,
 }));
 
 jest.mock("@/lib/api", () => ({
-  trainingApi: {
-    supervisorSummary: jest.fn(),
+  reportApi: {
+    cohortSnapshot: jest.fn(),
   },
 }));
 
@@ -29,17 +29,26 @@ const renderWithClient = (ui) => {
 describe("TrainingDashboard", () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    trainingApi.supervisorSummary.mockResolvedValue({
+    reportApi.cohortSnapshot.mockResolvedValue({
       data: {
-        total_trainees: 12,
-        active_placements: 10,
-        observations_this_cycle: 7,
-        required_per_trainee: 2,
-        trainees_on_track: 8,
-        trainees_at_risk: 3,
-        trainees_not_started: 1,
-        trainees: [
-          { trainee_id: "t1", trainee_name: "Trainee One", school_site: "Metro Partner School", required: 2, completed: 1, status: "at_risk" },
+        summary: {
+          active_trainees: 12,
+          completed_observations: 7,
+          upcoming_observations: 2,
+          trainees_on_track: 8,
+          trainees_at_risk: 3,
+          trainees_not_started: 1,
+        },
+        trainee_rows: [
+          {
+            trainee_id: "t1",
+            trainee_name: "Trainee One",
+            placement_site: "Metro Partner School",
+            required_observations: 2,
+            completed_observations: 1,
+            status: "At risk",
+            next_action: "Schedule observation",
+          },
         ],
         upcoming_observations: [],
         recent_observations: [],

@@ -1,124 +1,149 @@
-import React, { useMemo } from "react";
+import React from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { LayoutShell } from "@/components/LayoutShell";
-import { EmptyState, LoadingState, PageHeader, Panel, SectionHeader } from "@/components/ui";
-import { assessmentApi, recognitionApi, teacherApi } from "@/lib/api";
+import { EmptyState, ErrorState, LoadingState, PageHeader, Panel, SectionHeader } from "@/components/ui";
+import { dashboardApi } from "@/lib/api";
 
-function PriorityCard({ label, value, summary, to }) {
+const severityStyles = {
+  critical: "border-rose-200 bg-rose-50 text-rose-950",
+  warning: "border-amber-200 bg-amber-50 text-amber-950",
+  info: "border-sky-200 bg-sky-50 text-sky-950",
+};
+
+function StatCard({ label, value, hint }) {
   return (
-    <Panel className="min-h-[150px]">
+    <Panel className="min-h-[120px]">
       <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</div>
-      <div className="mt-3 text-3xl font-semibold text-slate-950">{value}</div>
-      <p className="mt-2 text-sm leading-6 text-slate-600">{summary}</p>
-      {to ? <Link to={to} className="mt-3 inline-flex text-sm font-medium text-primary hover:text-primary/80">Next action</Link> : null}
+      <div className="mt-3 text-3xl font-semibold text-slate-950">{value ?? 0}</div>
+      {hint ? <p className="mt-2 text-sm leading-6 text-slate-600">{hint}</p> : null}
     </Panel>
   );
 }
 
+function PriorityCard({ card }) {
+  const tone = severityStyles[card.severity] || severityStyles.info;
+  return (
+    <Panel className={`min-h-[170px] border ${tone}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-wide opacity-75">{card.type?.replace(/_/g, " ")}</div>
+          <h3 className="mt-2 text-base font-semibold">{card.title}</h3>
+        </div>
+        <div className="rounded-md bg-white/70 px-3 py-1 text-lg font-semibold">{card.count ?? 0}</div>
+      </div>
+      <p className="mt-3 text-sm leading-6 opacity-85">{card.summary}</p>
+      {card.cta_href ? (
+        <Link to={card.cta_href} className="mt-4 inline-flex min-h-11 items-center text-sm font-semibold underline">
+          {card.cta_label || "Open"}
+        </Link>
+      ) : null}
+    </Panel>
+  );
+}
+
+function PatternCard({ pattern }) {
+  return (
+    <div className="rounded-md border border-slate-200 bg-white p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="font-semibold text-slate-950">{pattern.title}</h3>
+          <p className="mt-2 text-sm leading-6 text-slate-600">{pattern.description}</p>
+        </div>
+        <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600">
+          {pattern.severity || "info"}
+        </span>
+      </div>
+      {pattern.affected_teacher_names?.length ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {pattern.affected_teacher_names.slice(0, 5).map((name) => (
+            <span key={name} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
+              {name}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <p className="mt-3 text-sm font-medium text-slate-800">{pattern.recommended_action}</p>
+      {pattern.recommended_href ? (
+        <Link to={pattern.recommended_href} className="mt-3 inline-flex min-h-11 items-center text-sm font-semibold text-primary hover:text-primary/80">
+          Take next step
+        </Link>
+      ) : null}
+    </div>
+  );
+}
+
+function formatLessonDate(value) {
+  if (!value) return "Recent lesson";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Recent lesson";
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
 export function SchoolAdminPilotDashboard() {
-  const rosterQuery = useQuery({
-    queryKey: ["pilot-dashboard-roster"],
-    queryFn: () => assessmentApi.roster({}).then((res) => res.data),
-  });
-  const tasksQuery = useQuery({
-    queryKey: ["pilot-dashboard-coaching-tasks"],
-    queryFn: () => teacherApi.coachingTasks().then((res) => res.data),
-  });
-  const recognitionQuery = useQuery({
-    queryKey: ["pilot-dashboard-recognition"],
-    queryFn: () => recognitionApi.reviewQueue().then((res) => res.data),
-    retry: 1,
+  const intelligenceQuery = useQuery({
+    queryKey: ["dashboard-intelligence", "school"],
+    queryFn: () => dashboardApi.intelligence().then((res) => res.data),
   });
 
-  const roster = rosterQuery.data?.roster || [];
-  const tasks = tasksQuery.data?.tasks || [];
-  const recognitionItems = recognitionQuery.data?.items || [];
-  const recentLessons = useMemo(
-    () =>
-      roster
-        .filter((row) => row.last_assessment_date || row.recent_observations?.length)
-        .slice(0, 5),
-    [roster]
-  );
-  const followUpTeachers = roster.filter((row) => (row.action_items || []).length || row.trend_30d === "declining");
-  const openTasks = tasks.filter((task) => task.status !== "completed");
-  const lessonsReady = recentLessons.length;
-  const patterns = followUpTeachers.length
-    ? [
-        {
-          title: "Student discussion is showing up as a common growth area.",
-          body: `${followUpTeachers.length} teacher${followUpTeachers.length === 1 ? "" : "s"} would benefit from a short follow-up focused on student talk and wait time.`,
-          count: followUpTeachers.length,
-          next: "Start with the teacher whose latest goal was student discussion.",
-        },
-      ]
-    : [];
+  const data = intelligenceQuery.data || {};
+  const summary = data.cycle_summary || {};
+  const priorities = data.priority_cards || [];
+  const patterns = data.patterns || [];
+  const recentLessons = data.recent_lessons || [];
+  const observationGaps = data.observation_gaps || [];
+  const highlights = data.highlights || [];
 
   return (
     <LayoutShell>
       <div className="mx-auto max-w-7xl px-4 py-5 sm:px-6 sm:py-6">
         <PageHeader
           title="School Dashboard"
-          description="Start with the teachers and lessons that need your next coaching move."
-          actions={<Link to="/observation/new" className="rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800">Plan observation</Link>}
+          description="Start with the patterns, lessons, and follow-up moves that need your attention today."
+          actions={<Link to="/observation/new" className="inline-flex min-h-11 items-center rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800">Plan observation</Link>}
         />
 
-        {rosterQuery.isLoading ? <LoadingState message="Preparing coaching priorities..." /> : null}
+        {intelligenceQuery.isLoading ? <LoadingState message="Preparing coaching priorities..." /> : null}
+        {intelligenceQuery.isError ? (
+          <ErrorState title="Dashboard needs a refresh" message="Try again in a moment, then start from the teacher list if the dashboard still needs time." />
+        ) : null}
 
-        {!rosterQuery.isLoading ? (
+        {!intelligenceQuery.isLoading && !intelligenceQuery.isError ? (
           <div className="space-y-6">
-            <section>
-              <SectionHeader
-                title="Today’s coaching priorities"
-                description="A practical starting point for your next walkthroughs and conversations."
-              />
-              <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                <PriorityCard
-                  label="Teachers needing follow-up"
-                  value={followUpTeachers.length}
-                  summary={followUpTeachers.length ? "Start with the teacher whose last goal was student discussion." : "No urgent follow-ups are waiting right now."}
-                  to="/teachers"
-                />
-                <PriorityCard
-                  label="Lessons ready for review"
-                  value={lessonsReady}
-                  summary={lessonsReady ? "New lesson feedback is ready for a coaching conversation." : "Reviewed lessons will appear here as recordings are processed."}
-                  to="/videos"
-                />
-                <PriorityCard
-                  label="Open coaching tasks"
-                  value={openTasks.length}
-                  summary={openTasks.length ? "Use these tasks to keep coaching work visible between observations." : "Open goals will appear after reviewed lessons create next steps."}
-                  to="/coaching"
-                />
-                <PriorityCard
-                  label="Recognition candidates"
-                  value={recognitionItems.length}
-                  summary={recognitionItems.length ? "Celebrate a strong lesson moment while it is still fresh." : "Recognition candidates will appear after standout lessons are reviewed."}
-                  to="/recognition-review"
-                />
-              </div>
+            <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+              <StatCard label="Reviewed lessons" value={summary.reviewed_lessons} hint="Lesson feedback ready this cycle" />
+              <StatCard label="Teachers observed" value={summary.teachers_observed} hint={`${summary.coverage_pct || 0}% coverage`} />
+              <StatCard label="Open coaching tasks" value={summary.open_coaching_tasks} hint="Next steps still in motion" />
+              <StatCard label="Recognition earned" value={summary.recognition_count} hint="Strong moments to celebrate" />
+              <StatCard label="Days left" value={summary.days_remaining_in_cycle} hint="Current coaching cycle" />
             </section>
 
-            <div className="grid gap-6 xl:grid-cols-[0.9fr,1.1fr]">
+            <section>
+              <SectionHeader title="Today’s coaching priorities" description="Use these cards to choose the first useful move, not to chase every metric at once." />
+              {priorities.length ? (
+                <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                  {priorities.map((card) => <PriorityCard key={card.id || card.title} card={card} />)}
+                </div>
+              ) : (
+                <EmptyState
+                  title="Priorities will appear as lesson feedback builds."
+                  message="Once a few lessons have been reviewed, patterns and follow-up priorities will appear here."
+                />
+              )}
+            </section>
+
+            <div className="grid gap-6 xl:grid-cols-[1fr,0.9fr]">
               <Panel className="space-y-4">
-                <SectionHeader title="Patterns worth noticing" description="Use these to plan team-level support." />
+                <SectionHeader title="Patterns worth noticing" description="Look for the pattern, why it matters, and one practical next action." />
                 {patterns.length ? (
                   <div className="space-y-3">
-                    {patterns.map((pattern) => (
-                      <div key={pattern.title} className="rounded-md border border-slate-200 bg-slate-50 p-4">
-                        <div className="font-semibold text-slate-900">{pattern.title}</div>
-                        <p className="mt-2 text-sm leading-6 text-slate-600">{pattern.body}</p>
-                        <div className="mt-3 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                          {pattern.count} teacher{pattern.count === 1 ? "" : "s"}
-                        </div>
-                        <p className="mt-2 text-sm text-slate-700">{pattern.next}</p>
-                      </div>
-                    ))}
+                    {patterns.map((pattern) => <PatternCard key={pattern.id || pattern.title} pattern={pattern} />)}
                   </div>
                 ) : (
-                  <EmptyState title="Patterns will appear after reviewed lessons build up." />
+                  <EmptyState
+                    title="Patterns will appear after reviewed lessons build up."
+                    message="You’ll see plain-language trends that can shape walkthroughs and coaching conversations."
+                  />
                 )}
               </Panel>
 
@@ -127,17 +152,18 @@ export function SchoolAdminPilotDashboard() {
                 {recentLessons.length ? (
                   <div className="space-y-3">
                     {recentLessons.map((lesson) => (
-                      <div key={lesson.teacher_id} className="rounded-md border border-slate-200 bg-white p-4">
+                      <div key={lesson.assessment_id || lesson.video_id || `${lesson.teacher_id}-${lesson.lesson_date}`} className="rounded-md border border-slate-200 bg-white p-4">
                         <div className="flex flex-wrap items-start justify-between gap-3">
                           <div>
                             <div className="font-semibold text-slate-900">{lesson.teacher_name}</div>
-                            <p className="mt-1 text-sm leading-6 text-slate-600">
-                              {lesson.subject || "Latest lesson"}: start with one strength, then choose the next student-thinking move to try.
-                            </p>
+                            <p className="mt-1 text-xs font-medium uppercase tracking-wide text-slate-500">{formatLessonDate(lesson.lesson_date)} · {lesson.title}</p>
+                            <p className="mt-2 text-sm leading-6 text-slate-600">{lesson.summary}</p>
                           </div>
-                          <Link to={`/teachers/${lesson.teacher_id}/latest-lesson`} className="text-sm font-medium text-primary hover:text-primary/80">
-                            Open
-                          </Link>
+                          {lesson.href ? (
+                            <Link to={lesson.href} className="inline-flex min-h-11 items-center text-sm font-semibold text-primary hover:text-primary/80">
+                              Open
+                            </Link>
+                          ) : null}
                         </div>
                       </div>
                     ))}
@@ -151,23 +177,47 @@ export function SchoolAdminPilotDashboard() {
               </Panel>
             </div>
 
-            <Panel className="space-y-4">
-              <SectionHeader title="Recognition" description="Keep strong teaching moments visible." />
-              {recognitionItems.length ? (
-                <div className="grid gap-3 md:grid-cols-2">
-                  {recognitionItems.slice(0, 4).map((item) => (
-                    <div key={item.video_id} className="rounded-md border border-amber-100 bg-amber-50 p-4">
-                      <div className="font-semibold text-amber-950">{item.teacher_name || "Teacher"} has a lesson moment ready to review.</div>
-                      <Link to="/recognition-review" className="mt-2 inline-flex text-sm font-medium text-amber-950 underline">
-                        Review recognition
-                      </Link>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <EmptyState title="Recognition candidates will appear here." />
-              )}
-            </Panel>
+            <div className="grid gap-6 xl:grid-cols-2">
+              <Panel className="space-y-4">
+                <SectionHeader title="Observation gaps" description="Plan short visits for teachers who have gone longest without a fresh look." />
+                {observationGaps.length ? (
+                  <div className="space-y-3">
+                    {observationGaps.map((gap) => (
+                      <div key={gap.teacher_id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-white p-4">
+                        <div>
+                          <div className="font-semibold text-slate-900">{gap.teacher_name}</div>
+                          <p className="mt-1 text-sm text-slate-600">
+                            {gap.days_since_last_observation == null ? "No observation yet this cycle." : `${gap.days_since_last_observation} days since the last observation.`}
+                          </p>
+                        </div>
+                        <Link to={gap.recommended_href || `/observation/new?teacher_id=${gap.teacher_id}`} className="inline-flex min-h-11 items-center rounded-md border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50">
+                          Plan observation
+                        </Link>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyState title="Observation coverage is current." message="As the cycle continues, teachers who need a fresh observation will appear here." />
+                )}
+              </Panel>
+
+              <Panel className="space-y-4">
+                <SectionHeader title="Highlights" description="Keep growth and recognition visible." />
+                {highlights.length ? (
+                  <div className="space-y-3">
+                    {highlights.map((item) => (
+                      <div key={item.id || `${item.type}-${item.teacher_id}`} className="rounded-md border border-emerald-100 bg-emerald-50 p-4">
+                        <div className="font-semibold text-emerald-950">{item.teacher_name}</div>
+                        <p className="mt-2 text-sm leading-6 text-emerald-900">{item.description}</p>
+                        {item.href ? <Link to={item.href} className="mt-3 inline-flex min-h-11 items-center text-sm font-semibold text-emerald-950 underline">Open</Link> : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyState title="Highlights will appear here." message="Recognition and growth moments will show up as lessons are reviewed." />
+                )}
+              </Panel>
+            </div>
           </div>
         ) : null}
       </div>
