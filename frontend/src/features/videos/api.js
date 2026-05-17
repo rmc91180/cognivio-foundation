@@ -12,6 +12,12 @@ export const videoApi = {
   retry: (videoId) => api.post(`/api/videos/${videoId}/retry`),
   retryPrivacy: (videoId) => api.post(`/api/videos/${videoId}/privacy/retry`),
   analysisMoments: (videoId) => api.get(`/api/admin/videos/${videoId}/analysis-moments`),
+  comments: (videoId) => api.get(`/api/videos/${videoId}/comments`),
+  createComment: (videoId, payload) => api.post(`/api/videos/${videoId}/comments`, payload),
+  updateComment: (videoId, commentId, payload) =>
+    api.patch(`/api/videos/${videoId}/comments/${commentId}`, payload),
+  deleteComment: (videoId, commentId) => api.delete(`/api/videos/${videoId}/comments/${commentId}`),
+  audioAnalysis: (videoId) => api.get(`/api/videos/${videoId}/audio-analysis`),
 };
 
 export const evidenceApi = {
