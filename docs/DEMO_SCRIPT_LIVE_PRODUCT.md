@@ -20,6 +20,18 @@
 7. Demo reset/master admin: show the master admin demo controls and AI quality page.
 8. Close: "Cognivio turns lesson recordings into a coaching loop that is specific, humane, and easy to act on."
 
+## Video Observation Depth Moment
+
+Use this short sequence inside either walkthrough after opening a reviewed lesson video:
+
+1. Open the demo video from the teacher profile, workspace, or video list.
+2. Point out the observation focus banner: "You were watching for..."
+3. Click a timeline marker and show how the video jumps to that note.
+4. Add a note at the current time and choose whether it stays private, is shared with the teacher, or is admin-only.
+5. Open the talk-time tab and describe it as a starting point for the coaching conversation.
+6. Open the transcript tab and click a timestamp.
+7. If asked about turning notes into coaching tasks, say: "That connection is planned, but this PR keeps task creation out until the backend exposes a safe create endpoint."
+
 ## 8-minute Training Walkthrough
 
 1. Training dashboard: show trainee progress, on-track counts, and who needs attention.

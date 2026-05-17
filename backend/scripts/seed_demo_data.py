@@ -34,6 +34,9 @@ DEMO_COLLECTIONS = [
     "training_cohorts",
     "trainee_placements",
     "videos",
+    "video_comments",
+    "video_audio_transcripts",
+    "video_analysis_features",
     "assessments",
     "coaching_tasks",
     "coaching_task_reflections",
@@ -71,6 +74,7 @@ def _coach_assessment(persona: str, teacher: dict, observer_id: str, index: int,
     reviewed_at = _now() - timedelta(days=days_ago)
     video_id = f"demo-{persona}-video-{teacher['id']}-{index}"
     assessment_id = f"demo-{persona}-assessment-{teacher['id']}-{index}"
+    session_id = f"demo-{persona}-session-{teacher['id']}-{index}"
     summary = (
         f"You created a clear path for students to talk through their thinking in {teacher['subject']}. "
         "Keep naming the move you want students to use, then pause long enough for a few more voices to enter."
@@ -113,8 +117,12 @@ def _coach_assessment(persona: str, teacher: dict, observer_id: str, index: int,
         filename=f"{teacher['name'].split()[0].lower()}-lesson-{index}.mp4",
         teacher_id=teacher["id"],
         uploaded_by=observer_id,
+        workspace_id=teacher.get("organization_id") or teacher.get("school_id") or observer_id,
+        organization_id=teacher.get("organization_id"),
+        observation_session_id=session_id,
         status="completed",
         analysis_status="completed",
+        privacy_status="completed",
         subject=teacher["subject"],
         recorded_at=assessment["recorded_at"],
         upload_date=assessment["analyzed_at"],
@@ -124,7 +132,128 @@ def _coach_assessment(persona: str, teacher: dict, observer_id: str, index: int,
             else None
         ),
     )
-    return {"video": video, "assessment": assessment}
+    session = _demo_doc(
+        persona,
+        id=session_id,
+        workspace_id=teacher.get("organization_id") or teacher.get("school_id") or observer_id,
+        observer_id=observer_id,
+        teacher_id=teacher["id"],
+        teacher_name=teacher["name"],
+        focus_elements=["Student discussion", "Wait time"],
+        focus_note="Watch for how students build on one another before the adult voice steps back in.",
+        personal_goals=[],
+        status="analysis_complete",
+        linked_video_id=video_id,
+        linked_assessment_id=assessment_id,
+        created_at=_iso(reviewed_at - timedelta(hours=3)),
+        updated_at=_iso(reviewed_at),
+    )
+    comments: List[Dict[str, Any]] = []
+    transcript = None
+    features = None
+    if with_audio:
+        comments = [
+            _demo_doc(
+                persona,
+                id=f"{video_id}-comment-private",
+                video_id=video_id,
+                workspace_id=video["workspace_id"],
+                organization_id=video.get("organization_id"),
+                teacher_id=teacher["id"],
+                observation_session_id=session_id,
+                author_id=observer_id,
+                author_name="Principal Sarah Chen" if persona == "k12" else "Dr. James Okonkwo",
+                author_role="school_admin" if persona == "k12" else "training_admin",
+                timestamp_seconds=42.0,
+                focus_area_id="Student discussion",
+                focus_area_label="Student discussion",
+                body="Private note: follow up on how the first student idea opened the door for two more voices.",
+                visibility="observer_private",
+                is_private=True,
+                thread_parent_id=None,
+                created_at=_iso(reviewed_at - timedelta(minutes=25)),
+                updated_at=_iso(reviewed_at - timedelta(minutes=25)),
+            ),
+            _demo_doc(
+                persona,
+                id=f"{video_id}-comment-shared",
+                video_id=video_id,
+                workspace_id=video["workspace_id"],
+                organization_id=video.get("organization_id"),
+                teacher_id=teacher["id"],
+                observation_session_id=session_id,
+                author_id=observer_id,
+                author_name="Principal Sarah Chen" if persona == "k12" else "Dr. James Okonkwo",
+                author_role="school_admin" if persona == "k12" else "training_admin",
+                timestamp_seconds=96.0,
+                focus_area_id="Wait time",
+                focus_area_label="Wait time",
+                body="Moment to revisit: you paused after the first answer, and that gave another student room to add their reasoning.",
+                visibility="shared_with_teacher",
+                is_private=False,
+                thread_parent_id=None,
+                created_at=_iso(reviewed_at - timedelta(minutes=20)),
+                updated_at=_iso(reviewed_at - timedelta(minutes=20)),
+            ),
+            _demo_doc(
+                persona,
+                id=f"{video_id}-comment-admin",
+                video_id=video_id,
+                workspace_id=video["workspace_id"],
+                organization_id=video.get("organization_id"),
+                teacher_id=teacher["id"],
+                observation_session_id=session_id,
+                author_id=observer_id,
+                author_name="Principal Sarah Chen" if persona == "k12" else "Dr. James Okonkwo",
+                author_role="school_admin" if persona == "k12" else "training_admin",
+                timestamp_seconds=154.0,
+                focus_area_id="Student discussion",
+                focus_area_label="Student discussion",
+                body="Use this moment in the next coaching conversation: the prompt was clear, and one next move is inviting students to respond to each other before you clarify.",
+                visibility="admin_only",
+                is_private=False,
+                thread_parent_id=None,
+                created_at=_iso(reviewed_at - timedelta(minutes=15)),
+                updated_at=_iso(reviewed_at - timedelta(minutes=15)),
+            ),
+        ]
+        transcript = _demo_doc(
+            persona,
+            id=f"{video_id}-transcript",
+            video_id=video_id,
+            transcript_status="completed",
+            model="demo-transcript",
+            language="en",
+            text="What makes you say that? I agree because the pattern repeats. Say more about the pattern.",
+            segments=[
+                {"start_sec": 34.0, "end_sec": 48.0, "speaker": "teacher", "text": "What makes you say that?"},
+                {"start_sec": 49.0, "end_sec": 68.0, "speaker": "student", "text": "I agree because the pattern repeats."},
+                {"start_sec": 90.0, "end_sec": 105.0, "speaker": "teacher", "text": "Say more about the pattern."},
+            ],
+            created_at=_iso(reviewed_at),
+        )
+        features = _demo_doc(
+            persona,
+            id=f"{video_id}-audio-features",
+            video_id=video_id,
+            teacher_talk_ratio=0.58,
+            turn_count=9,
+            question_count=4,
+            open_question_count=2,
+            directive_density=0.12,
+            pause_density=0.18,
+            transition_markers=2,
+            modalities_used=["audio"],
+            created_at=_iso(reviewed_at),
+        )
+    return {
+        "video": video,
+        "assessment": assessment,
+        "observation_session": session,
+        "video_comments": comments,
+        "video_audio_transcript": transcript,
+        "video_analysis_features": features,
+    }
 
 
 def build_demo_documents(persona: str) -> Dict[str, List[Dict[str, Any]]]:
@@ -164,6 +293,12 @@ def build_demo_documents(persona: str) -> Dict[str, List[Dict[str, Any]]]:
                 lesson_docs = _coach_assessment("k12", docs["teachers"][-1], admin_id, idx + 1, idx + 1, with_audio=idx == 0)
                 docs["videos"].append(lesson_docs["video"])
                 docs["assessments"].append(lesson_docs["assessment"])
+                docs["observation_sessions"].append(lesson_docs["observation_session"])
+                docs["video_comments"].extend(lesson_docs["video_comments"])
+                if lesson_docs["video_audio_transcript"]:
+                    docs["video_audio_transcripts"].append(lesson_docs["video_audio_transcript"])
+                if lesson_docs["video_analysis_features"]:
+                    docs["video_analysis_features"].append(lesson_docs["video_analysis_features"])
                 docs["observations"].append(_demo_doc("k12", id=f"demo-k12-observation-{idx + 1}", user_id=admin_id, teacher_id=teacher_id, video_id=lesson_docs["video"]["id"], admin_comment=lesson_docs["assessment"]["summary"], implementation_status="planned", created_at=lesson_docs["assessment"]["analyzed_at"], updated_at=None))
         for idx, teacher_id in enumerate(teacher_ids[:5]):
             docs["coaching_tasks"].append(_demo_doc("k12", id=f"demo-k12-task-{idx + 1}", workspace_id=org_id, observer_id=admin_id, teacher_id=teacher_id, teacher_name=teacher_specs[idx][0], title="Try one deeper student discussion prompt", suggested_action="Choose one student answer and ask the class to build on it before you move on.", priority="medium", priority_rank=50, status="open", created_at=created_at, updated_at=None))
@@ -187,9 +322,15 @@ def build_demo_documents(persona: str) -> Dict[str, List[Dict[str, Any]]]:
             docs["teachers"].append(_demo_doc("training", id=trainee_id, name=name, email=f"trainee{idx + 1}@demo.cognivio.local", subject="Clinical Practice", grade_level="Residency", department="Teacher Education", organization_id=org_id, created_by=admin_id, manager_user_id=admin_id, placement_site=f"Metro Partner School {1 + (idx % 4)}", school_site=f"Metro Partner School {1 + (idx % 4)}", created_at=created_at))
             docs["trainee_placements"].append(_demo_doc("training", id=f"demo-placement-{idx + 1}", workspace_id=org_id, trainee_id=trainee_id, school_site=f"Metro Partner School {1 + (idx % 4)}", mentor_teacher=f"Mentor {idx + 1}", status="active", created_by=admin_id, created_at=created_at, updated_at=created_at))
             if idx < 5:
-                lesson_docs = _coach_assessment("training", docs["teachers"][-1], admin_id, idx + 1, idx + 1)
+                lesson_docs = _coach_assessment("training", docs["teachers"][-1], admin_id, idx + 1, idx + 1, with_audio=idx == 0)
                 docs["videos"].append(lesson_docs["video"])
                 docs["assessments"].append(lesson_docs["assessment"])
+                docs["observation_sessions"].append(lesson_docs["observation_session"])
+                docs["video_comments"].extend(lesson_docs["video_comments"])
+                if lesson_docs["video_audio_transcript"]:
+                    docs["video_audio_transcripts"].append(lesson_docs["video_audio_transcript"])
+                if lesson_docs["video_analysis_features"]:
+                    docs["video_analysis_features"].append(lesson_docs["video_analysis_features"])
                 docs["observations"].append(_demo_doc("training", id=f"demo-training-observation-{idx + 1}", user_id=admin_id, teacher_id=trainee_id, video_id=lesson_docs["video"]["id"], summary=lesson_docs["assessment"]["summary"], admin_comment=lesson_docs["assessment"]["summary"], implementation_status="planned", created_at=lesson_docs["assessment"]["analyzed_at"], updated_at=None))
             if idx < 3:
                 scheduled = _now() + timedelta(days=idx + 1)

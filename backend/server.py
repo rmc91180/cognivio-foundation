@@ -4320,10 +4320,51 @@ def _resolve_video_workspace_id(video: dict, teacher: Optional[dict], current_us
 def _sanitize_video_comment_doc(doc: dict) -> dict:
     cleaned = {k: v for k, v in (doc or {}).items() if k != "_id"}
     cleaned["timestamp_seconds"] = float(cleaned.get("timestamp_seconds") or 0)
-    cleaned["is_private"] = bool(cleaned.get("is_private", False))
+    cleaned["visibility"] = _normalize_video_comment_visibility(
+        cleaned.get("visibility"),
+        bool(cleaned.get("is_private", False)),
+        cleaned.get("author_role"),
+    )
+    cleaned["is_private"] = cleaned["visibility"] == "observer_private"
     cleaned.setdefault("updated_at", None)
+    cleaned.setdefault("edited_at", None)
+    cleaned.setdefault("deleted_at", None)
     cleaned.setdefault("thread_parent_id", None)
+    cleaned.setdefault("focus_area_id", cleaned.get("rubric_element_id"))
+    cleaned.setdefault(
+        "focus_area_label",
+        cleaned.get("focus_area_label")
+        or cleaned.get("rubric_element_name")
+        or cleaned.get("rubric_element_code"),
+    )
     return cleaned
+
+
+def _normalize_video_comment_visibility(
+    visibility: Optional[Any],
+    is_private: bool = False,
+    author_role: Optional[str] = None,
+) -> str:
+    normalized = str(visibility or "").strip().lower()
+    if normalized in {"observer_private", "shared_with_teacher", "admin_only"}:
+        return normalized
+    if normalized in {"private", "observer"} or is_private:
+        return "observer_private"
+    if normalized in {"admin", "admins"}:
+        return "admin_only"
+    return "shared_with_teacher"
+
+
+def _video_comment_is_admin_role(current_user: dict) -> bool:
+    tenant_role = _get_user_tenant_role(current_user)
+    role = _get_user_role(current_user)
+    return tenant_role in {"school_admin", "training_admin", "super_admin"} or role == "admin"
+
+
+def _video_comment_can_manage(comment: dict, current_user: dict) -> bool:
+    if comment.get("author_id") == current_user.get("id"):
+        return True
+    return _video_comment_is_admin_role(current_user)
 
 
 def _parse_comment_created_at(value: Optional[str]) -> datetime:
@@ -4337,13 +4378,29 @@ def _parse_comment_created_at(value: Optional[str]) -> datetime:
 
 
 def _comment_visibility_query(video_id: str, current_user: dict) -> Dict[str, Any]:
-    return {
-        "video_id": video_id,
-        "$or": [
-            {"is_private": {"$ne": True}},
-            {"author_id": current_user["id"]},
-        ],
-    }
+    base_query: Dict[str, Any] = {"video_id": video_id, "deleted_at": {"$exists": False}}
+    tenant_role = _get_user_tenant_role(current_user)
+    if tenant_role == "super_admin":
+        return base_query
+    if tenant_role == "teacher":
+        return {
+            **base_query,
+            "$or": [
+                {"visibility": "shared_with_teacher"},
+                {"visibility": {"$exists": False}, "is_private": {"$ne": True}},
+            ],
+        }
+    if _video_comment_is_admin_role(current_user):
+        return {
+            **base_query,
+            "$or": [
+                {"visibility": {"$in": ["shared_with_teacher", "admin_only"]}},
+                {"visibility": {"$exists": False}, "is_private": {"$ne": True}},
+                {"visibility": "observer_private", "author_id": current_user["id"]},
+                {"is_private": True, "author_id": current_user["id"]},
+            ],
+        }
+    return {**base_query, "visibility": "shared_with_teacher"}
 
 
 async def _get_video_comment_or_404(
@@ -6789,10 +6846,16 @@ class VideoComment(BaseModel):
     id: str
     video_id: str
     workspace_id: Optional[str] = None
+    organization_id: Optional[str] = None
+    teacher_id: Optional[str] = None
+    observation_session_id: Optional[str] = None
     author_id: str
     author_name: str
     author_role: str
     timestamp_seconds: float
+    focus_area_id: Optional[str] = None
+    focus_area_label: Optional[str] = None
+    visibility: str = "shared_with_teacher"
     rubric_element_id: Optional[str] = None
     rubric_element_code: Optional[str] = None
     rubric_element_name: Optional[str] = None
@@ -6801,6 +6864,8 @@ class VideoComment(BaseModel):
     thread_parent_id: Optional[str] = None
     created_at: str
     updated_at: Optional[str] = None
+    edited_at: Optional[str] = None
+    deleted_at: Optional[str] = None
 
 
 class VideoCommentListResponse(BaseModel):
@@ -6809,6 +6874,9 @@ class VideoCommentListResponse(BaseModel):
 
 class VideoCommentCreate(BaseModel):
     timestamp_seconds: float
+    focus_area_id: Optional[str] = None
+    focus_area_label: Optional[str] = None
+    visibility: Optional[str] = None
     rubric_element_id: Optional[str] = None
     rubric_element_code: Optional[str] = None
     rubric_element_name: Optional[str] = None
@@ -6818,6 +6886,9 @@ class VideoCommentCreate(BaseModel):
 
 
 class VideoCommentUpdate(BaseModel):
+    focus_area_id: Optional[str] = None
+    focus_area_label: Optional[str] = None
+    visibility: Optional[str] = None
     rubric_element_id: Optional[str] = None
     rubric_element_code: Optional[str] = None
     rubric_element_name: Optional[str] = None
@@ -7125,6 +7196,7 @@ class AudioAnalysisKeyMoment(BaseModel):
 
 
 class VideoAudioAnalysisResponse(BaseModel):
+    video_id: str = ""
     transcript_available: bool = False
     features_available: bool = False
     teacher_talk_pct: float = 0.0
@@ -7132,7 +7204,9 @@ class VideoAudioAnalysisResponse(BaseModel):
     silence_pct: float = 0.0
     teacher_talk_seconds: float = 0.0
     student_talk_seconds: float = 0.0
+    silence_seconds: float = 0.0
     total_duration_seconds: float = 0.0
+    student_transcript_suppressed: bool = False
     segments: List[AudioAnalysisTimelineSegment] = []
     transcript_segments: List[AudioAnalysisTranscriptSegment] = []
     key_moments: List[AudioAnalysisKeyMoment] = []
@@ -10298,6 +10372,7 @@ async def _resolve_video_comment_rubric_fields(
     }
 
 
+@api_router.get("/videos/{video_id}/comments", response_model=VideoCommentListResponse)
 async def list_video_comments(
     video_id: str,
     current_user: dict = Depends(get_current_user),
@@ -10318,6 +10393,7 @@ async def list_video_comments(
     )
 
 
+@api_router.post("/videos/{video_id}/comments", response_model=VideoComment)
 async def create_video_comment(
     video_id: str,
     payload: VideoCommentCreate,
@@ -10328,9 +10404,17 @@ async def create_video_comment(
     body = (payload.body or "").strip()
     if not body:
         raise HTTPException(status_code=400, detail="Comment text is required")
+    if len(body) > 4000:
+        raise HTTPException(status_code=400, detail="Comment text is too long")
     timestamp_seconds = float(payload.timestamp_seconds or 0)
     if timestamp_seconds < 0:
         raise HTTPException(status_code=400, detail="Comment timestamp cannot be negative")
+    visibility = _normalize_video_comment_visibility(payload.visibility, payload.is_private)
+    tenant_role = _get_user_tenant_role(current_user)
+    if tenant_role == "teacher" and visibility != "shared_with_teacher":
+        raise HTTPException(status_code=403, detail="Teachers can only add shared lesson comments")
+    if visibility == "admin_only" and not _video_comment_is_admin_role(current_user):
+        raise HTTPException(status_code=403, detail="Admin access required for admin-only comments")
     thread_parent_id = _clean_optional_string(payload.thread_parent_id)
     if thread_parent_id:
         parent = await _get_video_comment_or_404(video_id, thread_parent_id, current_user)
@@ -10348,6 +10432,9 @@ async def create_video_comment(
         "id": str(uuid.uuid4()),
         "video_id": video_id,
         "workspace_id": _resolve_video_workspace_id(video, teacher, current_user),
+        "organization_id": video.get("organization_id") or (teacher or {}).get("organization_id"),
+        "teacher_id": video.get("teacher_id"),
+        "observation_session_id": video.get("observation_session_id") or video.get("session_id"),
         "author_id": current_user["id"],
         "author_name": (
             _clean_optional_string(current_user.get("name"))
@@ -10356,9 +10443,12 @@ async def create_video_comment(
         ),
         "author_role": _get_user_tenant_role(current_user),
         "timestamp_seconds": timestamp_seconds,
+        "focus_area_id": _clean_optional_string(payload.focus_area_id) or rubric_fields.get("rubric_element_id"),
+        "focus_area_label": _clean_optional_string(payload.focus_area_label) or rubric_fields.get("rubric_element_name") or rubric_fields.get("rubric_element_code"),
+        "visibility": visibility,
         **rubric_fields,
         "body": body,
-        "is_private": bool(payload.is_private),
+        "is_private": visibility == "observer_private",
         "thread_parent_id": thread_parent_id,
         "created_at": now,
         "updated_at": now,
@@ -10367,6 +10457,7 @@ async def create_video_comment(
     return VideoComment(**_sanitize_video_comment_doc(doc))
 
 
+@api_router.patch("/videos/{video_id}/comments/{comment_id}", response_model=VideoComment)
 async def update_video_comment(
     video_id: str,
     comment_id: str,
@@ -10375,10 +10466,10 @@ async def update_video_comment(
 ):
     await _get_visible_video_or_404(video_id, current_user)
     comment = await _get_video_comment_or_404(video_id, comment_id, current_user)
-    if comment.get("author_id") != current_user["id"]:
-        raise HTTPException(status_code=403, detail="Only the author can edit this comment")
+    if not _video_comment_can_manage(comment, current_user):
+        raise HTTPException(status_code=403, detail="Only the author or an admin can edit this comment")
     created_at = _parse_comment_created_at(comment.get("created_at"))
-    if datetime.now(timezone.utc) - created_at > timedelta(minutes=15):
+    if comment.get("author_id") == current_user["id"] and datetime.now(timezone.utc) - created_at > timedelta(minutes=15):
         raise HTTPException(status_code=403, detail="Comments can only be edited within 15 minutes")
     updates = payload.dict(exclude_unset=True)
     update_fields: Dict[str, Any] = {}
@@ -10386,22 +10477,39 @@ async def update_video_comment(
         body = (payload.body or "").strip()
         if not body:
             raise HTTPException(status_code=400, detail="Comment text is required")
+        if len(body) > 4000:
+            raise HTTPException(status_code=400, detail="Comment text is too long")
         update_fields["body"] = body
     if "is_private" in updates and payload.is_private is not None:
-        update_fields["is_private"] = bool(payload.is_private)
+        update_fields["visibility"] = _normalize_video_comment_visibility(None, bool(payload.is_private))
+        update_fields["is_private"] = update_fields["visibility"] == "observer_private"
+    if "visibility" in updates and payload.visibility is not None:
+        visibility = _normalize_video_comment_visibility(payload.visibility)
+        if _get_user_tenant_role(current_user) == "teacher" and visibility != "shared_with_teacher":
+            raise HTTPException(status_code=403, detail="Teachers can only add shared lesson comments")
+        if visibility == "admin_only" and not _video_comment_is_admin_role(current_user):
+            raise HTTPException(status_code=403, detail="Admin access required for admin-only comments")
+        update_fields["visibility"] = visibility
+        update_fields["is_private"] = visibility == "observer_private"
+    if "focus_area_id" in updates:
+        update_fields["focus_area_id"] = _clean_optional_string(payload.focus_area_id)
+    if "focus_area_label" in updates:
+        update_fields["focus_area_label"] = _clean_optional_string(payload.focus_area_label)
     rubric_keys = {"rubric_element_id", "rubric_element_code", "rubric_element_name"}
     if rubric_keys.intersection(updates.keys()):
-        update_fields.update(
-            await _resolve_video_comment_rubric_fields(
-                video_id,
-                payload.rubric_element_id,
-                payload.rubric_element_code,
-                payload.rubric_element_name,
-            )
+        rubric_fields = await _resolve_video_comment_rubric_fields(
+            video_id,
+            payload.rubric_element_id,
+            payload.rubric_element_code,
+            payload.rubric_element_name,
         )
+        update_fields.update(rubric_fields)
+        update_fields.setdefault("focus_area_id", rubric_fields.get("rubric_element_id"))
+        update_fields.setdefault("focus_area_label", rubric_fields.get("rubric_element_name") or rubric_fields.get("rubric_element_code"))
     if not update_fields:
         raise HTTPException(status_code=400, detail="No fields to update")
     update_fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+    update_fields["edited_at"] = update_fields["updated_at"]
     updated = await db.video_comments.find_one_and_update(
         {"id": comment_id, "video_id": video_id},
         {"$set": update_fields},
@@ -10413,6 +10521,7 @@ async def update_video_comment(
     return VideoComment(**_sanitize_video_comment_doc(updated))
 
 
+@api_router.delete("/videos/{video_id}/comments/{comment_id}")
 async def delete_video_comment(
     video_id: str,
     comment_id: str,
@@ -10420,22 +10529,26 @@ async def delete_video_comment(
 ):
     await _get_visible_video_or_404(video_id, current_user)
     comment = await _get_video_comment_or_404(video_id, comment_id, current_user)
-    role = _get_user_role(current_user)
-    if comment.get("author_id") != current_user["id"] and role != "admin":
+    if not _video_comment_can_manage(comment, current_user):
         raise HTTPException(status_code=403, detail="Only the author or an admin can delete this comment")
     if comment.get("is_private") and comment.get("author_id") != current_user["id"]:
         raise HTTPException(status_code=403, detail="Only the author can delete a private comment")
+    now = datetime.now(timezone.utc).isoformat()
     if comment.get("thread_parent_id"):
-        result = await db.video_comments.delete_one({"id": comment_id, "video_id": video_id})
-        deleted_count = result.deleted_count
+        result = await db.video_comments.update_one(
+            {"id": comment_id, "video_id": video_id},
+            {"$set": {"deleted_at": now, "updated_at": now}},
+        )
+        deleted_count = getattr(result, "modified_count", 0) or getattr(result, "matched_count", 0)
     else:
-        result = await db.video_comments.delete_many(
+        result = await db.video_comments.update_many(
             {
                 "video_id": video_id,
                 "$or": [{"id": comment_id}, {"thread_parent_id": comment_id}],
-            }
+            },
+            {"$set": {"deleted_at": now, "updated_at": now}},
         )
-        deleted_count = result.deleted_count
+        deleted_count = getattr(result, "modified_count", 0) or getattr(result, "matched_count", 0)
     if deleted_count == 0:
         raise HTTPException(status_code=404, detail="Comment not found")
     return {"message": "Comment deleted", "deleted_count": deleted_count}
@@ -10638,9 +10751,15 @@ def _audio_speaker_bucket(raw_speaker: Optional[Any]) -> str:
     return "teacher"
 
 
+def _audio_speaker_is_student(raw_speaker: Optional[Any]) -> bool:
+    normalized = str(raw_speaker or "").strip().lower()
+    return any(token in normalized for token in ["student", "pupil", "learner", "class"])
+
+
 def _build_video_audio_analysis_response(
     transcript_doc: Optional[dict],
     feature_doc: Optional[dict],
+    video_id: str = "",
 ) -> VideoAudioAnalysisResponse:
     raw_segments = list((transcript_doc or {}).get("segments") or [])
     normalized_segments: List[dict] = []
@@ -10692,7 +10811,11 @@ def _build_video_audio_analysis_response(
             }
         )
         text = str(segment.get("text") or "").strip()
-        if text:
+        suppress_student_text = (
+            _audio_speaker_is_student(segment.get("speaker"))
+            and not AUDIO_ALLOW_STUDENT_VOICE_PROCESSING
+        )
+        if text and not suppress_student_text:
             transcript_segments.append(
                 {
                     "start_sec": round(start, 2),
@@ -10734,6 +10857,7 @@ def _build_video_audio_analysis_response(
         teacher_pct = student_pct = silence_pct = 0.0
 
     return VideoAudioAnalysisResponse(
+        video_id=video_id or str((transcript_doc or feature_doc or {}).get("video_id") or ""),
         transcript_available=(transcript_doc or {}).get("transcript_status") == "completed",
         features_available=bool(feature_doc),
         teacher_talk_pct=teacher_pct,
@@ -10741,13 +10865,19 @@ def _build_video_audio_analysis_response(
         silence_pct=silence_pct,
         teacher_talk_seconds=round(teacher_seconds, 2),
         student_talk_seconds=round(student_seconds, 2),
+        silence_seconds=round(silence_seconds, 2),
         total_duration_seconds=round(total_duration, 2),
+        student_transcript_suppressed=bool(
+            not AUDIO_ALLOW_STUDENT_VOICE_PROCESSING
+            and any(_audio_speaker_is_student(segment.get("speaker")) for segment in raw_segments)
+        ),
         segments=[AudioAnalysisTimelineSegment(**item) for item in normalized_segments],
         transcript_segments=[AudioAnalysisTranscriptSegment(**item) for item in transcript_segments],
         key_moments=[AudioAnalysisKeyMoment(**item) for item in key_moments[:20]],
     )
 
 
+@api_router.get("/videos/{video_id}/audio-analysis", response_model=VideoAudioAnalysisResponse)
 async def get_video_audio_analysis(
     video_id: str,
     current_user: dict = Depends(get_current_user),
@@ -10762,7 +10892,7 @@ async def get_video_audio_analysis(
         {"video_id": video_id},
         {"_id": 0},
     )
-    return _build_video_audio_analysis_response(transcript_doc, feature_doc)
+    return _build_video_audio_analysis_response(transcript_doc, feature_doc, video_id=video_id)
 
 
 async def resolve_video_privacy_review(

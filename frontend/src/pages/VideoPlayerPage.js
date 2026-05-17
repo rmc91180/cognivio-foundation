@@ -1,11 +1,15 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { assessmentApi, exemplarApi, observationApi, recognitionApi, shareAssetApi, videoApi } from "@/lib/api";
+import api, { assessmentApi, exemplarApi, observationApi, recognitionApi, shareAssetApi, videoApi } from "@/lib/api";
 import { LayoutShell } from "@/components/LayoutShell";
 import { AssessmentFeedbackWidget } from "@/components/assessment/AssessmentFeedbackWidget";
 import { ObservationFocusPanel } from "@/components/assessment/ObservationFocusPanel";
 import { VideoTimeline } from "@/components/VideoTimeline";
+import { VideoCommentThread } from "@/components/VideoCommentThread";
+import { VideoTimelineMarkers } from "@/components/VideoTimelineMarkers";
+import { TalkTimeChart } from "@/components/TalkTimeChart";
+import { AudioTimeline } from "@/components/AudioTimeline";
 import { useAuth } from "@/hooks/useAuth";
 import { toast } from "sonner";
 import { Badge, Button, EmptyState, Field, PageContextHeader, Panel, Textarea } from "@/components/ui";
@@ -18,7 +22,9 @@ export function VideoPlayerPage() {
   const { videoId } = useParams();
   const queryClient = useQueryClient();
   const { user } = useAuth();
-  const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role);
+  const role = user?.tenant_role || user?.role;
+  const isTeacher = role === "teacher";
+  const isAdmin = ["admin", "principal", "school_admin", "training_admin", "super_admin", "master_admin"].includes(role);
   const [searchParams] = useSearchParams();
   const videoRef = useRef(null);
   const [currentTime, setCurrentTime] = useState(0);
@@ -26,6 +32,12 @@ export function VideoPlayerPage() {
   const hasSeenkedFromUrl = useRef(false);
   const [videoStatus, setVideoStatus] = useState("processing");
   const [wsConnected, setWsConnected] = useState(false);
+  const [highlightedCommentId, setHighlightedCommentId] = useState(null);
+  const [isAddingComment, setIsAddingComment] = useState(false);
+  const [commentBody, setCommentBody] = useState("");
+  const [commentVisibility, setCommentVisibility] = useState("observer_private");
+  const [commentFocusArea, setCommentFocusArea] = useState("");
+  const [audioTab, setAudioTab] = useState("talk");
   const isRtl = i18n.dir() === "rtl";
   const dateTimeFormatter = useMemo(
     () =>
@@ -227,6 +239,24 @@ export function VideoPlayerPage() {
     queryFn: () =>
       observationApi.listForVideo(videoId).then((r) => r.data),
   });
+  const { data: commentsRes } = useQuery({
+    queryKey: ["video-comments", videoId],
+    enabled: Boolean(videoId),
+    queryFn: () => videoApi.comments(videoId).then((r) => r.data),
+  });
+  const { data: audioAnalysisRes } = useQuery({
+    queryKey: ["video-audio-analysis", videoId],
+    enabled: Boolean(videoId),
+    retry: false,
+    queryFn: () => videoApi.audioAnalysis(videoId).then((r) => r.data),
+  });
+  const observationSessionId = videoRes?.observation_session_id || videoRes?.session_id;
+  const { data: observationSessionRes } = useQuery({
+    queryKey: ["observation-session", observationSessionId],
+    enabled: Boolean(observationSessionId),
+    retry: false,
+    queryFn: () => api.get(`/api/observation-sessions/${observationSessionId}`).then((r) => r.data),
+  });
 
   const assessmentId = videoRes?.assessment_id;
   const { data: assessmentRes } = useQuery({
@@ -294,6 +324,42 @@ export function VideoPlayerPage() {
     onError: (error) => {
       const detail = error?.response?.data?.detail;
       toast.error(typeof detail === "string" ? detail : detail?.message || t("videoPlayer.privacyRetryFailed"));
+    },
+  });
+  const createCommentMutation = useMutation({
+    mutationFn: (payload) => videoApi.createComment(videoId, payload),
+    onSuccess: (response) => {
+      toast.success("Note saved.");
+      setCommentBody("");
+      setIsAddingComment(false);
+      setHighlightedCommentId(response?.data?.id || null);
+      queryClient.invalidateQueries({ queryKey: ["video-comments", videoId] });
+    },
+    onError: (error) => {
+      const detail = error?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : "That note could not be saved right now.");
+    },
+  });
+  const updateCommentMutation = useMutation({
+    mutationFn: ({ commentId, payload }) => videoApi.updateComment(videoId, commentId, payload),
+    onSuccess: () => {
+      toast.success("Note updated.");
+      queryClient.invalidateQueries({ queryKey: ["video-comments", videoId] });
+    },
+    onError: (error) => {
+      const detail = error?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : "That note could not be updated right now.");
+    },
+  });
+  const deleteCommentMutation = useMutation({
+    mutationFn: (commentId) => videoApi.deleteComment(videoId, commentId),
+    onSuccess: () => {
+      toast.success("Note deleted.");
+      queryClient.invalidateQueries({ queryKey: ["video-comments", videoId] });
+    },
+    onError: (error) => {
+      const detail = error?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : "That note could not be deleted right now.");
     },
   });
   const saveRecognitionOptInMutation = useMutation({
@@ -378,6 +444,57 @@ export function VideoPlayerPage() {
     videoRef.current.currentTime = seconds;
     videoRef.current.focus();
   };
+  const openCommentForm = useCallback(() => {
+    if (!isAdmin) return;
+    if (videoRef.current) {
+      videoRef.current.pause();
+      setCurrentTime(Math.floor(videoRef.current.currentTime || 0));
+    }
+    setIsAddingComment(true);
+  }, [isAdmin]);
+  const submitComment = useCallback(
+    ({ body, timestamp, visibility, focusArea, threadParentId } = {}) => {
+      const cleanedBody = (body ?? commentBody).trim();
+      if (!cleanedBody) {
+        toast.error("Add a note before saving.");
+        return;
+      }
+      const selectedFocus = (observationSessionRes?.focus_elements || []).find(
+        (item) => String(item) === String(focusArea ?? commentFocusArea)
+      );
+      createCommentMutation.mutate({
+        timestamp_seconds: Number(timestamp ?? currentTime) || 0,
+        body: cleanedBody,
+        visibility: visibility || commentVisibility,
+        focus_area_id: selectedFocus || focusArea || commentFocusArea || null,
+        focus_area_label: selectedFocus || focusArea || commentFocusArea || null,
+        thread_parent_id: threadParentId || null,
+      });
+    },
+    [
+      commentBody,
+      commentFocusArea,
+      commentVisibility,
+      createCommentMutation,
+      currentTime,
+      observationSessionRes,
+    ]
+  );
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      const target = event.target;
+      const tagName = target?.tagName?.toLowerCase();
+      const isTyping = tagName === "input" || tagName === "textarea" || target?.isContentEditable;
+      if (isTyping || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key?.toLowerCase() === "c") {
+        event.preventDefault();
+        openCommentForm();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [openCommentForm]);
 
   const handleGenerateReport = () => {
     const win = window.open("", "_blank");
@@ -464,6 +581,15 @@ export function VideoPlayerPage() {
   };
 
   const observations = observationsRes ?? [];
+  const videoComments = Array.isArray(commentsRes)
+    ? commentsRes
+    : Array.isArray(commentsRes?.comments)
+      ? commentsRes.comments
+      : [];
+  const sharedVideoComments = videoComments.filter(
+    (comment) => isAdmin || (comment.visibility || (comment.is_private ? "observer_private" : "shared_with_teacher")) === "shared_with_teacher"
+  );
+  const observationFocusAreas = observationSessionRes?.focus_elements || [];
   const recognitionStatus = recognitionRes?.recognition?.status || "not_evaluated";
   const recognitionEligible = Boolean(recognitionRes?.eligibility?.is_eligible);
   const recognitionReasons = recognitionRes?.eligibility?.reasons || [];
@@ -593,6 +719,22 @@ export function VideoPlayerPage() {
             <span className="text-[11px] text-rose-600">{statusRes.error_message}</span>
           )}
         </div>
+        {observationSessionRes?.focus_elements?.length || observationSessionRes?.focus_note ? (
+          <div className="mb-4 rounded-md border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-950">
+            {observationSessionRes?.focus_elements?.length ? (
+              <div>
+                <span className="font-semibold">You were watching for: </span>
+                {observationSessionRes.focus_elements.join(", ")}
+              </div>
+            ) : null}
+            {observationSessionRes?.focus_note ? (
+              <div className="mt-1 text-sky-800">
+                <span className="font-semibold">Focus note: </span>
+                {observationSessionRes.focus_note}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
           <section className="md:col-span-7 space-y-3">
             <Panel padded={false} className="overflow-hidden">
@@ -620,28 +762,47 @@ export function VideoPlayerPage() {
                         />
                       </div>
                     )}
+                    {duration > 0 && sharedVideoComments.length > 0 && (
+                      <div className="mb-3">
+                        <VideoTimelineMarkers
+                          duration={duration}
+                          currentTime={currentTime}
+                          comments={sharedVideoComments}
+                          highlightedCommentId={highlightedCommentId}
+                          onSeekTo={handleSeek}
+                          onSelectComment={setHighlightedCommentId}
+                        />
+                      </div>
+                    )}
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                       <span className="text-[11px] text-slate-500">
                         {t("videoPlayer.currentTime", {
                           time: formatClock(currentTime),
                         })}
                       </span>
-                      <Button variant="secondary" size="sm" onClick={copyTimestampLink}>
-                        <svg
-                          className="h-3.5 w-3.5"
-                          fill="none"
-                          viewBox="0 0 24 24"
-                          stroke="currentColor"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"
-                          />
-                        </svg>
-                        {t("videoPlayer.copyTimestampLink")}
-                      </Button>
+                      <div className="flex flex-wrap gap-2">
+                        {isAdmin ? (
+                          <Button variant="secondary" size="sm" onClick={openCommentForm}>
+                            Add note at current time
+                          </Button>
+                        ) : null}
+                        <Button variant="secondary" size="sm" onClick={copyTimestampLink}>
+                          <svg
+                            className="h-3.5 w-3.5"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"
+                            />
+                          </svg>
+                          {t("videoPlayer.copyTimestampLink")}
+                        </Button>
+                      </div>
                     </div>
                   </div>
                 </>
@@ -700,7 +861,7 @@ export function VideoPlayerPage() {
                   title={t("videoPlayer.focusContextTitle")}
                   description={t("videoPlayer.focusContextDescription")}
                 />
-                {observationSummary?.confidence_note && (
+                {isAdmin && observationSummary?.confidence_note && (
                   <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-[11px] text-amber-800">
                     {observationSummary.confidence_note}
                   </div>
@@ -1055,6 +1216,167 @@ export function VideoPlayerPage() {
           </section>
 
           <section className="md:col-span-5 space-y-3">
+            <Panel className="p-4 text-xs">
+              <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">Timestamped notes</h2>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Capture the exact moments you want to revisit in coaching.
+                  </p>
+                </div>
+                {isAdmin ? (
+                  <Button size="sm" variant="secondary" onClick={openCommentForm}>
+                    Add note
+                  </Button>
+                ) : null}
+              </div>
+              {isAddingComment && isAdmin ? (
+                <div className="mb-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="mb-2 text-xs font-semibold text-slate-700">
+                    Note at {formatClock(currentTime)}
+                  </div>
+                  {observationFocusAreas.length ? (
+                    <label className="mb-2 block text-xs text-slate-600">
+                      Focus area
+                      <select
+                        value={commentFocusArea}
+                        onChange={(event) => setCommentFocusArea(event.target.value)}
+                        className="mt-1 min-h-[40px] w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
+                      >
+                        <option value="">Choose a focus area</option>
+                        {observationFocusAreas.map((item) => (
+                          <option key={item} value={item}>
+                            {item}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+                  <label className="mb-2 block text-xs text-slate-600">
+                    Visibility
+                    <select
+                      value={commentVisibility}
+                      onChange={(event) => setCommentVisibility(event.target.value)}
+                      className="mt-1 min-h-[40px] w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
+                    >
+                      <option value="observer_private">Private note</option>
+                      <option value="shared_with_teacher">Share with teacher</option>
+                      <option value="admin_only">Admin only</option>
+                    </select>
+                  </label>
+                  <Textarea
+                    rows={4}
+                    value={commentBody}
+                    onChange={(event) => setCommentBody(event.target.value)}
+                    placeholder="Name what happened here and what you want to follow up on."
+                  />
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      onClick={() => submitComment()}
+                      disabled={createCommentMutation.isPending || !commentBody.trim()}
+                    >
+                      Save note
+                    </Button>
+                    <Button size="sm" variant="secondary" onClick={() => setIsAddingComment(false)}>
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+              <VideoCommentThread
+                comments={sharedVideoComments}
+                currentUser={user}
+                highlightedCommentId={highlightedCommentId}
+                isAdminView={isAdmin}
+                onSeekTo={(seconds) => {
+                  handleSeek(seconds);
+                  setHighlightedCommentId(null);
+                }}
+                onReply={(comment, body) =>
+                  submitComment({
+                    body,
+                    timestamp: comment.timestamp_seconds,
+                    visibility: comment.visibility,
+                    focusArea: comment.focus_area_label || comment.focus_area_id,
+                    threadParentId: comment.id,
+                  })
+                }
+                onEdit={(comment, body) =>
+                  updateCommentMutation.mutate({ commentId: comment.id, payload: { body } })
+                }
+                onDelete={(comment) => deleteCommentMutation.mutate(comment.id)}
+              />
+              {!isAdmin && isTeacher ? (
+                <p className="mt-3 text-xs leading-5 text-slate-500">
+                  Shared notes are moments to revisit, not a scorecard. Start with what you want to keep using.
+                </p>
+              ) : null}
+            </Panel>
+
+            <Panel className="p-4 text-xs">
+              <h2 className="mb-2 text-sm font-semibold text-slate-900">Talk-time and transcript</h2>
+              <div className="mb-3 flex flex-wrap gap-2">
+                {[
+                  ["talk", "Talk time"],
+                  ["timeline", "Audio timeline"],
+                  ["transcript", "Transcript"],
+                ].map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setAudioTab(key)}
+                    className={`min-h-[36px] rounded-md px-3 text-xs font-medium ${
+                      audioTab === key
+                        ? "bg-primary text-white"
+                        : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {audioTab === "talk" ? (
+                <TalkTimeChart analysis={audioAnalysisRes} isTeacherView={isTeacher} />
+              ) : null}
+              {audioTab === "timeline" ? (
+                <AudioTimeline
+                  segments={audioAnalysisRes?.segments || []}
+                  keyMoments={audioAnalysisRes?.key_moments || []}
+                  duration={audioAnalysisRes?.total_duration_seconds || duration}
+                  onSeek={handleSeek}
+                />
+              ) : null}
+              {audioTab === "transcript" ? (
+                <div className="space-y-2">
+                  {audioAnalysisRes?.student_transcript_suppressed ? (
+                    <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
+                      Student transcript is hidden based on the workspace privacy setting.
+                    </div>
+                  ) : null}
+                  {audioAnalysisRes?.transcript_segments?.length ? (
+                    audioAnalysisRes.transcript_segments.map((segment, index) => (
+                      <button
+                        key={`${segment.start_sec}-${index}`}
+                        type="button"
+                        onClick={() => handleSeek(Number(segment.start_sec) || 0)}
+                        className="block w-full rounded-md border border-slate-200 bg-white px-3 py-3 text-left text-sm leading-6 text-slate-700 hover:bg-slate-50"
+                      >
+                        <span className="mr-2 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600">
+                          {formatClock(segment.start_sec)}
+                        </span>
+                        {segment.text}
+                      </button>
+                    ))
+                  ) : (
+                    <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-500">
+                      Transcript will appear here when audio review is available.
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </Panel>
+
             {analysisMomentsEnabled && (
               <Panel className="p-4 text-xs">
                 <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
@@ -1232,6 +1554,7 @@ export function VideoPlayerPage() {
               </Button>
             </Panel>
 
+            {isAdmin ? (
             <Panel className="p-4 text-xs">
               <h2 className="mb-2 text-sm font-semibold text-slate-900">
                 {t("videoPlayer.detailedRubricView")}
@@ -1263,6 +1586,7 @@ export function VideoPlayerPage() {
                 </div>
               )}
             </Panel>
+            ) : null}
           </section>
         </div>
       </div>
