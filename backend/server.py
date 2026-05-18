@@ -6555,7 +6555,7 @@ class MasterAdminUserActionPayload(BaseModel):
 
 class TeacherCreate(BaseModel):
     name: str
-    email: EmailStr
+    email: Optional[EmailStr] = None
     subject: str
     grade_level: str
     department: Optional[str] = None
@@ -8428,7 +8428,7 @@ async def create_teacher(teacher: TeacherCreate, current_user: dict = Depends(ge
     teacher_doc = {
         "id": teacher_id,
         "name": teacher.name,
-        "email": teacher.email,
+        "email": str(teacher.email or "").strip().lower(),
         "subject": teacher.subject,
         "grade_level": teacher.grade_level,
         "department": teacher.department,
@@ -20133,6 +20133,163 @@ async def _derive_onboarding_steps(current_user: dict, stored: Optional[dict] = 
     return steps
 
 
+async def _onboarding_count(collection_name: str, query: dict) -> int:
+    collection = getattr(db, collection_name, None)
+    if collection is None:
+        return 0
+    return await collection.count_documents(query)
+
+
+async def _build_onboarding_status_payload(current_user: dict, doc: dict, steps: dict) -> dict:
+    tenant_role = _get_user_tenant_role(current_user)
+    if tenant_role == "teacher":
+        raise HTTPException(status_code=403, detail="Teacher onboarding lives in your workspace.")
+
+    workspace_id = _workspace_id_for_user(current_user)
+    workspace_mode = _dashboard_workspace_mode(current_user)
+    teacher_ids = await _list_teacher_ids_for_user(current_user)
+    teacher_filter = {"teacher_id": {"$in": teacher_ids or ["__none__"]}}
+    video_filter = {
+        "$or": [
+            {"teacher_id": {"$in": teacher_ids or ["__none__"]}},
+            {"workspace_id": workspace_id},
+            {"uploaded_by": current_user["id"]},
+        ]
+    }
+    assessment_filter = {
+        "$or": [
+            {"teacher_id": {"$in": teacher_ids or ["__none__"]}},
+            {"workspace_id": workspace_id},
+            {"user_id": current_user["id"]},
+        ]
+    }
+
+    planned_observations = await _onboarding_count("observation_sessions", teacher_filter)
+    if planned_observations == 0:
+        planned_observations = await _onboarding_count("observations", teacher_filter)
+    uploaded_recordings = await _onboarding_count("videos", video_filter)
+    reviewed_lessons = await _onboarding_count("assessments", assessment_filter)
+    open_tasks = await _onboarding_count(
+        "coaching_tasks",
+        {**teacher_filter, "status": {"$nin": ["completed", "done", "archived", "deleted"]}},
+    )
+
+    is_training = workspace_mode == "training"
+    people_label = "trainees" if is_training else "teachers"
+    person_label = "trainee" if is_training else "teacher"
+    org_complete = bool(
+        current_user.get("organization_name")
+        or current_user.get("school_name")
+        or doc.get("name")
+        or doc.get("organization_name")
+    )
+    counts = {
+        "teachers": 0 if is_training else len(teacher_ids),
+        "trainees": len(teacher_ids) if is_training else 0,
+        "planned_observations": planned_observations,
+        "uploaded_recordings": uploaded_recordings,
+        "reviewed_lessons": reviewed_lessons,
+        "open_coaching_tasks": open_tasks,
+    }
+    step_defs = [
+        {
+            "id": "organization_profile",
+            "title": "Confirm your workspace",
+            "description": "Name the school or program so everyone knows where this coaching work lives.",
+            "status": "complete" if org_complete else "incomplete",
+            "href": "/school-setup" if workspace_mode == "school" else "/onboarding",
+            "count": None,
+        },
+        {
+            "id": "add_teachers",
+            "title": f"Add your first {person_label}",
+            "description": (
+                "Add trainees so you can plan placement observations."
+                if is_training
+                else "Add teachers so you can plan focused observations."
+            ),
+            "status": "complete" if len(teacher_ids) > 0 else "incomplete",
+            "href": "/teachers",
+            "count": len(teacher_ids),
+        },
+        {
+            "id": "plan_observation",
+            "title": "Plan a focused observation" if not is_training else "Plan a trainee observation",
+            "description": "Choose what Cognivio should pay attention to before the recording is uploaded.",
+            "status": "complete" if planned_observations > 0 else "incomplete",
+            "href": "/observation/new",
+            "count": planned_observations,
+        },
+        {
+            "id": "upload_recording",
+            "title": "Record or upload a lesson" if not is_training else "Record or upload an observation",
+            "description": "Connect the recording to the observation focus you saved.",
+            "status": "complete" if uploaded_recordings > 0 else "incomplete",
+            "href": "/record",
+            "count": uploaded_recordings,
+        },
+        {
+            "id": "review_feedback",
+            "title": "Review the first coaching summary" if not is_training else "Review trainee observation feedback",
+            "description": "Once one recording has been reviewed, your dashboard will start showing coaching patterns.",
+            "status": "complete" if reviewed_lessons > 0 else "incomplete",
+            "href": "/dashboard",
+            "count": reviewed_lessons,
+        },
+        {
+            "id": "invite_team",
+            "title": "Invite the team when you are ready",
+            "description": f"Keep this optional while you rehearse the flow with internal {people_label}.",
+            "status": "optional",
+            "href": "/teachers",
+            "count": None,
+        },
+    ]
+    required_steps = [step for step in step_defs if step["status"] != "optional"]
+    complete_required = sum(1 for step in required_steps if step["status"] == "complete")
+    progress_pct = round((complete_required / len(required_steps)) * 100) if required_steps else 100
+    if len(teacher_ids) == 0:
+        progress_pct = 0
+    next_step = next((step for step in step_defs if step["status"] == "incomplete"), None)
+    if next_step is None:
+        next_step = {
+            "id": "dashboard",
+            "title": "You are ready to use the dashboard",
+            "description": "Review priorities, plan the next observation, and open reports when you need a shareable snapshot.",
+            "href": "/dashboard",
+            "cta_label": "Open dashboard",
+        }
+    else:
+        next_step = {
+            "id": next_step["id"],
+            "title": next_step["title"],
+            "description": next_step["description"],
+            "href": next_step["href"],
+            "cta_label": (
+                "Add trainee" if next_step["id"] == "add_teachers" and is_training
+                else "Add teacher" if next_step["id"] == "add_teachers"
+                else "Plan observation" if next_step["id"] == "plan_observation"
+                else "Record or upload" if next_step["id"] == "upload_recording"
+                else "Open dashboard"
+            ),
+        }
+    completed = all(step["status"] == "complete" for step in required_steps)
+    legacy_completed_count = sum(1 for step in ONBOARDING_STEP_ORDER if steps.get(step))
+    return {
+        "workspace_id": workspace_id,
+        "workspace_mode": workspace_mode,
+        "completed": completed,
+        "progress_pct": progress_pct,
+        "next_step": next_step,
+        "steps": step_defs,
+        "counts": counts,
+        "onboarding_steps": steps,
+        "completed_count": legacy_completed_count,
+        "total_steps": len(ONBOARDING_STEP_ORDER),
+        "is_complete": completed,
+    }
+
+
 async def _persist_onboarding_steps(current_user: dict, steps: dict) -> None:
     _, _, collection_name = await _workspace_doc_for_user(current_user)
     target = {"id": current_user.get("organization_id") or current_user["id"]}
@@ -20148,16 +20305,7 @@ async def get_onboarding_status(current_user: dict = Depends(get_current_user)):
     steps = await _derive_onboarding_steps(current_user, doc.get("onboarding_steps") or {})
     if steps != (doc.get("onboarding_steps") or {}):
         await _persist_onboarding_steps(current_user, steps)
-    completed_count = sum(1 for step in ONBOARDING_STEP_ORDER if steps.get(step))
-    next_step = next((step for step in ONBOARDING_STEP_ORDER if not steps.get(step)), None)
-    return {
-        "workspace_id": _workspace_id_for_user(current_user),
-        "onboarding_steps": steps,
-        "completed_count": completed_count,
-        "total_steps": len(ONBOARDING_STEP_ORDER),
-        "next_step": next_step,
-        "is_complete": bool(steps.get("completed_at")),
-    }
+    return await _build_onboarding_status_payload(current_user, doc, steps)
 
 
 @api_router.post("/onboarding/complete")
@@ -21825,6 +21973,102 @@ async def get_admin_ai_quality_history(current_user: dict = Depends(get_current_
         reverse=True,
     )
     return {"items": history[:50], "count": len(history)}
+
+
+def _readiness_dependency_state(record: "MasterAdminDependencyRecord") -> str:
+    status = str(record.status or "").lower()
+    if record.healthy or status in {"healthy", "ok", "configured"}:
+        return "healthy"
+    if status in {"unknown", "not_configured", "missing"}:
+        return "unknown"
+    return "unhealthy"
+
+
+async def _readiness_demo_persona_seeded(persona: str) -> bool:
+    collection = getattr(db, "teachers", None)
+    if collection is None:
+        return False
+    return await collection.count_documents({"demo_data": True, "demo_persona": persona}) > 0
+
+
+async def _readiness_last_demo_reset() -> Optional[str]:
+    latest: Optional[str] = None
+    for collection_name in ("teachers", "assessments", "videos", "coaching_tasks"):
+        collection = getattr(db, collection_name, None)
+        if collection is None:
+            continue
+        doc = await collection.find_one(
+            {"demo_data": True},
+            {"_id": 0, "created_at": 1, "updated_at": 1, "reset_at": 1},
+            sort=[("created_at", -1)],
+        )
+        candidate = (doc or {}).get("reset_at") or (doc or {}).get("updated_at") or (doc or {}).get("created_at")
+        if candidate and (latest is None or str(candidate) > latest):
+            latest = str(candidate)
+    return latest
+
+
+@api_router.get("/admin/internal-readiness")
+async def get_admin_internal_readiness(current_user: dict = Depends(get_current_user)):
+    _require_master_admin_user(current_user)
+    dependency_records = await _build_dependency_health_snapshot()
+    dependencies = {
+        "mongodb": "unknown",
+        "r2": "unknown",
+        "resend": "unknown",
+        "openai": "unknown",
+    }
+    dependency_key_map = {
+        "atlas": "mongodb",
+        "mongodb-atlas": "mongodb",
+        "r2": "r2",
+        "cloudflare-r2": "r2",
+        "resend": "resend",
+        "openai": "openai",
+    }
+    for record in dependency_records:
+        key = dependency_key_map.get(record.id)
+        if key:
+            dependencies[key] = _readiness_dependency_state(record)
+
+    latest_quality = sorted(_read_ai_quality_history(), key=lambda item: str(item.get("run_at") or ""), reverse=True)
+    quality = latest_quality[0] if latest_quality else {}
+    warnings = []
+    if not DEMO_MODE:
+        warnings.append("Demo mode is off, so reset controls are intentionally unavailable.")
+    if not FRONTEND_URL:
+        warnings.append("Frontend URL is not configured in the backend environment.")
+    if not BACKEND_PUBLIC_BASE_URL:
+        warnings.append("Backend public base URL is not configured.")
+    if any(value == "unhealthy" for value in dependencies.values()):
+        warnings.append("One or more dependencies need attention before a full rehearsal.")
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "environment": {
+            "demo_mode": bool(DEMO_MODE),
+            "railway_environment_name": APP_SETTINGS.operations.railway_environment_name or None,
+            "frontend_url_configured": bool(FRONTEND_URL),
+            "backend_public_base_url_configured": bool(BACKEND_PUBLIC_BASE_URL),
+        },
+        "dependencies": dependencies,
+        "demo_data": {
+            "k12_seeded": await _readiness_demo_persona_seeded("k12"),
+            "training_seeded": await _readiness_demo_persona_seeded("training"),
+            "last_reset_at": await _readiness_last_demo_reset(),
+        },
+        "quality": {
+            "latest_quality_gate_passed": quality.get("passed") if quality else None,
+            "coach_voice_score": (quality.get("scores") or {}).get("coach_voice") if quality else None,
+        },
+        "product_flow": {
+            "dashboard_intelligence_available": True,
+            "video_comments_available": hasattr(db, "video_comments"),
+            "mobile_upload_available": True,
+            "reports_available": True,
+        },
+        "warnings": warnings,
+    }
 
 
 @api_router.get("/master-admin/support", response_model=MasterAdminSupportResponse)

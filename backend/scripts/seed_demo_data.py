@@ -301,6 +301,8 @@ def build_demo_documents(persona: str) -> Dict[str, List[Dict[str, Any]]]:
                 if lesson_docs["video_analysis_features"]:
                     docs["video_analysis_features"].append(lesson_docs["video_analysis_features"])
                 docs["observations"].append(_demo_doc("k12", id=f"demo-k12-observation-{idx + 1}", user_id=admin_id, teacher_id=teacher_id, video_id=lesson_docs["video"]["id"], admin_comment=lesson_docs["assessment"]["summary"], implementation_status="planned", created_at=lesson_docs["assessment"]["analyzed_at"], updated_at=None))
+            elif idx == 3:
+                docs["observation_sessions"].append(_demo_doc("k12", id="demo-k12-planned-observation-new-teacher", workspace_id=org_id, observer_id=admin_id, teacher_id=teacher_id, teacher_name=name, focus_elements=["Student discussion"], focus_note="Watch for one moment where students build on each other's thinking.", personal_goals=[], status="pending", created_at=created_at, updated_at=created_at))
         for idx, teacher_id in enumerate(teacher_ids[:5]):
             docs["coaching_tasks"].append(_demo_doc("k12", id=f"demo-k12-task-{idx + 1}", workspace_id=org_id, observer_id=admin_id, teacher_id=teacher_id, teacher_name=teacher_specs[idx][0], title="Try one deeper student discussion prompt", suggested_action="Choose one student answer and ask the class to build on it before you move on.", priority="medium", priority_rank=50, status="open", created_at=created_at, updated_at=None))
         for idx, teacher_id in enumerate(teacher_ids[5:7]):

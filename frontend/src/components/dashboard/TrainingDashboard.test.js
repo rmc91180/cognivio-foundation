@@ -3,7 +3,7 @@ import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import { TrainingDashboard } from "@/components/dashboard/TrainingDashboard";
-import { reportApi } from "@/lib/api";
+import { onboardingApi, reportApi } from "@/lib/api";
 
 jest.mock("@/components/LayoutShell", () => ({
   LayoutShell: ({ children }) => <div>{children}</div>,
@@ -12,6 +12,9 @@ jest.mock("@/components/LayoutShell", () => ({
 jest.mock("@/lib/api", () => ({
   reportApi: {
     cohortSnapshot: jest.fn(),
+  },
+  onboardingApi: {
+    status: jest.fn(),
   },
 }));
 
@@ -29,6 +32,9 @@ const renderWithClient = (ui) => {
 describe("TrainingDashboard", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    onboardingApi.status.mockResolvedValue({
+      data: { progress_pct: 100, counts: { reviewed_lessons: 1 }, next_step: { href: "/dashboard" } },
+    });
     reportApi.cohortSnapshot.mockResolvedValue({
       data: {
         summary: {

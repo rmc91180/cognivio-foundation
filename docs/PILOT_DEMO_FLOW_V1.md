@@ -4,6 +4,7 @@ This PR builds the first coherent client-demo loop: role-personalized routing, f
 
 ## Demo Routes
 
+- `/onboarding` - setup hub with progress, next step, quick add, and first-observation actions.
 - `/dashboard` - school admin dashboard or training supervisor dashboard, depending on role.
 - `/my-workspace` - teacher daily workspace with latest lesson, goals, recognition, and reflections.
 - `/observation/new` - observation focus setup for school and training admins.
@@ -29,6 +30,20 @@ Training persona:
 - Trainees: 12 demo trainees with placement sites, upcoming observations, and recent observation summaries
 
 Demo login password for seeded users: `DemoAccess2026!`
+
+## Onboarding Path
+
+Use the internal readiness flow before jumping into analytics:
+
+1. Start from `/onboarding` or the setup assistant on `/dashboard`.
+2. Add the first teacher or trainee.
+3. Plan the first focused observation.
+4. Record or upload from `/record`.
+5. Review video comments and talk-time when demo data supports it.
+6. Return to dashboard intelligence.
+7. Open reports and export CSV for an internal planning snapshot.
+
+This is still internal demo readiness. Final real-school privacy/security approval is deferred to the security hardening track.
 
 ## Seeding Demo Data
 

@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { LayoutShell } from "@/components/LayoutShell";
 import { EmptyState, ErrorState, LoadingState, PageHeader, Panel, SectionHeader } from "@/components/ui";
 import { dashboardApi } from "@/lib/api";
+import { SetupAssistantPanel } from "@/components/dashboard/SetupAssistantPanel";
 
 const severityStyles = {
   critical: "border-rose-200 bg-rose-50 text-rose-950",
@@ -110,6 +111,8 @@ export function SchoolAdminPilotDashboard() {
 
         {!intelligenceQuery.isLoading && !intelligenceQuery.isError ? (
           <div className="space-y-6">
+            <SetupAssistantPanel mode="school" />
+
             <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
               <StatCard label="Reviewed lessons" value={summary.reviewed_lessons} hint="Lesson feedback ready this cycle" />
               <StatCard label="Teachers observed" value={summary.teachers_observed} hint={`${summary.coverage_pct || 0}% coverage`} />
