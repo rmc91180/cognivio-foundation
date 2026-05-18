@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel
 
 import server as legacy
@@ -31,9 +31,9 @@ class PasswordResetConfirmPayload(BaseModel):
 router = APIRouter(tags=["auth"])
 
 
-@router.post("/auth/register", response_model=legacy.TokenResponse)
-async def register(user: legacy.UserCreate):
-    return await register_user(user)
+@router.post("/auth/register")
+async def register(user: legacy.UserCreate, request: Request, response: Response):
+    return await register_user(user, request, response)
 
 
 @router.post("/auth/login", response_model=legacy.TokenResponse)

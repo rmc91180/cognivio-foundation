@@ -52,6 +52,7 @@ export function AuthPage() {
   const approvalRequired = runtimeConfig.registrationApprovalRequired;
   const [mode, setMode] = useState("login");
   const [showPasswordResetRequest, setShowPasswordResetRequest] = useState(false);
+  const [accessRequestSubmitted, setAccessRequestSubmitted] = useState(false);
   const [accessType, setAccessType] = useState("teacher");
   const [institutionType, setInstitutionType] = useState("school");
   const [form, setForm] = useState({
@@ -97,6 +98,7 @@ export function AuthPage() {
     if (isResetConfirmMode) {
       setMode("login");
       setShowPasswordResetRequest(false);
+      setAccessRequestSubmitted(false);
     }
   }, [isResetConfirmMode]);
 
@@ -264,8 +266,10 @@ export function AuthPage() {
           ...current,
           password: "",
         }));
+        setAccessRequestSubmitted(true);
         if (res?.data?.status === "approved") {
           setMode("login");
+          setAccessRequestSubmitted(false);
         }
       } catch {
         return;
@@ -347,6 +351,7 @@ export function AuthPage() {
               onClick={() => {
                 setMode("login");
                 setShowPasswordResetRequest(false);
+                setAccessRequestSubmitted(false);
               }}
               className={`flex-1 rounded px-3 py-2 ${
                 mode === "login" && !showPasswordResetRequest
@@ -362,6 +367,7 @@ export function AuthPage() {
                 onClick={() => {
                   setMode("signup");
                   setShowPasswordResetRequest(false);
+                  setAccessRequestSubmitted(false);
                 }}
                 className={`flex-1 rounded px-3 py-2 ${
                   mode === "signup"
@@ -427,6 +433,13 @@ export function AuthPage() {
             <div className="mt-1">{approvalDescription}</div>
           </div>
         )}
+
+        {accessRequestSubmitted && mode === "signup" && !isResetConfirmMode && !isResetRequestMode ? (
+          <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+            <div className="font-semibold">Access request submitted</div>
+            <div className="mt-1">Your request is waiting for Master Admin review. Once approved, sign in with this same email and password.</div>
+          </div>
+        ) : null}
 
         <form onSubmit={onSubmit} className="space-y-4">
           {mode === "signup" && !isDemo && !isResetConfirmMode && !isResetRequestMode && (
@@ -568,7 +581,7 @@ export function AuthPage() {
             <p className="text-xs text-rose-600">{t("auth.passwordMismatch")}</p>
           ) : null}
 
-          <Button type="submit" disabled={busy} fullWidth className="mt-2 shadow-brand">
+          <Button type="submit" disabled={busy || accessRequestSubmitted} fullWidth className="mt-2 shadow-brand">
             {submitLabel}
           </Button>
         </form>

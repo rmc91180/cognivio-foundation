@@ -464,6 +464,10 @@ async def register_user(
         raise HTTPException(status_code=403, detail="Registration is disabled for demo mode")
 
     email = _normalize_email(user.email)
+    requested_role = _resolve_requested_role(user)
+    if getattr(legacy, "ACCESS_APPROVAL_REQUIRED", True) and not getattr(legacy, "_is_access_auto_approved_email", lambda _email: False)(email):
+        return await request_access(user, request)
+
     existing = await legacy.db.users.find_one({"email": email})
     if _blocks_new_access_request(existing):
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -479,7 +483,8 @@ async def register_user(
         "password": hash_password(user.password),
         "created_at": now,
         "updated_at": now,
-        "role": "admin" if email in getattr(legacy, "ADMIN_EMAILS", set()) else "teacher",
+        "role": "admin" if email in getattr(legacy, "ADMIN_EMAILS", set()) else requested_role["role"],
+        "tenant_role": "school_admin" if email in getattr(legacy, "ADMIN_EMAILS", set()) else requested_role["tenant_role"],
         "approval_status": "approved",
         "tenant_status": "approved",
         "is_active": True,
@@ -637,11 +642,27 @@ async def request_access(user: Any, request: Optional[Request] = None) -> Dict[s
         "requested_school_name": school_name or None,
         "requested_manager_email": requested_manager_email or None,
         "manager_email": requested_manager_email or None,
+        "approval_requested_at": now,
         "uploads_total": 0,
         "assessments_total": 0,
     }
 
     await legacy.db.users.insert_one(user_doc)
+
+    email_warnings = []
+    for helper_name in ("_send_access_request_notification", "_send_access_request_received_confirmation"):
+        helper = getattr(legacy, helper_name, None)
+        if not helper:
+            continue
+        try:
+            delivered = bool(helper(user_doc))
+            if not delivered:
+                email_warnings.append(helper_name)
+        except Exception:
+            email_warnings.append(helper_name)
+            logger = getattr(legacy, "logger", None)
+            if logger:
+                logger.warning("%s failed after access request creation", helper_name, exc_info=True)
 
     await _maybe_log_auth_event(
         "access_request_submitted",
@@ -656,6 +677,11 @@ async def request_access(user: Any, request: Optional[Request] = None) -> Dict[s
         "status": "pending",
         "message": "Access request submitted for master-admin review.",
         "user_id": user_id,
+        "email": email,
+        "approval_status": "pending",
+        "tenant_role": tenant_role,
+        "organization_type": organization_type,
+        "email_warning": bool(email_warnings),
     }
 
 

@@ -113,6 +113,10 @@ export function AuthProvider({ children }) {
   const registerMutation = useMutation({
     mutationFn: authApi.register,
     onSuccess: (res) => {
+      if (res?.data?.status === "pending" && !res?.data?.token) {
+        toast.success(res?.data?.message || t("auth.requestAccessSubmitted"));
+        return;
+      }
       clearPreviewSession();
       localStorage.setItem("cognivio_token", res.data.token);
       setUser(res.data.user);
