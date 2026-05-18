@@ -1,0 +1,4 @@
+/login https://app.cognivio.live/login 302
+/signup https://app.cognivio.live/login 302
+/request-access https://app.cognivio.live/login 302
+/app https://app.cognivio.live/login 302
