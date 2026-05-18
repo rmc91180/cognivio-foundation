@@ -26,16 +26,25 @@ def _status(
     message: str,
     remediation: str,
     details: Optional[Dict[str, Any]] = None,
+    *,
+    reason_code: Optional[str] = None,
+    status_override: Optional[str] = None,
 ) -> Dict[str, Any]:
+    status = status_override or ("healthy" if healthy else "unhealthy")
+    resolved_details = dict(details or {})
+    if reason_code:
+        resolved_details["reason_code"] = reason_code
     return {
         "name": name,
-        "status": "healthy" if healthy else "unhealthy",
+        "status": status,
         "healthy": healthy,
         "last_probe": _now_iso(),
         "message": message,
         "failure_note": None if healthy else message,
         "suggested_remediation": remediation,
-        "details": details or {},
+        "action": remediation,
+        "reason_code": reason_code or ("ok" if healthy else "unknown"),
+        "details": resolved_details,
     }
 
 
@@ -196,8 +205,9 @@ async def probe_resend() -> Dict[str, Any]:
             {
                 "configured": False,
                 "missing": missing,
-                "from_email": email.resend_from_email or None,
+                "from_email_configured": bool(email.resend_from_email),
             },
+            reason_code="missing_api_key" if "RESEND_API_KEY" in missing else "missing_sender",
         )
 
     parsed_from_email = parseaddr(email.resend_from_email or "")[1].strip().lower()
@@ -212,6 +222,7 @@ async def probe_resend() -> Dict[str, Any]:
                 "from_email_configured": bool(email.resend_from_email),
                 "sender_valid": False,
             },
+            reason_code="invalid_sender",
         )
 
     sender_domain = parsed_from_email.rsplit("@", 1)[1]
@@ -231,9 +242,10 @@ async def probe_resend() -> Dict[str, Any]:
                 "Verify RESEND_API_KEY in Railway and confirm the sending domain is verified.",
                 {
                     "configured": True,
-                    "from_email": email.resend_from_email,
+                    "from_email_configured": bool(email.resend_from_email),
                     "status_code": response.status_code,
                 },
+                reason_code="invalid_api_key",
             )
 
         if response.status_code >= 500:
@@ -244,10 +256,11 @@ async def probe_resend() -> Dict[str, Any]:
                 "Retry after Resend service recovery or check Railway outbound network health.",
                 {
                     "configured": True,
-                    "from_email": email.resend_from_email,
+                    "from_email_configured": bool(email.resend_from_email),
                     "sender_domain": sender_domain,
                     "status_code": response.status_code,
                 },
+                reason_code="api_error",
             )
 
         if response.status_code >= 400:
@@ -258,10 +271,11 @@ async def probe_resend() -> Dict[str, Any]:
                 "Verify RESEND_API_KEY permissions and RESEND_FROM_EMAIL in Railway.",
                 {
                     "configured": True,
-                    "from_email": email.resend_from_email,
+                    "from_email_configured": bool(email.resend_from_email),
                     "sender_domain": sender_domain,
                     "status_code": response.status_code,
                 },
+                reason_code="api_error",
             )
 
         try:
@@ -285,11 +299,12 @@ async def probe_resend() -> Dict[str, Any]:
                 "Add and verify the RESEND_FROM_EMAIL domain in Resend, or use a verified sender domain.",
                 {
                     "configured": True,
-                    "from_email": email.resend_from_email,
+                    "from_email_configured": bool(email.resend_from_email),
                     "sender_domain": sender_domain,
                     "status_code": response.status_code,
                     "domain_visible": False,
                 },
+                reason_code="domain_not_found",
             )
 
         domain_status = str(
@@ -307,12 +322,13 @@ async def probe_resend() -> Dict[str, Any]:
                 "Complete DNS verification for the configured sender domain in Resend.",
                 {
                     "configured": True,
-                    "from_email": email.resend_from_email,
+                    "from_email_configured": bool(email.resend_from_email),
                     "sender_domain": sender_domain,
                     "status_code": response.status_code,
                     "domain_visible": True,
                     "domain_status": domain_status or "unknown",
                 },
+                reason_code="domain_not_verified",
             )
 
         return _status(
@@ -322,12 +338,13 @@ async def probe_resend() -> Dict[str, Any]:
             "Set RESEND_API_KEY and RESEND_FROM_EMAIL in the backend environment.",
             {
                 "configured": True,
-                "from_email": email.resend_from_email,
+                "from_email_configured": bool(email.resend_from_email),
                 "sender_domain": sender_domain,
                 "status_code": response.status_code,
                 "domain_visible": True,
                 "domain_status": domain_status or "verified",
             },
+            reason_code="ok",
         )
 
     except Exception as exc:
@@ -338,10 +355,11 @@ async def probe_resend() -> Dict[str, Any]:
             "Verify RESEND_API_KEY, RESEND_FROM_EMAIL, and outbound network access from Railway.",
             {
                 "configured": True,
-                "from_email": email.resend_from_email,
+                "from_email_configured": bool(email.resend_from_email),
                 "sender_domain": sender_domain,
                 "error_type": exc.__class__.__name__,
             },
+            reason_code="network_error",
         )
 
 

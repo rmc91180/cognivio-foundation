@@ -1,5 +1,5 @@
 import api from "@/lib/apiClient";
-import { demoApi, masterAdminApi } from "@/lib/api";
+import { authApi, demoApi, masterAdminApi } from "@/lib/api";
 
 jest.mock("@/lib/apiClient", () => ({
   __esModule: true,
@@ -42,5 +42,19 @@ describe("masterAdminApi user lifecycle endpoints", () => {
     expect(api.post).toHaveBeenCalledWith("/api/demo/reset", null, {
       params: { persona: "training" },
     });
+  });
+
+  it("routes request access to the canonical approval endpoint", () => {
+    const payload = { email: "tester@example.com" };
+
+    authApi.requestAccess(payload);
+
+    expect(api.post).toHaveBeenCalledWith("/api/auth/request-access", payload);
+  });
+
+  it("exposes the signup health diagnostic endpoint", () => {
+    masterAdminApi.signupHealth();
+
+    expect(api.get).toHaveBeenCalledWith("/api/admin/signup-health");
   });
 });

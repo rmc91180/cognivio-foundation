@@ -211,6 +211,7 @@ def _get_user_approval_status(user: Optional[dict]) -> str:
 
 
 DELETED_USER_STATUSES = {"deleted", "hard_deleted", "account_deleted", "approval_deleted"}
+INACTIVE_USER_STATUSES = DELETED_USER_STATUSES | {"rejected", "denied", "revoked"}
 
 
 def _is_user_deleted_or_tombstoned(user: Optional[dict]) -> bool:
@@ -224,8 +225,53 @@ def _is_user_deleted_or_tombstoned(user: Optional[dict]) -> bool:
     )
 
 
+def is_demo_record(doc: Optional[dict]) -> bool:
+    return bool(doc) and doc.get("demo_data") is True
+
+
+def is_user_deleted_or_tombstoned(user_doc: Optional[dict]) -> bool:
+    return _is_user_deleted_or_tombstoned(user_doc)
+
+
+def is_user_active_for_admin_lists(user_doc: Optional[dict]) -> bool:
+    if not user_doc or _is_user_deleted_or_tombstoned(user_doc):
+        return False
+    if _get_user_approval_status(user_doc) in INACTIVE_USER_STATUSES:
+        return False
+    return user_doc.get("is_active", True) is not False
+
+
+def _is_pending_access_request(user_doc: Optional[dict]) -> bool:
+    return bool(user_doc) and not _is_user_deleted_or_tombstoned(user_doc) and _get_user_approval_status(user_doc) == "pending"
+
+
 def _is_active_roster_user(user: Optional[dict]) -> bool:
     return bool(user) and not _is_user_deleted_or_tombstoned(user) and _is_user_access_active(user)
+
+
+def is_org_active_for_master_admin(
+    org_doc: Optional[dict],
+    active_counts: Dict[str, int],
+    viewer_context: Optional[dict] = None,
+) -> bool:
+    if not org_doc:
+        return False
+    status = str(org_doc.get("status") or "active").strip().lower()
+    if status in {"archived", "inactive", "deleted", "orphaned", "archived_orphaned"}:
+        return False
+    if is_demo_record(org_doc):
+        return _get_user_tenant_role(viewer_context or {}) == "super_admin"
+    active_total = int(active_counts.get("active_user_count") or 0)
+    pending_total = int(active_counts.get("pending_user_count") or 0)
+    active_teachers = int(active_counts.get("active_teacher_count") or 0)
+    active_admins = int(active_counts.get("active_admin_count") or 0)
+    return any(value > 0 for value in (active_total, pending_total, active_teachers, active_admins))
+
+
+def _model_public_dict(model: Any) -> Dict[str, Any]:
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
 
 
 def _linked_user_hides_teacher_roster_record(user: Optional[dict]) -> bool:
@@ -450,7 +496,7 @@ async def _get_organization_seat_snapshot(*, organization_id: str, exclude_user_
     pending_docs = [
         doc
         for doc in user_docs
-        if (doc.get("id") != exclude_user_id) and doc.get("approval_status") == "pending"
+        if (doc.get("id") != exclude_user_id) and _is_pending_access_request(doc)
     ]
     return {
         "active_user_count": len(active_docs),
@@ -891,8 +937,9 @@ async def _build_master_admin_organization_record(organization_doc: dict) -> "Ma
             "approval_status": "approved",
             "is_active": {"$ne": False},
         },
-        {"_id": 0, "last_login_at": 1, "updated_at": 1},
+        {"_id": 0, "last_login_at": 1, "updated_at": 1, "approval_status": 1, "is_active": 1, "account_deleted": 1, "approval_deleted": 1, "deleted_at": 1},
     ).to_list(5000)
+    active_users = [doc for doc in active_users if is_user_active_for_admin_lists(doc)]
     recent_logins_30d = 0
     threshold_30d = datetime.now(timezone.utc) - timedelta(days=30)
     for user_doc in active_users:
@@ -922,13 +969,31 @@ async def _build_master_admin_organization_record(organization_doc: dict) -> "Ma
         health_summary = f"{seat_snapshot['pending_user_count']} approval request(s) are waiting."
     else:
         health_summary = "Institution is active and operating normally."
+    org_status = organization_doc.get("status") or "active"
+    if (
+        org_status == "active"
+        and not is_demo_record(organization_doc)
+        and not any(
+            [
+                seat_snapshot["active_user_count"],
+                seat_snapshot["pending_user_count"],
+                seat_snapshot["active_teacher_count"],
+                seat_snapshot["active_admin_count"],
+            ]
+        )
+    ):
+        org_status = "archived_orphaned"
+
     return MasterAdminOrganizationRecord(
         id=organization_doc["id"],
         name=organization_doc.get("name") or "—",
         organization_type=organization_doc.get("organization_type") or "school",
-        status=organization_doc.get("status") or "active",
+        status=org_status,
         created_at=organization_doc.get("created_at"),
         created_by=organization_doc.get("created_by"),
+        demo_data=is_demo_record(organization_doc),
+        demo_persona=organization_doc.get("demo_persona"),
+        record_state=org_status,
         school_count=school_count,
         active_user_count=seat_snapshot["active_user_count"],
         active_teacher_count=seat_snapshot["active_teacher_count"],
@@ -1014,8 +1079,10 @@ async def _build_institution_lookup_suggestions(
                 continue
             manager_doc = await db.users.find_one(
                 {"school_id": school_doc.get("id"), "tenant_role": "school_admin", "approval_status": "approved"},
-                {"_id": 0, "name": 1, "email": 1},
+                {"_id": 0, "name": 1, "email": 1, "approval_status": 1, "is_active": 1, "account_deleted": 1, "approval_deleted": 1, "deleted_at": 1},
             )
+            if manager_doc and not is_user_active_for_admin_lists(manager_doc):
+                manager_doc = None
             await append_suggestion(
                 organization_doc=organization_doc,
                 school_doc=school_doc,
@@ -1031,8 +1098,10 @@ async def _build_institution_lookup_suggestions(
                 "tenant_role": "training_admin" if normalized_type == "training" else "school_admin",
                 "approval_status": "approved",
             },
-            {"_id": 0, "name": 1, "email": 1},
+            {"_id": 0, "name": 1, "email": 1, "approval_status": 1, "is_active": 1, "account_deleted": 1, "approval_deleted": 1, "deleted_at": 1},
         )
+        if manager_doc and not is_user_active_for_admin_lists(manager_doc):
+            manager_doc = None
         if normalized_type == "school":
             school_doc = await db.schools.find_one(
                 {"organization_id": organization_doc.get("id")},
@@ -1166,8 +1235,10 @@ async def _build_master_admin_workspace_records() -> List["MasterAdminWorkspaceR
         {"role": {"$in": ["admin", "principal"]}, "approval_status": "approved", "is_active": {"$ne": False}},
         {"_id": 0, "password": 0},
     ).to_list(2000)
+    admin_docs = [doc for doc in admin_docs if is_user_active_for_admin_lists(doc)]
     teacher_docs = await db.teachers.find({}, {"_id": 0}).to_list(5000)
     user_docs = await db.users.find({}, {"_id": 0, "password": 0}).to_list(5000)
+    user_docs = [doc for doc in user_docs if not _is_user_deleted_or_tombstoned(doc)]
     users_by_teacher_id = {
         doc.get("teacher_id"): doc
         for doc in user_docs
@@ -1232,7 +1303,7 @@ async def _build_master_admin_workspace_records() -> List["MasterAdminWorkspaceR
             1 for user in matching_teacher_users
             if _get_user_approval_status(user) == "approved" and _is_user_access_active(user)
         )
-        pending_teacher_users = sum(1 for user in matching_teacher_users if _get_user_approval_status(user) == "pending")
+        pending_teacher_users = sum(1 for user in matching_teacher_users if _is_pending_access_request(user))
         unlinked_user_count = sum(
             1 for user in matching_teacher_users
             if not user.get("teacher_id") or user.get("teacher_id") not in teacher_ids
@@ -6263,6 +6334,9 @@ class MasterAdminOrganizationRecord(BaseModel):
     name: str
     organization_type: str
     status: str
+    demo_data: bool = False
+    demo_persona: Optional[str] = None
+    record_state: Optional[str] = None
     created_at: Optional[str] = None
     created_by: Optional[str] = None
     school_count: int = 0
@@ -12223,6 +12297,7 @@ async def _access_request_suggested_organization_id(user_doc: dict) -> Optional[
 async def list_access_users(current_user: dict = Depends(get_current_user)):
     _require_admin_ops_user(current_user)
     docs = await db.users.find({}, {"_id": 0, "password": 0}).sort("created_at", -1).to_list(1000)
+    docs = [doc for doc in docs if not _is_user_deleted_or_tombstoned(doc)]
     for doc in docs:
         if _get_user_approval_status(doc) == "pending":
             doc["suggested_organization_id"] = await _access_request_suggested_organization_id(doc)
@@ -20782,15 +20857,22 @@ async def get_master_admin_overview(current_user: dict = Depends(get_current_use
     cutoff_24h = (now - timedelta(hours=24)).isoformat()
     cutoff_7d = (now - timedelta(days=7)).isoformat()
 
-    approved_users = await db.users.count_documents({"approval_status": "approved", "is_active": {"$ne": False}})
-    pending_users = await db.users.count_documents({"approval_status": "pending"})
-    revoked_users = await db.users.count_documents(
-        {"$or": [{"approval_status": "revoked"}, {"is_active": False}]}
-    )
-    teacher_users = await db.users.count_documents({"role": "teacher"})
-    admin_users = await db.users.count_documents({"role": {"$in": ["admin", "principal"]}})
-    super_admin_users = await db.users.count_documents({"role": "super_admin"})
-    recent_logins = await db.users.count_documents({"last_login_at": {"$gte": cutoff_7d}})
+    all_user_docs = await db.users.find({}, {"_id": 0, "password": 0}).to_list(10000)
+    active_admin_docs = [doc for doc in all_user_docs if is_user_active_for_admin_lists(doc)]
+    pending_user_docs = [doc for doc in all_user_docs if _is_pending_access_request(doc)]
+    revoked_user_docs = [
+        doc
+        for doc in all_user_docs
+        if not _is_user_deleted_or_tombstoned(doc)
+        and (_get_user_approval_status(doc) == "revoked" or doc.get("is_active") is False)
+    ]
+    approved_users = len([doc for doc in active_admin_docs if _get_user_approval_status(doc) == "approved"])
+    pending_users = len(pending_user_docs)
+    revoked_users = len(revoked_user_docs)
+    teacher_users = len([doc for doc in all_user_docs if not _is_user_deleted_or_tombstoned(doc) and _get_user_role(doc) == "teacher"])
+    admin_users = len([doc for doc in all_user_docs if is_user_active_for_admin_lists(doc) and doc.get("role") in {"admin", "principal"}])
+    super_admin_users = len([doc for doc in all_user_docs if is_user_active_for_admin_lists(doc) and doc.get("role") == "super_admin"])
+    recent_logins = len([doc for doc in active_admin_docs if str(doc.get("last_login_at") or "") >= cutoff_7d])
     organizations_collection = getattr(db, "organizations", None)
     organization_docs = []
     if organizations_collection is not None:
@@ -20798,6 +20880,8 @@ async def get_master_admin_overview(current_user: dict = Depends(get_current_use
     organizations_at_limit = 0
     for organization_doc in organization_docs:
         record = await _build_master_admin_organization_record(organization_doc)
+        if not is_org_active_for_master_admin(organization_doc, _model_public_dict(record), current_user):
+            continue
         if record.capacity_state == "at_limit":
             organizations_at_limit += 1
 
@@ -20902,8 +20986,9 @@ async def get_master_admin_overview(current_user: dict = Depends(get_current_use
 
     pending_docs = await db.users.find(
         {"approval_status": "pending"},
-        {"_id": 0, "id": 1, "email": 1, "name": 1, "approval_requested_at": 1},
+        {"_id": 0, "id": 1, "email": 1, "name": 1, "approval_status": 1, "is_active": 1, "approval_requested_at": 1, "account_deleted": 1, "approval_deleted": 1, "deleted_at": 1},
     ).sort("approval_requested_at", -1).to_list(5)
+    pending_docs = [doc for doc in pending_docs if _is_pending_access_request(doc)]
     pending_preview = [
         MasterAdminPreviewItem(
             id=doc["id"],
@@ -21025,6 +21110,7 @@ async def get_master_admin_users(
     safe_limit = max(1, min(limit, 200))
     safe_offset = max(0, offset)
     docs = await db.users.find({}, {"_id": 0, "password": 0}).sort("created_at", -1).to_list(2000)
+    docs = [doc for doc in docs if not _is_user_deleted_or_tombstoned(doc)]
     records = [await _build_master_admin_user_record(doc) for doc in docs]
 
     normalized_q = str(q or "").strip().lower()
@@ -21101,6 +21187,7 @@ async def get_master_admin_organizations(
     q: Optional[str] = None,
     organization_type: Optional[str] = None,
     capacity_state: Optional[str] = None,
+    include_archived: bool = False,
     limit: int = 50,
     offset: int = 0,
     current_user: dict = Depends(get_current_user),
@@ -21109,13 +21196,15 @@ async def get_master_admin_organizations(
     safe_limit = max(1, min(limit, 200))
     safe_offset = max(0, offset)
     docs = await db.organizations.find({}, {"_id": 0}).sort("created_at", -1).to_list(1000)
-    records = [await _build_master_admin_organization_record(doc) for doc in docs]
+    paired_records = [(doc, await _build_master_admin_organization_record(doc)) for doc in docs]
     normalized_q = str(q or "").strip().lower()
     normalized_type = str(organization_type or "").strip().lower()
     normalized_capacity = str(capacity_state or "").strip().lower()
 
     filtered: List[MasterAdminOrganizationRecord] = []
-    for item in records:
+    for doc, item in paired_records:
+        if not include_archived and not is_org_active_for_master_admin(doc, _model_public_dict(item), current_user):
+            continue
         if normalized_q:
             haystack = " ".join([str(item.id).lower(), str(item.name).lower(), str(item.created_by or "").lower()])
             if normalized_q not in haystack:
@@ -21127,16 +21216,18 @@ async def get_master_admin_organizations(
         filtered.append(item)
 
     sliced = filtered[safe_offset : safe_offset + safe_limit]
+    real_filtered = [item for item in filtered if not item.demo_data]
     summary = {
-        "school": sum(1 for item in filtered if item.organization_type == "school"),
-        "training": sum(1 for item in filtered if item.organization_type == "training"),
-        "capped": sum(1 for item in filtered if item.seat_limit),
-        "at_limit": sum(1 for item in filtered if item.capacity_state == "at_limit"),
-        "near_limit": sum(1 for item in filtered if item.capacity_state == "near_limit"),
-        "uploads_total": sum(item.uploads_total for item in filtered),
-        "assessments_total": sum(item.assessments_total for item in filtered),
-        "active_incidents": sum(item.active_incident_count for item in filtered),
-        "recent_logins_30d": sum(item.recent_logins_30d for item in filtered),
+        "school": sum(1 for item in real_filtered if item.organization_type == "school"),
+        "training": sum(1 for item in real_filtered if item.organization_type == "training"),
+        "demo": sum(1 for item in filtered if item.demo_data),
+        "capped": sum(1 for item in real_filtered if item.seat_limit),
+        "at_limit": sum(1 for item in real_filtered if item.capacity_state == "at_limit"),
+        "near_limit": sum(1 for item in real_filtered if item.capacity_state == "near_limit"),
+        "uploads_total": sum(item.uploads_total for item in real_filtered),
+        "assessments_total": sum(item.assessments_total for item in real_filtered),
+        "active_incidents": sum(item.active_incident_count for item in real_filtered),
+        "recent_logins_30d": sum(item.recent_logins_30d for item in real_filtered),
     }
     return MasterAdminOrganizationListResponse(
         generated_at=datetime.now(timezone.utc).isoformat(),
@@ -21164,12 +21255,14 @@ async def get_master_admin_organization_detail(
             "approval_status": "approved",
             "is_active": {"$ne": False},
         },
-        {"_id": 0, "id": 1, "email": 1, "name": 1, "tenant_role": 1, "school_name": 1},
+        {"_id": 0, "id": 1, "email": 1, "name": 1, "tenant_role": 1, "school_name": 1, "approval_status": 1, "is_active": 1, "account_deleted": 1, "approval_deleted": 1, "deleted_at": 1},
     ).sort("name", 1).to_list(500)
+    active_users = [doc for doc in active_users if is_user_active_for_admin_lists(doc)]
     pending_users = await db.users.find(
         {"organization_id": organization_id, "approval_status": "pending"},
-        {"_id": 0, "id": 1, "email": 1, "name": 1, "tenant_role": 1, "requested_school_name": 1},
+        {"_id": 0, "id": 1, "email": 1, "name": 1, "tenant_role": 1, "requested_school_name": 1, "account_deleted": 1, "approval_deleted": 1, "deleted_at": 1},
     ).sort("created_at", -1).to_list(200)
+    pending_users = [doc for doc in pending_users if _is_pending_access_request(doc)]
     schools = await db.schools.find(
         {"organization_id": organization_id},
         {"_id": 0, "id": 1, "name": 1, "user_id": 1, "district_name": 1},
@@ -21985,10 +22078,13 @@ def _readiness_dependency_state(record: "MasterAdminDependencyRecord") -> str:
 
 
 async def _readiness_demo_persona_seeded(persona: str) -> bool:
-    collection = getattr(db, "teachers", None)
-    if collection is None:
-        return False
-    return await collection.count_documents({"demo_data": True, "demo_persona": persona}) > 0
+    for collection_name in ("organizations", "teachers", "users", "assessments", "videos", "coaching_tasks"):
+        collection = getattr(db, collection_name, None)
+        if collection is None:
+            continue
+        if await collection.count_documents({"demo_data": True, "demo_persona": persona}) > 0:
+            return True
+    return False
 
 
 async def _readiness_last_demo_reset() -> Optional[str]:
@@ -22033,32 +22129,55 @@ async def get_admin_internal_readiness(current_user: dict = Depends(get_current_
 
     latest_quality = sorted(_read_ai_quality_history(), key=lambda item: str(item.get("run_at") or ""), reverse=True)
     quality = latest_quality[0] if latest_quality else {}
+    k12_seeded = await _readiness_demo_persona_seeded("k12")
+    training_seeded = await _readiness_demo_persona_seeded("training")
+    any_demo_seeded = k12_seeded or training_seeded
+
+    def _seed_status(is_seeded: bool) -> str:
+        if is_seeded:
+            return "healthy" if DEMO_MODE else "available"
+        return "unhealthy" if DEMO_MODE else "not_seeded"
+
     warnings = []
-    if not DEMO_MODE:
-        warnings.append("Demo mode is off, so reset controls are intentionally unavailable.")
     if not FRONTEND_URL:
         warnings.append("Frontend URL is not configured in the backend environment.")
     if not BACKEND_PUBLIC_BASE_URL:
         warnings.append("Backend public base URL is not configured.")
-    if any(value == "unhealthy" for value in dependencies.values()):
-        warnings.append("One or more dependencies need attention before a full rehearsal.")
+    unhealthy_dependency_names = [key for key, value in dependencies.items() if value == "unhealthy"]
+    if unhealthy_dependency_names:
+        warnings.append(f"Dependencies need attention: {', '.join(unhealthy_dependency_names)}.")
+    if not DEMO_MODE and any_demo_seeded:
+        warnings.append("Seeded demo data is available for internal viewing. Reset controls are disabled because demo mode is off.")
+    if DEMO_MODE and not any_demo_seeded:
+        warnings.append("Demo mode is enabled, but seeded demo data is missing.")
+
+    quality_status = "unknown"
+    if quality:
+        quality_status = "healthy" if quality.get("passed") else "unhealthy"
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "environment": {
             "demo_mode": bool(DEMO_MODE),
+            "demo_mode_status": "healthy" if DEMO_MODE else "disabled",
+            "demo_reset_controls_status": "healthy" if DEMO_MODE else "disabled",
             "railway_environment_name": APP_SETTINGS.operations.railway_environment_name or None,
             "frontend_url_configured": bool(FRONTEND_URL),
             "backend_public_base_url_configured": bool(BACKEND_PUBLIC_BASE_URL),
         },
         "dependencies": dependencies,
         "demo_data": {
-            "k12_seeded": await _readiness_demo_persona_seeded("k12"),
-            "training_seeded": await _readiness_demo_persona_seeded("training"),
+            "k12_seeded": k12_seeded,
+            "training_seeded": training_seeded,
+            "k12_seeded_status": _seed_status(k12_seeded),
+            "training_seeded_status": _seed_status(training_seeded),
+            "demo_data_status": "available" if any_demo_seeded else ("unhealthy" if DEMO_MODE else "not_seeded"),
+            "reset_controls_status": "healthy" if DEMO_MODE else "disabled",
             "last_reset_at": await _readiness_last_demo_reset(),
         },
         "quality": {
             "latest_quality_gate_passed": quality.get("passed") if quality else None,
+            "latest_quality_gate_status": quality_status,
             "coach_voice_score": (quality.get("scores") or {}).get("coach_voice") if quality else None,
         },
         "product_flow": {
@@ -22068,6 +22187,66 @@ async def get_admin_internal_readiness(current_user: dict = Depends(get_current_
             "reports_available": True,
         },
         "warnings": warnings,
+    }
+
+
+async def _signup_health_counts() -> Dict[str, Any]:
+    users = await db.users.find({}, {"_id": 0, "password": 0}).to_list(10000)
+    active_users = [doc for doc in users if is_user_active_for_admin_lists(doc)]
+    deleted_users = [doc for doc in users if _is_user_deleted_or_tombstoned(doc)]
+    deleted_ids = {doc.get("id") for doc in deleted_users if doc.get("id")}
+    deleted_emails = {str(doc.get("email") or "").strip().lower() for doc in deleted_users if doc.get("email")}
+    stale_admin_links = 0
+    stale_teacher_links = 0
+    stale_workspace_links = 0
+
+    if deleted_ids or deleted_emails:
+        for doc in users:
+            if doc.get("manager_user_id") in deleted_ids or str(doc.get("manager_email") or "").strip().lower() in deleted_emails:
+                stale_admin_links += 1
+        if getattr(db, "teachers", None) is not None:
+            teachers = await db.teachers.find({}, {"_id": 0}).to_list(10000)
+            for teacher in teachers:
+                if (
+                    teacher.get("created_by") in deleted_ids
+                    or teacher.get("linked_admin_user_id") in deleted_ids
+                    or str(teacher.get("linked_admin_email") or "").strip().lower() in deleted_emails
+                    or str(teacher.get("manager_email") or "").strip().lower() in deleted_emails
+                ):
+                    stale_teacher_links += 1
+        if getattr(db, "schools", None) is not None:
+            schools = await db.schools.find({}, {"_id": 0}).to_list(10000)
+            stale_workspace_links += sum(1 for school in schools if school.get("user_id") in deleted_ids)
+
+    org_docs = await db.organizations.find({}, {"_id": 0}).to_list(10000) if getattr(db, "organizations", None) is not None else []
+    stale_orgs = 0
+    demo_orgs = 0
+    for org in org_docs:
+        if is_demo_record(org):
+            demo_orgs += 1
+        record = await _build_master_admin_organization_record(org)
+        if not is_demo_record(org) and record.status == "archived_orphaned":
+            stale_orgs += 1
+
+    return {
+        "pending_requests_count": sum(1 for doc in users if _is_pending_access_request(doc)),
+        "approved_users_count": sum(1 for doc in active_users if _get_user_approval_status(doc) == "approved"),
+        "deleted_tombstones_count": len(deleted_users),
+        "stale_admin_links_count": stale_admin_links,
+        "stale_teacher_links_count": stale_teacher_links,
+        "stale_workspace_links_count": stale_workspace_links,
+        "stale_orgs_count": stale_orgs,
+        "demo_orgs_count": demo_orgs,
+        "demo_mode_enabled": bool(DEMO_MODE),
+    }
+
+
+@api_router.get("/admin/signup-health")
+async def get_admin_signup_health(current_user: dict = Depends(get_current_user)):
+    _require_master_admin_user(current_user)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        **(await _signup_health_counts()),
     }
 
 

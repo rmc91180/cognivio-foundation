@@ -146,6 +146,7 @@ export const masterAdminApi = {
   bootstrap: () => api.get("/api/master-admin/bootstrap"),
   overview: () => api.get("/api/master-admin/overview"),
   internalReadiness: () => api.get("/api/admin/internal-readiness"),
+  signupHealth: () => api.get("/api/admin/signup-health"),
   users: (params = {}) => api.get("/api/master-admin/users", { params }),
   userDetail: (userId) => api.get(`/api/master-admin/users/${userId}`),
 

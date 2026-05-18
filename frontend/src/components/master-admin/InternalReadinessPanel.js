@@ -7,14 +7,28 @@ import { masterAdminApi } from "@/lib/api";
 const stateClass = {
   healthy: "bg-emerald-100 text-emerald-800",
   unhealthy: "bg-rose-100 text-rose-800",
+  disabled: "bg-slate-100 text-slate-700",
+  available: "bg-sky-100 text-sky-800",
+  not_seeded: "bg-slate-100 text-slate-700",
+  not_applicable: "bg-slate-100 text-slate-700",
   unknown: "bg-slate-100 text-slate-700",
+};
+
+const stateLabel = {
+  healthy: "Healthy",
+  unhealthy: "Unhealthy",
+  disabled: "Disabled",
+  available: "Available",
+  not_seeded: "Not seeded",
+  not_applicable: "Not applicable",
+  unknown: "Unknown",
 };
 
 function StatusPill({ value }) {
   const normalized = value === true ? "healthy" : value === false ? "unhealthy" : String(value || "unknown");
   return (
-    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold capitalize ${stateClass[normalized] || stateClass.unknown}`}>
-      {normalized}
+    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${stateClass[normalized] || stateClass.unknown}`}>
+      {stateLabel[normalized] || normalized}
     </span>
   );
 }
@@ -67,7 +81,8 @@ export function InternalReadinessPanel() {
 
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         <ReadinessCard title="Environment">
-          <div className="flex items-center justify-between gap-3"><span>Demo mode</span><StatusPill value={data.environment?.demo_mode} /></div>
+          <div className="flex items-center justify-between gap-3"><span>Demo mode</span><StatusPill value={data.environment?.demo_mode_status || data.environment?.demo_mode} /></div>
+          <div className="flex items-center justify-between gap-3"><span>Demo reset controls</span><StatusPill value={data.environment?.demo_reset_controls_status || data.demo_data?.reset_controls_status} /></div>
           <div className="flex items-center justify-between gap-3"><span>Railway</span><span>{data.environment?.railway_environment_name || "unknown"}</span></div>
           <div className="flex items-center justify-between gap-3"><span>Frontend URL</span><StatusPill value={data.environment?.frontend_url_configured} /></div>
           <div className="flex items-center justify-between gap-3"><span>Backend URL</span><StatusPill value={data.environment?.backend_public_base_url_configured} /></div>
@@ -83,13 +98,14 @@ export function InternalReadinessPanel() {
         </ReadinessCard>
 
         <ReadinessCard title="Demo data">
-          <div className="flex items-center justify-between gap-3"><span>K-12 seeded</span><StatusPill value={data.demo_data?.k12_seeded} /></div>
-          <div className="flex items-center justify-between gap-3"><span>Training seeded</span><StatusPill value={data.demo_data?.training_seeded} /></div>
+          <div className="flex items-center justify-between gap-3"><span>K-12 seeded</span><StatusPill value={data.demo_data?.k12_seeded_status ?? data.demo_data?.k12_seeded} /></div>
+          <div className="flex items-center justify-between gap-3"><span>Training seeded</span><StatusPill value={data.demo_data?.training_seeded_status ?? data.demo_data?.training_seeded} /></div>
+          <div className="flex items-center justify-between gap-3"><span>Reset controls</span><StatusPill value={data.demo_data?.reset_controls_status} /></div>
           <div>Last reset: {data.demo_data?.last_reset_at || "not recorded"}</div>
         </ReadinessCard>
 
         <ReadinessCard title="Quality gate">
-          <div className="flex items-center justify-between gap-3"><span>Latest gate</span><StatusPill value={data.quality?.latest_quality_gate_passed} /></div>
+          <div className="flex items-center justify-between gap-3"><span>Latest gate</span><StatusPill value={data.quality?.latest_quality_gate_status ?? data.quality?.latest_quality_gate_passed} /></div>
           <div>Coach voice: {data.quality?.coach_voice_score ?? "unknown"}</div>
         </ReadinessCard>
 

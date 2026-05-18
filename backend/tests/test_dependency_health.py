@@ -89,6 +89,7 @@ async def test_resend_health_reports_invalid_sender(monkeypatch):
     result = await probe_resend()
 
     assert result["healthy"] is False
+    assert result["reason_code"] == "invalid_sender"
     assert result["details"]["sender_valid"] is False
     assert "re_test" not in str(result)
 
@@ -108,6 +109,7 @@ async def test_resend_health_reports_rejected_api_key(monkeypatch):
 
     assert result["healthy"] is False
     assert result["message"] == "Resend API key was rejected."
+    assert result["reason_code"] == "invalid_api_key"
     assert "re_secret_value" not in str(result)
 
 
@@ -131,9 +133,12 @@ async def test_resend_health_reports_domain_visibility_and_verification(monkeypa
     verified_domain = await probe_resend()
 
     assert missing_domain["details"]["domain_visible"] is False
+    assert missing_domain["reason_code"] == "domain_not_found"
     assert unverified_domain["details"]["domain_visible"] is True
+    assert unverified_domain["reason_code"] == "domain_not_verified"
     assert unverified_domain["details"]["domain_status"] == "pending"
     assert verified_domain["healthy"] is True
+    assert verified_domain["reason_code"] == "ok"
 
 
 @pytest.mark.asyncio
@@ -162,5 +167,6 @@ async def test_provider_failures_are_sanitized(monkeypatch):
 
     assert "re_secret_value" not in str(resend)
     assert "sk-secret-value" not in str(openai)
+    assert resend["reason_code"] == "network_error"
     assert resend["details"]["error_type"] == "RuntimeError"
     assert openai["details"]["error_type"] == "RuntimeError"
