@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { LayoutShell } from "@/components/LayoutShell";
 import { EmptyState, LoadingState, PageHeader, Panel, SectionHeader } from "@/components/ui";
 import { reportApi } from "@/lib/api";
+import { SetupAssistantPanel } from "@/components/dashboard/SetupAssistantPanel";
 
 const formatDate = (value) => {
   if (!value) return "Not scheduled";
@@ -60,6 +61,8 @@ export function TrainingDashboard() {
 
         {!isLoading && !isError ? (
           <div className="space-y-6">
+            <SetupAssistantPanel mode="training" />
+
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
               <StatCard label="Total trainees" value={summary.active_trainees ?? 0} hint="Student teachers connected to your program." />
               <StatCard label="Observations this cycle" value={summary.completed_observations ?? 0} hint={`${summary.upcoming_observations ?? 0} upcoming observations planned.`} />

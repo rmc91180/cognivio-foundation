@@ -100,6 +100,8 @@ export function TeachersPage() {
       toast.success(t("teachersPage.teacherCreated"));
       queryClient.invalidateQueries({ queryKey: ["teachers"] });
       queryClient.invalidateQueries({ queryKey: ["roster"] });
+      queryClient.invalidateQueries({ queryKey: ["onboarding-status"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard-intelligence"] });
       setForm(DEFAULT_FORM);
       setShowAddTeacher(false);
     },
@@ -266,6 +268,7 @@ export function TeachersPage() {
     const latestVideoId = latestObservation?.video_id || roster?.latest_video_id || null;
     return [
       { id: "deep-dive", label: t("teachersPage.openDeepDive"), to: `/teachers/${teacher.id}`, tone: "primary" },
+      { id: "plan-observation", label: "Plan observation", to: `/observation/new?teacher_id=${teacher.id}` },
       { id: "latest-lesson", label: t("teachersPage.openLatestLesson"), to: latestVideoId ? `/videos/${latestVideoId}` : `/videos?teacher_id=${teacher.id}` },
       { id: "coaching-record", label: t("teachersPage.openCoachingRecord"), to: `/teachers/${teacher.id}/action-plan` },
       { id: "schedule", label: t("teachersPage.openSchedule"), to: "/master-schedule" },
@@ -1042,7 +1045,7 @@ function AddTeacherForm({
   return (
     <form onSubmit={onSubmit} className="space-y-3 text-sm">
       <Input label={t("teachersPage.name")} required value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} />
-      <Input label={t("teachersPage.email")} type="email" required value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} />
+      <Input label={`${t("teachersPage.email")} optional`} type="email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} />
       <Input label={t("teachersPage.subject")} value={form.subject} onChange={(e) => setForm((f) => ({ ...f, subject: e.target.value }))} />
       <Input label={t("teachersPage.gradeLevel")} value={form.grade_level} onChange={(e) => setForm((f) => ({ ...f, grade_level: e.target.value }))} />
       <Input label={t("teachersPage.department")} value={form.department} onChange={(e) => setForm((f) => ({ ...f, department: e.target.value }))} />
@@ -1152,6 +1155,7 @@ function TeacherMobileCard({
     ? getTeacherQuickLinks(teacher, roster)
     : [
         { id: "deep-dive", label: t("teachersPage.openDeepDive"), to: `/teachers/${teacher.id}`, tone: "primary" },
+        { id: "plan-observation", label: "Plan observation", to: `/observation/new?teacher_id=${teacher.id}` },
         { id: "videos", label: t("teachersPage.viewVideos"), to: `/videos?teacher_id=${teacher.id}` },
       ];
 

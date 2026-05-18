@@ -11,14 +11,14 @@
 
 ## 8-minute K-12 Walkthrough
 
-1. Dashboard priorities: show what needs attention and which teacher to support first.
-2. Observation setup: choose a teacher, select one to three focus areas, and save the observation focus.
-3. Latest lesson: open the teacher profile or workspace and show the coaching summary.
-4. Coaching task/reflection: show an open goal and how the teacher can respond after trying it.
-5. Recognition/notifications: show a lesson-ready or recognition notification.
-6. Reports: open the coaching snapshot and point to the plain-language patterns.
-7. Demo reset/master admin: show the master admin demo controls and AI quality page.
-8. Close: "Cognivio turns lesson recordings into a coaching loop that is specific, humane, and easy to act on."
+1. Onboarding/setup assistant: show the next step and the setup checklist.
+2. Add first teacher: add or point to the first demo teacher.
+3. Observation setup: choose a teacher, select one to three focus areas, and save the observation focus.
+4. Record/upload: open `/record` from the saved observation and connect the recording.
+5. Latest lesson/video review: open video comments, talk-time, and the coaching summary.
+6. Coaching task/reflection and recognition: show the follow-up loop.
+7. Dashboard intelligence and reports: show priorities, patterns, and CSV export.
+8. Demo reset/master admin: show internal readiness, demo controls, and AI quality.
 
 ## Video Observation Depth Moment
 
@@ -36,24 +36,27 @@ Use this short sequence inside either walkthrough after opening a reviewed lesso
 
 Use this sequence when showing the internal-testing admin flow:
 
-1. Open `/dashboard` as the school admin and start with "Today's coaching priorities."
-2. Open a "Patterns worth noticing" card and point to the recommended next action.
-3. Use an observation gap row to plan a focused observation for one teacher.
-4. Open `/reports` and show the Coaching Snapshot summary.
-5. Export the coaching snapshot CSV and explain that it is an internal planning artifact, not a teacher-facing score report.
-6. Switch to the training admin persona, open `/dashboard`, and show the cohort status view.
-7. Open `/reports` as the training admin and show the Cohort Snapshot with trainee status rows.
+1. Start from `/onboarding` or the dashboard setup assistant.
+2. Add the first teacher or trainee.
+3. Plan the first focused observation.
+4. Record/upload the lesson or observation.
+5. Review video comments and talk-time.
+6. Open `/dashboard` as the school admin and start with "Today's coaching priorities."
+7. Open a "Patterns worth noticing" card and point to the recommended next action.
+8. Use an observation gap row to plan a focused observation for one teacher.
+9. Open `/reports` and show the Coaching Snapshot summary.
+10. Export the coaching snapshot CSV and explain that it is an internal planning artifact, not a teacher-facing score report.
 
 ## 8-minute Training Walkthrough
 
-1. Training dashboard: show trainee progress, on-track counts, and who needs attention.
-2. Cohort/trainee view: open the trainee roster and select a trainee.
+1. Onboarding/setup assistant: show trainee setup progress.
+2. Add first trainee or open the seeded cohort.
 3. Observation setup: save a focus for a placement observation.
-4. Latest observation feedback: open the latest lesson or video feedback.
-5. Coaching/reflection: show the follow-up task loop.
-6. Reports: show the cohort snapshot.
-7. Demo reset/master admin: verify demo mode and AI quality monitoring.
-8. Close: "For supervisors, Cognivio keeps observation cycles visible without turning feedback into a compliance spreadsheet."
+4. Record/upload: connect the observation recording.
+5. Latest observation feedback: open video comments, talk-time, and the summary.
+6. Coaching/reflection: show the follow-up task loop.
+7. Reports: show the cohort snapshot and export CSV.
+8. Master admin: verify internal readiness, demo mode, and AI quality monitoring.
 
 ## Common Objections
 

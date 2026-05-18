@@ -40,11 +40,23 @@ Rubric codes are mapped to plain-language labels before returning dashboard patt
 
 ## Frontend
 
+- Dashboard pages now include a compact setup assistant when onboarding progress is not complete or no reviewed lessons exist yet.
 - `SchoolAdminPilotDashboard` now uses `/api/dashboard/intelligence`.
 - `TrainingDashboard` now uses `/api/reports/cohort-snapshot`.
 - `ReportsPage` now uses the new coaching/cohort snapshots and CSV export endpoints.
 - Mobile report tables collapse into cards where the page would otherwise become dense.
 - Empty states avoid system wording and explain what will appear after lessons are reviewed.
+
+## Onboarding Link
+
+For internal testing, start from `/onboarding` or the setup assistant before reviewing dashboard intelligence:
+
+1. Add first teacher or trainee.
+2. Plan first observation.
+3. Record or upload.
+4. Review video comments and talk-time.
+5. Return to dashboard intelligence.
+6. Open reports and export CSV.
 
 ## Demo Data
 

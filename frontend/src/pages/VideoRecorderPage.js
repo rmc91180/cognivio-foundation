@@ -35,6 +35,7 @@ export function VideoRecorderPage() {
   const [queued, setQueued] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const [lastUploadPayload, setLastUploadPayload] = useState(null);
+  const [uploadedVideoId, setUploadedVideoId] = useState("");
 
   const { data: teachersPayload } = useQuery({
     queryKey: ["teachers"],
@@ -85,9 +86,10 @@ export function VideoRecorderPage() {
         },
       });
     },
-    onSuccess: () => {
+    onSuccess: (response) => {
       toast.success(t("videoRecorderPage.uploadingQueued"));
       setQueued(true);
+      setUploadedVideoId(response?.data?.video?.id || response?.data?.id || response?.data?.video_id || "");
       setUploadProgress(0);
       setUploadError("");
       setLastUploadPayload(null);
@@ -261,7 +263,22 @@ export function VideoRecorderPage() {
                 ) : null}
                 {queued && (
                   <div className="mt-3 rounded-md bg-emerald-50 px-3 py-2 text-[11px] text-emerald-700">
-                    {t("videoRecorderPage.queuedMessage")}
+                    <div>{t("videoRecorderPage.queuedMessage")}</div>
+                    <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                      {uploadedVideoId ? (
+                        <Link to={`/videos/${uploadedVideoId}`} className="inline-flex min-h-[36px] items-center justify-center rounded-md bg-emerald-950 px-3 py-1.5 font-semibold text-white hover:bg-emerald-900">
+                          Review recording
+                        </Link>
+                      ) : null}
+                      <Link to="/dashboard" className="inline-flex min-h-[36px] items-center justify-center rounded-md border border-emerald-200 bg-white px-3 py-1.5 font-semibold text-emerald-950 hover:bg-emerald-100">
+                        Back to dashboard
+                      </Link>
+                      {activeSession?.id ? (
+                        <Link to={`/observation/new?teacher_id=${selectedTeacher}&session_id=${activeSession.id}`} className="inline-flex min-h-[36px] items-center justify-center rounded-md border border-emerald-200 bg-white px-3 py-1.5 font-semibold text-emerald-950 hover:bg-emerald-100">
+                          View observation
+                        </Link>
+                      ) : null}
+                    </div>
                   </div>
                 )}
               </div>

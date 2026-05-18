@@ -28,6 +28,7 @@ const ADMIN_ROUTES = [
   "/ops",
   "/settings/notifications",
   "/notifications",
+  "/onboarding",
 ];
 
 const TRAINING_ROUTES = [
@@ -60,6 +61,7 @@ const TEACHER_ROUTES = [
 
 const SUPER_ADMIN_ROUTES = [
   "/master-admin",
+  "/onboarding",
   "/teachers",
   "/my-insights",
   "/settings/notifications",

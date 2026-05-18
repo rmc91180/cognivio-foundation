@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Badge, ErrorState, LoadingState, Panel } from "@/components/ui";
 import { MasterAdminMetricCard, MasterAdminMetricGrid, MasterAdminPageScaffold } from "@/components/master-admin/MasterAdminPageScaffold";
+import { InternalReadinessPanel } from "@/components/master-admin/InternalReadinessPanel";
 import { demoApi, masterAdminApi } from "@/lib/api";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 
@@ -126,6 +127,8 @@ export function MasterAdminPage() {
                 </div>
               </Panel>
             ) : null}
+
+            <InternalReadinessPanel />
 
             <MasterAdminMetricGrid>
               {(data?.cards || []).map((card) => (

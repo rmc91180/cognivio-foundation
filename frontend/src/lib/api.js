@@ -145,6 +145,7 @@ export const consentApi = {
 export const masterAdminApi = {
   bootstrap: () => api.get("/api/master-admin/bootstrap"),
   overview: () => api.get("/api/master-admin/overview"),
+  internalReadiness: () => api.get("/api/admin/internal-readiness"),
   users: (params = {}) => api.get("/api/master-admin/users", { params }),
   userDetail: (userId) => api.get(`/api/master-admin/users/${userId}`),
 

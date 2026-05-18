@@ -3,7 +3,7 @@ import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import { SchoolAdminPilotDashboard } from "@/components/dashboard/SchoolAdminPilotDashboard";
-import { dashboardApi } from "@/lib/api";
+import { dashboardApi, onboardingApi } from "@/lib/api";
 
 jest.mock("@/components/LayoutShell", () => ({
   LayoutShell: ({ children }) => <div>{children}</div>,
@@ -12,6 +12,9 @@ jest.mock("@/components/LayoutShell", () => ({
 jest.mock("@/lib/api", () => ({
   dashboardApi: {
     intelligence: jest.fn(),
+  },
+  onboardingApi: {
+    status: jest.fn(),
   },
 }));
 
@@ -29,6 +32,9 @@ const renderWithClient = (ui) => {
 describe("SchoolAdminPilotDashboard", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    onboardingApi.status.mockResolvedValue({
+      data: { progress_pct: 100, counts: { reviewed_lessons: 1 }, next_step: { href: "/dashboard" } },
+    });
   });
 
   it("renders priority cards and plain-language patterns from dashboard intelligence", async () => {
