@@ -202,7 +202,7 @@ export function VideosPage() {
             </p>
             <div>
               <Link
-                to="/my-workspace"
+                to="/my-profile?returnTo=/videos"
                 className="inline-flex items-center rounded-md border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
               >
                 {t("videosPage.completeProfileCta")}

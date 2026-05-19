@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import api from "@/lib/api";
+import { LayoutShell } from "@/components/LayoutShell";
 
 const normalizeBadges = (payload) => {
   if (Array.isArray(payload)) return payload;
@@ -35,7 +36,7 @@ const formatDate = (value) => {
   }
 };
 
-export default function TeacherBadgesPage() {
+export function TeacherBadgesPage() {
   const [badges, setBadges] = useState([]);
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState("");
@@ -48,7 +49,7 @@ export default function TeacherBadgesPage() {
       setError("");
 
       try {
-        const response = await api.get("/teacher/badges");
+        const response = await api.get("/api/recognition/my-badges");
         if (!active) return;
 
         setBadges(normalizeBadges(response?.data));
@@ -76,15 +77,15 @@ export default function TeacherBadgesPage() {
   const earnedCount = useMemo(() => badges.length, [badges]);
 
   return (
-    <div className="min-h-screen bg-slate-50 px-4 py-8">
-      <div className="mx-auto max-w-5xl">
+    <LayoutShell>
+      <div className="mx-auto max-w-5xl px-4 py-8">
         <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <p className="text-sm font-semibold uppercase tracking-wide text-slate-500">
-            Teacher Growth
+            Teacher growth
           </p>
-          <h1 className="mt-1 text-3xl font-bold text-slate-900">Badges</h1>
+          <h1 className="mt-1 text-3xl font-bold text-slate-900">My Recognition</h1>
           <p className="mt-2 max-w-2xl text-slate-600">
-            Celebrate evidence of growth, consistency, and classroom practice over time.
+            Recognition you earn will appear here. When a lesson shows a strong coaching move, your school can celebrate it here.
           </p>
           <div className="mt-4 inline-flex rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700">
             {earnedCount} earned
@@ -112,10 +113,10 @@ export default function TeacherBadgesPage() {
               🏅
             </div>
             <h2 className="text-lg font-semibold text-slate-900">
-              No badges yet
+              Recognition you earn will appear here
             </h2>
             <p className="mx-auto mt-2 max-w-md text-sm text-slate-600">
-              Badges will appear here as feedback cycles identify consistent strengths and growth.
+              After a reviewed lesson highlights a strong coaching move, you’ll be able to return to it from this page.
             </p>
           </div>
         )}
@@ -151,6 +152,8 @@ export default function TeacherBadgesPage() {
           </div>
         )}
       </div>
-    </div>
+    </LayoutShell>
   );
 }
+
+export default TeacherBadgesPage;

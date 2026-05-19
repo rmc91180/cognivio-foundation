@@ -64,7 +64,7 @@ const ROLE_NAV_ITEMS = {
   ],
   teacher: [
     { to: "/my-workspace", icon: LayoutDashboard, label: "My Workspace", end: true },
-    { to: "/videos", icon: PlayCircle, label: "My Lessons" },
+    { to: "/my-lessons", icon: PlayCircle, label: "My Lessons" },
     { to: "/my-workspace/coaching", icon: MessageSquareText, label: "My Coaching" },
     { to: "/my-badges", icon: Trophy, label: "My Recognition" },
   ],
@@ -94,7 +94,7 @@ const ROLE_MOBILE_NAV_ITEMS = {
   ],
   teacher: [
     { to: "/my-workspace", icon: LayoutDashboard, label: "Home", end: true },
-    { to: "/videos", icon: PlayCircle, label: "Lessons" },
+    { to: "/my-lessons", icon: PlayCircle, label: "Lessons" },
     { to: "/my-workspace/coaching", icon: MessageSquareText, label: "Coaching" },
     { to: "/my-badges", icon: Trophy, label: "Recognition" },
   ],

@@ -201,10 +201,16 @@ export function MasterAdminUserDetailPage() {
 
       throw new Error(`Unsupported action: ${mode}`);
     },
-    onSuccess: (_, variables) => {
-      toast.success(
-        t(`masterAdminUserDetail.${variables.mode}Success`, "Account updated.")
-      );
+    onSuccess: (response, variables) => {
+      const payload = response?.data || {};
+      const emailStatus = payload.email_status || payload.email || {};
+      if (payload.ok === true && emailStatus?.warning) {
+        toast.warning(payload.message || emailStatus.warning);
+      } else {
+        toast.success(
+          payload.message || t(`masterAdminUserDetail.${variables.mode}Success`, "Account updated.")
+        );
+      }
 
       queryClient.invalidateQueries({ queryKey: ["master-admin-user-detail", userId] });
       queryClient.invalidateQueries({ queryKey: ["master-admin-users"] });

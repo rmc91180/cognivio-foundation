@@ -15,13 +15,24 @@ This runbook is for Cognivio internal rehearsal and demo readiness. Do not use r
 Local seed commands:
 
 ```powershell
+$env:DEMO_MODE="true"
 $env:PYTHONPATH="backend"
 python backend/scripts/seed_demo_data.py --persona k12
 python backend/scripts/seed_demo_data.py --persona training
 python backend/scripts/seed_demo_data.py --persona all
 ```
 
-Use `--force` only for local/dev environments where demo mode is intentionally off.
+Use `--force` only for local/dev environments where demo mode is intentionally off:
+
+```powershell
+$env:ENVIRONMENT="development"
+$env:PYTHONPATH="backend"
+python backend/scripts/seed_demo_data.py --persona all --force
+```
+
+Railway-safe demo reset should use the Master Admin controls when `DEMO_MODE=true`, or a one-off Railway command with `DEMO_MODE=true` for the job. Do not seed or reset demo data against an environment that contains real school data.
+
+`DEMO_MODE=false` disables reset controls. It does not automatically hide existing seeded demo data from Master Admin internal testing views. Demo data should stay marked as `demo_data=true` and should not be counted as real customer activity.
 
 Master Admin reset:
 
@@ -52,6 +63,17 @@ Use current internal/demo credentials from the secure team source. Do not add re
 9. Return to `/dashboard` and check coaching priorities, patterns, recent lessons, and observation gaps.
 10. Open `/reports` and export the coaching snapshot CSV.
 11. Log in as a teacher and check workspace goals, reflections, recognition, and lesson feedback.
+12. Open `/my-profile`, confirm the teacher profile can be saved, then open `/my-lessons`, `/my-workspace/coaching`, and `/my-badges`.
+
+## First-Login Teacher Flow
+
+1. Login as a newly approved teacher.
+2. Confirm the privacy consent page appears once.
+3. Accept consent and confirm the app advances to the teacher home route.
+4. Open `/my-profile` and save grade level, class/section, and subject.
+5. Open `/my-lessons` and confirm lesson recordings or a warm empty state render.
+6. Open `/record` to confirm the upload/recording path is reachable.
+7. Open `/my-workspace/coaching` and `/my-badges` and confirm neither page is blank.
 
 ## Training Internal Test
 
