@@ -90,6 +90,24 @@ Use current internal/demo credentials from the secure team source. Do not add re
 11. Confirm each gradebook reminder says “Demo reminder — LMS sync is not connected yet.”
 12. Confirm demo records stay marked as demo data and do not mix into real customer counts.
 
+## Teacher Endpoint and Admin Intelligence Hotfix Verification
+
+1. Login as an approved teacher.
+2. Open `/my-workspace`.
+3. Confirm `GET /api/teachers/me/dashboard?period=semester` returns 200.
+4. Open `/my-badges`.
+5. Confirm `GET /api/teachers/me/recognition` returns 200.
+6. If the teacher is a demo user, click **Fill my demo workspace**.
+7. Confirm `/my-workspace`, `/my-lessons`, `/my-coaching`, `/my-badges`, and `/my-profile` populate without a hard refresh.
+8. Login as a school admin.
+9. Open `/dashboard`.
+10. Confirm `GET /api/admin/workspace/dashboard?period=semester` returns 200.
+11. If the school admin workspace is demo-eligible, click **Fill demo workspace**.
+12. Confirm `/dashboard`, `/reports`, and `/teachers` populate with connected demo data.
+13. Login as a training admin and repeat the `/dashboard` smoke.
+14. Confirm `GET /api/admin/workspace/search?q=test` returns 200 for school and training admins.
+15. Confirm no red error cards appear for valid empty teacher or admin workspaces.
+
 ## Training Internal Test
 
 1. Log in as a training admin.

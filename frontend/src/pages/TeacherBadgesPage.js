@@ -1,10 +1,10 @@
 import React from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { LayoutShell } from "@/components/LayoutShell";
-import { EmptyState, ErrorState, LoadingState, PageContextHeader, Panel, SectionHeader } from "@/components/ui";
-import { teacherApi } from "@/lib/api";
+import { Button, EmptyState, ErrorState, LoadingState, PageContextHeader, Panel, SectionHeader } from "@/components/ui";
+import { demoApi, teacherApi } from "@/lib/api";
 
 const formatDate = (value) => {
   if (!value) return "";
@@ -14,10 +14,35 @@ const formatDate = (value) => {
 };
 
 export function TeacherBadgesPage() {
+  const queryClient = useQueryClient();
   const recognitionQuery = useQuery({
     queryKey: ["teacher-recognition"],
     queryFn: () => teacherApi.myRecognition().then((res) => res.data),
     retry: 1,
+  });
+  const seedMutation = useMutation({
+    mutationFn: () => demoApi.seed({ persona: "teacher", scope: "current_teacher" }),
+    onSuccess: () => {
+      toast.success("Demo workspace filled.");
+      [
+        "teacher-self-profile",
+        "teacher-dashboard",
+        "teacher-lessons",
+        "teacher-coaching",
+        "teacher-recognition",
+        "dashboard-intelligence",
+        "admin-workspace-dashboard",
+        "admin-workspace-search",
+        "teachers",
+        "reports",
+        "coaching",
+        "recognition",
+      ].forEach((key) => queryClient.invalidateQueries({ queryKey: [key] }));
+    },
+    onError: (error) => {
+      const detail = error?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : "Demo seeding is available only in demo workspaces.");
+    },
   });
   const data = recognitionQuery.data || {};
   const summary = data.summary || {};
@@ -83,10 +108,19 @@ export function TeacherBadgesPage() {
                 </div>
               </Panel>
             ) : (
-              <EmptyState
-                title="Recognition you earn will appear here."
-                message="When a reviewed lesson highlights a strong coaching move, you’ll be able to return to it from this page."
-              />
+              <Panel>
+                <EmptyState
+                  title="Recognition you earn will appear here."
+                  message="When a reviewed lesson highlights a strong coaching move, you’ll be able to return to it from this page."
+                />
+                {data.demo_eligible ? (
+                  <div className="mt-4 flex justify-center">
+                    <Button type="button" variant="secondary" onClick={() => seedMutation.mutate()} disabled={seedMutation.isPending}>
+                      {seedMutation.isPending ? "Filling..." : "Fill my demo workspace"}
+                    </Button>
+                  </div>
+                ) : null}
+              </Panel>
             )}
 
             <div className="grid gap-6 lg:grid-cols-2">

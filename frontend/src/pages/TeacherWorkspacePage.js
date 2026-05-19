@@ -49,7 +49,20 @@ export function TeacherWorkspacePage() {
     onSuccess: (response) => {
       const counts = response?.data?.counts || {};
       toast.success(`Demo workspace filled with ${counts.videos || 0} lessons and ${counts.coaching_tasks || 0} goals.`);
-      ["teacher-dashboard", "teacher-lessons", "teacher-coaching", "teacher-recognition", "teacher-self-profile"].forEach((key) =>
+      [
+        "teacher-self-profile",
+        "teacher-dashboard",
+        "teacher-lessons",
+        "teacher-coaching",
+        "teacher-recognition",
+        "dashboard-intelligence",
+        "admin-workspace-dashboard",
+        "admin-workspace-search",
+        "teachers",
+        "reports",
+        "coaching",
+        "recognition",
+      ].forEach((key) =>
         queryClient.invalidateQueries({ queryKey: [key] })
       );
     },

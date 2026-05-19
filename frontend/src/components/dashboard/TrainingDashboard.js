@@ -1,46 +1,73 @@
-import React from "react";
+import React, { useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Search } from "lucide-react";
+import { toast } from "sonner";
 import { LayoutShell } from "@/components/LayoutShell";
-import { EmptyState, LoadingState, PageHeader, Panel, SectionHeader } from "@/components/ui";
-import { reportApi } from "@/lib/api";
+import { Button, EmptyState, Field, Input, LoadingState, PageHeader, Panel, SectionHeader } from "@/components/ui";
+import { adminWorkspaceApi, demoApi } from "@/lib/api";
 import { SetupAssistantPanel } from "@/components/dashboard/SetupAssistantPanel";
 
-const formatDate = (value) => {
-  if (!value) return "Not scheduled";
-  const parsed = Date.parse(value);
-  if (Number.isNaN(parsed)) return value;
-  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(parsed));
+const invalidateWorkspaceQueries = (queryClient) => {
+  [
+    "teacher-self-profile",
+    "teacher-dashboard",
+    "teacher-lessons",
+    "teacher-coaching",
+    "teacher-recognition",
+    "dashboard-intelligence",
+    "admin-workspace-dashboard",
+    "admin-workspace-search",
+    "teachers",
+    "reports",
+    "coaching",
+    "recognition",
+  ].forEach((key) => queryClient.invalidateQueries({ queryKey: [key] }));
 };
 
 function StatCard({ label, value, hint }) {
   return (
     <Panel className="min-h-[126px]">
       <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</div>
-      <div className="mt-3 text-3xl font-semibold text-slate-950">{value}</div>
+      <div className="mt-3 text-3xl font-semibold text-slate-950">{value ?? 0}</div>
       {hint ? <div className="mt-2 text-sm leading-6 text-slate-600">{hint}</div> : null}
     </Panel>
   );
 }
 
+function SimpleList({ items, emptyTitle, render }) {
+  if (!items?.length) return <EmptyState title={emptyTitle} />;
+  return <div className="space-y-3">{items.map(render)}</div>;
+}
+
 export function TrainingDashboard() {
+  const queryClient = useQueryClient();
+  const [period, setPeriod] = useState("semester");
+  const [query, setQuery] = useState("");
   const { data, isLoading, isError } = useQuery({
-    queryKey: ["training-cohort-snapshot"],
-    queryFn: () => reportApi.cohortSnapshot().then((res) => res.data),
+    queryKey: ["admin-workspace-dashboard", "training", period],
+    queryFn: () => adminWorkspaceApi.dashboard({ period }).then((res) => res.data),
+    retry: 1,
+  });
+  const searchQuery = useQuery({
+    queryKey: ["admin-workspace-search", "training", query],
+    queryFn: () => adminWorkspaceApi.search({ q: query }).then((res) => res.data),
+    enabled: query.trim().length > 1,
+  });
+  const seedMutation = useMutation({
+    mutationFn: () => demoApi.seed({ persona: "training", scope: "current_workspace" }),
+    onSuccess: (response) => {
+      const counts = response?.data?.counts || {};
+      toast.success(`Demo workspace filled with ${counts.teachers || 0} trainee and ${counts.videos || 0} lessons.`);
+      invalidateWorkspaceQueries(queryClient);
+    },
+    onError: (error) => {
+      const detail = error?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : "Demo seeding is available only in demo workspaces.");
+    },
   });
   const summary = data?.summary || {};
-  const trainees = data?.trainee_rows || [];
-  const upcomingObservations =
-    data?.upcoming_observations ||
-    trainees
-      .filter((trainee) => trainee.next_observation_at)
-      .map((trainee) => ({
-        trainee_id: trainee.trainee_id,
-        trainee_name: trainee.trainee_name,
-        school_site: trainee.placement_site,
-        scheduled_date: trainee.next_observation_at,
-        focus_elements: [],
-      }));
+  const results = searchQuery.data?.results || [];
 
   return (
     <LayoutShell>
@@ -48,7 +75,16 @@ export function TrainingDashboard() {
         <PageHeader
           title="Supervisor Dashboard"
           description="A focused view of trainee progress, placement observations, and who needs your next touchpoint."
-          actions={<Link to="/observation/new" className="inline-flex min-h-[44px] items-center rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800">Plan observation</Link>}
+          actions={
+            <div className="flex flex-wrap gap-3">
+              {data?.demo_eligible ? (
+                <Button type="button" variant="secondary" onClick={() => seedMutation.mutate()} disabled={seedMutation.isPending}>
+                  {seedMutation.isPending ? "Filling..." : "Fill demo workspace"}
+                </Button>
+              ) : null}
+              <Link to="/observation/new" className="inline-flex min-h-[44px] items-center rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800">Plan observation</Link>
+            </div>
+          }
         />
 
         {isLoading ? <LoadingState message="Preparing your cohort view..." /> : null}
@@ -63,132 +99,146 @@ export function TrainingDashboard() {
           <div className="space-y-6">
             <SetupAssistantPanel mode="training" />
 
+            <Panel>
+              <Field label="Search this training workspace">
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-3 top-3.5 h-4 w-4 text-slate-400" />
+                  <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search trainees, observations, coaching, reports..." className="pl-9" />
+                </div>
+              </Field>
+              {query.trim().length > 1 ? (
+                <div className="mt-3 max-h-80 space-y-2 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  {searchQuery.isLoading ? <div className="text-sm text-slate-500">Searching...</div> : null}
+                  {!searchQuery.isLoading && results.length ? results.map((result, index) => (
+                    <Link key={`${result.type}-${index}`} to={result.href || "/dashboard"} className="block rounded-md bg-white p-3 text-sm hover:bg-slate-100">
+                      <div className="font-semibold text-slate-900">{result.title}</div>
+                      <div className="mt-1 text-slate-600">{result.snippet}</div>
+                      <div className="mt-1 text-xs font-medium text-slate-500">{[result.source_label, result.teacher_name].filter(Boolean).join(" • ")}</div>
+                    </Link>
+                  )) : null}
+                  {!searchQuery.isLoading && !results.length ? <div className="text-sm text-slate-500">Try a trainee name, observation, coaching note, or report.</div> : null}
+                </div>
+              ) : null}
+            </Panel>
+
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-              <StatCard label="Total trainees" value={summary.active_trainees ?? 0} hint="Student teachers connected to your program." />
-              <StatCard label="Observations this cycle" value={summary.completed_observations ?? 0} hint={`${summary.upcoming_observations ?? 0} upcoming observations planned.`} />
-              <StatCard label="On track" value={summary.trainees_on_track ?? 0} hint="Trainees with steady observation progress." />
-              <StatCard label="Needs attention" value={summary.trainees_at_risk ?? 0} hint="Start here when planning your next check-ins." />
+              <StatCard label="Active trainees" value={summary.active_trainees} hint="Student teachers connected to your program." />
+              <StatCard label="Reviewed observations" value={summary.reviewed_lessons} hint="Observation feedback ready this period." />
+              <StatCard label="Open coaching tasks" value={summary.open_coaching_tasks} hint="Next steps still in motion." />
+              <StatCard label="Reports ready" value={summary.reports_ready} hint="Cohort snapshots ready to review." />
             </div>
 
             <Panel className="space-y-4">
-              <SectionHeader
-                title="Compliance table"
-                description="Use this as the quick planning list for your observation cycle."
+              <SectionHeader title="Next best actions" description="Choose the first useful move for this cohort." />
+              <SimpleList
+                items={data?.next_best_actions || []}
+                emptyTitle="Once a few observations are reviewed, cohort priorities and patterns will appear here."
+                render={(item) => (
+                  <Link key={item.id || item.title} to={item.href || "/dashboard"} className="block rounded-md border border-slate-200 bg-white p-4 hover:bg-slate-50">
+                    <div className="font-semibold text-slate-900">{item.title}</div>
+                    <p className="mt-2 text-sm leading-6 text-slate-600">{item.description}</p>
+                  </Link>
+                )}
               />
-              {trainees.length ? (
-                <>
-                <div className="space-y-3 md:hidden">
-                  {trainees.map((trainee) => (
-                    <div key={trainee.trainee_id} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="font-semibold text-slate-900">{trainee.trainee_name}</div>
-                          <div className="mt-1 text-sm text-slate-600">{trainee.placement_site || "Placement not set"}</div>
-                        </div>
-                        <span className="shrink-0 rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-700">
-                          {trainee.status}
-                        </span>
-                      </div>
-                      <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-600">
-                        <div className="rounded-md bg-white px-3 py-2">
-                          <div className="font-semibold text-slate-900">{trainee.required_observations}</div>
-                          <div>Required</div>
-                        </div>
-                        <div className="rounded-md bg-white px-3 py-2">
-                          <div className="font-semibold text-slate-900">{trainee.completed_observations}</div>
-                          <div>Completed</div>
-                        </div>
-                      </div>
-                      <Link
-                        className="mt-3 inline-flex min-h-[44px] w-full items-center justify-center rounded-md bg-white px-3 py-2 text-sm font-semibold text-primary ring-1 ring-slate-200 hover:bg-slate-100"
-                        to={`/observation/new?teacher_id=${trainee.trainee_id}`}
-                      >
-                        Schedule observation
-                      </Link>
-                    </div>
-                  ))}
-                </div>
-                <div className="hidden overflow-x-auto md:block">
-                  <table className="min-w-full text-left text-sm">
-                    <thead className="text-xs uppercase tracking-wide text-slate-500">
-                      <tr>
-                        <th className="py-2 pr-4">Trainee</th>
-                        <th className="py-2 pr-4">Placement site</th>
-                        <th className="py-2 pr-4">Required</th>
-                        <th className="py-2 pr-4">Completed</th>
-                        <th className="py-2 pr-4">Status</th>
-                        <th className="py-2 pr-4">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {trainees.map((trainee) => (
-                        <tr key={trainee.trainee_id}>
-                          <td className="py-3 pr-4 font-medium text-slate-900">{trainee.trainee_name}</td>
-                          <td className="py-3 pr-4 text-slate-600">{trainee.placement_site || "Placement not set"}</td>
-                          <td className="py-3 pr-4 text-slate-600">{trainee.required_observations}</td>
-                          <td className="py-3 pr-4 text-slate-600">{trainee.completed_observations}</td>
-                          <td className="py-3 pr-4">
-                            <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">
-                              {trainee.status}
-                            </span>
-                          </td>
-                          <td className="py-3 pr-4">
-                            <Link className="font-medium text-primary hover:text-primary/80" to={`/observation/new?teacher_id=${trainee.trainee_id}`}>
-                              Schedule observation
-                            </Link>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                </>
-              ) : (
-                <EmptyState
-                  title="No trainees yet"
-                  message="Trainees will appear here once they are linked to your training organization."
-                />
-              )}
             </Panel>
 
             <div className="grid gap-6 xl:grid-cols-2">
               <Panel className="space-y-4">
-                <SectionHeader title="Upcoming observations" description="The next planned touchpoints across placements." />
-                {upcomingObservations.length ? (
-                  <div className="space-y-3">
-                    {upcomingObservations.map((item, index) => (
-                      <div key={`${item.trainee_id}-${item.scheduled_date || index}`} className="rounded-md border border-slate-200 bg-slate-50 p-3">
-                        <div className="font-semibold text-slate-900">{item.trainee_name}</div>
-                        <div className="mt-1 text-sm text-slate-600">{item.school_site || "Placement site not set"} • {formatDate(item.scheduled_date)}</div>
-                        {(item.focus_elements || []).length ? <div className="mt-2 text-xs text-slate-500">{item.focus_elements.join(", ")}</div> : null}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <EmptyState title="Planned observations will appear here." message="Scheduled observations for this week will appear here." />
-                )}
+                <SectionHeader title="Trainees needing attention" description="Start with trainees who need a fresh observation or coaching follow-up." />
+                <SimpleList
+                  items={data?.teacher_attention || []}
+                  emptyTitle="Trainee attention items will appear here as observations build."
+                  render={(item) => (
+                    <Link key={item.teacher_id || item.teacher_name} to={item.href || "/teachers"} className="block rounded-md border border-slate-200 bg-white p-4 hover:bg-slate-50">
+                      <div className="font-semibold text-slate-900">{item.teacher_name}</div>
+                      <p className="mt-2 text-sm text-slate-600">{item.reason}</p>
+                    </Link>
+                  )}
+                />
               </Panel>
 
               <Panel className="space-y-4">
-                <SectionHeader title="Recent observation summaries" description="A quick read on what your trainees are working on now." />
-                {(data?.recent_observations || []).length ? (
-                  <div className="space-y-3">
-                    {data.recent_observations.map((item, index) => (
-                      <div key={`${item.trainee_id}-${item.completed_date || index}`} className="rounded-md border border-slate-200 bg-white p-3">
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <div className="font-semibold text-slate-900">{item.trainee_name}</div>
-                            <div className="mt-1 text-sm leading-6 text-slate-600">{item.summary || "Once a reviewed observation is saved, the summary will appear here."}</div>
-                          </div>
-                          <span className="shrink-0 text-xs text-slate-500">{formatDate(item.completed_date)}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <EmptyState title="No recent summaries" message="Recent observation notes will appear here after lessons are reviewed." />
-                )}
+                <SectionHeader title="Recent observations" description="A quick read on what your trainees are working on now." />
+                <SimpleList
+                  items={data?.recent_lessons || []}
+                  emptyTitle="Recent observation summaries will appear after lessons are reviewed."
+                  render={(item) => (
+                    <Link key={item.assessment_id || item.video_id || item.title} to={item.href || "/reports"} className="block rounded-md border border-slate-200 bg-white p-4 hover:bg-slate-50">
+                      <div className="font-semibold text-slate-900">{item.teacher_name}</div>
+                      <p className="mt-2 text-sm leading-6 text-slate-600">{item.summary}</p>
+                    </Link>
+                  )}
+                />
               </Panel>
+            </div>
+
+            <div className="grid gap-6 xl:grid-cols-2">
+              <Panel className="space-y-4">
+                <SectionHeader title="Observation gaps" description="Plan the next touchpoints across placements." />
+                <SimpleList
+                  items={data?.observation_gaps || []}
+                  emptyTitle="Planned observations will appear here."
+                  render={(item) => (
+                    <Link key={item.teacher_id} to={item.recommended_href || `/observation/new?teacher_id=${item.teacher_id}`} className="block rounded-md border border-slate-200 bg-white p-4 hover:bg-slate-50">
+                      <div className="font-semibold text-slate-900">{item.teacher_name}</div>
+                      <p className="mt-2 text-sm text-slate-600">{item.days_since_last_observation == null ? "No observation yet this cycle." : `${item.days_since_last_observation} days since the last observation.`}</p>
+                    </Link>
+                  )}
+                />
+              </Panel>
+
+              <Panel className="space-y-4">
+                <SectionHeader title="Cohort reports and trends" description="Snapshots and patterns for your next supervisor meeting." />
+                <SimpleList
+                  items={[...(data?.reports || []), ...(data?.trends || [])]}
+                  emptyTitle="Cohort reports and trends will appear after reviewed observations."
+                  render={(item) => (
+                    <Link key={item.id || item.title} to={item.href || "/reports"} className="block rounded-md border border-slate-200 bg-white p-4 hover:bg-slate-50">
+                      <div className="font-semibold text-slate-900">{item.title}</div>
+                      <p className="mt-2 text-sm text-slate-600">{item.description}</p>
+                    </Link>
+                  )}
+                />
+              </Panel>
+            </div>
+
+            <div className="grid gap-6 xl:grid-cols-2">
+              <Panel className="space-y-4">
+                <SectionHeader title="Recognition candidates" description="Strong trainee moments worth celebrating." />
+                <SimpleList
+                  items={data?.recognition_candidates || []}
+                  emptyTitle="Recognition candidates will appear here."
+                  render={(item) => (
+                    <Link key={item.id || item.title} to={item.href || "/recognition"} className="block rounded-md border border-emerald-100 bg-emerald-50 p-4">
+                      <div className="font-semibold text-emerald-950">{item.teacher_name || item.title}</div>
+                      <p className="mt-2 text-sm leading-6 text-emerald-900">{item.description}</p>
+                    </Link>
+                  )}
+                />
+              </Panel>
+              <Panel className="space-y-4">
+                <SectionHeader title="Gradebook reminders" description="Demo-ready reminders for future program sync." />
+                <SimpleList
+                  items={data?.gradebook_reminders || []}
+                  emptyTitle="Gradebook reminders will appear here for demo workspaces."
+                  render={(item) => (
+                    <Link key={item.id || item.title} to={item.href || "/dashboard"} className="block rounded-md border border-slate-200 bg-white p-4 hover:bg-slate-50">
+                      <div className="font-semibold text-slate-900">{item.title}</div>
+                      <p className="mt-2 text-xs font-semibold text-slate-500">Demo reminder — LMS sync is not connected yet.</p>
+                    </Link>
+                  )}
+                />
+              </Panel>
+            </div>
+
+            <div className="flex justify-end">
+              <select value={period} onChange={(event) => setPeriod(event.target.value)} className="min-h-[44px] rounded-md border border-slate-200 bg-white px-3 py-2 text-sm">
+                <option value="month">Month</option>
+                <option value="quarter">Quarter</option>
+                <option value="semester">Semester</option>
+                <option value="year">Year</option>
+                <option value="all">All</option>
+              </select>
             </div>
           </div>
         ) : null}

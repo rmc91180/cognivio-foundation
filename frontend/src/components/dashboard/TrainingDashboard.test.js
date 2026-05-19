@@ -2,16 +2,21 @@ import React from "react";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { TrainingDashboard } from "@/components/dashboard/TrainingDashboard";
-import { onboardingApi, reportApi } from "@/lib/api";
+import { adminWorkspaceApi, demoApi, onboardingApi } from "@/lib/api";
 
 jest.mock("@/components/LayoutShell", () => ({
   LayoutShell: ({ children }) => <div>{children}</div>,
 }));
 
 jest.mock("@/lib/api", () => ({
-  reportApi: {
-    cohortSnapshot: jest.fn(),
+  adminWorkspaceApi: {
+    dashboard: jest.fn(),
+    search: jest.fn(),
+  },
+  demoApi: {
+    seed: jest.fn(),
   },
   onboardingApi: {
     status: jest.fn(),
@@ -35,29 +40,25 @@ describe("TrainingDashboard", () => {
     onboardingApi.status.mockResolvedValue({
       data: { progress_pct: 100, counts: { reviewed_lessons: 1 }, next_step: { href: "/dashboard" } },
     });
-    reportApi.cohortSnapshot.mockResolvedValue({
+    adminWorkspaceApi.search.mockResolvedValue({ data: { query: "", results: [] } });
+    demoApi.seed.mockResolvedValue({ data: { counts: { teachers: 1, videos: 5 } } });
+    adminWorkspaceApi.dashboard.mockResolvedValue({
       data: {
+        demo_eligible: false,
         summary: {
           active_trainees: 12,
-          completed_observations: 7,
-          upcoming_observations: 2,
-          trainees_on_track: 8,
-          trainees_at_risk: 3,
-          trainees_not_started: 1,
+          reviewed_lessons: 7,
+          open_coaching_tasks: 2,
+          reports_ready: 1,
         },
-        trainee_rows: [
-          {
-            trainee_id: "t1",
-            trainee_name: "Trainee One",
-            placement_site: "Metro Partner School",
-            required_observations: 2,
-            completed_observations: 1,
-            status: "At risk",
-            next_action: "Schedule observation",
-          },
-        ],
-        upcoming_observations: [],
-        recent_observations: [],
+        next_best_actions: [{ id: "schedule", title: "Plan a focused trainee observation", description: "Start with one useful touchpoint.", href: "/observation/new" }],
+        teacher_attention: [{ teacher_id: "t1", teacher_name: "Trainee One", reason: "Needs a fresh observation.", href: "/observation/new?teacher_id=t1" }],
+        recent_lessons: [],
+        observation_gaps: [],
+        reports: [],
+        trends: [],
+        recognition_candidates: [],
+        gradebook_reminders: [],
       },
     });
   });
@@ -69,8 +70,32 @@ describe("TrainingDashboard", () => {
       expect(screen.getByText("Supervisor Dashboard")).toBeInTheDocument();
     });
 
-    expect(await screen.findByText("Compliance table")).toBeInTheDocument();
+    expect(await screen.findByText("Trainees needing attention")).toBeInTheDocument();
     expect(screen.queryByText("Today’s coaching priorities")).not.toBeInTheDocument();
-    expect(screen.queryByText("Recognition candidates")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Fill demo workspace" })).not.toBeInTheDocument();
+  });
+
+  it("allows eligible demo training admins to fill the workspace", async () => {
+    const user = userEvent.setup();
+    adminWorkspaceApi.dashboard.mockResolvedValueOnce({
+      data: {
+        demo_eligible: true,
+        summary: {},
+        next_best_actions: [],
+        teacher_attention: [],
+        recent_lessons: [],
+        observation_gaps: [],
+        reports: [],
+        trends: [],
+        recognition_candidates: [],
+        gradebook_reminders: [],
+      },
+    });
+
+    renderWithClient(<TrainingDashboard />);
+
+    await user.click(await screen.findByRole("button", { name: "Fill demo workspace" }));
+
+    expect(demoApi.seed).toHaveBeenCalledWith({ persona: "training", scope: "current_workspace" });
   });
 });
