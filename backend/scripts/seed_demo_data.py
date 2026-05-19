@@ -42,6 +42,9 @@ DEMO_COLLECTIONS = [
     "coaching_task_reflections",
     "recognition_badges",
     "lesson_recognition_events",
+    "teacher_face_profiles",
+    "teacher_face_references",
+    "gradebook_reminders",
     "observations",
     "observation_sessions",
     "schedules",
@@ -289,7 +292,13 @@ def build_demo_documents(persona: str) -> Dict[str, List[Dict[str, Any]]]:
             email = f"{name.lower().replace(' ', '.')}@demo.cognivio.local"
             docs["teachers"].append(_demo_doc("k12", id=teacher_id, name=name, email=email, subject=subject, grade_level=grade, school_id=school_id, organization_id=org_id, created_by=admin_id, manager_user_id=admin_id, created_at=created_at, at_risk=idx in {2, 5}))
             if idx == 0:
+                docs["teachers"][-1].update(subjects=[subject, "Small-group discussion"], primary_subject=subject, class_section="Period 2")
                 docs["users"].append(_demo_doc("k12", id="demo-k12-teacher-login", email=email, name=name, password=password, role="teacher", tenant_role="teacher", approval_status="approved", is_active=True, teacher_id=teacher_id, organization_id=org_id, organization_name="Westbrook Elementary", school_id=school_id, school_name="Westbrook Elementary", manager_user_id=admin_id, manager_name="Principal Sarah Chen", created_at=created_at))
+                profile_id = f"demo-k12-{teacher_id}-privacy-profile"
+                docs["teacher_face_profiles"].append(_demo_doc("k12", id=profile_id, teacher_id=teacher_id, user_id="demo-k12-teacher-login", workspace_id=org_id, status="active", profile_version=1, reference_count=1, quality_score=1.0, embedding_model="opencv-sface", embedding_version="demo-contract-v1", created_at=created_at, updated_at=created_at, last_enrolled_at=created_at, needs_refresh=False, warnings=[]))
+                docs["teacher_face_references"].append(_demo_doc("k12", id=f"demo-k12-{teacher_id}-reference-1", teacher_id=teacher_id, user_id="demo-k12-teacher-login", workspace_id=org_id, profile_id=profile_id, reference_type="image", filename="demo-teacher-reference.jpg", file_path=None, file_url=None, s3_key=f"demo/privacy/{teacher_id}/reference-1.jpg", status="ready", embedding=[], quality_checks={"validation_mode": "demo_metadata"}, created_at=created_at, updated_at=created_at, retention_expires_at=_iso(_now() + timedelta(days=365))))
+                for reminder_idx, reminder_status in enumerate(["overdue", "due_soon", "completed"], start=1):
+                    docs["gradebook_reminders"].append(_demo_doc("k12", id=f"demo-k12-{teacher_id}-gradebook-{reminder_idx}", teacher_id=teacher_id, workspace_id=org_id, title=f"Gradebook reminder {reminder_idx}", description="Review the latest class entries before your next coaching conversation.", status=reminder_status, due_at=_iso(_now() + timedelta(days=reminder_idx - 2)), href="/my-workspace?section=gradebook", created_at=created_at, updated_at=created_at))
             if idx < 3:
                 lesson_docs = _coach_assessment("k12", docs["teachers"][-1], admin_id, idx + 1, idx + 1, with_audio=idx == 0)
                 docs["videos"].append(lesson_docs["video"])
@@ -305,6 +314,7 @@ def build_demo_documents(persona: str) -> Dict[str, List[Dict[str, Any]]]:
                 docs["observation_sessions"].append(_demo_doc("k12", id="demo-k12-planned-observation-new-teacher", workspace_id=org_id, observer_id=admin_id, teacher_id=teacher_id, teacher_name=name, focus_elements=["Student discussion"], focus_note="Watch for one moment where students build on each other's thinking.", personal_goals=[], status="pending", created_at=created_at, updated_at=created_at))
         for idx, teacher_id in enumerate(teacher_ids[:5]):
             docs["coaching_tasks"].append(_demo_doc("k12", id=f"demo-k12-task-{idx + 1}", workspace_id=org_id, observer_id=admin_id, teacher_id=teacher_id, teacher_name=teacher_specs[idx][0], title="Try one deeper student discussion prompt", suggested_action="Choose one student answer and ask the class to build on it before you move on.", priority="medium", priority_rank=50, status="open", created_at=created_at, updated_at=None))
+        docs["coaching_task_reflections"].append(_demo_doc("k12", id="demo-k12-teacher-login-reflection-1", task_id="demo-k12-task-1", teacher_id=teacher_ids[0], author_user_id="demo-k12-teacher-login", tried="I asked students to build on one answer.", happened="Two more students added their reasoning before I summarized.", text="Two more students added their reasoning before I summarized.", created_at=created_at, updated_at=None))
         for idx, teacher_id in enumerate(teacher_ids[5:7]):
             docs["coaching_tasks"].append(_demo_doc("k12", id=f"demo-k12-completed-task-{idx + 1}", workspace_id=org_id, observer_id=admin_id, teacher_id=teacher_id, teacher_name=teacher_specs[idx + 5][0], title="Add a quick partner rehearsal", suggested_action="Let students rehearse their answer with a partner before whole-group share.", priority="low", priority_rank=25, status="completed", created_at=created_at, updated_at=created_at, completed_at=created_at))
         for idx, teacher_id in enumerate(teacher_ids[:2]):
@@ -325,6 +335,13 @@ def build_demo_documents(persona: str) -> Dict[str, List[Dict[str, Any]]]:
             docs["teachers"].append(_demo_doc("training", id=trainee_id, name=name, email=f"trainee{idx + 1}@demo.cognivio.local", subject="Clinical Practice", grade_level="Residency", department="Teacher Education", organization_id=org_id, created_by=admin_id, manager_user_id=admin_id, placement_site=f"Metro Partner School {1 + (idx % 4)}", school_site=f"Metro Partner School {1 + (idx % 4)}", created_at=created_at))
             docs["trainee_placements"].append(_demo_doc("training", id=f"demo-placement-{idx + 1}", workspace_id=org_id, trainee_id=trainee_id, school_site=f"Metro Partner School {1 + (idx % 4)}", mentor_teacher=f"Mentor {idx + 1}", status="active", created_by=admin_id, created_at=created_at, updated_at=created_at))
             if idx < 5:
+                if idx == 0:
+                    docs["teachers"][-1].update(subjects=["Clinical Practice", "Small-group instruction"], primary_subject="Clinical Practice", class_section="Residency Seminar")
+                    docs["users"].append(_demo_doc("training", id="demo-training-trainee-login", email=f"trainee{idx + 1}@demo.cognivio.local", name=name, password=password, role="teacher", tenant_role="teacher", approval_status="approved", is_active=True, teacher_id=trainee_id, organization_id=org_id, organization_name="Metro University Teacher Ed", organization_type="training", manager_user_id=admin_id, manager_name="Dr. James Okonkwo", created_at=created_at))
+                    profile_id = f"demo-training-{trainee_id}-privacy-profile"
+                    docs["teacher_face_profiles"].append(_demo_doc("training", id=profile_id, teacher_id=trainee_id, user_id="demo-training-trainee-login", workspace_id=org_id, status="active", profile_version=1, reference_count=1, quality_score=1.0, embedding_model="opencv-sface", embedding_version="demo-contract-v1", created_at=created_at, updated_at=created_at, last_enrolled_at=created_at, needs_refresh=False, warnings=[]))
+                    docs["teacher_face_references"].append(_demo_doc("training", id=f"demo-training-{trainee_id}-reference-1", teacher_id=trainee_id, user_id="demo-training-trainee-login", workspace_id=org_id, profile_id=profile_id, reference_type="image", filename="demo-trainee-reference.jpg", file_path=None, file_url=None, s3_key=f"demo/privacy/{trainee_id}/reference-1.jpg", status="ready", embedding=[], quality_checks={"validation_mode": "demo_metadata"}, created_at=created_at, updated_at=created_at, retention_expires_at=_iso(_now() + timedelta(days=365))))
+                    docs["gradebook_reminders"].append(_demo_doc("training", id=f"demo-training-{trainee_id}-gradebook-1", teacher_id=trainee_id, workspace_id=org_id, title="Gradebook reminder", description="Review the latest placement entries before your supervisor meeting.", status="due_soon", due_at=_iso(_now() + timedelta(days=2)), href="/my-workspace?section=gradebook", created_at=created_at, updated_at=created_at))
                 lesson_docs = _coach_assessment("training", docs["teachers"][-1], admin_id, idx + 1, idx + 1, with_audio=idx == 0)
                 docs["videos"].append(lesson_docs["video"])
                 docs["assessments"].append(lesson_docs["assessment"])
@@ -353,24 +370,30 @@ async def reset_demo_data_for_persona(db: Any, persona: str) -> Dict[str, Any]:
         "assessments_seeded": 0,
         "tasks_seeded": 0,
         "badges_seeded": 0,
+        "reference_images_seeded": 0,
+        "gradebook_reminders_seeded": 0,
     }
     deleted: Dict[str, int] = {}
 
     for selected in personas:
         for collection_name in DEMO_COLLECTIONS:
-            collection = getattr(db, collection_name)
+            collection = getattr(db, collection_name, None)
+            if collection is None:
+                continue
             result = await collection.delete_many({"demo_data": True, "demo_persona": selected})
             deleted[collection_name] = deleted.get(collection_name, 0) + result.deleted_count
 
         docs_by_collection = build_demo_documents(selected)
         for collection_name, docs in docs_by_collection.items():
-            collection = getattr(db, collection_name)
-            if docs:
+            collection = getattr(db, collection_name, None)
+            if docs and collection is not None:
                 await collection.insert_many(docs)
         totals["teachers_seeded"] += len(docs_by_collection.get("teachers", []))
         totals["assessments_seeded"] += len(docs_by_collection.get("assessments", []))
         totals["tasks_seeded"] += len(docs_by_collection.get("coaching_tasks", []))
         totals["badges_seeded"] += len(docs_by_collection.get("recognition_badges", []))
+        totals["reference_images_seeded"] += len(docs_by_collection.get("teacher_face_references", []))
+        totals["gradebook_reminders_seeded"] += len(docs_by_collection.get("gradebook_reminders", []))
 
     return {
         "reset_at": _iso(_now()),

@@ -1,156 +1,116 @@
-import React, { useEffect, useMemo, useState } from "react";
-import api from "@/lib/api";
+import React from "react";
+import { Link } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { LayoutShell } from "@/components/LayoutShell";
-
-const normalizeBadges = (payload) => {
-  if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload?.badges)) return payload.badges;
-  if (Array.isArray(payload?.items)) return payload.items;
-  if (Array.isArray(payload?.data)) return payload.data;
-  return [];
-};
-
-const badgeTitle = (badge) =>
-  badge?.title || badge?.name || badge?.badge_name || badge?.type || "Badge";
-
-const badgeDescription = (badge) =>
-  badge?.description ||
-  badge?.summary ||
-  badge?.message ||
-  "Recognition earned through observed professional growth.";
-
-const badgeDate = (badge) =>
-  badge?.earned_at ||
-  badge?.earnedAt ||
-  badge?.created_at ||
-  badge?.createdAt ||
-  badge?.awarded_at ||
-  badge?.awardedAt;
+import { EmptyState, ErrorState, LoadingState, PageContextHeader, Panel, SectionHeader } from "@/components/ui";
+import { teacherApi } from "@/lib/api";
 
 const formatDate = (value) => {
   if (!value) return "";
-  try {
-    return new Date(value).toLocaleDateString();
-  } catch {
-    return "";
-  }
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) return "";
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(parsed));
 };
 
 export function TeacherBadgesPage() {
-  const [badges, setBadges] = useState([]);
-  const [status, setStatus] = useState("loading");
-  const [error, setError] = useState("");
+  const recognitionQuery = useQuery({
+    queryKey: ["teacher-recognition"],
+    queryFn: () => teacherApi.myRecognition().then((res) => res.data),
+    retry: 1,
+  });
+  const data = recognitionQuery.data || {};
+  const summary = data.summary || {};
+  const accolades = data.accolades || data.badges || [];
+  const highlightedMoments = data.highlighted_moments || [];
+  const spotlightLessons = data.spotlight_lessons || [];
 
-  useEffect(() => {
-    let active = true;
-
-    const loadBadges = async () => {
-      setStatus("loading");
-      setError("");
-
-      try {
-        const response = await api.get("/api/recognition/my-badges");
-        if (!active) return;
-
-        setBadges(normalizeBadges(response?.data));
-        setStatus("ready");
-      } catch (err) {
-        if (!active) return;
-
-        setError(
-          err?.response?.data?.detail ||
-            err?.message ||
-            "Badges are not available right now."
-        );
-        setBadges([]);
-        setStatus("error");
-      }
-    };
-
-    loadBadges();
-
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  const earnedCount = useMemo(() => badges.length, [badges]);
+  const copyShare = async (url) => {
+    try {
+      await navigator.clipboard?.writeText(url);
+      toast.success("Share link copied.");
+    } catch {
+      toast.error("Share link could not be copied right now.");
+    }
+  };
 
   return (
     <LayoutShell>
-      <div className="mx-auto max-w-5xl px-4 py-8">
-        <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-          <p className="text-sm font-semibold uppercase tracking-wide text-slate-500">
-            Teacher growth
-          </p>
-          <h1 className="mt-1 text-3xl font-bold text-slate-900">My Recognition</h1>
-          <p className="mt-2 max-w-2xl text-slate-600">
-            Recognition you earn will appear here. When a lesson shows a strong coaching move, your school can celebrate it here.
-          </p>
-          <div className="mt-4 inline-flex rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700">
-            {earnedCount} earned
-          </div>
-        </div>
+      <div className="mx-auto max-w-6xl px-4 py-5 sm:px-6 sm:py-6">
+        <PageContextHeader
+          breadcrumbs={[{ label: "My Workspace", to: "/my-workspace" }, { label: "Recognition" }]}
+          title="Your growth deserves to be seen."
+          description="Return to Cognivio accolades, highlighted moments, and spotlight lessons from your reviewed recordings."
+          badge="Recognition"
+        />
 
-        {status === "loading" && (
-          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <p className="text-slate-600">Loading badges…</p>
-          </div>
-        )}
+        {recognitionQuery.isLoading ? <LoadingState message="Opening your recognition..." /> : null}
+        {recognitionQuery.isError ? <ErrorState title="Recognition could not be opened" message="Try again in a moment. Your earned recognition is still saved." /> : null}
 
-        {status === "error" && (
-          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-6 shadow-sm">
-            <h2 className="font-semibold text-amber-900">
-              Badges could not be loaded
-            </h2>
-            <p className="mt-2 text-sm text-amber-800">{error}</p>
-          </div>
-        )}
-
-        {status === "ready" && badges.length === 0 && (
-          <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm">
-            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-slate-100 text-2xl">
-              🏅
+        {!recognitionQuery.isLoading && !recognitionQuery.isError ? (
+          <div className="space-y-6">
+            <div className="grid gap-4 sm:grid-cols-3">
+              <Panel>
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Total earned</div>
+                <div className="mt-2 text-3xl font-bold text-slate-950">{summary.total_earned || 0}</div>
+              </Panel>
+              <Panel>
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">This month</div>
+                <div className="mt-2 text-3xl font-bold text-slate-950">{summary.this_month || 0}</div>
+              </Panel>
+              <Panel>
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Latest accolade</div>
+                <div className="mt-2 text-lg font-semibold text-slate-950">{summary.latest_title || "Recognition will appear here"}</div>
+              </Panel>
             </div>
-            <h2 className="text-lg font-semibold text-slate-900">
-              Recognition you earn will appear here
-            </h2>
-            <p className="mx-auto mt-2 max-w-md text-sm text-slate-600">
-              After a reviewed lesson highlights a strong coaching move, you’ll be able to return to it from this page.
-            </p>
-          </div>
-        )}
 
-        {status === "ready" && badges.length > 0 && (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {badges.map((badge, index) => {
-              const id = badge?.id || badge?._id || index;
-              const date = badgeDate(badge);
+            {accolades.length ? (
+              <Panel className="space-y-4">
+                <SectionHeader title="Cognivio accolades" description="Celebrations tied to real lesson feedback and highlighted teaching moves." />
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  {accolades.map((item) => (
+                    <article key={item.id} className="rounded-xl border border-amber-100 bg-amber-50 p-5">
+                      {item.image_url ? <img src={item.image_url} alt="" className="mb-4 h-28 w-full rounded-lg object-cover" /> : null}
+                      <h2 className="text-lg font-semibold text-amber-950">{item.title || "Cognivio accolade"}</h2>
+                      <p className="mt-2 text-sm leading-6 text-amber-900">{item.description}</p>
+                      {item.earned_at ? <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-amber-800">Earned {formatDate(item.earned_at)}</p> : null}
+                      <div className="mt-4 flex flex-wrap gap-3">
+                        {item.video_id ? <Link to={`/videos/${item.video_id}`} className="text-sm font-semibold text-amber-950 underline">Open lesson</Link> : null}
+                        {item.share_url ? <button type="button" onClick={() => copyShare(item.share_url)} className="text-sm font-semibold text-amber-950 underline">Copy share link</button> : null}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </Panel>
+            ) : (
+              <EmptyState
+                title="Recognition you earn will appear here."
+                message="When a reviewed lesson highlights a strong coaching move, you’ll be able to return to it from this page."
+              />
+            )}
 
-              return (
-                <article
-                  key={id}
-                  className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
-                >
-                  <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-slate-100 text-2xl">
-                    {badge?.icon || "🏅"}
-                  </div>
-                  <h2 className="text-lg font-semibold text-slate-900">
-                    {badgeTitle(badge)}
-                  </h2>
-                  <p className="mt-2 text-sm leading-6 text-slate-600">
-                    {badgeDescription(badge)}
-                  </p>
-                  {date && (
-                    <p className="mt-4 text-xs font-medium uppercase tracking-wide text-slate-500">
-                      Earned {formatDate(date)}
-                    </p>
-                  )}
-                </article>
-              );
-            })}
+            <div className="grid gap-6 lg:grid-cols-2">
+              <Panel className="space-y-4">
+                <SectionHeader title="Highlighted Moments" description="Lesson moments worth revisiting and celebrating." />
+                {highlightedMoments.length ? highlightedMoments.map((item) => (
+                  <Link key={`${item.id}-moment`} to={item.href || `/videos/${item.video_id}`} className="block rounded-lg border border-slate-200 bg-slate-50 p-4 hover:bg-white">
+                    <div className="font-semibold text-slate-900">{item.title}</div>
+                    <p className="mt-2 text-sm leading-6 text-slate-700">{item.description}</p>
+                  </Link>
+                )) : <EmptyState title="Highlighted moments will appear after recognition is awarded." />}
+              </Panel>
+              <Panel className="space-y-4">
+                <SectionHeader title="Spotlight Lessons" description="Reviewed lessons you may want to return to before a coaching conversation." />
+                {spotlightLessons.length ? spotlightLessons.map((item) => (
+                  <Link key={`${item.id}-spotlight`} to={item.href || `/videos/${item.video_id}`} className="block rounded-lg border border-slate-200 bg-slate-50 p-4 hover:bg-white">
+                    <div className="font-semibold text-slate-900">{item.lesson_title || item.title}</div>
+                    <p className="mt-2 text-sm leading-6 text-slate-700">{item.description}</p>
+                  </Link>
+                )) : <EmptyState title="Spotlight lessons will appear here as your reviewed lessons build up." />}
+              </Panel>
+            </div>
           </div>
-        )}
+        ) : null}
       </div>
     </LayoutShell>
   );

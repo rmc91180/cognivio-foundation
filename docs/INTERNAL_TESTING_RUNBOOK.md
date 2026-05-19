@@ -73,7 +73,22 @@ Use current internal/demo credentials from the secure team source. Do not add re
 4. Open `/my-profile` and save grade level, class/section, and subject.
 5. Open `/my-lessons` and confirm lesson recordings or a warm empty state render.
 6. Open `/record` to confirm the upload/recording path is reachable.
-7. Open `/my-workspace/coaching` and `/my-badges` and confirm neither page is blank.
+7. Open `/my-coaching` and `/my-badges` and confirm neither page is blank.
+
+## Teacher Experience V1 Demo Flow
+
+1. Seed demo teacher data locally with `DEMO_MODE=true` and `python backend/scripts/seed_demo_data.py --persona all`.
+2. Sign in as a seeded teacher persona or open a demo teacher workspace.
+3. Open `/my-workspace` and use “Fill my demo workspace” if the account is demo-eligible.
+4. Search for a lesson moment, coaching goal, recognition item, or gradebook reminder.
+5. Open `/my-lessons` and filter by status, subject, or period.
+6. Open `/record`; teacher users should not need to select themselves.
+7. Open `/my-profile`, edit teaching details, and upload a privacy reference image.
+8. Open `/privacy`, review consent, then use “Back to Teacher Profile.”
+9. Open `/my-coaching`, add a reflection to a goal or shared moment.
+10. Open `/my-badges` and review Cognivio accolades, highlighted moments, and spotlight lessons.
+11. Confirm each gradebook reminder says “Demo reminder — LMS sync is not connected yet.”
+12. Confirm demo records stay marked as demo data and do not mix into real customer counts.
 
 ## Training Internal Test
 

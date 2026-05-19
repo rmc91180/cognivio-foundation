@@ -6,7 +6,7 @@ import { ConsentPage } from "@/pages/ConsentPage";
 import { TeacherLessonsPage } from "@/pages/TeacherLessonsPage";
 import { TeacherCoachingPage } from "@/pages/TeacherCoachingPage";
 import TeacherBadgesPage from "@/pages/TeacherBadgesPage";
-import api, { consentApi, teacherApi } from "@/lib/api";
+import { consentApi, teacherApi } from "@/lib/api";
 import { findBannedCoachVoicePhrases } from "@/lib/coachVoice";
 
 jest.mock("@/components/LayoutShell", () => ({
@@ -24,9 +24,6 @@ jest.mock("@/hooks/useAuth", () => ({
 
 jest.mock("@/lib/api", () => ({
   __esModule: true,
-  default: {
-    get: jest.fn(),
-  },
   consentApi: {
     status: jest.fn(),
     grant: jest.fn(),
@@ -34,6 +31,8 @@ jest.mock("@/lib/api", () => ({
   teacherApi: {
     myLessons: jest.fn(),
     myCoaching: jest.fn(),
+    myRecognition: jest.fn(),
+    createReflection: jest.fn(),
     currentProfile: jest.fn(),
     updateCurrentProfile: jest.fn(),
   },
@@ -76,14 +75,15 @@ describe("end-to-end app flow hotfix pages", () => {
       data: {
         profile_required: true,
         privacy_profile_required: false,
+        readiness: { teacher_profile_complete: false, missing_items: [{ id: "profile", label: "Finish your teacher profile", href: "/my-profile" }] },
         lessons: [],
       },
     });
 
     renderWithProviders(<TeacherLessonsPage />);
 
-    const cta = await screen.findByRole("link", { name: /Complete teacher profile/i });
-    expect(cta).toHaveAttribute("href", "/my-profile?returnTo=/my-lessons");
+    const cta = await screen.findByRole("link", { name: /Next step/i });
+    expect(cta).toHaveAttribute("href", "/my-profile");
   });
 
   it("renders teacher lesson cards without banned system copy", async () => {
@@ -91,6 +91,7 @@ describe("end-to-end app flow hotfix pages", () => {
       data: {
         profile_required: false,
         privacy_profile_required: false,
+        readiness: { teacher_profile_complete: true, missing_items: [] },
         lessons: [
           {
             video_id: "video-1",
@@ -116,8 +117,9 @@ describe("end-to-end app flow hotfix pages", () => {
         profile_required: false,
         active_tasks: [],
         shared_moments: [],
-        reflections: [],
+        teacher_reflections: [],
         messages: [],
+        readiness: { missing_items: [] },
       },
     });
 
@@ -127,11 +129,11 @@ describe("end-to-end app flow hotfix pages", () => {
   });
 
   it("renders recognition empty state from the canonical my-badges endpoint", async () => {
-    api.get.mockResolvedValue({ data: { badges: [] } });
+    teacherApi.myRecognition.mockResolvedValue({ data: { badges: [], accolades: [], highlighted_moments: [], spotlight_lessons: [], summary: { total_earned: 0 } } });
 
     renderWithProviders(<TeacherBadgesPage />);
 
     expect(await screen.findByText(/Recognition you earn will appear here/i)).toBeInTheDocument();
-    expect(api.get).toHaveBeenCalledWith("/api/recognition/my-badges");
+    expect(teacherApi.myRecognition).toHaveBeenCalled();
   });
 });

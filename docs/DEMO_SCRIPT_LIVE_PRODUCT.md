@@ -58,6 +58,17 @@ Use this sequence when showing the internal-testing admin flow:
 7. Reports: show the cohort snapshot and export CSV.
 8. Master admin: verify internal readiness, demo mode, and AI quality monitoring.
 
+## Teacher Experience Walkthrough
+
+1. Open `/my-workspace` as a demo teacher and click “Fill my demo workspace” if the page needs data.
+2. Use search to find a lesson moment, coaching goal, recognition item, or gradebook reminder.
+3. Open `/my-lessons`, filter by reviewed lessons, and open a recording.
+4. Open `/record` and show that the teacher is implied; add a lesson title, subject, and class/section.
+5. Open `/my-profile`, edit subjects/classes, and add a privacy reference image.
+6. Open `/my-coaching`, add a reflection to a goal or shared moment.
+7. Open `/my-badges` and show Cognivio accolades, highlighted moments, and spotlight lessons.
+8. Point out that gradebook reminders are demo placeholders and that LMS sync is not connected yet.
+
 ## Common Objections
 
 Teachers won't want to be recorded.

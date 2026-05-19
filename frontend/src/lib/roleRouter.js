@@ -51,7 +51,13 @@ const TRAINING_ROUTES = [
 const TEACHER_ROUTES = [
   "/my-workspace",
   "/my-profile",
+  "/my-lessons",
+  "/my-coaching",
   "/my-badges",
+  "/teacher",
+  "/lessons",
+  "/coaching",
+  "/recognition",
   "/videos",
   "/record",
   "/all-star-library",
@@ -218,8 +224,10 @@ export const getRoleShellConfig = (user) => {
       label: "Teacher",
       navItems: [
         { label: "My Workspace", to: "/my-workspace" },
-        { label: "My Lessons", to: "/my-lessons" },
-        { label: "My Coaching", to: "/my-workspace/coaching" },
+        { label: "Lessons", to: "/my-lessons" },
+        { label: "Coaching", to: "/my-coaching" },
+        { label: "Recognition", to: "/my-badges" },
+        { label: "Teacher Profile", to: "/my-profile" },
       ],
     };
   }

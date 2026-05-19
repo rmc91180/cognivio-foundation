@@ -18,12 +18,14 @@ def _now_iso() -> str:
 
 async def upload_video(
     file: legacy.UploadFile,
-    teacher_id: str,
+    teacher_id: Optional[str],
     workspace_id: Optional[str] = None,
     session_id: Optional[str] = None,
     *,
     request: Optional[legacy.Request] = None,
     subject: Optional[str] = None,
+    lesson_title: Optional[str] = None,
+    class_section: Optional[str] = None,
     recorded_at: Optional[str] = None,
     current_user: Optional[dict] = None,
 ) -> legacy.VideoUploadResponse:
@@ -43,7 +45,14 @@ async def upload_video(
         normalized_recorded_at = legacy._parse_optional_iso_datetime(recorded_at, "recorded_at")
         upload_time = _now_iso()
 
-        teacher = await teacher_repository.get_teacher_or_404(teacher_id, current_user)
+        if not teacher_id and legacy._get_user_tenant_role(current_user) == "teacher":
+            teacher = await legacy._get_current_teacher_for_workspace(current_user)
+            teacher_id = teacher["id"]
+        elif not teacher_id:
+            raise legacy.HTTPException(status_code=400, detail="Teacher is required for admin uploads")
+        else:
+            teacher = await teacher_repository.get_teacher_or_404(teacher_id, current_user)
+
         observation_session = None
         if session_id:
             observation_session = await legacy._get_observation_session_or_404(session_id, current_user)
@@ -66,6 +75,11 @@ async def upload_video(
             )
 
         subject = subject or teacher.get("subject")
+        lesson_title = legacy._clean_optional_string(lesson_title) or file.filename or subject
+        class_section = legacy._clean_optional_string(class_section) or teacher.get("class_section") or teacher.get("department")
+        reference_images = await legacy.get_teacher_reference_images_for_blur(teacher_id, workspace_id or legacy._workspace_id_for_user(current_user))
+        reference_count = len(reference_images)
+        reference_status = "ready" if reference_count else "missing_reference_images"
         video_id = str(legacy.uuid.uuid4())
         filename = f"{video_id}{file_ext}"
         teacher_dir = legacy.UPLOAD_DIR / "videos" / teacher_id
@@ -159,12 +173,17 @@ async def upload_video(
             "processing_completed_at": None,
             "processing_failed_at": None,
             "subject": subject,
+            "lesson_title": lesson_title,
+            "class_section": class_section,
             "recorded_at": normalized_recorded_at,
             "upload_date": upload_time,
             "analysis_language": preferred_language,
             "workspace_id": workspace_id,
             "session_id": session_id,
             "upload_source": upload_source,
+            "teacher_reference_images_available": reference_count > 0,
+            "teacher_reference_image_count": reference_count,
+            "privacy_blur_teacher_match_status": reference_status,
         }
         await video_repository.insert_video(video_doc)
 
@@ -188,6 +207,8 @@ async def upload_video(
                 "observation_session_id": session_id,
                 "file_path": relative_path,
                 "subject": subject,
+                "lesson_title": lesson_title,
+                "class_section": class_section,
                 "recorded_at": normalized_recorded_at,
                 "privacy_status": legacy.PrivacyProcessingStatus.QUEUED.value,
                 "analysis_status": legacy.VideoProcessingStatus.QUEUED.value,
@@ -195,6 +216,9 @@ async def upload_video(
                 "uploaded_at": upload_time,
                 "workspace_id": workspace_id,
                 "session_id": session_id,
+                "teacher_reference_images_available": reference_count > 0,
+                "teacher_reference_image_count": reference_count,
+                "privacy_blur_teacher_match_status": reference_status,
             }
         )
 
@@ -251,10 +275,15 @@ async def upload_video(
             transcode_status=transcode_status,
             upload_date=video_doc["upload_date"],
             subject=subject,
+            lesson_title=lesson_title,
+            class_section=class_section,
             recorded_at=normalized_recorded_at,
             file_path=relative_path,
             file_size_bytes=size,
             content_type=content_type or "video/mp4",
+            teacher_reference_images_available=reference_count > 0,
+            teacher_reference_image_count=reference_count,
+            privacy_blur_teacher_match_status=reference_status,
         )
 
     except legacy.HTTPException:
