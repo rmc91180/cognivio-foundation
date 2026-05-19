@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -40,21 +40,6 @@ const referenceImageValidationMessage = (file) => {
   return "Please choose a PNG, JPG, or WebP image.";
 };
 
-const createSafeReferencePreviewUrl = (file) => {
-  if (!isSafeReferenceImageFile(file)) {
-    throw new Error(referenceImageValidationMessage(file));
-  }
-  return URL.createObjectURL(file);
-};
-
-const isSafeReferencePreviewUrl = (url) => typeof url === "string" && url.startsWith("blob:");
-
-const revokeReferencePreviewUrl = (url) => {
-  if (isSafeReferencePreviewUrl(url)) {
-    URL.revokeObjectURL(url);
-  }
-};
-
 const toSafeStoredImageUrl = (url) => {
   if (typeof url !== "string" || !url.trim()) return "";
 
@@ -72,14 +57,18 @@ const toSafeStoredImageUrl = (url) => {
   return "";
 };
 
+const formatFileSize = (bytes) => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 KB";
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
 export function TeacherSelfProfilePage() {
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
   const { refreshUser } = useAuth();
   const returnTo = useMemo(() => profileReturnTarget(location), [location]);
-  const [previewUrl, setPreviewUrl] = useState("");
-  const previewUrlRef = useRef("");
   const [selectedImage, setSelectedImage] = useState(null);
   const [form, setForm] = useState({
     name: "",
@@ -90,19 +79,6 @@ export function TeacherSelfProfilePage() {
     primary_subject: "",
     category: "",
   });
-
-  const updatePreviewUrl = (nextUrl) => {
-    revokeReferencePreviewUrl(previewUrlRef.current);
-    previewUrlRef.current = nextUrl || "";
-    setPreviewUrl(nextUrl || "");
-  };
-
-  useEffect(() => {
-    return () => {
-      revokeReferencePreviewUrl(previewUrlRef.current);
-      previewUrlRef.current = "";
-    };
-  }, []);
 
   const profileQuery = useQuery({
     queryKey: ["teacher-self-profile"],
@@ -174,7 +150,6 @@ export function TeacherSelfProfilePage() {
     onSuccess: () => {
       toast.success("Reference image saved.");
       setSelectedImage(null);
-      updatePreviewUrl("");
       invalidateTeacherPages();
     },
     onError: (error) => {
@@ -214,20 +189,17 @@ export function TeacherSelfProfilePage() {
 
     if (!file) {
       setSelectedImage(null);
-      updatePreviewUrl("");
       return;
     }
 
-    try {
-      const nextPreviewUrl = createSafeReferencePreviewUrl(file);
-      setSelectedImage(file);
-      updatePreviewUrl(nextPreviewUrl);
-    } catch (error) {
+    if (!isSafeReferenceImageFile(file)) {
       setSelectedImage(null);
-      updatePreviewUrl("");
       event.target.value = "";
-      toast.error(error?.message || "Please choose a PNG, JPG, or WebP image.");
+      toast.error(referenceImageValidationMessage(file));
+      return;
     }
+
+    setSelectedImage(file);
   };
 
   const readiness = profileQuery.data?.readiness || {};
@@ -235,7 +207,6 @@ export function TeacherSelfProfilePage() {
   const demoEligible = Boolean(profileQuery.data?.demo_eligible);
   const canSave = form.grade_level.trim() && (form.primary_subject.trim() || form.subject.trim() || splitSubjects(form.subjectsText).length);
   const pageTitle = readiness.teacher_profile_complete ? "Teacher Profile" : "Finish your teacher profile";
-  const safePreviewUrl = isSafeReferencePreviewUrl(previewUrl) ? previewUrl : "";
 
   return (
     <LayoutShell>
@@ -329,9 +300,21 @@ export function TeacherSelfProfilePage() {
                   Choose reference image
                   <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={handleImageChange} />
                 </label>
-                {safePreviewUrl ? (
-                  <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
-                    <img src={safePreviewUrl} alt="Selected reference preview" className="h-28 w-28 rounded-lg object-cover" />
+
+                {selectedImage ? (
+                  <div className="mt-4 flex flex-col gap-3 rounded-lg border border-slate-200 bg-slate-50 p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-lg bg-white text-slate-500">
+                        <ImagePlus className="h-6 w-6" aria-hidden="true" />
+                      </div>
+                      <div>
+                        <div className="text-sm font-semibold text-slate-900">Reference image selected</div>
+                        <div className="text-xs text-slate-600">
+                          {selectedImage.name} · {formatFileSize(selectedImage.size)}
+                        </div>
+                        <div className="mt-1 text-xs text-slate-500">Save this image to add it to your privacy reference set.</div>
+                      </div>
+                    </div>
                     <Button type="button" onClick={() => uploadMutation.mutate()} disabled={uploadMutation.isPending || !selectedImage}>
                       {uploadMutation.isPending ? "Uploading..." : "Save reference image"}
                     </Button>
