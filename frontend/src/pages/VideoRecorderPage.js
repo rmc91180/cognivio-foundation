@@ -6,6 +6,8 @@ import { LayoutShell } from "@/components/LayoutShell";
 import { VideoRecorder } from "@/components/VideoRecorder";
 import api, { teacherApi, videoApi } from "@/lib/api";
 import { toast } from "sonner";
+import { useAuth } from "@/hooks/useAuth";
+import { isTeacherUser } from "@/lib/userRoutes";
 
 const normalizeTeachers = (payload) => {
   if (Array.isArray(payload)) return payload;
@@ -23,6 +25,7 @@ const normalizeSessions = (payload) => {
 
 export function VideoRecorderPage() {
   const { t } = useTranslation();
+  const { user } = useAuth();
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
   const requestedTeacherId = searchParams.get("teacher_id") || "";
@@ -36,6 +39,7 @@ export function VideoRecorderPage() {
   const [uploadError, setUploadError] = useState("");
   const [lastUploadPayload, setLastUploadPayload] = useState(null);
   const [uploadedVideoId, setUploadedVideoId] = useState("");
+  const isTeacher = isTeacherUser(user);
 
   const { data: teachersPayload } = useQuery({
     queryKey: ["teachers"],
@@ -47,6 +51,15 @@ export function VideoRecorderPage() {
     () => teachers.find((t) => t.id === selectedTeacher),
     [teachers, selectedTeacher]
   );
+
+  React.useEffect(() => {
+    if (isTeacher && !selectedTeacher && user?.teacher_id) {
+      setSelectedTeacher(user.teacher_id);
+    } else if (isTeacher && !selectedTeacher && teachers.length === 1) {
+      setSelectedTeacher(teachers[0].id);
+      setSubject(teachers[0].subject || "");
+    }
+  }, [isTeacher, selectedTeacher, teachers, user?.teacher_id]);
 
   const pendingSessionsQuery = useQuery({
     queryKey: ["observation-pending-session", selectedTeacher],
@@ -189,6 +202,7 @@ export function VideoRecorderPage() {
                   <select
                     className="mt-1 min-h-[44px] w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none ring-primary/40 focus:ring"
                     value={selectedTeacher}
+                    disabled={isTeacher}
                     onChange={(e) => {
                       setSelectedTeacher(e.target.value);
                       const teacher = teachers.find((t) => t.id === e.target.value);
@@ -270,8 +284,8 @@ export function VideoRecorderPage() {
                           Review recording
                         </Link>
                       ) : null}
-                      <Link to="/dashboard" className="inline-flex min-h-[36px] items-center justify-center rounded-md border border-emerald-200 bg-white px-3 py-1.5 font-semibold text-emerald-950 hover:bg-emerald-100">
-                        Back to dashboard
+                      <Link to={isTeacher ? "/my-lessons" : "/dashboard"} className="inline-flex min-h-[36px] items-center justify-center rounded-md border border-emerald-200 bg-white px-3 py-1.5 font-semibold text-emerald-950 hover:bg-emerald-100">
+                        {isTeacher ? "Back to lessons" : "Back to dashboard"}
                       </Link>
                       {activeSession?.id ? (
                         <Link to={`/observation/new?teacher_id=${selectedTeacher}&session_id=${activeSession.id}`} className="inline-flex min-h-[36px] items-center justify-center rounded-md border border-emerald-200 bg-white px-3 py-1.5 font-semibold text-emerald-950 hover:bg-emerald-100">

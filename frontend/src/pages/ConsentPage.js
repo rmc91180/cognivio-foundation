@@ -1,10 +1,12 @@
 import React, { useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useLocation, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { LayoutShell } from "@/components/LayoutShell";
 import { Button, PageContextHeader, Panel } from "@/components/ui";
 import { consentApi } from "@/lib/api";
+import { useAuth } from "@/hooks/useAuth";
+import { getHomeRoute } from "@/lib/roleRouter";
 
 const CONSENTS = [
   ["video_recording", "Video recording", "Cognivio stores classroom videos so your observer can review teaching practice."],
@@ -14,6 +16,9 @@ const CONSENTS = [
 
 export function ConsentPage() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const queryClient = useQueryClient();
+  const { user, refreshUser } = useAuth();
   const [checked, setChecked] = useState({});
   const { data } = useQuery({ queryKey: ["consent-status"], queryFn: () => consentApi.status().then((res) => res.data) });
   const mutation = useMutation({
@@ -22,12 +27,23 @@ export function ConsentPage() {
         await consentApi.grant({ consent_type, granted: true, version: "2026-05" });
       }
     },
-    onSuccess: () => {
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["consent-status"] });
+      await queryClient.invalidateQueries({ queryKey: ["protected-consent-status"] });
+      let refreshedUser = user;
+      try {
+        refreshedUser = await refreshUser();
+      } catch {
+        refreshedUser = user;
+      }
       toast.success("Consent saved");
-      navigate("/my-workspace");
+      navigate(location.state?.from || getHomeRoute(refreshedUser || user), { replace: true });
+    },
+    onError: (error) => {
+      toast.error(error?.response?.data?.detail || "Consent could not be saved right now.");
     },
   });
-  const allChecked = CONSENTS.every(([key]) => checked[key]);
+  const allChecked = CONSENTS.every(([key]) => checked[key] || data?.consents?.[key]?.granted);
 
   return (
     <LayoutShell>

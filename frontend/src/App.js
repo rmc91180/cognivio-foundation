@@ -2,6 +2,7 @@ import React, { Suspense, lazy } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/hooks/useAuth";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
+import { RouteErrorBoundary } from "@/components/RouteErrorBoundary";
 import { AuthPage } from "@/pages/AuthPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { SkeletonTable } from "@/components/ui";
@@ -51,6 +52,9 @@ const RecognitionReviewPage = lazyPage(() => import("@/pages/RecognitionReviewPa
 const ExemplarLibraryPage = lazyPage(() => import("@/pages/ExemplarLibraryPage"), "ExemplarLibraryPage");
 const OpsMetricsPage = lazyPage(() => import("@/pages/OpsMetricsPage"), "OpsMetricsPage");
 const TeacherWorkspacePage = lazyPage(() => import("@/pages/TeacherWorkspacePage"), "TeacherWorkspacePage");
+const TeacherSelfProfilePage = lazyPage(() => import("@/pages/TeacherSelfProfilePage"), "TeacherSelfProfilePage");
+const TeacherLessonsPage = lazyPage(() => import("@/pages/TeacherLessonsPage"), "TeacherLessonsPage");
+const TeacherCoachingPage = lazyPage(() => import("@/pages/TeacherCoachingPage"), "TeacherCoachingPage");
 const TeacherBadgesPage = lazyPage(() => import("@/pages/TeacherBadgesPage"), "TeacherBadgesPage");
 const ActionPlanRecordPage = lazyPage(() => import("@/pages/ActionPlanRecordPage"), "ActionPlanRecordPage");
 const ReflectionRecordPage = lazyPage(() => import("@/pages/ReflectionRecordPage"), "ReflectionRecordPage");
@@ -350,6 +354,22 @@ function AppRoutes() {
         }
       />
       <Route
+        path="/my-profile"
+        element={
+          <ProtectedRoute allowedTenantRoles={["teacher"]}>
+            <LazyRoute><TeacherSelfProfilePage /></LazyRoute>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/my-lessons"
+        element={
+          <ProtectedRoute allowedTenantRoles={["teacher"]}>
+            <LazyRoute><TeacherLessonsPage /></LazyRoute>
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/my-workspace/goals"
         element={
           <ProtectedRoute allowedTenantRoles={["teacher"]}>
@@ -361,7 +381,7 @@ function AppRoutes() {
         path="/my-workspace/coaching"
         element={
           <ProtectedRoute allowedTenantRoles={["teacher"]}>
-            <LazyRoute><CoachingHubPage /></LazyRoute>
+            <LazyRoute><TeacherCoachingPage /></LazyRoute>
           </ProtectedRoute>
         }
       />
@@ -490,7 +510,7 @@ function AppRoutes() {
       <Route
         path="/record"
         element={
-          <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
+          <ProtectedRoute allowedTenantRoles={["teacher", "school_admin", "training_admin"]}>
             <LazyRoute><VideoRecorderPage /></LazyRoute>
           </ProtectedRoute>
         }
@@ -505,7 +525,9 @@ function AppRoutes() {
 function App() {
   return (
     <AuthProvider>
-      <AppRoutes />
+      <RouteErrorBoundary>
+        <AppRoutes />
+      </RouteErrorBoundary>
     </AuthProvider>
   );
 }

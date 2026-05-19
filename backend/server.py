@@ -1844,11 +1844,14 @@ async def _approve_user_access(
         result="success",
         reason=note,
     )
-    await NotificationService().send_access_approved(
+    notification = await NotificationService().send_access_approved(
         updated,
         updated.get("school_name") or updated.get("organization_name") or resolved_org_name,
         approval_note=note,
     )
+    notification_payload = notification.get("payload") if isinstance(notification, dict) else {}
+    updated["_email_delivery_attempted"] = True
+    updated["_email_delivery_succeeded"] = bool((notification_payload or {}).get("email_delivery_succeeded"))
     return updated
 
 
@@ -2030,13 +2033,20 @@ async def _hard_delete_user_access(
         try:
             from app.services.notification_service import NotificationService
 
-            await NotificationService().send_access_rejected(
+            notification = await NotificationService().send_access_rejected(
                 target,
                 reason=reason,
                 actor_label=actor.get("email") or actor.get("id"),
             )
+            notification_payload = notification.get("payload") if isinstance(notification, dict) else {}
+            deleted_snapshot["_email_delivery_attempted"] = True
+            deleted_snapshot["_email_delivery_succeeded"] = bool(
+                (notification_payload or {}).get("email_delivery_succeeded")
+            )
         except Exception:
             logger.warning("Access rejection notification failed during hard delete", exc_info=True)
+            deleted_snapshot["_email_delivery_attempted"] = True
+            deleted_snapshot["_email_delivery_succeeded"] = False
     deleted_snapshot["deleted_counts"] = deleted_counts
     return deleted_snapshot
 
@@ -3082,6 +3092,8 @@ async def _list_teacher_ids_for_user(current_user: dict) -> List[str]:
     if tenant_role == "teacher":
         email = (current_user.get("email") or "").strip()
         clauses: List[Dict[str, Any]] = [{"created_by": current_user["id"]}]
+        if current_user.get("teacher_id"):
+            clauses.insert(0, {"id": current_user.get("teacher_id")})
         if email:
             clauses.insert(0, {"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
         query = clauses[0] if len(clauses) == 1 else {"$or": clauses}
@@ -3124,7 +3136,8 @@ async def _teacher_is_visible_to_user(teacher: dict, current_user: dict) -> bool
         teacher_email = str(teacher.get("email") or "").strip().lower()
         current_email = str(current_user.get("email") or "").strip().lower()
         return (
-            (teacher_email and teacher_email == current_email)
+            (current_user.get("teacher_id") and teacher.get("id") == current_user.get("teacher_id"))
+            or (teacher_email and teacher_email == current_email)
             or teacher.get("created_by") == current_user.get("id")
         )
 
@@ -6227,6 +6240,21 @@ class AccessUserListResponse(BaseModel):
     revoked: List[AccessUserRecord]
 
 
+class AccessActionEmailStatus(BaseModel):
+    attempted: bool = False
+    sent: bool = False
+    warning: Optional[str] = None
+
+
+class MasterAdminUserActionResponse(AccessUserRecord):
+    ok: bool = True
+    action: str
+    user_id: str
+    status: str
+    message: str
+    email_status: AccessActionEmailStatus
+
+
 class AccessDecisionPayload(BaseModel):
     reason: Optional[str] = None
     organization_id: Optional[str] = None
@@ -6647,6 +6675,15 @@ class TeacherSelfProfileCreate(BaseModel):
     category_custom: Optional[str] = None
 
 
+class TeacherSelfProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    subject: Optional[str] = None
+    grade_level: Optional[str] = None
+    department: Optional[str] = None
+    category: Optional[str] = None
+    category_custom: Optional[str] = None
+
+
 class TeacherResponse(BaseModel):
     id: str
     name: str
@@ -6670,6 +6707,10 @@ class TeacherResponse(BaseModel):
 
 
 class TeacherUpdate(BaseModel):
+    name: Optional[str] = None
+    subject: Optional[str] = None
+    grade_level: Optional[str] = None
+    department: Optional[str] = None
     category: Optional[str] = None
     category_custom: Optional[str] = None
     next_coaching_conference: Optional[str] = None
@@ -8588,6 +8629,139 @@ async def create_teacher_self_profile(
     return TeacherResponse(**_localize_teacher_payload(teacher_doc, language))
 
 
+def _teacher_profile_complete(teacher: Optional[dict]) -> bool:
+    if not teacher:
+        return False
+    return all(
+        _clean_optional_string((teacher or {}).get(field))
+        for field in ("subject", "grade_level")
+    )
+
+
+async def _current_teacher_profile_payload(current_user: dict, request: Optional[Request] = None) -> Dict[str, Any]:
+    if _get_user_tenant_role(current_user) != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher account required")
+
+    teacher = None
+    if current_user.get("teacher_id"):
+        try:
+            teacher = await _get_teacher_or_404(current_user["teacher_id"], current_user)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+    if not teacher:
+        linked = await _find_linkable_teacher_for_user(current_user)
+        if linked:
+            await db.users.update_one(
+                {"id": current_user["id"]},
+                {"$set": {"teacher_id": linked["id"], "updated_at": datetime.now(timezone.utc).isoformat()}},
+            )
+            teacher = linked
+
+    privacy_profile = None
+    if teacher:
+        privacy_profile = await _get_active_privacy_profile(teacher["id"])
+        teacher = await _enrich_teacher_with_tenancy_context(teacher)
+        teacher.pop("created_by", None)
+        language = _resolve_request_language(request, default="en") if request else "en"
+        teacher = _localize_teacher_payload(teacher, language)
+
+    return {
+        "profile": teacher,
+        "profile_required": teacher is None or not _teacher_profile_complete(teacher),
+        "teacher_profile_complete": _teacher_profile_complete(teacher),
+        "privacy_profile_required": bool(PRIVACY_REQUIRE_PROFILE and not privacy_profile),
+        "privacy_profile_complete": bool(privacy_profile),
+        "actions": {
+            "profile_href": "/my-profile",
+            "privacy_href": "/privacy",
+            "lessons_href": "/my-lessons",
+            "record_href": "/record",
+        },
+    }
+
+
+@api_router.get("/teachers/me/profile")
+async def get_my_teacher_profile(
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    return await _current_teacher_profile_payload(current_user, request)
+
+
+@api_router.patch("/teachers/me/profile")
+async def update_my_teacher_profile(
+    payload: TeacherSelfProfileUpdate,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    if _get_user_tenant_role(current_user) != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher account required")
+
+    existing_teacher = None
+    if current_user.get("teacher_id"):
+        try:
+            existing_teacher = await _get_teacher_or_404(current_user["teacher_id"], current_user)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+    if not existing_teacher:
+        existing_teacher = await _find_linkable_teacher_for_user(current_user)
+
+    now = datetime.now(timezone.utc).isoformat()
+    update_fields: Dict[str, Any] = {}
+    for field in ("name", "subject", "grade_level", "department", "category", "category_custom"):
+        value = getattr(payload, field, None)
+        if value is not None:
+            update_fields[field] = _clean_optional_string(value)
+
+    subject = update_fields.get("subject") or (existing_teacher or {}).get("subject")
+    grade_level = update_fields.get("grade_level") or (existing_teacher or {}).get("grade_level")
+    if not _clean_optional_string(subject) or not _clean_optional_string(grade_level):
+        raise HTTPException(status_code=400, detail="Subject and grade level are required")
+
+    saved_teacher_id = None
+    if existing_teacher:
+        update_fields["updated_at"] = now
+        await db.teachers.update_one({"id": existing_teacher["id"]}, {"$set": update_fields})
+        saved_teacher_id = existing_teacher["id"]
+        if current_user.get("teacher_id") != existing_teacher["id"]:
+            await db.users.update_one(
+                {"id": current_user["id"]},
+                {"$set": {"teacher_id": existing_teacher["id"], "updated_at": now}},
+            )
+    else:
+        teacher_id = str(uuid.uuid4())
+        saved_teacher_id = teacher_id
+        teacher_doc = {
+            "id": teacher_id,
+            "name": update_fields.get("name") or _clean_optional_string(current_user.get("name")) or "Teacher",
+            "email": str(current_user.get("email") or "").strip().lower(),
+            "subject": _clean_optional_string(subject),
+            "grade_level": _clean_optional_string(grade_level),
+            "department": update_fields.get("department"),
+            "school_id": current_user.get("school_id"),
+            "organization_id": current_user.get("organization_id"),
+            "category": update_fields.get("category"),
+            "category_custom": update_fields.get("category_custom"),
+            "next_coaching_conference": None,
+            "created_by": current_user.get("manager_user_id") or current_user["id"],
+            "created_at": now,
+            "updated_at": now,
+        }
+        await db.teachers.insert_one(teacher_doc)
+        await db.users.update_one(
+            {"id": current_user["id"]},
+            {"$set": {"teacher_id": teacher_id, "updated_at": now}},
+        )
+
+    await CACHE_CLIENT.invalidate_pattern(f"teachers:{_workspace_id_for_user(current_user)}:*")
+    return await _current_teacher_profile_payload(
+        {**current_user, "teacher_id": saved_teacher_id},
+        request,
+    )
+
+
 @api_router.patch("/teachers/{teacher_id}", response_model=TeacherResponse)
 async def update_teacher(
     teacher_id: str,
@@ -8596,6 +8770,14 @@ async def update_teacher(
 ):
     teacher = await _get_teacher_or_404(teacher_id, current_user)
     update_fields: Dict[str, Any] = {}
+    if payload.name is not None:
+        update_fields["name"] = _clean_optional_string(payload.name)
+    if payload.subject is not None:
+        update_fields["subject"] = _clean_optional_string(payload.subject)
+    if payload.grade_level is not None:
+        update_fields["grade_level"] = _clean_optional_string(payload.grade_level)
+    if payload.department is not None:
+        update_fields["department"] = _clean_optional_string(payload.department)
     if payload.category is not None:
         update_fields["category"] = payload.category
     if payload.category_custom is not None:
@@ -17708,6 +17890,117 @@ async def get_my_latest_lesson(current_user: dict = Depends(get_current_user)):
     }
 
 
+def _teacher_lesson_status(video: dict, assessment: Optional[dict]) -> str:
+    if assessment:
+        return "reviewed"
+    status = _normalize_video_status(video.get("analysis_status") or video.get("status"))
+    if status == VideoProcessingStatus.COMPLETED.value:
+        return "reviewed"
+    if status == VideoProcessingStatus.FAILED.value:
+        return "failed"
+    if status in {VideoProcessingStatus.QUEUED.value, VideoProcessingStatus.PROCESSING.value}:
+        return "processing"
+    return "uploaded"
+
+
+@api_router.get("/teachers/me/lessons")
+async def get_my_lessons(current_user: dict = Depends(get_current_user)):
+    profile_payload = await _current_teacher_profile_payload(current_user)
+    teacher = profile_payload.get("profile")
+    if not teacher:
+        return {**profile_payload, "lessons": []}
+
+    videos = await db.videos.find(
+        {"teacher_id": teacher["id"]},
+        {"_id": 0, "stored_filename": 0, "uploaded_by": 0},
+    ).sort("upload_date", -1).to_list(200)
+    video_ids = [video.get("id") for video in videos if video.get("id")]
+    assessments = await db.assessments.find(
+        {"video_id": {"$in": video_ids}},
+        {"_id": 0, "element_scores": 0, "overall_score": 0, "analysis_confidence": 0},
+    ).sort("analyzed_at", -1).to_list(200) if video_ids else []
+    assessment_by_video_id: Dict[str, dict] = {}
+    for assessment in assessments:
+        if assessment.get("video_id") and assessment.get("video_id") not in assessment_by_video_id:
+            assessment_by_video_id[assessment["video_id"]] = assessment
+
+    lessons = []
+    for video in videos:
+        assessment = assessment_by_video_id.get(video.get("id"))
+        observation_summary = (assessment or {}).get("observation_summary") or {}
+        summary = observation_summary.get("executive_summary") or (assessment or {}).get("summary")
+        lessons.append(
+            {
+                "video_id": video.get("id"),
+                "assessment_id": (assessment or {}).get("id"),
+                "title": video.get("filename") or video.get("subject") or "Lesson recording",
+                "uploaded_at": video.get("upload_date") or video.get("created_at"),
+                "status": _teacher_lesson_status(video, assessment),
+                "summary": summary,
+                "href": f"/videos/{video.get('id')}" if video.get("id") else "/videos",
+                "recording_type": video.get("recording_type") or video.get("upload_source"),
+            }
+        )
+
+    return {**profile_payload, "lessons": lessons}
+
+
+@api_router.get("/teachers/me/coaching")
+async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)):
+    profile_payload = await _current_teacher_profile_payload(current_user)
+    teacher = profile_payload.get("profile")
+    if not teacher:
+        return {**profile_payload, "active_tasks": [], "shared_moments": [], "reflections": [], "messages": []}
+
+    tasks = await _list_persisted_coaching_tasks(
+        current_user,
+        teacher_id=teacher["id"],
+        include_completed=False,
+        limit=100,
+    )
+    comments = await db.video_comments.find(
+        {
+            "teacher_id": teacher["id"],
+            "visibility": "shared_with_teacher",
+            "deleted_at": {"$in": [None, ""]},
+        },
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(100)
+    reflections = await db.coaching_task_reflections.find(
+        {"teacher_id": teacher["id"]},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(100)
+    return {
+        **profile_payload,
+        "active_tasks": [
+            {
+                "id": task.get("id"),
+                "title": task.get("title") or "Coaching goal",
+                "body": task.get("suggested_action") or task.get("summary") or "",
+                "source": "lesson" if task.get("video_id") else "admin",
+                "due_date": task.get("due_date"),
+                "status": task.get("status"),
+                "href": f"/my-workspace/goals?task_id={task.get('id')}" if task.get("id") else None,
+            }
+            for task in tasks
+        ],
+        "shared_moments": [
+            {
+                "comment_id": comment.get("id"),
+                "video_id": comment.get("video_id"),
+                "timestamp_seconds": comment.get("timestamp_seconds"),
+                "body": comment.get("body"),
+                "href": f"/videos/{comment.get('video_id')}?t={int(comment.get('timestamp_seconds') or 0)}"
+                if comment.get("video_id")
+                else "/videos",
+            }
+            for comment in comments
+        ],
+        "reflections": reflections,
+        "messages": [],
+    }
+
+
 @api_router.patch("/coaching/tasks/{task_id}", response_model=CoachingTask)
 async def update_coaching_task(
     task_id: str,
@@ -21305,7 +21598,38 @@ async def update_master_admin_organization_seat_policy(
     return await _build_master_admin_organization_record(updated)
 
 
-@api_router.post("/master-admin/users/{user_id}/approve", response_model=AccessUserRecord)
+def _build_master_admin_user_action_response(
+    updated: dict,
+    *,
+    action: str,
+    status: str,
+) -> MasterAdminUserActionResponse:
+    attempted = bool(updated.get("_email_delivery_attempted"))
+    sent = bool(updated.get("_email_delivery_succeeded"))
+    warning = None
+    if attempted and not sent:
+        warning = "Email could not be sent. Check Resend health before relying on email delivery."
+    message_action = "Approved" if status == "approved" else "Rejected"
+    message = (
+        f"{message_action}. Confirmation email sent."
+        if sent
+        else f"{message_action}. Email could not be sent; check Resend health."
+        if attempted
+        else f"{message_action}."
+    )
+    record = _model_public_dict(_to_access_user_record(updated))
+    return MasterAdminUserActionResponse(
+        **record,
+        ok=True,
+        action=action,
+        user_id=updated.get("id") or record.get("id"),
+        status=status,
+        message=message,
+        email_status=AccessActionEmailStatus(attempted=attempted, sent=sent, warning=warning),
+    )
+
+
+@api_router.post("/master-admin/users/{user_id}/approve", response_model=MasterAdminUserActionResponse)
 async def master_admin_approve_user(
     user_id: str,
     payload: MasterAdminUserActionPayload,
@@ -21339,7 +21663,7 @@ async def master_admin_approve_user(
             "manager_email": updated.get("manager_email") or updated.get("requested_manager_email"),
         },
     )
-    return _to_access_user_record(updated)
+    return _build_master_admin_user_action_response(updated, action="approve", status="approved")
 
 
 @api_router.post("/master-admin/users/{user_id}/revoke", response_model=AccessUserRecord)
@@ -21381,7 +21705,7 @@ async def master_admin_freeze_user(
     return await master_admin_revoke_user(user_id, payload, current_user=current_user)
 
 
-@api_router.post("/master-admin/users/{user_id}/delete", response_model=AccessUserRecord)
+@api_router.post("/master-admin/users/{user_id}/delete", response_model=MasterAdminUserActionResponse)
 async def master_admin_delete_user(
     user_id: str,
     payload: MasterAdminUserActionPayload,
@@ -21416,7 +21740,9 @@ async def master_admin_delete_user(
             "deleted_counts": deleted.get("deleted_counts") or {},
         },
     )
-    return _to_access_user_record(deleted)
+    action = "reject" if deleted.get("approval_deleted") else "delete"
+    status = "rejected" if deleted.get("approval_deleted") else "deleted"
+    return _build_master_admin_user_action_response(deleted, action=action, status=status)
 
 
 @api_router.post("/master-admin/users/{user_id}/reactivate", response_model=AccessUserRecord)
