@@ -32,6 +32,8 @@ export function VideoRecorderPage() {
   const requestedSessionId = searchParams.get("session_id") || "";
   const [selectedTeacher, setSelectedTeacher] = useState(requestedTeacherId);
   const [subject, setSubject] = useState("");
+  const [lessonTitle, setLessonTitle] = useState("");
+  const [classSection, setClassSection] = useState("");
   const [recordedBlob, setRecordedBlob] = useState(null);
   const [recordedUrl, setRecordedUrl] = useState("");
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -44,6 +46,12 @@ export function VideoRecorderPage() {
   const { data: teachersPayload } = useQuery({
     queryKey: ["teachers"],
     queryFn: () => teacherApi.list().then((res) => res.data),
+    enabled: !isTeacher,
+  });
+  const profileQuery = useQuery({
+    queryKey: ["teacher-self-profile"],
+    queryFn: () => teacherApi.currentProfile().then((res) => res.data),
+    enabled: isTeacher,
   });
   const teachers = useMemo(() => normalizeTeachers(teachersPayload), [teachersPayload]);
 
@@ -53,13 +61,20 @@ export function VideoRecorderPage() {
   );
 
   React.useEffect(() => {
-    if (isTeacher && !selectedTeacher && user?.teacher_id) {
-      setSelectedTeacher(user.teacher_id);
-    } else if (isTeacher && !selectedTeacher && teachers.length === 1) {
+    if (isTeacher) {
+      const profile = profileQuery.data?.profile;
+      if (!selectedTeacher && (user?.teacher_id || profile?.id)) {
+        setSelectedTeacher(user?.teacher_id || profile?.id);
+      }
+      if (profile) {
+        setSubject((current) => current || profile.primary_subject || profile.subject || "");
+        setClassSection((current) => current || profile.class_section || profile.department || "");
+      }
+    } else if (!selectedTeacher && teachers.length === 1) {
       setSelectedTeacher(teachers[0].id);
       setSubject(teachers[0].subject || "");
     }
-  }, [isTeacher, selectedTeacher, teachers, user?.teacher_id]);
+  }, [isTeacher, selectedTeacher, teachers, user?.teacher_id, profileQuery.data]);
 
   const pendingSessionsQuery = useQuery({
     queryKey: ["observation-pending-session", selectedTeacher],
@@ -83,11 +98,13 @@ export function VideoRecorderPage() {
   }, [pendingSessions, requestedSessionId]);
 
   const uploadMutation = useMutation({
-    mutationFn: ({ file, teacherId, subjectValue, recordedAt }) => {
+    mutationFn: ({ file, teacherId, subjectValue, recordedAt, lessonTitleValue, classSectionValue }) => {
       const formData = new FormData();
       formData.append("file", file);
-      formData.append("teacher_id", teacherId);
+      if (!isTeacher && teacherId) formData.append("teacher_id", teacherId);
       if (subjectValue) formData.append("subject", subjectValue);
+      if (lessonTitleValue) formData.append("lesson_title", lessonTitleValue);
+      if (classSectionValue) formData.append("class_section", classSectionValue);
       if (recordedAt) formData.append("recorded_at", recordedAt);
       if (activeSession?.id) formData.append("observation_session_id", activeSession.id);
       return videoApi.upload(formData, {
@@ -123,8 +140,8 @@ export function VideoRecorderPage() {
   });
 
   const buildUploadPayload = () => {
-    if (!recordedBlob || !selectedTeacher) {
-      toast.error(t("videoRecorderPage.selectTeacherAndRecordFirst"));
+    if (!recordedBlob || (!isTeacher && !selectedTeacher)) {
+      toast.error(isTeacher ? "Record a lesson first." : t("videoRecorderPage.selectTeacherAndRecordFirst"));
       return null;
     }
     setQueued(false);
@@ -139,6 +156,8 @@ export function VideoRecorderPage() {
       file,
       teacherId: selectedTeacher,
       subjectValue,
+      lessonTitleValue: lessonTitle,
+      classSectionValue: classSection,
       recordedAt,
     };
   };
@@ -173,7 +192,21 @@ export function VideoRecorderPage() {
           </div>
           <div className="md:col-span-5">
             <div className="rounded-xl border border-slate-200 bg-white p-5">
-              {selectedTeacherObj ? (
+              {isTeacher ? (
+                <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-3 text-sm text-emerald-950">
+                  <div className="font-semibold">This recording will connect to your teacher workspace.</div>
+                  <div className="mt-1 text-emerald-800">
+                    {profileQuery.data?.readiness?.privacy_reference_images_ready
+                      ? "Reference images are ready for the privacy blur pipeline."
+                      : "Add reference images in Teacher Profile so the privacy blur can recognize you."}
+                  </div>
+                  {!profileQuery.data?.readiness?.privacy_reference_images_ready ? (
+                    <Link to="/my-profile#privacy-reference-images" className="mt-2 inline-flex font-semibold text-emerald-950 underline">
+                      Open Teacher Profile
+                    </Link>
+                  ) : null}
+                </div>
+              ) : selectedTeacherObj ? (
                 <div className="mb-4 rounded-lg border border-sky-200 bg-sky-50 px-3 py-3 text-sm text-sky-950">
                   <div className="font-semibold">
                     You’re observing {selectedTeacherObj.name || selectedTeacherObj.email}.
@@ -195,6 +228,7 @@ export function VideoRecorderPage() {
                 {t("videoRecorderPage.metadata")}
               </h2>
               <div className="space-y-3 text-xs">
+                {!isTeacher ? (
                 <div>
                   <label className="block text-xs font-medium text-slate-600">
                     {t("videoRecorderPage.teacher")}
@@ -217,14 +251,48 @@ export function VideoRecorderPage() {
                     ))}
                   </select>
                 </div>
+                ) : null}
+                <div>
+                  <label className="block text-xs font-medium text-slate-600">
+                    Lesson title or topic
+                  </label>
+                  <input
+                    type="text"
+                    value={lessonTitle}
+                    onChange={(e) => setLessonTitle(e.target.value)}
+                    placeholder="For example, Comparing fractions"
+                    className="mt-1 min-h-[44px] w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none ring-primary/40 focus:ring"
+                  />
+                </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-600">
                     {t("videoRecorderPage.subject")}
                   </label>
+                  {isTeacher && profileQuery.data?.profile?.subjects?.length ? (
+                    <select
+                      value={subject}
+                      onChange={(e) => setSubject(e.target.value)}
+                      className="mt-1 min-h-[44px] w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none ring-primary/40 focus:ring"
+                    >
+                      {profileQuery.data.profile.subjects.map((item) => <option key={item} value={item}>{item}</option>)}
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      value={subject}
+                      onChange={(e) => setSubject(e.target.value)}
+                      className="mt-1 min-h-[44px] w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none ring-primary/40 focus:ring"
+                    />
+                  )}
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600">
+                    Class or section
+                  </label>
                   <input
                     type="text"
-                    value={subject}
-                    onChange={(e) => setSubject(e.target.value)}
+                    value={classSection}
+                    onChange={(e) => setClassSection(e.target.value)}
                     className="mt-1 min-h-[44px] w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none ring-primary/40 focus:ring"
                   />
                 </div>

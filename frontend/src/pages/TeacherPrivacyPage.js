@@ -1,4 +1,5 @@
 import React from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { LayoutShell } from "@/components/LayoutShell";
@@ -49,7 +50,11 @@ export function TeacherPrivacyPage() {
   return (
     <LayoutShell>
       <div className="mx-auto max-w-5xl px-6 py-6">
-        <PageContextHeader title="Privacy" description="Manage consent, data export, and deletion rights." />
+        <PageContextHeader
+          title="Privacy"
+          description="Manage consent, data export, and deletion rights."
+          actions={!isAdmin ? <Link to="/my-profile" className="inline-flex min-h-[44px] items-center justify-center rounded-md border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100">Back to Teacher Profile</Link> : null}
+        />
         <div className="grid gap-6 lg:grid-cols-[1fr,0.8fr]">
           <Panel>
             <h2 className="text-lg font-semibold text-slate-950">Current consents</h2>

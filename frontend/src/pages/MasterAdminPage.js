@@ -57,6 +57,16 @@ export function MasterAdminPage() {
     },
     onError: () => toast.error("Demo reset is not available right now."),
   });
+  const demoSeedMutation = useMutation({
+    mutationFn: (persona) => demoApi.seed({ persona, scope: "global", confirm: "SEED DEMO DATA" }).then((res) => res.data),
+    onSuccess: (result) => {
+      toast.success("Demo data seeded.");
+      queryClient.invalidateQueries();
+      refetch();
+      queryClient.setQueryData(["master-admin-demo-last-reset"], result);
+    },
+    onError: () => toast.error("Demo seed is not available right now."),
+  });
   const lastReset = queryClient.getQueryData(["master-admin-demo-last-reset"]);
 
   return (
@@ -119,6 +129,21 @@ export function MasterAdminPage() {
                         onClick={() => demoResetMutation.mutate(persona)}
                         disabled={demoResetMutation.isPending}
                         className="rounded-md border border-amber-200 bg-white px-3 py-2 text-sm font-semibold text-amber-950 hover:bg-amber-100 disabled:opacity-60"
+                      >
+                        {label}
+                      </button>
+                    ))}
+                    {[
+                      ["k12", "Seed K-12 demo"],
+                      ["training", "Seed Training demo"],
+                      ["all", "Seed all"],
+                    ].map(([persona, label]) => (
+                      <button
+                        key={`seed-${persona}`}
+                        type="button"
+                        onClick={() => demoSeedMutation.mutate(persona)}
+                        disabled={demoSeedMutation.isPending}
+                        className="rounded-md border border-amber-200 bg-amber-900 px-3 py-2 text-sm font-semibold text-white hover:bg-amber-950 disabled:opacity-60"
                       >
                         {label}
                       </button>

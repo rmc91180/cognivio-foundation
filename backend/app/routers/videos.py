@@ -25,8 +25,10 @@ router = APIRouter(tags=["videos"])
 async def upload_video_route(
     request: legacy.Request,
     file: UploadFile = File(...),
-    teacher_id: str = Form(...),
+    teacher_id: Optional[str] = Form(None),
     subject: Optional[str] = Form(None),
+    lesson_title: Optional[str] = Form(None),
+    class_section: Optional[str] = Form(None),
     recorded_at: Optional[str] = Form(None),
     observation_session_id: Optional[str] = Form(None),
     session_id: Optional[str] = Form(None),
@@ -38,6 +40,8 @@ async def upload_video_route(
         session_id=observation_session_id or session_id,
         request=request,
         subject=subject,
+        lesson_title=lesson_title,
+        class_section=class_section,
         recorded_at=recorded_at,
         current_user=current_user,
     )

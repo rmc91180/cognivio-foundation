@@ -109,6 +109,7 @@ export const trainingApi = {
 
 export const demoApi = {
   reset: (persona) => api.post("/api/demo/reset", null, { params: { persona } }),
+  seed: (payload) => api.post("/api/demo/seed", payload),
 };
 
 export const gradebookApi = {

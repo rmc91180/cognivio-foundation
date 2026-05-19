@@ -3197,6 +3197,8 @@ def _build_privacy_profile_summary(teacher_id: str, profile: Optional[dict]) -> 
 
 
 async def _get_active_privacy_profile(teacher_id: str) -> Optional[dict]:
+    if not teacher_id or not hasattr(db, "teacher_face_profiles"):
+        return None
     return await db.teacher_face_profiles.find_one(
         {"teacher_id": teacher_id, "status": "active"},
         {"_id": 0},
@@ -6678,8 +6680,11 @@ class TeacherSelfProfileCreate(BaseModel):
 class TeacherSelfProfileUpdate(BaseModel):
     name: Optional[str] = None
     subject: Optional[str] = None
+    subjects: Optional[List[str]] = None
+    primary_subject: Optional[str] = None
     grade_level: Optional[str] = None
     department: Optional[str] = None
+    class_section: Optional[str] = None
     category: Optional[str] = None
     category_custom: Optional[str] = None
 
@@ -6786,10 +6791,15 @@ class VideoUploadResponse(BaseModel):
     transcode_status: Optional[str] = None
     upload_date: str
     subject: Optional[str] = None
+    lesson_title: Optional[str] = None
+    class_section: Optional[str] = None
     recorded_at: Optional[str] = None
     file_path: Optional[str] = None
     file_size_bytes: Optional[int] = None
     content_type: Optional[str] = None
+    teacher_reference_images_available: Optional[bool] = None
+    teacher_reference_image_count: Optional[int] = None
+    privacy_blur_teacher_match_status: Optional[str] = None
 
 
 class CurriculumUploadResponse(BaseModel):
@@ -7894,6 +7904,23 @@ class CoachingTaskCompleteRequest(BaseModel):
 class CoachingTaskReflectionCreate(BaseModel):
     tried: str
     happened: str
+    comment_id: Optional[str] = None
+    video_id: Optional[str] = None
+
+
+class TeacherReflectionCreate(BaseModel):
+    tried: Optional[str] = None
+    happened: Optional[str] = None
+    text: Optional[str] = None
+    task_id: Optional[str] = None
+    comment_id: Optional[str] = None
+    video_id: Optional[str] = None
+
+
+class DemoSeedRequest(BaseModel):
+    persona: str = "teacher"
+    scope: str = "current_teacher"
+    confirm: Optional[str] = None
 
 
 class CoachingHistoryResponse(BaseModel):
@@ -8638,6 +8665,124 @@ def _teacher_profile_complete(teacher: Optional[dict]) -> bool:
     )
 
 
+def _teacher_subject_list(teacher: Optional[dict]) -> List[str]:
+    if not teacher:
+        return []
+    raw_subjects = teacher.get("subjects")
+    if isinstance(raw_subjects, list):
+        values = raw_subjects
+    else:
+        values = _parse_teacher_subjects(raw_subjects or teacher.get("subject"))
+    primary = _clean_optional_string(teacher.get("primary_subject") or teacher.get("subject"))
+    if primary and primary not in values:
+        values = [primary, *values]
+    seen: set[str] = set()
+    cleaned: List[str] = []
+    for value in values:
+        text = _clean_optional_string(value)
+        key = text.lower() if text else ""
+        if text and key not in seen:
+            seen.add(key)
+            cleaned.append(text)
+    return cleaned
+
+
+def _public_reference_image_url(reference: dict) -> Optional[str]:
+    if reference.get("file_url"):
+        return reference.get("file_url")
+    file_path = reference.get("file_path")
+    if file_path:
+        safe_path = str(file_path).replace("\\", "/").lstrip("/")
+        return _to_public_backend_url(f"/uploads/{safe_path}")
+    return None
+
+
+def _reference_image_payload(reference: dict) -> Dict[str, Any]:
+    created_at = reference.get("created_at")
+    return {
+        "id": reference.get("id"),
+        "teacher_id": reference.get("teacher_id"),
+        "user_id": reference.get("user_id"),
+        "workspace_id": reference.get("workspace_id"),
+        "status": reference.get("status") or "ready",
+        "filename": reference.get("filename"),
+        "image_url": _public_reference_image_url(reference),
+        "created_at": created_at,
+        "updated_at": reference.get("updated_at") or created_at,
+        "demo_data": bool(reference.get("demo_data")),
+    }
+
+
+async def _list_teacher_reference_images(teacher_id: str, workspace_id: Optional[str] = None) -> List[dict]:
+    if not teacher_id or not hasattr(db, "teacher_face_references"):
+        return []
+    query: Dict[str, Any] = {
+        "teacher_id": teacher_id,
+        "status": {"$nin": ["deleted", "replaced", "expired"]},
+    }
+    if workspace_id:
+        query["$or"] = [{"workspace_id": workspace_id}, {"workspace_id": {"$exists": False}}, {"workspace_id": None}]
+    try:
+        return await db.teacher_face_references.find(query, {"_id": 0}).sort("created_at", -1).to_list(100)
+    except Exception:
+        fallback_query = {"teacher_id": teacher_id}
+        docs = await db.teacher_face_references.find(fallback_query, {"_id": 0}).to_list(100)
+        return [
+            doc
+            for doc in docs
+            if str(doc.get("status") or "ready").lower() not in {"deleted", "replaced", "expired"}
+            and (not workspace_id or doc.get("workspace_id") in {None, workspace_id} or "workspace_id" not in doc)
+        ]
+
+
+async def get_teacher_reference_images_for_blur(teacher_id: str, workspace_id: Optional[str]) -> List[dict]:
+    references = await _list_teacher_reference_images(teacher_id, workspace_id)
+    return [
+        ref
+        for ref in references
+        if str(ref.get("status") or "ready").lower() in {"uploaded", "ready", "active"}
+        and (ref.get("s3_key") or ref.get("file_path") or ref.get("file_url"))
+    ]
+
+
+async def _teacher_readiness(teacher: Optional[dict], current_user: dict) -> Dict[str, Any]:
+    consent_complete = bool(
+        current_user.get("consent_complete")
+        or current_user.get("privacy_consent_complete")
+        or current_user.get("privacy_consent_accepted")
+        or current_user.get("consent_accepted_at")
+        or current_user.get("privacy_consent_accepted_at")
+    )
+    if not consent_complete:
+        consent_doc = await db.consent_records.find_one(
+            {"user_id": current_user.get("id"), "status": "accepted"},
+            {"_id": 0, "id": 1},
+        ) if hasattr(db, "consent_records") else None
+        consent_complete = bool(consent_doc)
+
+    teacher_profile_complete = _teacher_profile_complete(teacher)
+    workspace_id = _workspace_id_for_user(current_user)
+    references = await get_teacher_reference_images_for_blur((teacher or {}).get("id"), workspace_id) if teacher else []
+    reference_count = len(references)
+    reference_ready = reference_count > 0
+    missing_items: List[Dict[str, str]] = []
+    if not teacher_profile_complete:
+        missing_items.append({"id": "profile", "label": "Finish your teacher profile", "href": "/my-profile"})
+    if not consent_complete:
+        missing_items.append({"id": "consent", "label": "Review privacy consent", "href": "/consent"})
+    if PRIVACY_REQUIRE_PROFILE and not reference_ready:
+        missing_items.append({"id": "reference_images", "label": "Add privacy reference images", "href": "/my-profile#privacy-reference-images"})
+    return {
+        "teacher_profile_complete": teacher_profile_complete,
+        "consent_complete": consent_complete,
+        "privacy_reference_images_ready": reference_ready,
+        "privacy_reference_image_count": reference_count,
+        "can_record": bool(teacher),
+        "can_receive_blur_processing": bool(reference_ready or not PRIVACY_REQUIRE_PROFILE),
+        "missing_items": missing_items,
+    }
+
+
 async def _current_teacher_profile_payload(current_user: dict, request: Optional[Request] = None) -> Dict[str, Any]:
     if _get_user_tenant_role(current_user) != "teacher":
         raise HTTPException(status_code=403, detail="Teacher account required")
@@ -8659,23 +8804,35 @@ async def _current_teacher_profile_payload(current_user: dict, request: Optional
             teacher = linked
 
     privacy_profile = None
+    reference_images: List[dict] = []
     if teacher:
         privacy_profile = await _get_active_privacy_profile(teacher["id"])
+        reference_images = await _list_teacher_reference_images(teacher["id"], _workspace_id_for_user(current_user))
         teacher = await _enrich_teacher_with_tenancy_context(teacher)
         teacher.pop("created_by", None)
         language = _resolve_request_language(request, default="en") if request else "en"
         teacher = _localize_teacher_payload(teacher, language)
+        teacher["subjects"] = _teacher_subject_list(teacher)
+        teacher["primary_subject"] = teacher.get("primary_subject") or teacher.get("subject")
+        teacher["class_section"] = teacher.get("class_section") or teacher.get("department")
+
+    readiness = await _teacher_readiness(teacher, current_user)
 
     return {
         "profile": teacher,
-        "profile_required": teacher is None or not _teacher_profile_complete(teacher),
-        "teacher_profile_complete": _teacher_profile_complete(teacher),
+        "profile_required": teacher is None or not readiness["teacher_profile_complete"],
+        "teacher_profile_complete": readiness["teacher_profile_complete"],
         "privacy_profile_required": bool(PRIVACY_REQUIRE_PROFILE and not privacy_profile),
         "privacy_profile_complete": bool(privacy_profile),
+        "readiness": readiness,
+        "reference_images": [_reference_image_payload(ref) for ref in reference_images],
+        "demo_eligible": bool((current_user or {}).get("demo_data") or (teacher or {}).get("demo_data")),
         "actions": {
             "profile_href": "/my-profile",
             "privacy_href": "/privacy",
             "lessons_href": "/my-lessons",
+            "coaching_href": "/my-coaching",
+            "recognition_href": "/my-badges",
             "record_href": "/record",
         },
     }
@@ -8714,6 +8871,25 @@ async def update_my_teacher_profile(
         value = getattr(payload, field, None)
         if value is not None:
             update_fields[field] = _clean_optional_string(value)
+    if payload.subjects is not None:
+        subjects = [
+            text
+            for text in (_clean_optional_string(item) for item in payload.subjects)
+            if text
+        ]
+        update_fields["subjects"] = list(dict.fromkeys(subjects))
+        if subjects and not update_fields.get("subject"):
+            update_fields["subject"] = subjects[0]
+    if payload.primary_subject is not None:
+        primary_subject = _clean_optional_string(payload.primary_subject)
+        update_fields["primary_subject"] = primary_subject
+        if primary_subject and not update_fields.get("subject"):
+            update_fields["subject"] = primary_subject
+    if payload.class_section is not None:
+        class_section = _clean_optional_string(payload.class_section)
+        update_fields["class_section"] = class_section
+        if class_section and not update_fields.get("department"):
+            update_fields["department"] = class_section
 
     subject = update_fields.get("subject") or (existing_teacher or {}).get("subject")
     grade_level = update_fields.get("grade_level") or (existing_teacher or {}).get("grade_level")
@@ -8738,8 +8914,11 @@ async def update_my_teacher_profile(
             "name": update_fields.get("name") or _clean_optional_string(current_user.get("name")) or "Teacher",
             "email": str(current_user.get("email") or "").strip().lower(),
             "subject": _clean_optional_string(subject),
+            "subjects": update_fields.get("subjects") or _teacher_subject_list({"subject": subject}),
+            "primary_subject": update_fields.get("primary_subject") or _clean_optional_string(subject),
             "grade_level": _clean_optional_string(grade_level),
             "department": update_fields.get("department"),
+            "class_section": update_fields.get("class_section") or update_fields.get("department"),
             "school_id": current_user.get("school_id"),
             "organization_id": current_user.get("organization_id"),
             "category": update_fields.get("category"),
@@ -8760,6 +8939,122 @@ async def update_my_teacher_profile(
         {**current_user, "teacher_id": saved_teacher_id},
         request,
     )
+
+
+@api_router.get("/teachers/me/reference-images")
+async def list_my_teacher_reference_images(current_user: dict = Depends(get_current_user)):
+    teacher = await _get_current_teacher_for_workspace(current_user)
+    workspace_id = _workspace_id_for_user(current_user)
+    references = await _list_teacher_reference_images(teacher["id"], workspace_id)
+    return {
+        "teacher_id": teacher["id"],
+        "reference_images": [_reference_image_payload(ref) for ref in references],
+        "readiness": await _teacher_readiness(teacher, current_user),
+    }
+
+
+@api_router.post("/teachers/me/reference-images")
+async def upload_my_teacher_reference_image(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_current_teacher_for_workspace(current_user)
+    workspace_id = _workspace_id_for_user(current_user)
+    now = datetime.now(timezone.utc).isoformat()
+    active_profile = await _get_active_privacy_profile(teacher["id"])
+    profile_id = active_profile.get("id") if active_profile else str(uuid.uuid4())
+    relative_path, file_url, s3_key = await _save_privacy_reference_file(file, teacher["id"], profile_id)
+    reference_doc = {
+        "id": str(uuid.uuid4()),
+        "teacher_id": teacher["id"],
+        "user_id": current_user["id"],
+        "workspace_id": workspace_id,
+        "profile_id": profile_id,
+        "reference_type": "image",
+        "filename": file.filename,
+        "file_path": relative_path,
+        "file_url": file_url,
+        "s3_key": s3_key,
+        "status": "ready",
+        "embedding": [],
+        "quality_checks": {
+            "validation_mode": "contract_only",
+            "content_type": file.content_type,
+        },
+        "created_at": now,
+        "updated_at": now,
+        "retention_expires_at": (datetime.now(timezone.utc) + timedelta(days=PRIVACY_PROFILE_IMAGE_RETENTION_DAYS)).isoformat(),
+        "demo_data": bool(current_user.get("demo_data") or teacher.get("demo_data")),
+        "demo_persona": current_user.get("demo_persona") or teacher.get("demo_persona"),
+    }
+    await db.teacher_face_references.insert_one(reference_doc)
+    existing_count = await db.teacher_face_references.count_documents(
+        {"teacher_id": teacher["id"], "profile_id": profile_id, "status": {"$nin": ["deleted", "expired"]}}
+    )
+    profile_update = {
+        "teacher_id": teacher["id"],
+        "status": "active",
+        "profile_version": int((active_profile or {}).get("profile_version", 0) or 0) or 1,
+        "reference_count": existing_count,
+        "quality_score": 1.0,
+        "embedding_model": "opencv-sface",
+        "embedding_version": "contract-v1",
+        "updated_at": now,
+        "last_enrolled_at": now,
+        "needs_refresh": False,
+        "warnings": [],
+        "workspace_id": workspace_id,
+        "user_id": current_user["id"],
+    }
+    if not active_profile:
+        profile_update.update({"id": profile_id, "created_at": now})
+        await db.teacher_face_profiles.insert_one(profile_update)
+    else:
+        await db.teacher_face_profiles.update_one({"id": profile_id}, {"$set": profile_update})
+    await _log_privacy_audit_event(
+        "privacy_reference_image_uploaded",
+        "teacher_reference",
+        reference_doc["id"],
+        actor_user_id=current_user["id"],
+        details={"teacher_id": teacher["id"], "profile_id": profile_id},
+    )
+    return {
+        "ok": True,
+        "reference_image": _reference_image_payload(reference_doc),
+        "readiness": await _teacher_readiness(teacher, current_user),
+    }
+
+
+@api_router.delete("/teachers/me/reference-images/{image_id}")
+async def delete_my_teacher_reference_image(
+    image_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_current_teacher_for_workspace(current_user)
+    deleted_at = datetime.now(timezone.utc).isoformat()
+    result = await db.teacher_face_references.update_one(
+        {"id": image_id, "teacher_id": teacher["id"]},
+        {"$set": {"status": "deleted", "updated_at": deleted_at, "retention_expires_at": deleted_at}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Reference image not found")
+    active_profile = await _get_active_privacy_profile(teacher["id"])
+    if active_profile:
+        remaining_count = await db.teacher_face_references.count_documents(
+            {"teacher_id": teacher["id"], "profile_id": active_profile["id"], "status": {"$nin": ["deleted", "expired"]}}
+        )
+        await db.teacher_face_profiles.update_one(
+            {"id": active_profile["id"]},
+            {"$set": {"reference_count": remaining_count, "updated_at": deleted_at, "needs_refresh": remaining_count == 0}},
+        )
+    await _log_privacy_audit_event(
+        "privacy_reference_image_deleted",
+        "teacher_reference",
+        image_id,
+        actor_user_id=current_user["id"],
+        details={"teacher_id": teacher["id"]},
+    )
+    return {"ok": True, "deleted": True, "readiness": await _teacher_readiness(teacher, current_user)}
 
 
 @api_router.patch("/teachers/{teacher_id}", response_model=TeacherResponse)
@@ -10293,8 +10588,10 @@ async def _start_privacy_maintenance_tasks() -> None:
 async def upload_video(
     request: Request,
     file: UploadFile = File(...),
-    teacher_id: str = Form(...),
+    teacher_id: Optional[str] = Form(None),
     subject: Optional[str] = Form(None),
+    lesson_title: Optional[str] = Form(None),
+    class_section: Optional[str] = Form(None),
     recorded_at: Optional[str] = Form(None),
     observation_session_id: Optional[str] = Form(None),
     current_user: dict = Depends(get_current_user)
@@ -10313,7 +10610,13 @@ async def upload_video(
         normalized_recorded_at = _parse_optional_iso_datetime(recorded_at, "recorded_at")
         upload_time = datetime.now(timezone.utc).isoformat()
 
-        teacher = await _get_teacher_or_404(teacher_id, current_user)
+        if not teacher_id and _get_user_tenant_role(current_user) == "teacher":
+            teacher = await _get_current_teacher_for_workspace(current_user)
+            teacher_id = teacher["id"]
+        elif not teacher_id:
+            raise HTTPException(status_code=400, detail="Teacher is required for admin uploads")
+        else:
+            teacher = await _get_teacher_or_404(teacher_id, current_user)
         observation_session = None
         if observation_session_id:
             observation_session = await _get_observation_session_or_404(observation_session_id, current_user)
@@ -10335,6 +10638,11 @@ async def upload_video(
             )
 
         subject = subject or teacher.get("subject")
+        lesson_title = _clean_optional_string(lesson_title) or file.filename or subject
+        class_section = _clean_optional_string(class_section) or teacher.get("class_section") or teacher.get("department")
+        reference_images = await get_teacher_reference_images_for_blur(teacher_id, _workspace_id_for_user(current_user))
+        reference_count = len(reference_images)
+        reference_status = "ready" if reference_count else "missing_reference_images"
         video_id = str(uuid.uuid4())
         filename = f"{video_id}{file_ext}"
         teacher_dir = UPLOAD_DIR / "videos" / teacher_id
@@ -10419,9 +10727,14 @@ async def upload_video(
             "processing_completed_at": None,
             "processing_failed_at": None,
             "subject": subject,
+            "lesson_title": lesson_title,
+            "class_section": class_section,
             "recorded_at": normalized_recorded_at,
             "upload_date": upload_time,
             "analysis_language": preferred_language,
+            "teacher_reference_images_available": reference_count > 0,
+            "teacher_reference_image_count": reference_count,
+            "privacy_blur_teacher_match_status": reference_status,
         }
         await db.videos.insert_one(video_doc)
 
@@ -10444,11 +10757,16 @@ async def upload_video(
             "observation_session_id": observation_session_id or None,
             "file_path": relative_path,
             "subject": subject,
+            "lesson_title": lesson_title,
+            "class_section": class_section,
             "recorded_at": normalized_recorded_at,
             "privacy_status": PrivacyProcessingStatus.QUEUED.value,
             "analysis_status": VideoProcessingStatus.QUEUED.value,
             "uploaded_by": current_user["id"],
             "uploaded_at": upload_time,
+            "teacher_reference_images_available": reference_count > 0,
+            "teacher_reference_image_count": reference_count,
+            "privacy_blur_teacher_match_status": reference_status,
         })
 
         if observation_session:
@@ -10509,10 +10827,15 @@ async def upload_video(
             transcode_status=transcode_status,
             upload_date=video_doc["upload_date"],
             subject=subject,
+            lesson_title=lesson_title,
+            class_section=class_section,
             recorded_at=normalized_recorded_at,
             file_path=relative_path,
             file_size_bytes=size,
             content_type=content_type,
+            teacher_reference_images_available=reference_count > 0,
+            teacher_reference_image_count=reference_count,
+            privacy_blur_teacher_match_status=reference_status,
         )
     except HTTPException:
         app_metrics.record_upload_result(
@@ -17904,7 +18227,13 @@ def _teacher_lesson_status(video: dict, assessment: Optional[dict]) -> str:
 
 
 @api_router.get("/teachers/me/lessons")
-async def get_my_lessons(current_user: dict = Depends(get_current_user)):
+async def get_my_lessons(
+    q: Optional[str] = None,
+    status: Optional[str] = None,
+    subject: Optional[str] = None,
+    period: Optional[str] = "all",
+    current_user: dict = Depends(get_current_user),
+):
     profile_payload = await _current_teacher_profile_payload(current_user)
     teacher = profile_payload.get("profile")
     if not teacher:
@@ -17923,26 +18252,72 @@ async def get_my_lessons(current_user: dict = Depends(get_current_user)):
     for assessment in assessments:
         if assessment.get("video_id") and assessment.get("video_id") not in assessment_by_video_id:
             assessment_by_video_id[assessment["video_id"]] = assessment
+    shared_counts = {}
+    if video_ids:
+        shared_comments = await db.video_comments.find(
+            {
+                "video_id": {"$in": video_ids},
+                "teacher_id": teacher["id"],
+                "visibility": "shared_with_teacher",
+                "deleted_at": {"$in": [None, ""]},
+            },
+            {"_id": 0, "video_id": 1},
+        ).to_list(500)
+        for comment in shared_comments:
+            shared_counts[comment.get("video_id")] = shared_counts.get(comment.get("video_id"), 0) + 1
 
     lessons = []
     for video in videos:
         assessment = assessment_by_video_id.get(video.get("id"))
         observation_summary = (assessment or {}).get("observation_summary") or {}
         summary = observation_summary.get("executive_summary") or (assessment or {}).get("summary")
+        lesson_status = _teacher_lesson_status(video, assessment)
+        lesson_subject = video.get("subject") or (assessment or {}).get("subject") or teacher.get("subject")
+        lesson_title = video.get("lesson_title") or video.get("title") or video.get("filename") or lesson_subject or "Lesson recording"
+        uploaded_at = video.get("upload_date") or video.get("created_at")
+        if status and status != "all" and lesson_status != status:
+            continue
+        if subject and subject != "all" and str(lesson_subject or "").strip().lower() != subject.strip().lower():
+            continue
+        haystack = " ".join(
+            str(value or "")
+            for value in (lesson_title, lesson_subject, video.get("class_section"), summary)
+        ).lower()
+        if q and q.strip().lower() not in haystack:
+            continue
+        if period and period != "all" and uploaded_at:
+            parsed = _parse_optional_iso_datetime(uploaded_at, "uploaded_at")
+            if parsed:
+                days = {"month": 31, "quarter": 93, "semester": 186, "year": 366}.get(period, 10_000)
+                if parsed < datetime.now(timezone.utc) - timedelta(days=days):
+                    continue
         lessons.append(
             {
                 "video_id": video.get("id"),
                 "assessment_id": (assessment or {}).get("id"),
-                "title": video.get("filename") or video.get("subject") or "Lesson recording",
-                "uploaded_at": video.get("upload_date") or video.get("created_at"),
-                "status": _teacher_lesson_status(video, assessment),
+                "title": lesson_title,
+                "subject": lesson_subject,
+                "class_section": video.get("class_section") or teacher.get("class_section") or teacher.get("department"),
+                "uploaded_at": uploaded_at,
+                "status": lesson_status,
                 "summary": summary,
                 "href": f"/videos/{video.get('id')}" if video.get("id") else "/videos",
                 "recording_type": video.get("recording_type") or video.get("upload_source"),
+                "shared_moments_count": shared_counts.get(video.get("id"), 0),
+                "talk_time_summary": video.get("audio_summary") or (assessment or {}).get("audio_summary"),
             }
         )
 
-    return {**profile_payload, "lessons": lessons}
+    return {
+        **profile_payload,
+        "lessons": lessons,
+        "filters": {
+            "subjects": _teacher_subject_list(teacher),
+            "status": status or "all",
+            "period": period or "all",
+            "q": q or "",
+        },
+    }
 
 
 @api_router.get("/teachers/me/coaching")
@@ -17950,7 +18325,19 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
     profile_payload = await _current_teacher_profile_payload(current_user)
     teacher = profile_payload.get("profile")
     if not teacher:
-        return {**profile_payload, "active_tasks": [], "shared_moments": [], "reflections": [], "messages": []}
+        return {
+            **profile_payload,
+            "active_tasks": [],
+            "recommendations": [],
+            "shared_moments": [],
+            "admin_notes": [],
+            "teacher_reflections": [],
+            "reflections": [],
+            "suggested_improvements": [],
+            "next_best_action": None,
+            "upcoming_meetings": [],
+            "messages": [],
+        }
 
     tasks = await _list_persisted_coaching_tasks(
         current_user,
@@ -17970,6 +18357,52 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
         {"teacher_id": teacher["id"]},
         {"_id": 0},
     ).sort("created_at", -1).to_list(100)
+    assessments = await db.assessments.find(
+        {"teacher_id": teacher["id"]},
+        {"_id": 0, "element_scores": 0, "overall_score": 0, "analysis_confidence": 0},
+    ).sort("analyzed_at", -1).to_list(10)
+    recommendations: List[dict] = []
+    suggested_improvements: List[dict] = []
+    for assessment in assessments:
+        summary = assessment.get("observation_summary") or {}
+        video_id = assessment.get("video_id")
+        for index, item in enumerate(summary.get("actionable_next_steps_structured") or summary.get("coaching_actions") or assessment.get("recommendations") or []):
+            text = _coaching_action_text(item)
+            if not text:
+                continue
+            recommendations.append(
+                {
+                    "id": f"{assessment.get('id')}-recommendation-{index}",
+                    "title": "Next-lesson move",
+                    "body": text,
+                    "href": f"/videos/{video_id}" if video_id else "/my-lessons",
+                }
+            )
+        for index, item in enumerate(summary.get("growth_opportunities") or summary.get("focus_areas") or []):
+            text = _coaching_action_text(item)
+            if text:
+                suggested_improvements.append(
+                    {
+                        "id": f"{assessment.get('id')}-improvement-{index}",
+                        "title": "Teaching move to try",
+                        "description": text,
+                        "focus_area": summary.get("focus_area_label") or assessment.get("subject") or "Lesson feedback",
+                    }
+                )
+    upcoming_meetings = await db.schedules.find(
+        {"teacher_id": teacher["id"]},
+        {"_id": 0},
+    ).sort("start_time", 1).to_list(10) if hasattr(db, "schedules") else []
+    next_best_action = None
+    if profile_payload.get("readiness", {}).get("missing_items"):
+        item = profile_payload["readiness"]["missing_items"][0]
+        next_best_action = {"title": item["label"], "description": "Take this step so your recordings and coaching notes stay connected.", "href": item["href"]}
+    elif tasks:
+        task = tasks[0]
+        next_best_action = {"title": task.get("title") or "Reflect on one coaching goal", "description": task.get("suggested_action") or task.get("summary") or "Write down what you tried and what you noticed.", "href": f"/my-coaching?task_id={task.get('id')}"}
+    elif comments:
+        comment = comments[0]
+        next_best_action = {"title": "Revisit a shared lesson moment", "description": comment.get("body") or "Open the timestamp your observer shared.", "href": f"/videos/{comment.get('video_id')}?t={int(comment.get('timestamp_seconds') or 0)}"}
     return {
         **profile_payload,
         "active_tasks": [
@@ -17984,6 +18417,7 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
             }
             for task in tasks
         ],
+        "recommendations": recommendations[:6],
         "shared_moments": [
             {
                 "comment_id": comment.get("id"),
@@ -17996,8 +18430,283 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
             }
             for comment in comments
         ],
+        "admin_notes": [],
+        "teacher_reflections": reflections,
         "reflections": reflections,
+        "suggested_improvements": suggested_improvements[:6],
+        "next_best_action": next_best_action,
+        "upcoming_meetings": [
+            {
+                "id": meeting.get("id"),
+                "title": meeting.get("course_name") or meeting.get("title") or "Coaching conversation",
+                "scheduled_at": meeting.get("start_time") or meeting.get("scheduled_at"),
+                "href": "/my-coaching",
+            }
+            for meeting in upcoming_meetings
+        ],
         "messages": [],
+    }
+
+
+@api_router.post("/teachers/me/reflections")
+async def create_my_teacher_reflection(
+    payload: TeacherReflectionCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    if _get_user_tenant_role(current_user) != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher access required")
+    teacher = await _get_current_teacher_for_workspace(current_user)
+    task = None
+    if payload.task_id:
+        task = await _get_visible_coaching_task_or_404(payload.task_id, current_user)
+        if task.get("teacher_id") != teacher.get("id"):
+            raise HTTPException(status_code=403, detail="Cannot reflect on another teacher's goal")
+    if payload.comment_id:
+        comment = await db.video_comments.find_one(
+            {
+                "id": payload.comment_id,
+                "teacher_id": teacher["id"],
+                "visibility": "shared_with_teacher",
+                "deleted_at": {"$in": [None, ""]},
+            },
+            {"_id": 0},
+        )
+        if not comment:
+            raise HTTPException(status_code=404, detail="Shared moment not found")
+    tried = _clean_optional_string(payload.tried) or "Reflection"
+    happened = _clean_optional_string(payload.happened) or _clean_optional_string(payload.text)
+    if not happened:
+        raise HTTPException(status_code=400, detail="Reflection text is required")
+    now = datetime.now(timezone.utc).isoformat()
+    reflection_doc = {
+        "id": str(uuid.uuid4()),
+        "task_id": payload.task_id,
+        "comment_id": payload.comment_id,
+        "video_id": payload.video_id,
+        "teacher_id": teacher["id"],
+        "author_user_id": current_user["id"],
+        "observer_id": (task or {}).get("observer_id"),
+        "tried": tried,
+        "happened": happened,
+        "text": happened,
+        "created_at": now,
+        "updated_at": None,
+    }
+    await db.coaching_task_reflections.insert_one(reflection_doc)
+    if payload.task_id:
+        await db.coaching_tasks.update_one(
+            {"id": payload.task_id},
+            {"$set": {"status": "in_progress", "updated_at": now}, "$inc": {"reflection_count": 1}},
+        )
+    return {"ok": True, "reflection": reflection_doc}
+
+
+@api_router.post("/teachers/me/coaching-replies")
+async def create_my_coaching_reply(
+    payload: TeacherReflectionCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    return await create_my_teacher_reflection(payload, current_user)
+
+
+async def _my_teacher_recognition_payload(current_user: dict, teacher: Optional[dict] = None) -> Dict[str, Any]:
+    teacher = teacher or await _get_current_teacher_for_workspace(current_user)
+    badges = await db.recognition_badges.find(
+        {"teacher_id": teacher["id"], "status": {"$ne": "revoked"}},
+        {"_id": 0},
+    ).sort("awarded_at", -1).to_list(100)
+    video_ids = [badge.get("video_id") for badge in badges if badge.get("video_id")]
+    videos = await db.videos.find({"id": {"$in": video_ids}}, {"_id": 0, "id": 1, "lesson_title": 1, "subject": 1, "upload_date": 1}).to_list(100) if video_ids else []
+    videos_by_id = {video.get("id"): video for video in videos}
+    items = []
+    for badge in badges:
+        video = videos_by_id.get(badge.get("video_id")) or {}
+        title = badge.get("title") or badge.get("badge_type") or badge.get("recognition_type") or "Cognivio accolade"
+        description = badge.get("description") or badge.get("awarded_for") or "A reviewed lesson highlighted a strong coaching move worth returning to."
+        item = {
+            "id": badge.get("id"),
+            "title": title,
+            "description": description,
+            "earned_at": badge.get("earned_at") or badge.get("awarded_at") or badge.get("created_at"),
+            "source_lesson_id": badge.get("assessment_id"),
+            "video_id": badge.get("video_id"),
+            "timestamp_seconds": badge.get("timestamp_seconds"),
+            "image_url": badge.get("image_url") or badge.get("badge_url") or badge.get("asset_url"),
+            "share_url": badge.get("share_url"),
+            "awarded_by": badge.get("awarded_by"),
+            "lesson_title": video.get("lesson_title") or video.get("subject"),
+            "demo_data": bool(badge.get("demo_data")),
+        }
+        items.append(item)
+    latest = items[0] if items else None
+    now = datetime.now(timezone.utc)
+    this_month = 0
+    for item in items:
+        parsed = _parse_optional_iso_datetime(item.get("earned_at"), "earned_at") if item.get("earned_at") else None
+        if parsed and parsed.year == now.year and parsed.month == now.month:
+            this_month += 1
+    highlighted_moments = [
+        {
+            **item,
+            "href": f"/videos/{item.get('video_id')}?t={int(item.get('timestamp_seconds') or 0)}" if item.get("video_id") else "/my-badges",
+        }
+        for item in items
+        if item.get("video_id")
+    ]
+    return {
+        "badges": items,
+        "accolades": items,
+        "highlighted_moments": highlighted_moments,
+        "spotlight_lessons": highlighted_moments[:3],
+        "share_cards": [item for item in items if item.get("share_url")],
+        "summary": {
+            "total_earned": len(items),
+            "this_month": this_month,
+            "latest_title": latest.get("title") if latest else None,
+        },
+    }
+
+
+@api_router.get("/teachers/me/recognition")
+async def get_my_teacher_recognition(current_user: dict = Depends(get_current_user)):
+    teacher = await _get_current_teacher_for_workspace(current_user)
+    return await _my_teacher_recognition_payload(current_user, teacher)
+
+
+async def _my_gradebook_reminders(teacher: dict) -> List[dict]:
+    docs = await db.gradebook_reminders.find(
+        {"teacher_id": teacher["id"]},
+        {"_id": 0},
+    ).sort("due_at", 1).to_list(50) if hasattr(db, "gradebook_reminders") else []
+    return [
+        {
+            "id": doc.get("id"),
+            "title": doc.get("title") or "Gradebook reminder",
+            "description": doc.get("description") or "Check the grade entries connected to this class.",
+            "status": doc.get("status") or "due_soon",
+            "due_at": doc.get("due_at"),
+            "href": doc.get("href") or "/my-workspace?section=gradebook",
+            "note": "Demo reminder — LMS sync is not connected yet.",
+            "demo_data": bool(doc.get("demo_data", True)),
+        }
+        for doc in docs
+    ]
+
+
+@api_router.get("/teachers/me/search")
+async def search_my_teacher_workspace(q: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)):
+    teacher = await _get_current_teacher_for_workspace(current_user)
+    query_text = (q or "").strip().lower()
+    lessons_payload = await get_my_lessons(q=None, status=None, subject=None, period="all", current_user=current_user)
+    coaching_payload = await get_my_teacher_coaching(current_user)
+    recognition_payload = await _my_teacher_recognition_payload(current_user, teacher)
+    gradebook = await _my_gradebook_reminders(teacher)
+    results: List[dict] = []
+
+    def add_result(item_type: str, title: str, snippet: str, href: str, source_label: str, timestamp_seconds: Optional[float] = None):
+        haystack = f"{title} {snippet} {source_label}".lower()
+        if query_text and query_text not in haystack:
+            return
+        results.append(
+            {
+                "type": item_type,
+                "title": title,
+                "snippet": snippet,
+                "href": href,
+                "timestamp_seconds": timestamp_seconds,
+                "source_label": source_label,
+            }
+        )
+
+    for lesson in lessons_payload.get("lessons", [])[:50]:
+        add_result("lesson", lesson.get("title") or "Lesson recording", lesson.get("summary") or lesson.get("subject") or "", lesson.get("href") or "/my-lessons", "Lesson")
+    for moment in coaching_payload.get("shared_moments", [])[:50]:
+        add_result("moment", "Moment to revisit", moment.get("body") or "", moment.get("href") or "/my-coaching", "Coaching", moment.get("timestamp_seconds"))
+    for task in coaching_payload.get("active_tasks", [])[:50]:
+        add_result("goal", task.get("title") or "Coaching goal", task.get("body") or "", task.get("href") or "/my-coaching", "Goal")
+    for reflection in coaching_payload.get("teacher_reflections", [])[:50]:
+        add_result("reflection", reflection.get("tried") or "Reflection", reflection.get("happened") or reflection.get("text") or "", "/my-coaching", "Reflection")
+    for item in recognition_payload.get("accolades", [])[:50]:
+        add_result("recognition", item.get("title") or "Recognition", item.get("description") or "", "/my-badges", "Recognition")
+    for reminder in gradebook[:50]:
+        add_result("grading", reminder.get("title") or "Gradebook reminder", f"{reminder.get('description') or ''} {reminder.get('note') or ''}", reminder.get("href") or "/my-workspace", "Gradebook reminder")
+
+    if not query_text:
+        results = results[:12]
+    return {"results": results[:50], "query": q or ""}
+
+
+@api_router.get("/teachers/me/dashboard")
+async def get_my_teacher_dashboard(
+    period: Optional[str] = "semester",
+    current_user: dict = Depends(get_current_user),
+):
+    profile_payload = await _current_teacher_profile_payload(current_user)
+    teacher = profile_payload.get("profile")
+    if not teacher:
+        return {
+            **profile_payload,
+            "next_best_action": {"title": "Finish your teacher profile", "description": "Add your teaching details so your workspace can connect lessons, feedback, and coaching.", "href": "/my-profile"},
+            "highlights": [],
+            "action_items": [],
+            "trends": [],
+            "communications": [],
+            "schedule": [],
+            "gradebook_reminders": [],
+            "reports": [],
+            "search_index_summary": {"items": 0},
+        }
+    lessons_payload = await get_my_lessons(q=None, status=None, subject=None, period="all", current_user=current_user)
+    coaching_payload = await get_my_teacher_coaching(current_user)
+    recognition_payload = await _my_teacher_recognition_payload(current_user, teacher)
+    gradebook = await _my_gradebook_reminders(teacher)
+    latest_lesson = (lessons_payload.get("lessons") or [None])[0]
+    next_best_action = coaching_payload.get("next_best_action")
+    if not next_best_action and latest_lesson:
+        next_best_action = {"title": "Review your latest lesson", "description": latest_lesson.get("summary") or "Open the newest recording and choose one next step.", "href": latest_lesson.get("href") or "/my-lessons"}
+    if not next_best_action:
+        next_best_action = {"title": "Record or upload a lesson", "description": "Start with one lesson recording so feedback and coaching notes have a place to land.", "href": "/record"}
+    completed_reflections = len(coaching_payload.get("teacher_reflections") or [])
+    trends = []
+    if completed_reflections:
+        trends.append({"id": "reflections", "period": period or "semester", "title": "Reflection rhythm", "description": f"You’ve saved {completed_reflections} coaching reflections recently."})
+    if len(lessons_payload.get("lessons") or []) >= 2:
+        trends.append({"id": "lesson-focus", "period": period or "semester", "title": "Lesson feedback pattern", "description": "Student discussion has been a common focus across your recent lesson feedback."})
+    schedule = [
+        {"id": item.get("id"), "title": item.get("title"), "scheduled_at": item.get("scheduled_at"), "href": item.get("href")}
+        for item in coaching_payload.get("upcoming_meetings", [])
+    ]
+    action_items = [
+        {"id": task.get("id"), "type": "goal", "title": task.get("title"), "description": task.get("body"), "href": task.get("href") or "/my-coaching"}
+        for task in coaching_payload.get("active_tasks", [])[:4]
+    ] + [
+        {"id": item.get("id"), "type": "grading", "title": item.get("title"), "description": f"{item.get('description')} {item.get('note')}", "href": item.get("href")}
+        for item in gradebook[:3]
+    ]
+    highlights = []
+    if recognition_payload.get("accolades"):
+        latest = recognition_payload["accolades"][0]
+        highlights.append({"id": latest.get("id"), "type": "recognition", "title": latest.get("title"), "description": latest.get("description"), "href": "/my-badges"})
+    if latest_lesson:
+        highlights.append({"id": latest_lesson.get("video_id"), "type": "lesson", "title": latest_lesson.get("title"), "description": latest_lesson.get("summary") or "Your latest lesson is ready to revisit.", "href": latest_lesson.get("href")})
+    return {
+        **profile_payload,
+        "next_best_action": next_best_action,
+        "latest_lesson": latest_lesson,
+        "highlights": highlights,
+        "action_items": action_items,
+        "trends": trends,
+        "communications": coaching_payload.get("admin_notes", []),
+        "schedule": schedule,
+        "gradebook_reminders": gradebook,
+        "reports": [{"id": "teacher-progress", "title": "Teacher progress snapshot", "description": "Trends will appear after a few reviewed lessons.", "href": "/reports"}],
+        "search_index_summary": {
+            "lessons": len(lessons_payload.get("lessons") or []),
+            "goals": len(coaching_payload.get("active_tasks") or []),
+            "recognition": len(recognition_payload.get("accolades") or []),
+            "gradebook_reminders": len(gradebook),
+        },
+        "demo_eligible": bool((current_user or {}).get("demo_data") or (teacher or {}).get("demo_data")),
     }
 
 
@@ -27111,6 +27820,317 @@ def _generate_demo_adherence_score(
 
 
 # ==================== SEED DATA ENDPOINT ====================
+async def _upsert_demo_docs(collection_name: str, docs: List[dict]) -> int:
+    collection = getattr(db, collection_name)
+    count = 0
+    for doc in docs:
+        await collection.update_one({"id": doc["id"]}, {"$set": doc}, upsert=True)
+        count += 1
+    return count
+
+
+def _demo_seed_persona_for_user(current_user: dict, teacher: Optional[dict] = None) -> str:
+    persona = current_user.get("demo_persona") or (teacher or {}).get("demo_persona")
+    if persona in {"k12", "training"}:
+        return persona
+    return "training" if current_user.get("tenant_role") == "training_admin" else "k12"
+
+
+async def _seed_current_teacher_experience(current_user: dict) -> Dict[str, Any]:
+    teacher = await _get_current_teacher_for_workspace(current_user)
+    if not (DEMO_MODE or current_user.get("demo_data") or teacher.get("demo_data")):
+        raise HTTPException(status_code=403, detail="Demo seeding is available only in demo workspaces")
+    persona = _demo_seed_persona_for_user(current_user, teacher)
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    workspace_id = _workspace_id_for_user(current_user)
+    teacher_id = teacher["id"]
+    subjects = _teacher_subject_list(teacher) or ["Grade 4 Math", "Small-group discussion"]
+    profile_updates = {
+        "subject": subjects[0],
+        "subjects": subjects,
+        "primary_subject": subjects[0],
+        "grade_level": teacher.get("grade_level") or "Grade 4",
+        "department": teacher.get("department") or "Period 2",
+        "class_section": teacher.get("class_section") or teacher.get("department") or "Period 2",
+        "demo_data": True,
+        "demo_persona": persona,
+        "updated_at": now,
+    }
+    await db.teachers.update_one({"id": teacher_id}, {"$set": profile_updates}, upsert=False)
+
+    profile_id = f"demo-{persona}-{teacher_id}-privacy-profile"
+    reference_id = f"demo-{persona}-{teacher_id}-reference-1"
+    reference_doc = {
+        "id": reference_id,
+        "teacher_id": teacher_id,
+        "user_id": current_user["id"],
+        "workspace_id": workspace_id,
+        "profile_id": profile_id,
+        "reference_type": "image",
+        "filename": "demo-teacher-reference.jpg",
+        "file_path": None,
+        "file_url": None,
+        "s3_key": f"demo/privacy/{teacher_id}/reference-1.jpg",
+        "status": "ready",
+        "embedding": [],
+        "quality_checks": {"validation_mode": "demo_metadata"},
+        "created_at": now,
+        "updated_at": now,
+        "retention_expires_at": (now_dt + timedelta(days=PRIVACY_PROFILE_IMAGE_RETENTION_DAYS)).isoformat(),
+        "demo_data": True,
+        "demo_persona": persona,
+    }
+    profile_doc = {
+        "id": profile_id,
+        "teacher_id": teacher_id,
+        "user_id": current_user["id"],
+        "workspace_id": workspace_id,
+        "status": "active",
+        "profile_version": 1,
+        "reference_count": 1,
+        "quality_score": 1.0,
+        "embedding_model": "opencv-sface",
+        "embedding_version": "demo-contract-v1",
+        "created_at": now,
+        "updated_at": now,
+        "last_enrolled_at": now,
+        "needs_refresh": False,
+        "warnings": [],
+        "demo_data": True,
+        "demo_persona": persona,
+    }
+    video_docs = []
+    assessment_docs = []
+    comment_docs = []
+    task_docs = []
+    reflection_docs = []
+    badge_docs = []
+    reminder_docs = []
+    schedule_docs = []
+    for index, status in enumerate(["completed", "processing", "completed", "queued", "failed"], start=1):
+        video_id = f"demo-{persona}-{teacher_id}-experience-video-{index}"
+        recorded_at = (now_dt - timedelta(days=index * 9)).isoformat()
+        reviewed = status == "completed"
+        video_docs.append(
+            {
+                "id": video_id,
+                "filename": f"Demo lesson {index}",
+                "lesson_title": f"{subjects[0]} lesson {index}",
+                "teacher_id": teacher_id,
+                "uploaded_by": current_user["id"],
+                "workspace_id": workspace_id,
+                "organization_id": current_user.get("organization_id"),
+                "school_id": current_user.get("school_id"),
+                "subject": subjects[(index - 1) % len(subjects)],
+                "class_section": profile_updates["class_section"],
+                "status": status,
+                "analysis_status": status,
+                "privacy_status": "completed" if reviewed else "queued",
+                "upload_date": recorded_at,
+                "recorded_at": recorded_at,
+                "teacher_reference_images_available": True,
+                "teacher_reference_image_count": 1,
+                "privacy_blur_teacher_match_status": "ready",
+                "audio_summary": "Talk-time was balanced enough to make student discussion a useful coaching topic.",
+                "demo_data": True,
+                "demo_persona": persona,
+            }
+        )
+        if reviewed:
+            assessment_id = f"demo-{persona}-{teacher_id}-experience-assessment-{index}"
+            assessment_docs.append(
+                {
+                    "id": assessment_id,
+                    "video_id": video_id,
+                    "teacher_id": teacher_id,
+                    "subject": subjects[(index - 1) % len(subjects)],
+                    "summary": "You gave students a clear prompt, then left room for them to build on one another's thinking.",
+                    "observation_summary": {
+                        "executive_summary": "You gave students a clear prompt, then left room for them to build on one another's thinking.",
+                        "coaching_actions": ["Invite one student to respond to a classmate before you clarify.", "Name the discussion move you want students to try."],
+                        "actionable_next_steps_structured": [{"title": "Try a student-to-student follow-up", "text": "After one answer, ask who can build on that idea before you add your own explanation."}],
+                        "growth_opportunities": ["Use one extra follow-up question before moving to the next example."],
+                    },
+                    "analyzed_at": recorded_at,
+                    "created_at": recorded_at,
+                    "demo_data": True,
+                    "demo_persona": persona,
+                }
+            )
+            comment_docs.append(
+                {
+                    "id": f"demo-{persona}-{teacher_id}-experience-comment-{index}",
+                    "video_id": video_id,
+                    "teacher_id": teacher_id,
+                    "workspace_id": workspace_id,
+                    "timestamp_seconds": 84 + index,
+                    "body": "Moment to revisit: you paused and let a second student build on the first idea.",
+                    "visibility": "shared_with_teacher",
+                    "is_private": False,
+                    "created_at": recorded_at,
+                    "updated_at": recorded_at,
+                    "demo_data": True,
+                    "demo_persona": persona,
+                }
+            )
+    for index in range(1, 3):
+        task_docs.append(
+            {
+                "id": f"demo-{persona}-{teacher_id}-experience-task-{index}",
+                "workspace_id": workspace_id,
+                "observer_id": current_user.get("manager_user_id") or current_user["id"],
+                "teacher_id": teacher_id,
+                "teacher_name": teacher.get("name"),
+                "title": "Try one student-to-student discussion move",
+                "summary": "Choose one answer and invite another student to build on it before you add your explanation.",
+                "suggested_action": "Use one follow-up prompt: Who can add on to that idea?",
+                "priority": "medium",
+                "priority_rank": 50,
+                "status": "open",
+                "created_at": now,
+                "updated_at": now,
+                "demo_data": True,
+                "demo_persona": persona,
+            }
+        )
+    reflection_docs.append(
+        {
+            "id": f"demo-{persona}-{teacher_id}-experience-reflection-1",
+            "task_id": task_docs[0]["id"],
+            "teacher_id": teacher_id,
+            "author_user_id": current_user["id"],
+            "tried": "I asked students to build on one answer.",
+            "happened": "Two more students joined before I summarized the idea.",
+            "text": "Two more students joined before I summarized the idea.",
+            "created_at": now,
+            "updated_at": None,
+            "demo_data": True,
+            "demo_persona": persona,
+        }
+    )
+    badge_docs.append(
+        {
+            "id": f"demo-{persona}-{teacher_id}-experience-badge-1",
+            "teacher_id": teacher_id,
+            "video_id": video_docs[0]["id"],
+            "badge_type": "Strong Student Voice",
+            "title": "Strong Student Voice",
+            "description": "Your reviewed lesson included a clear moment where students built on one another's thinking.",
+            "awarded_for": "Students had space to build on one another's thinking.",
+            "status": "awarded",
+            "awarded_at": now,
+            "earned_at": now,
+            "awarded_by": current_user.get("manager_user_id") or "demo-observer",
+            "share_url": f"/share/demo/{teacher_id}/strong-student-voice",
+            "demo_data": True,
+            "demo_persona": persona,
+        }
+    )
+    for index, status in enumerate(["overdue", "due_soon", "completed"], start=1):
+        reminder_docs.append(
+            {
+                "id": f"demo-{persona}-{teacher_id}-gradebook-{index}",
+                "teacher_id": teacher_id,
+                "workspace_id": workspace_id,
+                "title": f"Gradebook reminder {index}",
+                "description": "Review the latest class entries before your next coaching conversation.",
+                "status": status,
+                "due_at": (now_dt + timedelta(days=index - 2)).isoformat(),
+                "href": "/my-workspace?section=gradebook",
+                "created_at": now,
+                "updated_at": now,
+                "demo_data": True,
+                "demo_persona": persona,
+            }
+        )
+    schedule_docs.append(
+        {
+            "id": f"demo-{persona}-{teacher_id}-coaching-meeting-1",
+            "teacher_id": teacher_id,
+            "user_id": current_user.get("manager_user_id") or current_user["id"],
+            "course_name": "Coaching conversation",
+            "start_time": (now_dt + timedelta(days=3)).isoformat(),
+            "recording_status": "planned",
+            "created_at": now,
+            "updated_at": now,
+            "demo_data": True,
+            "demo_persona": persona,
+        }
+    )
+    counts = {
+        "organizations": 0,
+        "users": 0,
+        "teachers": 1,
+        "videos": await _upsert_demo_docs("videos", video_docs),
+        "assessments": await _upsert_demo_docs("assessments", assessment_docs),
+        "comments": await _upsert_demo_docs("video_comments", comment_docs),
+        "coaching_tasks": await _upsert_demo_docs("coaching_tasks", task_docs),
+        "recognition_badges": await _upsert_demo_docs("recognition_badges", badge_docs),
+        "grading_items": await _upsert_demo_docs("gradebook_reminders", reminder_docs),
+        "reference_images": await _upsert_demo_docs("teacher_face_references", [reference_doc]),
+    }
+    await _upsert_demo_docs("teacher_face_profiles", [profile_doc])
+    await _upsert_demo_docs("coaching_task_reflections", reflection_docs)
+    await _upsert_demo_docs("schedules", schedule_docs)
+    return {
+        "ok": True,
+        "seeded_at": now,
+        "persona": persona,
+        "scope": "current_teacher",
+        "counts": counts,
+        "message": "Your demo workspace is filled with connected lessons, coaching notes, recognition, and gradebook reminders.",
+    }
+
+
+@api_router.post("/demo/seed")
+async def seed_demo_data_v1(
+    payload: DemoSeedRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    persona = payload.persona
+    scope = payload.scope
+    if persona not in {"k12", "training", "teacher", "all"}:
+        raise HTTPException(status_code=400, detail="Unsupported demo persona")
+    if scope not in {"global", "current_workspace", "current_teacher"}:
+        raise HTTPException(status_code=400, detail="Unsupported demo seed scope")
+    tenant_role = _get_user_tenant_role(current_user)
+    if scope == "current_teacher" or tenant_role == "teacher":
+        return await _seed_current_teacher_experience(current_user)
+    if scope == "global":
+        _require_master_admin_user(current_user)
+        if not DEMO_MODE:
+            raise HTTPException(status_code=403, detail="Demo seed controls are disabled while demo mode is off")
+        if payload.confirm and payload.confirm != "SEED DEMO DATA":
+            raise HTTPException(status_code=400, detail="Confirmation text did not match")
+        from scripts.seed_demo_data import reset_demo_data_for_persona
+
+        selected = "all" if persona == "teacher" else persona
+        result = await reset_demo_data_for_persona(db, selected)
+        return {
+            "ok": True,
+            "seeded_at": result.get("reset_at"),
+            "persona": selected,
+            "scope": "global",
+            "counts": {
+                "organizations": 0,
+                "users": 0,
+                "teachers": result.get("teachers_seeded", 0),
+                "videos": 0,
+                "assessments": result.get("assessments_seeded", 0),
+                "comments": 0,
+                "coaching_tasks": result.get("tasks_seeded", 0),
+                "recognition_badges": result.get("badges_seeded", 0),
+                "grading_items": 0,
+                "reference_images": 0,
+            },
+            "message": "Demo data was seeded for internal testing.",
+        }
+    if not (DEMO_MODE or current_user.get("demo_data")):
+        raise HTTPException(status_code=403, detail="Demo seeding is available only in demo workspaces")
+    return await _seed_current_teacher_experience(current_user)
+
+
 @api_router.post("/demo/reset")
 async def reset_pilot_demo_data(
     persona: str = Query("all", pattern="^(k12|training|all)$"),

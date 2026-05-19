@@ -81,6 +81,23 @@ function HomeRedirect() {
   return <Navigate to={getHomeRoute(user)} replace />;
 }
 
+function RoleAwareAlias({ teacherTo, adminTo }) {
+  const { user, initializing } = useAuth();
+  if (initializing) return null;
+  const role = user?.tenant_role || user?.role;
+  return <Navigate to={role === "teacher" ? teacherTo : adminTo} replace />;
+}
+
+function RoleAwareCoachingRoute() {
+  const { user, initializing } = useAuth();
+  if (initializing) return null;
+  const role = user?.tenant_role || user?.role;
+  if (role === "teacher") {
+    return <Navigate to="/my-coaching" replace />;
+  }
+  return <LazyRoute><CoachingHubPage /></LazyRoute>;
+}
+
 function AppRoutes() {
   return (
     <Routes>
@@ -291,8 +308,8 @@ function AppRoutes() {
       <Route
         path="/coaching"
         element={
-          <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
-            <LazyRoute><CoachingHubPage /></LazyRoute>
+          <ProtectedRoute allowedTenantRoles={["teacher", "school_admin", "training_admin"]}>
+            <RoleAwareCoachingRoute />
           </ProtectedRoute>
         }
       />
@@ -370,6 +387,14 @@ function AppRoutes() {
         }
       />
       <Route
+        path="/my-coaching"
+        element={
+          <ProtectedRoute allowedTenantRoles={["teacher"]}>
+            <LazyRoute><TeacherCoachingPage /></LazyRoute>
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/my-workspace/goals"
         element={
           <ProtectedRoute allowedTenantRoles={["teacher"]}>
@@ -381,7 +406,7 @@ function AppRoutes() {
         path="/my-workspace/coaching"
         element={
           <ProtectedRoute allowedTenantRoles={["teacher"]}>
-            <LazyRoute><TeacherCoachingPage /></LazyRoute>
+            <Navigate to="/my-coaching" replace />
           </ProtectedRoute>
         }
       />
@@ -407,6 +432,38 @@ function AppRoutes() {
         element={
           <ProtectedRoute allowedTenantRoles={["teacher", "school_admin", "training_admin"]}>
             <LazyRoute><VideosPage /></LazyRoute>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/teacher/profile"
+        element={
+          <ProtectedRoute allowedTenantRoles={["teacher"]}>
+            <Navigate to="/my-profile" replace />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/teacher/lessons"
+        element={
+          <ProtectedRoute allowedTenantRoles={["teacher"]}>
+            <Navigate to="/my-lessons" replace />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/lessons"
+        element={
+          <ProtectedRoute allowedTenantRoles={["teacher", "school_admin", "training_admin"]}>
+            <RoleAwareAlias teacherTo="/my-lessons" adminTo="/videos" />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/recognition"
+        element={
+          <ProtectedRoute allowedTenantRoles={["teacher", "school_admin", "training_admin"]}>
+            <RoleAwareAlias teacherTo="/my-badges" adminTo="/recognition-review" />
           </ProtectedRoute>
         }
       />
