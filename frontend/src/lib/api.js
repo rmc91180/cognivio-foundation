@@ -94,6 +94,11 @@ export const dashboardApi = {
   intelligence: () => api.get("/api/dashboard/intelligence"),
 };
 
+export const adminWorkspaceApi = {
+  dashboard: (params) => api.get("/api/admin/workspace/dashboard", { params }),
+  search: (params) => api.get("/api/admin/workspace/search", { params }),
+};
+
 export const teacherWorkspaceApi = {
   latestLesson: () => api.get("/api/teachers/me/latest-lesson"),
   coachingTasks: () => api.get("/api/coaching/tasks"),

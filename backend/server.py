@@ -8783,6 +8783,22 @@ async def _teacher_readiness(teacher: Optional[dict], current_user: dict) -> Dic
     }
 
 
+async def _current_workspace_demo_eligible(current_user: dict, linked_doc: Optional[dict] = None) -> bool:
+    if (current_user or {}).get("demo_data") or (linked_doc or {}).get("demo_data"):
+        return True
+    organization_id = (current_user or {}).get("organization_id") or (linked_doc or {}).get("organization_id")
+    school_id = (current_user or {}).get("school_id") or (linked_doc or {}).get("school_id")
+    if organization_id and hasattr(db, "organizations"):
+        organization = await db.organizations.find_one({"id": organization_id}, {"_id": 0, "demo_data": 1})
+        if organization and organization.get("demo_data") is True:
+            return True
+    if school_id and hasattr(db, "schools"):
+        school = await db.schools.find_one({"id": school_id}, {"_id": 0, "demo_data": 1})
+        if school and school.get("demo_data") is True:
+            return True
+    return False
+
+
 async def _current_teacher_profile_payload(current_user: dict, request: Optional[Request] = None) -> Dict[str, Any]:
     if _get_user_tenant_role(current_user) != "teacher":
         raise HTTPException(status_code=403, detail="Teacher account required")
@@ -8826,7 +8842,7 @@ async def _current_teacher_profile_payload(current_user: dict, request: Optional
         "privacy_profile_complete": bool(privacy_profile),
         "readiness": readiness,
         "reference_images": [_reference_image_payload(ref) for ref in reference_images],
-        "demo_eligible": bool((current_user or {}).get("demo_data") or (teacher or {}).get("demo_data")),
+        "demo_eligible": await _current_workspace_demo_eligible(current_user, teacher),
         "actions": {
             "profile_href": "/my-profile",
             "privacy_href": "/privacy",
@@ -15482,6 +15498,11 @@ def _dashboard_workspace_mode(current_user: dict) -> str:
     return "school"
 
 
+def _require_active_approved_api_user(current_user: dict) -> None:
+    if _is_user_deleted_or_tombstoned(current_user) or not _is_user_access_active(current_user):
+        raise HTTPException(status_code=403, detail="Active approved account required")
+
+
 DASHBOARD_PLAIN_LANGUAGE_FOCUS_LABELS = {
     "1a": "lesson purpose and content clarity",
     "1b": "knowing students as learners",
@@ -15627,6 +15648,8 @@ async def _build_dashboard_base(current_user: dict) -> dict:
         "name",
         1,
     )
+    if not current_user.get("demo_data"):
+        teachers = [teacher for teacher in teachers if not teacher.get("demo_data")]
     teacher_by_id = {teacher.get("id"): teacher for teacher in teachers if teacher.get("id")}
     teacher_ids = list(teacher_by_id.keys())
 
@@ -16721,6 +16744,325 @@ async def get_dashboard_intelligence(current_user: dict = Depends(get_current_us
     payload = await _build_dashboard_intelligence(current_user)
     payload["cache"] = {"hit": False, "store": "fresh"}
     return payload
+
+
+def _normalize_workspace_period(period: Optional[str]) -> str:
+    normalized = str(period or "semester").strip().lower()
+    return normalized if normalized in {"month", "quarter", "semester", "year", "all"} else "semester"
+
+
+def _admin_workspace_empty_payload(current_user: dict, period: str) -> Dict[str, Any]:
+    workspace_mode = "training" if _get_user_tenant_role(current_user) == "training_admin" else "school"
+    return {
+        "workspace_id": _get_dashboard_workspace_id(current_user),
+        "workspace_mode": workspace_mode,
+        "period": period,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "demo_eligible": bool(current_user.get("demo_data")),
+        "summary": {
+            "active_teachers": 0,
+            "active_trainees": 0,
+            "reviewed_lessons": 0,
+            "planned_observations": 0,
+            "open_coaching_tasks": 0,
+            "recognition_items": 0,
+            "gradebook_reminders": 0,
+            "reports_ready": 0,
+        },
+        "next_best_actions": [],
+        "priority_cards": [],
+        "teacher_attention": [],
+        "observation_gaps": [],
+        "coaching_activity": [],
+        "recognition_candidates": [],
+        "recent_lessons": [],
+        "communications": [],
+        "reports": [],
+        "gradebook_reminders": [],
+        "trends": [],
+        "search_index_summary": {
+            "teachers": 0,
+            "lessons": 0,
+            "moments": 0,
+            "coaching_items": 0,
+            "recognition": 0,
+            "reports": 0,
+            "gradebook_reminders": 0,
+        },
+    }
+
+
+async def _build_admin_workspace_dashboard(current_user: dict, period: Optional[str] = "semester") -> Dict[str, Any]:
+    _require_active_approved_api_user(current_user)
+    tenant_role = _get_user_tenant_role(current_user)
+    if tenant_role not in {"school_admin", "training_admin"}:
+        raise HTTPException(status_code=403, detail="Workspace dashboard is available to school and training administrators")
+    normalized_period = _normalize_workspace_period(period)
+    base = await _build_dashboard_base(current_user)
+    workspace_mode = "training" if tenant_role == "training_admin" else "school"
+    teacher_label = "trainee" if workspace_mode == "training" else "teacher"
+    teacher_label_plural = "trainees" if workspace_mode == "training" else "teachers"
+    teacher_ids = base["teacher_ids"]
+    open_tasks = [task for task in base["tasks"] if _dashboard_is_open_task(task)]
+    recognition_items = [badge for badge in base["badges"] if str(badge.get("status") or "awarded").lower() != "revoked"]
+    observation_gaps = _build_dashboard_observation_gaps(base)
+    gradebook_docs = await _dashboard_collection_docs(
+        "gradebook_reminders",
+        {"teacher_id": {"$in": teacher_ids or ["__none__"]}},
+        {"_id": 0},
+        500,
+        "due_at",
+        1,
+    )
+    planned_observations = len(base["observations"]) + len(base["sessions"])
+    reports_ready = 1 if base["cycle_assessments"] else 0
+    payload = _admin_workspace_empty_payload(current_user, normalized_period)
+    payload.update(
+        {
+            "workspace_mode": workspace_mode,
+            "generated_at": base["generated_at"],
+            "demo_eligible": await _current_workspace_demo_eligible(current_user),
+            "summary": {
+                "active_teachers": len(teacher_ids) if workspace_mode == "school" else 0,
+                "active_trainees": len(teacher_ids) if workspace_mode == "training" else 0,
+                "reviewed_lessons": len(base["cycle_assessments"]),
+                "planned_observations": planned_observations,
+                "open_coaching_tasks": len(open_tasks),
+                "recognition_items": len(recognition_items),
+                "gradebook_reminders": len(gradebook_docs),
+                "reports_ready": reports_ready,
+            },
+        }
+    )
+
+    if not teacher_ids:
+        payload["next_best_actions"] = [
+            {
+                "id": "add-first-person",
+                "title": f"Add your first {teacher_label}",
+                "description": f"Start with one {teacher_label}, then plan a focused observation.",
+                "href": "/teachers",
+                "cta_label": f"Add {teacher_label}",
+                "severity": "info",
+            }
+        ]
+    elif not base["cycle_assessments"]:
+        payload["next_best_actions"] = [
+            {
+                "id": "plan-first-observation",
+                "title": f"Plan a focused {teacher_label} observation",
+                "description": "Once a recording is reviewed, this dashboard will start showing patterns and coaching priorities.",
+                "href": "/observation/new",
+                "cta_label": "Plan observation",
+                "severity": "info",
+            }
+        ]
+    elif open_tasks:
+        payload["next_best_actions"] = [
+            {
+                "id": "follow-up-coaching",
+                "title": "Follow up on active coaching",
+                "description": f"{len(open_tasks)} coaching item{'s' if len(open_tasks) != 1 else ''} still need a next touchpoint.",
+                "href": "/coaching",
+                "cta_label": "Open coaching",
+                "severity": "warning",
+            }
+        ]
+
+    payload["priority_cards"] = [
+        {
+            "id": "observation-gaps",
+            "type": "observation_gap",
+            "title": f"{teacher_label_plural.title()} ready for a fresh observation",
+            "summary": "Plan a short visit for the people who have gone longest without a fresh look.",
+            "count": len(observation_gaps),
+            "severity": "warning" if observation_gaps else "info",
+            "cta_label": "Plan observation",
+            "cta_href": "/observation/new",
+        },
+        {
+            "id": "coaching-tasks",
+            "type": "coaching_task",
+            "title": "Active coaching conversations",
+            "summary": "Keep reflections and follow-up moves moving after reviewed lessons.",
+            "count": len(open_tasks),
+            "severity": "warning" if open_tasks else "info",
+            "cta_label": "Open coaching",
+            "cta_href": "/coaching",
+        },
+        {
+            "id": "reports-ready",
+            "type": "report",
+            "title": "Reports ready",
+            "summary": "Use reports to rehearse the story you want to discuss with the team.",
+            "count": reports_ready,
+            "severity": "info",
+            "cta_label": "View reports",
+            "cta_href": "/reports",
+        },
+    ]
+
+    payload["teacher_attention"] = [
+        {
+            "teacher_id": gap["teacher_id"],
+            "teacher_name": gap["teacher_name"],
+            "reason": "Needs a fresh observation this cycle.",
+            "href": gap.get("recommended_href"),
+            "severity": "warning",
+        }
+        for gap in observation_gaps[:8]
+    ]
+    payload["observation_gaps"] = observation_gaps
+    payload["coaching_activity"] = [
+        {
+            "id": task.get("id"),
+            "teacher_id": task.get("teacher_id"),
+            "teacher_name": _dashboard_teacher_name(base["teacher_by_id"].get(task.get("teacher_id"))),
+            "title": task.get("title") or task.get("summary") or "Coaching task",
+            "status": task.get("status") or "open",
+            "href": f"/coaching?teacher_id={task.get('teacher_id')}" if task.get("teacher_id") else "/coaching",
+        }
+        for task in open_tasks[:8]
+    ]
+    payload["recognition_candidates"] = [
+        {
+            "id": badge.get("id"),
+            "teacher_id": badge.get("teacher_id"),
+            "teacher_name": _dashboard_teacher_name(base["teacher_by_id"].get(badge.get("teacher_id"))),
+            "title": badge.get("title") or badge.get("badge_type") or "Cognivio accolade",
+            "description": badge.get("description") or "A reviewed lesson highlighted a strong coaching move worth celebrating.",
+            "href": "/recognition",
+        }
+        for badge in recognition_items[:8]
+    ]
+    payload["recent_lessons"] = [
+        {
+            "video_id": assessment.get("video_id"),
+            "assessment_id": assessment.get("id"),
+            "teacher_id": assessment.get("teacher_id"),
+            "teacher_name": _dashboard_teacher_name(base["teacher_by_id"].get(assessment.get("teacher_id"))),
+            "lesson_date": assessment.get("analyzed_at") or assessment.get("created_at"),
+            "title": assessment.get("subject") or "Reviewed lesson",
+            "summary": _dashboard_summary_text(assessment),
+            "href": _dashboard_video_href(assessment.get("video_id"), assessment.get("teacher_id")),
+        }
+        for assessment in base["assessments"][:8]
+    ]
+    payload["communications"] = [
+        {
+            "id": comment.get("id"),
+            "teacher_id": comment.get("teacher_id"),
+            "teacher_name": _dashboard_teacher_name(base["teacher_by_id"].get(comment.get("teacher_id"))),
+            "title": "Shared lesson moment",
+            "summary": comment.get("body") or "A shared lesson moment is ready for follow-up.",
+            "href": _dashboard_video_href(comment.get("video_id"), comment.get("teacher_id")),
+        }
+        for comment in base["video_comments"][:8]
+        if comment.get("visibility") == "shared_with_teacher"
+    ]
+    payload["reports"] = [
+        {
+            "id": "coaching-snapshot" if workspace_mode == "school" else "cohort-snapshot",
+            "title": "Coaching snapshot" if workspace_mode == "school" else "Cohort snapshot",
+            "description": "A report snapshot is ready once reviewed lessons are connected.",
+            "href": "/reports",
+            "status": "ready" if reports_ready else "waiting_for_reviewed_lessons",
+        }
+    ]
+    payload["gradebook_reminders"] = [
+        {
+            "id": doc.get("id"),
+            "teacher_id": doc.get("teacher_id"),
+            "teacher_name": _dashboard_teacher_name(base["teacher_by_id"].get(doc.get("teacher_id"))),
+            "title": doc.get("title") or "Gradebook reminder",
+            "due_date": doc.get("due_at") or doc.get("due_date"),
+            "status": doc.get("status") if doc.get("status") in {"overdue", "due_soon", "complete"} else "due_soon",
+            "href": doc.get("href") or "/dashboard?section=gradebook",
+            "demo_note": "Demo reminder — LMS sync is not connected yet.",
+        }
+        for doc in gradebook_docs[:8]
+    ]
+    if base["cycle_assessments"]:
+        payload["trends"] = [
+            {
+                "id": "reviewed-lessons",
+                "title": "Reviewed lessons are building a pattern",
+                "description": f"{len(base['cycle_assessments'])} reviewed lesson{'s' if len(base['cycle_assessments']) != 1 else ''} can guide coaching priorities this {normalized_period}.",
+                "period": normalized_period,
+                "href": "/reports",
+            }
+        ]
+    payload["search_index_summary"] = {
+        "teachers": len(teacher_ids),
+        "lessons": len(base["assessments"]),
+        "moments": len(base["video_comments"]),
+        "coaching_items": len(open_tasks),
+        "recognition": len(recognition_items),
+        "reports": len(payload["reports"]),
+        "gradebook_reminders": len(gradebook_docs),
+    }
+    return payload
+
+
+@api_router.get("/admin/workspace/dashboard")
+async def get_admin_workspace_dashboard(
+    period: Optional[str] = "semester",
+    current_user: dict = Depends(get_current_user),
+):
+    return await _build_admin_workspace_dashboard(current_user, period)
+
+
+@api_router.get("/admin/workspace/search")
+async def search_admin_workspace(
+    q: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    dashboard = await _build_admin_workspace_dashboard(current_user, "all")
+    query_text = str(q or "").strip().lower()
+    results: List[dict] = []
+
+    def add_result(
+        item_type: str,
+        title: str,
+        snippet: str,
+        href: Optional[str],
+        source_label: str,
+        teacher_id: Optional[str] = None,
+        teacher_name: Optional[str] = None,
+        timestamp_seconds: Optional[float] = None,
+    ) -> None:
+        haystack = f"{title} {snippet} {source_label} {teacher_name or ''}".lower()
+        if query_text and query_text not in haystack:
+            return
+        results.append(
+            {
+                "type": item_type,
+                "title": title,
+                "snippet": snippet,
+                "href": href,
+                "teacher_id": teacher_id,
+                "teacher_name": teacher_name,
+                "timestamp_seconds": timestamp_seconds,
+                "source_label": source_label,
+            }
+        )
+
+    for item in dashboard.get("teacher_attention", []):
+        add_result("teacher", item.get("teacher_name") or "Teacher", item.get("reason") or "", item.get("href"), "Teacher attention", item.get("teacher_id"), item.get("teacher_name"))
+    for item in dashboard.get("recent_lessons", []):
+        add_result("lesson", item.get("title") or "Reviewed lesson", item.get("summary") or "", item.get("href"), "Lesson", item.get("teacher_id"), item.get("teacher_name"))
+    for item in dashboard.get("communications", []):
+        add_result("communication", item.get("title") or "Shared moment", item.get("summary") or "", item.get("href"), "Communication", item.get("teacher_id"), item.get("teacher_name"))
+    for item in dashboard.get("coaching_activity", []):
+        add_result("coaching", item.get("title") or "Coaching task", item.get("status") or "", item.get("href"), "Coaching", item.get("teacher_id"), item.get("teacher_name"))
+    for item in dashboard.get("recognition_candidates", []):
+        add_result("recognition", item.get("title") or "Recognition", item.get("description") or "", item.get("href"), "Recognition", item.get("teacher_id"), item.get("teacher_name"))
+    for item in dashboard.get("reports", []):
+        add_result("report", item.get("title") or "Report", item.get("description") or "", item.get("href"), "Report")
+    for item in dashboard.get("gradebook_reminders", []):
+        add_result("gradebook", item.get("title") or "Gradebook reminder", item.get("demo_note") or "", item.get("href"), "Gradebook reminder", item.get("teacher_id"), item.get("teacher_name"))
+
+    return {"query": q or "", "results": results[:50]}
 
 
 @api_router.get("/reports/coaching-snapshot")
@@ -18542,7 +18884,7 @@ async def _my_teacher_recognition_payload(current_user: dict, teacher: Optional[
     now = datetime.now(timezone.utc)
     this_month = 0
     for item in items:
-        parsed = _parse_optional_iso_datetime(item.get("earned_at"), "earned_at") if item.get("earned_at") else None
+        parsed = _parse_iso_datetime(item.get("earned_at")) if item.get("earned_at") else None
         if parsed and parsed.year == now.year and parsed.month == now.month:
             this_month += 1
     highlighted_moments = [
@@ -18569,8 +18911,22 @@ async def _my_teacher_recognition_payload(current_user: dict, teacher: Optional[
 
 @api_router.get("/teachers/me/recognition")
 async def get_my_teacher_recognition(current_user: dict = Depends(get_current_user)):
-    teacher = await _get_current_teacher_for_workspace(current_user)
-    return await _my_teacher_recognition_payload(current_user, teacher)
+    _require_active_approved_api_user(current_user)
+    profile_payload = await _current_teacher_profile_payload(current_user)
+    teacher = profile_payload.get("profile")
+    if not teacher:
+        return {
+            "badges": [],
+            "accolades": [],
+            "highlighted_moments": [],
+            "spotlight_lessons": [],
+            "share_cards": [],
+            "summary": {"total_earned": 0, "this_month": 0, "latest_title": None},
+            "demo_eligible": bool(profile_payload.get("demo_eligible")),
+        }
+    payload = await _my_teacher_recognition_payload(current_user, teacher)
+    payload["demo_eligible"] = bool(profile_payload.get("demo_eligible"))
+    return payload
 
 
 async def _my_gradebook_reminders(teacher: dict) -> List[dict]:
@@ -18641,12 +18997,20 @@ async def get_my_teacher_dashboard(
     period: Optional[str] = "semester",
     current_user: dict = Depends(get_current_user),
 ):
+    _require_active_approved_api_user(current_user)
     profile_payload = await _current_teacher_profile_payload(current_user)
     teacher = profile_payload.get("profile")
     if not teacher:
         return {
             **profile_payload,
-            "next_best_action": {"title": "Finish your teacher profile", "description": "Add your teaching details so your workspace can connect lessons, feedback, and coaching.", "href": "/my-profile"},
+            "next_best_action": {
+                "id": "finish-profile",
+                "title": "Finish your teacher profile",
+                "description": "Add your teaching details so your workspace can connect lessons, feedback, and coaching.",
+                "href": "/my-profile",
+                "cta_label": "Open profile",
+            },
+            "latest_lesson": None,
             "highlights": [],
             "action_items": [],
             "trends": [],
@@ -18654,7 +19018,14 @@ async def get_my_teacher_dashboard(
             "schedule": [],
             "gradebook_reminders": [],
             "reports": [],
-            "search_index_summary": {"items": 0},
+            "recognition": {"total_earned": 0, "latest_title": None, "items": []},
+            "search_index_summary": {
+                "lessons": 0,
+                "goals": 0,
+                "recognition": 0,
+                "gradebook_reminders": 0,
+            },
+            "demo_eligible": bool(profile_payload.get("demo_eligible")),
         }
     lessons_payload = await get_my_lessons(q=None, status=None, subject=None, period="all", current_user=current_user)
     coaching_payload = await get_my_teacher_coaching(current_user)
@@ -18663,9 +19034,29 @@ async def get_my_teacher_dashboard(
     latest_lesson = (lessons_payload.get("lessons") or [None])[0]
     next_best_action = coaching_payload.get("next_best_action")
     if not next_best_action and latest_lesson:
-        next_best_action = {"title": "Review your latest lesson", "description": latest_lesson.get("summary") or "Open the newest recording and choose one next step.", "href": latest_lesson.get("href") or "/my-lessons"}
+        next_best_action = {
+            "id": "latest-lesson",
+            "title": "Review your latest lesson",
+            "description": latest_lesson.get("summary") or "Open the newest recording and choose one next step.",
+            "href": latest_lesson.get("href") or "/my-lessons",
+            "cta_label": "Open lesson",
+        }
     if not next_best_action:
-        next_best_action = {"title": "Record or upload a lesson", "description": "Start with one lesson recording so feedback and coaching notes have a place to land.", "href": "/record"}
+        next_best_action = {
+            "id": "record-lesson",
+            "title": "Record or upload a lesson",
+            "description": "Start with one lesson recording so feedback and coaching notes have a place to land.",
+            "href": "/record",
+            "cta_label": "Record or upload",
+        }
+    else:
+        next_best_action = {
+            "id": next_best_action.get("id") or "next-step",
+            "title": next_best_action.get("title") or "Open your next step",
+            "description": next_best_action.get("description") or "Choose one useful move for your next lesson.",
+            "href": next_best_action.get("href") or "/my-workspace",
+            "cta_label": next_best_action.get("cta_label") or "Open next step",
+        }
     completed_reflections = len(coaching_payload.get("teacher_reflections") or [])
     trends = []
     if completed_reflections:
@@ -18700,6 +19091,11 @@ async def get_my_teacher_dashboard(
         "schedule": schedule,
         "gradebook_reminders": gradebook,
         "reports": [{"id": "teacher-progress", "title": "Teacher progress snapshot", "description": "Trends will appear after a few reviewed lessons.", "href": "/reports"}],
+        "recognition": {
+            "total_earned": (recognition_payload.get("summary") or {}).get("total_earned", 0),
+            "latest_title": (recognition_payload.get("summary") or {}).get("latest_title"),
+            "items": (recognition_payload.get("accolades") or recognition_payload.get("badges") or [])[:4],
+        },
         "search_index_summary": {
             "lessons": len(lessons_payload.get("lessons") or []),
             "goals": len(coaching_payload.get("active_tasks") or []),
@@ -27838,7 +28234,7 @@ def _demo_seed_persona_for_user(current_user: dict, teacher: Optional[dict] = No
 
 async def _seed_current_teacher_experience(current_user: dict) -> Dict[str, Any]:
     teacher = await _get_current_teacher_for_workspace(current_user)
-    if not (DEMO_MODE or current_user.get("demo_data") or teacher.get("demo_data")):
+    if not await _current_workspace_demo_eligible(current_user, teacher):
         raise HTTPException(status_code=403, detail="Demo seeding is available only in demo workspaces")
     persona = _demo_seed_persona_for_user(current_user, teacher)
     now_dt = datetime.now(timezone.utc)
@@ -28083,6 +28479,60 @@ async def _seed_current_teacher_experience(current_user: dict) -> Dict[str, Any]
     }
 
 
+async def _seed_current_admin_workspace_experience(current_user: dict, persona: str) -> Dict[str, Any]:
+    tenant_role = _get_user_tenant_role(current_user)
+    if tenant_role not in {"school_admin", "training_admin"}:
+        raise HTTPException(status_code=403, detail="Demo workspace seeding is available to demo administrators")
+    if not await _current_workspace_demo_eligible(current_user):
+        raise HTTPException(status_code=403, detail="Demo seeding is available only in demo workspaces")
+    resolved_persona = "training" if tenant_role == "training_admin" else "k12"
+    if persona in {"k12", "training"}:
+        resolved_persona = persona
+    workspace_id = _workspace_id_for_user(current_user)
+    now = datetime.now(timezone.utc).isoformat()
+    teacher_id = f"demo-{resolved_persona}-{workspace_id}-workspace-teacher-1"
+    teacher_name = "Demo Trainee" if resolved_persona == "training" else "Demo Teacher"
+    teacher_doc = {
+        "id": teacher_id,
+        "name": teacher_name,
+        "email": f"{teacher_id}@demo.cognivio.local",
+        "subject": "Instructional practice",
+        "subjects": ["Instructional practice", "Student discussion"],
+        "primary_subject": "Instructional practice",
+        "grade_level": "Grade 4" if resolved_persona == "k12" else "Clinical placement",
+        "department": "Period 2" if resolved_persona == "k12" else "Cohort A",
+        "class_section": "Period 2" if resolved_persona == "k12" else "Cohort A",
+        "organization_id": current_user.get("organization_id"),
+        "organization_name": current_user.get("organization_name"),
+        "school_id": current_user.get("school_id"),
+        "school_name": current_user.get("school_name"),
+        "created_by": current_user["id"],
+        "created_at": now,
+        "updated_at": now,
+        "demo_data": True,
+        "demo_persona": resolved_persona,
+    }
+    await _upsert_demo_docs("teachers", [teacher_doc])
+    synthetic_teacher_user = {
+        **current_user,
+        "id": f"demo-{resolved_persona}-{workspace_id}-teacher-seed-user",
+        "email": teacher_doc["email"],
+        "name": teacher_name,
+        "role": "teacher",
+        "tenant_role": "teacher",
+        "teacher_id": teacher_id,
+        "demo_data": True,
+        "demo_persona": resolved_persona,
+        "manager_user_id": current_user.get("id"),
+    }
+    result = await _seed_current_teacher_experience(synthetic_teacher_user)
+    result["scope"] = "current_workspace"
+    result["persona"] = resolved_persona
+    result["counts"]["teachers"] = max(1, int(result["counts"].get("teachers") or 0))
+    result["message"] = "Your demo workspace is filled with connected teachers, lessons, coaching notes, recognition, and gradebook reminders."
+    return result
+
+
 @api_router.post("/demo/seed")
 async def seed_demo_data_v1(
     payload: DemoSeedRequest,
@@ -28126,9 +28576,7 @@ async def seed_demo_data_v1(
             },
             "message": "Demo data was seeded for internal testing.",
         }
-    if not (DEMO_MODE or current_user.get("demo_data")):
-        raise HTTPException(status_code=403, detail="Demo seeding is available only in demo workspaces")
-    return await _seed_current_teacher_experience(current_user)
+    return await _seed_current_admin_workspace_experience(current_user, persona)
 
 
 @api_router.post("/demo/reset")
@@ -28446,6 +28894,16 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
 from app.routers.auth import router as auth_router
 from app.routers.videos import router as videos_router
 
+def _prioritize_static_teacher_self_routes(router: APIRouter) -> None:
+    router.routes.sort(
+        key=lambda route: (
+            0 if getattr(route, "path", "").startswith("/api/teachers/me") else 1,
+            0 if getattr(route, "path", "") == "/api/demo/seed" else 1,
+        )
+    )
+
+
+_prioritize_static_teacher_self_routes(api_router)
 app.include_router(auth_router, prefix="/api")
 app.include_router(videos_router, prefix="/api")
 app.include_router(api_router)

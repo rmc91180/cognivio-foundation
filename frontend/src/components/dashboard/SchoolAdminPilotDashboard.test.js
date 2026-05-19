@@ -2,16 +2,21 @@ import React from "react";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { SchoolAdminPilotDashboard } from "@/components/dashboard/SchoolAdminPilotDashboard";
-import { dashboardApi, onboardingApi } from "@/lib/api";
+import { adminWorkspaceApi, demoApi, onboardingApi } from "@/lib/api";
 
 jest.mock("@/components/LayoutShell", () => ({
   LayoutShell: ({ children }) => <div>{children}</div>,
 }));
 
 jest.mock("@/lib/api", () => ({
-  dashboardApi: {
-    intelligence: jest.fn(),
+  adminWorkspaceApi: {
+    dashboard: jest.fn(),
+    search: jest.fn(),
+  },
+  demoApi: {
+    seed: jest.fn(),
   },
   onboardingApi: {
     status: jest.fn(),
@@ -35,19 +40,21 @@ describe("SchoolAdminPilotDashboard", () => {
     onboardingApi.status.mockResolvedValue({
       data: { progress_pct: 100, counts: { reviewed_lessons: 1 }, next_step: { href: "/dashboard" } },
     });
+    adminWorkspaceApi.search.mockResolvedValue({ data: { query: "", results: [] } });
+    demoApi.seed.mockResolvedValue({ data: { counts: { teachers: 1, videos: 5 } } });
   });
 
   it("renders priority cards and plain-language patterns from dashboard intelligence", async () => {
-    dashboardApi.intelligence.mockResolvedValue({
+    adminWorkspaceApi.dashboard.mockResolvedValue({
       data: {
-        cycle_summary: {
+        demo_eligible: true,
+        summary: {
+          active_teachers: 3,
           reviewed_lessons: 3,
-          teachers_observed: 2,
           open_coaching_tasks: 1,
-          recognition_count: 1,
-          days_remaining_in_cycle: 12,
-          coverage_pct: 66,
+          reports_ready: 1,
         },
+        next_best_actions: [{ id: "follow-up", title: "Follow up on active coaching", description: "One teacher has a coaching item ready.", href: "/coaching", cta_label: "Open coaching" }],
         priority_cards: [
           {
             id: "gap",
@@ -60,19 +67,14 @@ describe("SchoolAdminPilotDashboard", () => {
             cta_href: "/observation/new",
           },
         ],
-        patterns: [
-          {
-            id: "student-discussion",
-            title: "Student discussion is showing up as a common growth area.",
-            description: "Three teachers have recent lesson feedback pointing toward student discussion.",
-            recommended_action: "Plan one short observation focused on student discussion.",
-            severity: "warning",
-            affected_teacher_names: ["Avery Stone"],
-          },
-        ],
+        teacher_attention: [{ teacher_id: "t1", teacher_name: "Avery Stone", reason: "Needs a fresh observation this cycle.", href: "/observation/new?teacher_id=t1" }],
         recent_lessons: [],
         observation_gaps: [{ teacher_id: "t1", teacher_name: "Avery Stone", days_since_last_observation: 75, recommended_href: "/observation/new?teacher_id=t1" }],
-        highlights: [],
+        coaching_activity: [],
+        recognition_candidates: [],
+        gradebook_reminders: [],
+        reports: [],
+        trends: [],
       },
     });
 
@@ -80,20 +82,25 @@ describe("SchoolAdminPilotDashboard", () => {
 
     await waitFor(() => expect(screen.getByText("School Dashboard")).toBeInTheDocument());
     expect(await screen.findByText("Teachers ready for a fresh observation")).toBeInTheDocument();
-    expect(screen.getByText("Student discussion is showing up as a common growth area.")).toBeInTheDocument();
-    const planLinks = screen.getAllByRole("link", { name: "Plan observation" });
-    expect(planLinks.some((link) => link.getAttribute("href") === "/observation/new?teacher_id=t1")).toBe(true);
+    expect(screen.getAllByText("Avery Stone").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Fill demo workspace" })).toBeInTheDocument();
   });
 
   it("renders a friendly empty intelligence state", async () => {
-    dashboardApi.intelligence.mockResolvedValue({
+    adminWorkspaceApi.dashboard.mockResolvedValue({
       data: {
-        cycle_summary: {},
+        summary: {},
+        next_best_actions: [],
         priority_cards: [],
-        patterns: [],
+        teacher_attention: [],
         recent_lessons: [],
         observation_gaps: [],
-        highlights: [],
+        coaching_activity: [],
+        recognition_candidates: [],
+        gradebook_reminders: [],
+        reports: [],
+        trends: [],
+        demo_eligible: false,
       },
     });
 
@@ -101,5 +108,31 @@ describe("SchoolAdminPilotDashboard", () => {
 
     expect(await screen.findByText("Priorities will appear as lesson feedback builds.")).toBeInTheDocument();
     expect(screen.queryByText(/No data available/i)).not.toBeInTheDocument();
+  });
+
+  it("fills a demo workspace only when the backend marks it eligible", async () => {
+    const user = userEvent.setup();
+    adminWorkspaceApi.dashboard.mockResolvedValue({
+      data: {
+        demo_eligible: true,
+        summary: {},
+        next_best_actions: [],
+        priority_cards: [],
+        teacher_attention: [],
+        recent_lessons: [],
+        observation_gaps: [],
+        coaching_activity: [],
+        recognition_candidates: [],
+        gradebook_reminders: [],
+        reports: [],
+        trends: [],
+      },
+    });
+
+    renderWithClient(<SchoolAdminPilotDashboard />);
+
+    await user.click(await screen.findByRole("button", { name: "Fill demo workspace" }));
+
+    expect(demoApi.seed).toHaveBeenCalledWith({ persona: "k12", scope: "current_workspace" });
   });
 });
