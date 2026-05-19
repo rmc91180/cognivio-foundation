@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -7,6 +7,9 @@ import { LayoutShell } from "@/components/LayoutShell";
 import { Button, ErrorState, Field, Input, LoadingState, PageContextHeader, Panel, SectionHeader } from "@/components/ui";
 import { demoApi, teacherApi } from "@/lib/api";
 import { useAuth } from "@/hooks/useAuth";
+
+const ACCEPTED_REFERENCE_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
 
 const profileReturnTarget = (location) => {
   const params = new URLSearchParams(location.search);
@@ -19,6 +22,56 @@ const splitSubjects = (value) =>
     .map((item) => item.trim())
     .filter(Boolean);
 
+const isSafeReferenceImageFile = (file) => {
+  if (!file) return false;
+  if (!ACCEPTED_REFERENCE_IMAGE_TYPES.has(file.type)) return false;
+  if (file.size > MAX_REFERENCE_IMAGE_BYTES) return false;
+  return true;
+};
+
+const referenceImageValidationMessage = (file) => {
+  if (!file) return "Please choose a PNG, JPG, or WebP image.";
+  if (!ACCEPTED_REFERENCE_IMAGE_TYPES.has(file.type)) {
+    return "Please choose a PNG, JPG, or WebP image. SVG files are not supported for reference images.";
+  }
+  if (file.size > MAX_REFERENCE_IMAGE_BYTES) {
+    return "Please choose an image smaller than 10 MB.";
+  }
+  return "Please choose a PNG, JPG, or WebP image.";
+};
+
+const createSafeReferencePreviewUrl = (file) => {
+  if (!isSafeReferenceImageFile(file)) {
+    throw new Error(referenceImageValidationMessage(file));
+  }
+  return URL.createObjectURL(file);
+};
+
+const isSafeReferencePreviewUrl = (url) => typeof url === "string" && url.startsWith("blob:");
+
+const revokeReferencePreviewUrl = (url) => {
+  if (isSafeReferencePreviewUrl(url)) {
+    URL.revokeObjectURL(url);
+  }
+};
+
+const toSafeStoredImageUrl = (url) => {
+  if (typeof url !== "string" || !url.trim()) return "";
+
+  const trimmed = url.trim();
+
+  try {
+    const parsed = new URL(trimmed, window.location.origin);
+    if (parsed.protocol === "https:" || parsed.protocol === "http:") {
+      return parsed.href;
+    }
+  } catch {
+    return "";
+  }
+
+  return "";
+};
+
 export function TeacherSelfProfilePage() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -26,6 +79,7 @@ export function TeacherSelfProfilePage() {
   const { refreshUser } = useAuth();
   const returnTo = useMemo(() => profileReturnTarget(location), [location]);
   const [previewUrl, setPreviewUrl] = useState("");
+  const previewUrlRef = useRef("");
   const [selectedImage, setSelectedImage] = useState(null);
   const [form, setForm] = useState({
     name: "",
@@ -36,6 +90,19 @@ export function TeacherSelfProfilePage() {
     primary_subject: "",
     category: "",
   });
+
+  const updatePreviewUrl = (nextUrl) => {
+    revokeReferencePreviewUrl(previewUrlRef.current);
+    previewUrlRef.current = nextUrl || "";
+    setPreviewUrl(nextUrl || "");
+  };
+
+  useEffect(() => {
+    return () => {
+      revokeReferencePreviewUrl(previewUrlRef.current);
+      previewUrlRef.current = "";
+    };
+  }, []);
 
   const profileQuery = useQuery({
     queryKey: ["teacher-self-profile"],
@@ -96,6 +163,10 @@ export function TeacherSelfProfilePage() {
 
   const uploadMutation = useMutation({
     mutationFn: () => {
+      if (!isSafeReferenceImageFile(selectedImage)) {
+        throw new Error(referenceImageValidationMessage(selectedImage));
+      }
+
       const data = new FormData();
       data.append("file", selectedImage);
       return teacherApi.uploadReferenceImage(data);
@@ -103,11 +174,11 @@ export function TeacherSelfProfilePage() {
     onSuccess: () => {
       toast.success("Reference image saved.");
       setSelectedImage(null);
-      setPreviewUrl("");
+      updatePreviewUrl("");
       invalidateTeacherPages();
     },
     onError: (error) => {
-      const detail = error?.response?.data?.detail;
+      const detail = error?.response?.data?.detail || error?.message;
       toast.error(typeof detail === "string" ? detail : "That image could not be saved.");
     },
   });
@@ -139,9 +210,24 @@ export function TeacherSelfProfilePage() {
   };
 
   const handleImageChange = (event) => {
-    const file = event.target.files?.[0];
-    setSelectedImage(file || null);
-    setPreviewUrl(file ? URL.createObjectURL(file) : "");
+    const file = event.target.files?.[0] || null;
+
+    if (!file) {
+      setSelectedImage(null);
+      updatePreviewUrl("");
+      return;
+    }
+
+    try {
+      const nextPreviewUrl = createSafeReferencePreviewUrl(file);
+      setSelectedImage(file);
+      updatePreviewUrl(nextPreviewUrl);
+    } catch (error) {
+      setSelectedImage(null);
+      updatePreviewUrl("");
+      event.target.value = "";
+      toast.error(error?.message || "Please choose a PNG, JPG, or WebP image.");
+    }
   };
 
   const readiness = profileQuery.data?.readiness || {};
@@ -149,6 +235,7 @@ export function TeacherSelfProfilePage() {
   const demoEligible = Boolean(profileQuery.data?.demo_eligible);
   const canSave = form.grade_level.trim() && (form.primary_subject.trim() || form.subject.trim() || splitSubjects(form.subjectsText).length);
   const pageTitle = readiness.teacher_profile_complete ? "Teacher Profile" : "Finish your teacher profile";
+  const safePreviewUrl = isSafeReferencePreviewUrl(previewUrl) ? previewUrl : "";
 
   return (
     <LayoutShell>
@@ -242,9 +329,9 @@ export function TeacherSelfProfilePage() {
                   Choose reference image
                   <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={handleImageChange} />
                 </label>
-                {previewUrl ? (
+                {safePreviewUrl ? (
                   <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
-                    <img src={previewUrl} alt="Selected reference preview" className="h-28 w-28 rounded-lg object-cover" />
+                    <img src={safePreviewUrl} alt="Selected reference preview" className="h-28 w-28 rounded-lg object-cover" />
                     <Button type="button" onClick={() => uploadMutation.mutate()} disabled={uploadMutation.isPending || !selectedImage}>
                       {uploadMutation.isPending ? "Uploading..." : "Save reference image"}
                     </Button>
@@ -254,22 +341,26 @@ export function TeacherSelfProfilePage() {
 
               {referenceImages.length ? (
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  {referenceImages.map((image) => (
-                    <div key={image.id} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                      {image.image_url ? (
-                        <img src={image.image_url} alt="Teacher reference" className="h-32 w-full rounded-md object-cover" />
-                      ) : (
-                        <div className="flex h-32 items-center justify-center rounded-md bg-white text-sm text-slate-500">Reference image metadata ready</div>
-                      )}
-                      <div className="mt-3 flex items-center justify-between gap-3">
-                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">{image.status || "ready"}</span>
-                        <Button type="button" size="sm" variant="secondary" onClick={() => deleteMutation.mutate(image.id)} disabled={deleteMutation.isPending}>
-                          <Trash2 className="mr-1 h-4 w-4" />
-                          Delete
-                        </Button>
+                  {referenceImages.map((image) => {
+                    const safeStoredImageUrl = toSafeStoredImageUrl(image.image_url);
+
+                    return (
+                      <div key={image.id} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                        {safeStoredImageUrl ? (
+                          <img src={safeStoredImageUrl} alt="Teacher reference" className="h-32 w-full rounded-md object-cover" />
+                        ) : (
+                          <div className="flex h-32 items-center justify-center rounded-md bg-white text-sm text-slate-500">Reference image metadata ready</div>
+                        )}
+                        <div className="mt-3 flex items-center justify-between gap-3">
+                          <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">{image.status || "ready"}</span>
+                          <Button type="button" size="sm" variant="secondary" onClick={() => deleteMutation.mutate(image.id)} disabled={deleteMutation.isPending}>
+                            <Trash2 className="mr-1 h-4 w-4" />
+                            Delete
+                          </Button>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-700">
