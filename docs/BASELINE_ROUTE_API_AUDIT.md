@@ -1,5 +1,23 @@
 # Baseline Route/API Audit
 
+## 2026-05-20 Addendum: Settings and Framework Route Stability
+
+Follow-up production testing found that Admin Settings reached Railway successfully but `GET /api/frameworks` returned 500. This was not a CORS failure.
+
+The `audit-reveal-and-fix-platform-baseline` branch adds a deeper settings-specific repair:
+
+- Added `GET /api/health/version` for safe deployment/build alignment checks.
+- Fixed `/api/frameworks` so valid empty/default settings return 200 JSON instead of crashing.
+- Added stable response fields for framework settings: `frameworks`, `default_framework_id`, `active_framework_id`, `summary`, and `empty_state`.
+- Fixed framework route ordering so `/api/frameworks/selection/current` is mounted before `/api/frameworks/{framework_type}`.
+- Added canonical Admin Settings routes:
+  - `/settings`
+  - `/admin/settings` -> `/settings`
+- Updated school/training admin nav to use `/settings`.
+- Added backend route/CORS tests and frontend Admin Settings empty/error/populated tests.
+
+See `docs/BASELINE_REVIEW_REVEAL_FIX_AUDIT.md` for the full review, reveal, and fix audit.
+
 ## Executive Summary
 
 This audit was created for the `repair-baseline-routing-cors-demo-seed-audit` stabilization branch. The repo baseline is `main` at commit `01593cc5ae6098134fe726c6aa4207d93bb45402`, which includes PR #21.

@@ -5362,6 +5362,11 @@ async def api_health_check():
     """Health check endpoint under /api prefix"""
     return _build_public_health_payload()
 
+@api_router.get("/health/version")
+async def api_health_version():
+    """Safe deployment/version metadata for frontend and manual deployment checks."""
+    return _build_public_health_payload()
+
 def _build_public_health_payload() -> dict:
     commit = (
         os.getenv("RAILWAY_GIT_COMMIT_SHA")
@@ -8222,33 +8227,54 @@ async def set_user_audio_analysis_preference(
     )
 
 # ==================== FRAMEWORK ENDPOINTS ====================
-@cached(ttl=3600, key=lambda workspace_id: f"frameworks:{workspace_id}", client_getter=_cache_client)
+@cached(ttl=3600, key=lambda workspace_id, user_id, *_args, **_kwargs: f"frameworks:{workspace_id}:{user_id}", client_getter=_cache_client)
 async def _get_frameworks_cached(workspace_id: str, user_id: str) -> dict:
-    custom_domain_count = await db.custom_domains.count_documents(
-        {"user_id": user_id}
-    )
-    training_domain_count = await db.custom_domains.count_documents(
+    async def _safe_count_custom_domains(query: dict) -> int:
+        try:
+            return int(await db.custom_domains.count_documents(query))
+        except Exception as exc:
+            logger.warning("Unable to count framework custom domains: %s", exc)
+            return 0
+
+    custom_domain_count = await _safe_count_custom_domains({"user_id": user_id})
+    training_domain_count = await _safe_count_custom_domains(
         {
             "user_id": user_id,
             "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
         }
     )
+    try:
+        selection = await db.framework_selections.find_one({"user_id": user_id}, {"_id": 0})
+    except Exception as exc:
+        logger.warning("Unable to load current framework selection: %s", exc)
+        selection = None
+    frameworks = [
+        {"type": "danielson", "name": "Danielson Framework", "domain_count": 4},
+        {"type": "marshall", "name": "Marshall Rubrics", "domain_count": 6},
+        {
+            "type": "training_competency",
+            "name": "Training Competency Framework",
+            "domain_count": len(TRAINING_COMPETENCY_FRAMEWORK["domains"]) + training_domain_count,
+            "scale": TRAINING_COMPETENCY_SCALE,
+        },
+        {
+            "type": "custom",
+            "name": "Custom Focus Rubric",
+            "domain_count": 10 + custom_domain_count,
+        },
+    ]
     return {
-        "frameworks": [
-            {"type": "danielson", "name": "Danielson Framework", "domain_count": 4},
-            {"type": "marshall", "name": "Marshall Rubrics", "domain_count": 6},
-            {
-                "type": "training_competency",
-                "name": "Training Competency Framework",
-                "domain_count": len(TRAINING_COMPETENCY_FRAMEWORK["domains"]) + training_domain_count,
-                "scale": TRAINING_COMPETENCY_SCALE,
-            },
-            {
-                "type": "custom",
-                "name": "Custom Focus Rubric",
-                "domain_count": 10 + custom_domain_count,
-            },
-        ]
+        "frameworks": frameworks,
+        "default_framework_id": FrameworkType.DANIELSON.value,
+        "active_framework_id": (selection or {}).get("framework_type") or FrameworkType.DANIELSON.value,
+        "summary": {
+            "total": len(frameworks),
+            "active": 1 if frameworks else 0,
+        },
+        "empty_state": {
+            "title": "No frameworks configured yet",
+            "description": "Framework settings will appear here once a rubric or observation framework is added.",
+        },
     }
 
 
@@ -28923,16 +28949,17 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
 from app.routers.auth import router as auth_router
 from app.routers.videos import router as videos_router
 
-def _prioritize_static_teacher_self_routes(router: APIRouter) -> None:
+def _prioritize_static_routes(router: APIRouter) -> None:
     router.routes.sort(
         key=lambda route: (
             0 if getattr(route, "path", "").startswith("/api/teachers/me") else 1,
+            0 if getattr(route, "path", "").startswith("/api/frameworks/selection") else 1,
             0 if getattr(route, "path", "") == "/api/demo/seed" else 1,
         )
     )
 
 
-_prioritize_static_teacher_self_routes(api_router)
+_prioritize_static_routes(api_router)
 app.include_router(auth_router, prefix="/api")
 app.include_router(videos_router, prefix="/api")
 app.include_router(api_router)

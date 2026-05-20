@@ -52,7 +52,7 @@ const ROLE_NAV_ITEMS = {
     { to: "/coaching", icon: MessageSquareText, label: "Coaching" },
     { to: "/recognition-review", icon: Trophy, label: "Recognition" },
     { to: "/reports", icon: BookOpen, label: "Reports" },
-    { to: "/school-setup", icon: Layers, label: "Settings" },
+    { to: "/settings", icon: Layers, label: "Settings" },
   ],
   training: [
     { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard", end: true },
@@ -61,6 +61,7 @@ const ROLE_NAV_ITEMS = {
     { to: "/observation/new", icon: Target, label: "Observation" },
     { to: "/coaching", icon: MessageSquareText, label: "Coaching" },
     { to: "/reports", icon: BookOpen, label: "Reports" },
+    { to: "/settings", icon: Layers, label: "Settings" },
   ],
   teacher: [
     { to: "/my-workspace", icon: LayoutDashboard, label: "My Workspace", end: true },
@@ -85,6 +86,7 @@ const ROLE_MOBILE_NAV_ITEMS = {
     { to: "/observation/new", icon: Target, label: "Observe" },
     { to: "/coaching", icon: MessageSquareText, label: "Coaching" },
     { to: "/reports", icon: BookOpen, label: "Reports" },
+    { to: "/settings", icon: Layers, label: "Settings" },
   ],
   training: [
     { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard", end: true },
@@ -92,6 +94,7 @@ const ROLE_MOBILE_NAV_ITEMS = {
     { to: "/observation/new", icon: Target, label: "Observe" },
     { to: "/coaching", icon: MessageSquareText, label: "Coaching" },
     { to: "/reports", icon: BookOpen, label: "Reports" },
+    { to: "/settings", icon: Layers, label: "Settings" },
   ],
   teacher: [
     { to: "/my-workspace", icon: LayoutDashboard, label: "Home", end: true },

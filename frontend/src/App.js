@@ -534,8 +534,24 @@ function AppRoutes() {
       <Route
         path="/school-setup"
         element={
-          <ProtectedRoute allowedTenantRoles={["school_admin"]}>
+          <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
             <LazyRoute><FrameworksPage /></LazyRoute>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/settings"
+        element={
+          <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
+            <LazyRoute><FrameworksPage /></LazyRoute>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/admin/settings"
+        element={
+          <ProtectedRoute allowedTenantRoles={["school_admin", "training_admin"]}>
+            <Navigate to="/settings" replace />
           </ProtectedRoute>
         }
       />
