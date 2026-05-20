@@ -200,7 +200,6 @@ export function OnboardingPage() {
         <PageHeader
           title={isTraining ? "Set up your first trainee observation" : "Set up your first Cognivio observation"}
           description="We’ll walk you from setup to your first useful coaching conversation."
-          actions={<QuickAction to="/dashboard">Go to dashboard</QuickAction>}
         />
 
         {query.isLoading ? <LoadingState message="Preparing your setup checklist..." /> : null}

@@ -1,5 +1,7 @@
 import api from "@/lib/apiClient";
 import { authApi, demoApi, masterAdminApi } from "@/lib/api";
+import fs from "fs";
+import path from "path";
 
 jest.mock("@/lib/apiClient", () => ({
   __esModule: true,
@@ -52,9 +54,39 @@ describe("masterAdminApi user lifecycle endpoints", () => {
     expect(api.post).toHaveBeenCalledWith("/api/auth/request-access", payload);
   });
 
+  it("routes current-user checks through the deployment-friendly /api/me alias", () => {
+    authApi.me();
+
+    expect(api.get).toHaveBeenCalledWith("/api/me");
+  });
+
   it("exposes the signup health diagnostic endpoint", () => {
     masterAdminApi.signupHealth();
 
     expect(api.get).toHaveBeenCalledWith("/api/admin/signup-health");
+  });
+
+  it("keeps local API client calls under the mounted /api prefix", () => {
+    const srcDir = path.resolve(__dirname, "..");
+    const offenders = [];
+    const scan = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          scan(fullPath);
+          continue;
+        }
+        if (!entry.name.endsWith(".js") || entry.name.endsWith(".test.js")) continue;
+        const text = fs.readFileSync(fullPath, "utf8");
+        const regex = /api\.(?:get|post|patch|put|delete)\(\s*["']\/(?!api\/)/g;
+        if (regex.test(text)) {
+          offenders.push(path.relative(srcDir, fullPath));
+        }
+      }
+    };
+
+    scan(srcDir);
+
+    expect(offenders).toEqual([]);
   });
 });

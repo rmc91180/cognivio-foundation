@@ -190,7 +190,16 @@ def _clear_overrides():
 
 def test_endpoint_routes_are_mounted_under_api():
     paths = {route.path for route in server.app.routes}
+    assert "/api/me" in paths
+    assert "/api/institutions/lookup" in paths
+    assert "/api/onboarding/status" in paths
+    assert "/api/dashboard/intelligence" in paths
+    assert "/api/reports/coaching-snapshot" in paths
+    assert "/api/reports/cohort-snapshot" in paths
     assert "/api/teachers/me/dashboard" in paths
+    assert "/api/teachers/me/lessons" in paths
+    assert "/api/teachers/me/coaching" in paths
+    assert "/api/teachers/me/profile" in paths
     assert "/api/teachers/me/recognition" in paths
     assert "/api/demo/seed" in paths
     assert "/api/admin/workspace/dashboard" in paths
@@ -198,6 +207,41 @@ def test_endpoint_routes_are_mounted_under_api():
     ordered_paths = [route.path for route in server.app.routes]
     assert ordered_paths.index("/api/teachers/me/dashboard") < ordered_paths.index("/api/teachers/{teacher_id}/dashboard")
     assert ordered_paths.index("/api/teachers/me/recognition") < ordered_paths.index("/api/teachers/{teacher_id}/recognition")
+
+
+def test_api_me_alias_returns_current_user(monkeypatch):
+    client = _client(monkeypatch, {"id": "school-admin", "email": "admin@example.com", "tenant_role": "school_admin", "approval_status": "approved", "is_active": True})
+
+    response = client.get("/api/me")
+
+    assert response.status_code == 200
+    assert response.json()["email"] == "admin@example.com"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/institutions/lookup?organization_type=school&q=Test&limit=6",
+        "/api/admin/workspace/dashboard",
+        "/api/teachers/me/dashboard",
+        "/api/demo/seed",
+    ],
+)
+def test_production_frontend_origin_preflight_is_allowed(path):
+    client = TestClient(server.app)
+
+    response = client.options(
+        path,
+        headers={
+            "Origin": "https://app.cognivio.live",
+            "Access-Control-Request-Method": "GET" if path != "/api/demo/seed" else "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://app.cognivio.live"
+    assert "authorization" in response.headers["access-control-allow-headers"].lower()
 
 
 def test_teacher_dashboard_and_recognition_empty_payloads_are_200(monkeypatch):

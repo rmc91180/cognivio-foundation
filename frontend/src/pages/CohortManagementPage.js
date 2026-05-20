@@ -22,7 +22,7 @@ export default function CohortManagementPage() {
       setError("");
 
       try {
-        const response = await api.get("/cohorts");
+        const response = await api.get("/api/cohorts");
         if (!active) return;
 
         setCohorts(normalizeCohorts(response?.data));

@@ -66,6 +66,7 @@ describe("OnboardingPage", () => {
     expect(await screen.findByText("Set up your first Cognivio observation")).toBeInTheDocument();
     expect(await screen.findByText("0%")).toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: "Add teacher" })[0]).toHaveAttribute("href", "/teachers");
+    expect(screen.queryByRole("link", { name: "Go to dashboard" })).not.toBeInTheDocument();
     expect(screen.queryByText(/No data available/i)).not.toBeInTheDocument();
   });
 

@@ -22,7 +22,7 @@ export default function ObserverInsightsPage() {
       setError("");
 
       try {
-        const response = await api.get("/observer/insights");
+        const response = await api.get("/api/observer/insights");
         if (!active) return;
 
         setInsights(normalizeInsights(response?.data));
