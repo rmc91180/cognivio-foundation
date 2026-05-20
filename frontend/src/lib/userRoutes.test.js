@@ -34,6 +34,14 @@ describe("role route contract", () => {
     expect(canAccess(teacher, "/my-workspace")).toBe(true);
   });
 
+  it("allows school and training admins to access settings aliases", () => {
+    expect(canAccess(schoolAdmin, "/settings")).toBe(true);
+    expect(canAccess(schoolAdmin, "/admin/settings")).toBe(true);
+    expect(canAccess(trainingAdmin, "/settings")).toBe(true);
+    expect(canAccess(trainingAdmin, "/school-setup")).toBe(true);
+    expect(canAccess(teacher, "/settings")).toBe(false);
+  });
+
   it("honors explicit route guard tenant role allow-lists", () => {
     expect(canAccess(schoolAdmin, "/dashboard", ["school_admin"])).toBe(true);
     expect(canAccess(trainingAdmin, "/dashboard", ["school_admin"])).toBe(false);

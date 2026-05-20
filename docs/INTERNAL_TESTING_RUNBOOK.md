@@ -110,18 +110,21 @@ Use current internal/demo credentials from the secure team source. Do not add re
 
 ## Baseline Routing, CORS, and Demo Seed Verification
 
-1. Open `GET /api/health` on the deployed Railway backend and confirm the safe environment/build fields match the expected deployment.
+1. Open `GET /api/health` and `GET /api/health/version` on the deployed Railway backend and confirm the safe environment/build fields match the expected deployment.
 2. From `https://app.cognivio.live`, confirm `GET /api/institutions/lookup?organization_type=school&q=Test&limit=6` is not blocked by CORS.
 3. Login as a school admin and open `/dashboard`; the admin dashboard should render instead of redirecting to `/onboarding`.
-4. Click each visible school admin dashboard CTA once; only explicit setup CTAs should open setup/onboarding.
-5. Login as a training admin and repeat `/dashboard`, `/teachers`, `/observation/new`, `/coaching`, and `/reports`.
-6. Login as a teacher and confirm `/my-workspace`, `/my-lessons`, `/my-coaching`, `/my-badges`, and `/my-profile` render loading, starter, or populated states instead of blank pages.
-7. If the admin workspace is demo eligible, confirm **Fill demo workspace** appears, calls `POST /api/demo/seed`, and refreshes dashboard/teacher/report data.
-8. If the teacher workspace is demo eligible, confirm **Fill my demo workspace** appears, calls `POST /api/demo/seed`, and refreshes workspace/lessons/coaching/recognition/profile data.
-9. Login as a non-demo admin or teacher and confirm demo seed controls are hidden.
-10. Login as master admin and confirm `/master-admin`, `/master-admin/users`, `/master-admin/organizations`, `/master-admin/dependencies`, and `/master-admin/ai-quality` still work.
-11. Confirm demo reset controls still follow `DEMO_MODE`; disabling demo mode must disable reset controls without hiding existing demo data from appropriate internal testing views.
-12. If Cloudflare beacon or source-map console messages remain, verify they do not block Cognivio API calls or route rendering.
+4. Open `/settings` as a school admin and confirm `GET /api/frameworks` returns 200 JSON, not 500.
+5. Confirm Admin Settings renders even if framework settings are empty.
+6. Login as a training admin and confirm `/settings` is visible and reachable.
+7. Click each visible school/training admin dashboard and settings CTA once; only explicit setup CTAs should open setup/onboarding.
+8. Login as a training admin and repeat `/dashboard`, `/teachers`, `/observation/new`, `/coaching`, `/reports`, and `/settings`.
+9. Login as a teacher and confirm `/my-workspace`, `/my-lessons`, `/my-coaching`, `/my-badges`, and `/my-profile` render loading, starter, or populated states instead of blank pages.
+10. If the admin workspace is demo eligible, confirm **Fill demo workspace** appears, calls `POST /api/demo/seed`, and refreshes dashboard/teacher/report data.
+11. If the teacher workspace is demo eligible, confirm **Fill my demo workspace** appears, calls `POST /api/demo/seed`, and refreshes workspace/lessons/coaching/recognition/profile data.
+12. Login as a non-demo admin or teacher and confirm demo seed controls are hidden.
+13. Login as master admin and confirm `/master-admin`, `/master-admin/users`, `/master-admin/organizations`, `/master-admin/dependencies`, and `/master-admin/ai-quality` still work.
+14. Confirm demo reset controls still follow `DEMO_MODE`; disabling demo mode must disable reset controls without hiding existing demo data from appropriate internal testing views.
+15. If Cloudflare beacon or source-map console messages remain, verify they do not block Cognivio API calls or route rendering.
 
 ## Training Internal Test
 

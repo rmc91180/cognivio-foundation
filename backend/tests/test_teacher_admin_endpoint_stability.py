@@ -171,6 +171,8 @@ def _db():
         coaching_task_reflections=_Collection([]),
         schedules=_Collection([]),
         dashboard_intelligence_cache=_Collection([]),
+        custom_domains=_Collection([]),
+        framework_selections=_Collection([]),
     )
 
 
@@ -191,8 +193,11 @@ def _clear_overrides():
 def test_endpoint_routes_are_mounted_under_api():
     paths = {route.path for route in server.app.routes}
     assert "/api/me" in paths
+    assert "/api/health/version" in paths
     assert "/api/institutions/lookup" in paths
     assert "/api/onboarding/status" in paths
+    assert "/api/frameworks" in paths
+    assert "/api/frameworks/selection/current" in paths
     assert "/api/dashboard/intelligence" in paths
     assert "/api/reports/coaching-snapshot" in paths
     assert "/api/reports/cohort-snapshot" in paths
@@ -207,6 +212,7 @@ def test_endpoint_routes_are_mounted_under_api():
     ordered_paths = [route.path for route in server.app.routes]
     assert ordered_paths.index("/api/teachers/me/dashboard") < ordered_paths.index("/api/teachers/{teacher_id}/dashboard")
     assert ordered_paths.index("/api/teachers/me/recognition") < ordered_paths.index("/api/teachers/{teacher_id}/recognition")
+    assert ordered_paths.index("/api/frameworks/selection/current") < ordered_paths.index("/api/frameworks/{framework_type}")
 
 
 def test_api_me_alias_returns_current_user(monkeypatch):
@@ -222,6 +228,7 @@ def test_api_me_alias_returns_current_user(monkeypatch):
     "path",
     [
         "/api/institutions/lookup?organization_type=school&q=Test&limit=6",
+        "/api/frameworks",
         "/api/admin/workspace/dashboard",
         "/api/teachers/me/dashboard",
         "/api/demo/seed",
@@ -242,6 +249,36 @@ def test_production_frontend_origin_preflight_is_allowed(path):
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "https://app.cognivio.live"
     assert "authorization" in response.headers["access-control-allow-headers"].lower()
+
+
+def test_health_version_returns_safe_build_payload():
+    client = TestClient(server.app)
+
+    response = client.get("/api/health/version")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "healthy"
+    assert payload["service"] == "cognivio-api"
+    assert "server_time" in payload
+    assert "build" in payload
+    assert "JWT_SECRET" not in str(payload)
+
+
+def test_frameworks_route_returns_default_payload_for_empty_settings(monkeypatch):
+    client = _client(monkeypatch, {"id": "school-admin", "email": "admin@example.com", "tenant_role": "school_admin", "organization_id": "org-1", "approval_status": "approved", "is_active": True})
+
+    response = client.get("/api/frameworks")
+    selection = client.get("/api/frameworks/selection/current")
+
+    assert response.status_code == 200
+    assert selection.status_code == 200
+    payload = response.json()
+    assert isinstance(payload["frameworks"], list)
+    assert payload["default_framework_id"] == "danielson"
+    assert payload["active_framework_id"] == "danielson"
+    assert payload["summary"]["total"] >= 1
+    assert payload["empty_state"]["title"]
 
 
 def test_teacher_dashboard_and_recognition_empty_payloads_are_200(monkeypatch):
