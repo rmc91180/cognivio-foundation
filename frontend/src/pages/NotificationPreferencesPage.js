@@ -57,7 +57,7 @@ export default function NotificationPreferencesPage() {
       setError("");
 
       try {
-        const response = await api.get("/notifications/preferences");
+        const response = await api.get("/api/user/notification-preferences");
         if (!active) return;
 
         setPreferences(normalizePreferences(response?.data));
@@ -97,7 +97,7 @@ export default function NotificationPreferencesPage() {
     setError("");
 
     try {
-      await api.put("/notifications/preferences", preferences);
+      await api.patch("/api/user/notification-preferences", preferences);
       setMessage("Notification preferences saved.");
     } catch (err) {
       setError(

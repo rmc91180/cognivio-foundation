@@ -30,7 +30,7 @@ export const authApi = {
   institutionLookup: (params) => api.get("/api/institutions/lookup", { params }),
   requestPasswordReset: (payload) => api.post("/api/auth/password-reset/request", payload),
   confirmPasswordReset: (payload) => api.post("/api/auth/password-reset/confirm", payload),
-  me: () => api.get("/api/auth/me"),
+  me: () => api.get("/api/me"),
   getWorkspaceMode: () => api.get("/api/user/workspace-mode"),
   setWorkspaceMode: (payload) => api.post("/api/user/workspace-mode", payload),
 };

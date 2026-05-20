@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 import { useAuth } from "@/hooks/useAuth";
 import { RoleMismatchPage } from "@/pages/RoleMismatchPage";
 import { canAccess, getHomeRoute } from "@/lib/roleRouter";
-import { consentApi, onboardingApi } from "@/lib/api";
+import { consentApi } from "@/lib/api";
 import {
   canAccessTenantRole,
   getUserTenantRole,
@@ -44,20 +44,8 @@ export function ProtectedRoute({
   const tenantRole = getUserTenantRole(user);
   const authIsLoading = Boolean(initializing || loading || isLoading);
 
-  const isOnboardingRoute = isSamePath(currentPath, "/onboarding");
   const isConsentRoute = isSamePath(currentPath, "/consent");
   const isPrivacyRoute = isSamePath(currentPath, "/privacy");
-
-  const onboardingQuery = useQuery({
-    queryKey: ["protected-onboarding-status", user?.id],
-    enabled:
-      Boolean(user) &&
-      ["school_admin", "training_admin"].includes(tenantRole) &&
-      !isOnboardingRoute,
-    queryFn: () => onboardingApi.status().then((res) => res.data),
-    staleTime: 60_000,
-    retry: 1,
-  });
 
   const consentQuery = useQuery({
     queryKey: ["protected-consent-status", user?.id],
@@ -111,18 +99,6 @@ export function ProtectedRoute({
     });
 
     return redirect || <RoleMismatchPage user={user} currentRole={tenantRole} />;
-  }
-
-  if (
-    ["school_admin", "training_admin"].includes(tenantRole) &&
-    !isOnboardingRoute &&
-    !onboardingQuery.isLoading &&
-    !onboardingQuery.isFetching &&
-    onboardingQuery.data &&
-    onboardingQuery.data.is_complete === false
-  ) {
-    const redirect = safeRedirect("/onboarding", currentPath, { from: currentPath });
-    return redirect || children;
   }
 
   if (

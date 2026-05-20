@@ -5355,12 +5355,35 @@ async def enforce_csrf_for_session_auth(request: Request, call_next):
 @app.get("/health")
 async def health_check():
     """Health check endpoint for Railway deployment"""
-    return {"status": "healthy", "service": "cognivio-api"}
+    return _build_public_health_payload()
 
 @api_router.get("/health")
 async def api_health_check():
     """Health check endpoint under /api prefix"""
-    return {"status": "healthy", "service": "cognivio-api"}
+    return _build_public_health_payload()
+
+def _build_public_health_payload() -> dict:
+    commit = (
+        os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("RENDER_GIT_COMMIT")
+        or os.getenv("GIT_COMMIT")
+        or os.getenv("COMMIT_SHA")
+        or ""
+    )
+    return {
+        "status": "healthy",
+        "service": "cognivio-api",
+        "environment": APP_SETTINGS.environment,
+        "railway_environment_name": os.getenv("RAILWAY_ENVIRONMENT_NAME") or None,
+        "build": {
+            "commit": commit[:40] or None,
+            "version": os.getenv("APP_VERSION") or None,
+            "deployed_at": os.getenv("RAILWAY_DEPLOYMENT_CREATED_AT") or None,
+        },
+        "frontend_url_configured": bool(FRONTEND_URL),
+        "backend_public_base_url_configured": bool(BACKEND_PUBLIC_BASE_URL),
+        "server_time": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def _upload_storage_is_healthy() -> bool:
@@ -8100,6 +8123,12 @@ async def confirm_password_reset(payload: "PasswordResetConfirmPayload", request
 
 async def get_me(request: Request, response: Response, current_user: dict = Depends(get_current_user)):
     return await _auth_service.get_current_user_profile(current_user, request, response)
+
+
+@api_router.get("/me")
+async def get_current_user_alias(current_user: dict = Depends(get_current_user)):
+    """Compatibility alias for clients and deployment checks that probe /api/me."""
+    return _build_user_response_payload(current_user)
 
 
 def _require_school_admin_user(current_user: dict) -> dict:
@@ -28913,13 +28942,38 @@ app.add_api_route(
     methods=["GET"],
 )
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
-origins = APP_SETTINGS.auth.cors_origins
-if not origins:
-    logger.warning("CORS_ORIGINS not set; defaulting to no external origins")
+
+PRODUCTION_FRONTEND_ORIGINS = {
+    "https://app.cognivio.live",
+    "https://cognivio.live",
+    "https://www.cognivio.live",
+}
+LOCAL_FRONTEND_ORIGINS = {
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+}
+
+
+def _build_cors_origins() -> List[str]:
+    configured = {
+        origin.strip().rstrip("/")
+        for origin in (APP_SETTINGS.auth.cors_origins or [])
+        if origin and origin.strip()
+    }
+    if FRONTEND_URL:
+        configured.add(FRONTEND_URL.strip().rstrip("/"))
+    return sorted(configured | PRODUCTION_FRONTEND_ORIGINS | LOCAL_FRONTEND_ORIGINS)
+
+
+origins = _build_cors_origins()
+if not APP_SETTINGS.auth.cors_origins:
+    logger.info("CORS_ORIGINS not set; using Cognivio production and local development defaults")
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=origins or [],
+    allow_origins=origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
