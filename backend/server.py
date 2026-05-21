@@ -5332,6 +5332,7 @@ CSRF_EXEMPT_PATHS = {
     "/api/auth/login",
     "/api/auth/register",
     "/api/auth/request-access",
+    "/api/auth/logout",
     "/api/auth/password-reset/request",
     "/api/auth/password-reset/confirm",
 }

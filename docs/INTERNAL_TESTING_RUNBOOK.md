@@ -129,6 +129,21 @@ Use current internal/demo credentials from the secure team source. Do not add re
 17. Confirm demo reset controls still follow `DEMO_MODE`; disabling demo mode must disable reset controls without hiding existing demo data from appropriate internal testing views.
 18. If Cloudflare beacon or source-map console messages remain, verify they do not block Cognivio API calls or route rendering.
 
+## Login Lifecycle and Safari Signup Verification
+
+1. Open `https://app.cognivio.live` in Safari with cleared website data.
+2. Use the Sign up tab and submit a fresh teacher request with a known school/institution.
+3. Confirm the UI shows request-received/pending copy, not the generic “Failed to submit access request.”
+4. Confirm the request appears in `/master-admin/users?approval_status=pending` even if the notification email is delayed.
+5. Approve the pending user as Master Admin.
+6. Log in as that newly approved user in Safari and confirm `GET /api/me` returns 200.
+7. Confirm role routing lands on `/my-workspace` for teacher, `/dashboard` for school/training admin, and `/master-admin` for Master Admin.
+8. Submit a duplicate pending request and confirm the UI says the request is already pending.
+9. Submit a request for an already approved email and confirm the UI points the user to sign in or reset the password.
+10. In staging or local test, force email notification failure and confirm the request still persists and the UI says notification may be delayed.
+11. Repeat request -> approve -> login in Chrome, Edge, and Firefox.
+12. Confirm `OPTIONS /api/auth/request-access`, `OPTIONS /api/auth/login`, and `OPTIONS /api/auth/logout` return 200 from `https://app.cognivio.live`.
+
 ## Training Internal Test
 
 1. Log in as a training admin.

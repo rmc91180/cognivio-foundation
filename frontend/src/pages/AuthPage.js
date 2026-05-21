@@ -9,6 +9,7 @@ import { InstitutionSuggestionList } from "@/components/ui/InstitutionSuggestion
 import { Button, Field, Input, Panel } from "@/components/ui";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 import { authApi } from "@/lib/api";
+import { getAccessRequestSuccessMessage, getAuthErrorMessage } from "@/lib/authMessages";
 import { normalizePath } from "@/lib/userRoutes";
 import { getHomeRoute } from "@/lib/roleRouter";
 
@@ -53,6 +54,8 @@ export function AuthPage() {
   const [mode, setMode] = useState("login");
   const [showPasswordResetRequest, setShowPasswordResetRequest] = useState(false);
   const [accessRequestSubmitted, setAccessRequestSubmitted] = useState(false);
+  const [accessRequestNotice, setAccessRequestNotice] = useState("");
+  const [accessRequestError, setAccessRequestError] = useState("");
   const [accessType, setAccessType] = useState("teacher");
   const [institutionType, setInstitutionType] = useState("school");
   const [form, setForm] = useState({
@@ -260,6 +263,8 @@ export function AuthPage() {
     };
 
     if (mode === "signup" && approvalRequired) {
+      setAccessRequestNotice("");
+      setAccessRequestError("");
       try {
         const res = await requestAccessAsync(signupPayload);
         setForm((current) => ({
@@ -267,11 +272,13 @@ export function AuthPage() {
           password: "",
         }));
         setAccessRequestSubmitted(true);
+        setAccessRequestNotice(getAccessRequestSuccessMessage(res?.data, ""));
         if (res?.data?.status === "approved") {
           setMode("login");
           setAccessRequestSubmitted(false);
         }
-      } catch {
+      } catch (error) {
+        setAccessRequestError(getAuthErrorMessage(error, t("auth.requestAccessFailed")));
         return;
       }
 
@@ -352,6 +359,8 @@ export function AuthPage() {
                 setMode("login");
                 setShowPasswordResetRequest(false);
                 setAccessRequestSubmitted(false);
+                setAccessRequestNotice("");
+                setAccessRequestError("");
               }}
               className={`flex-1 rounded px-3 py-2 ${
                 mode === "login" && !showPasswordResetRequest
@@ -368,6 +377,8 @@ export function AuthPage() {
                   setMode("signup");
                   setShowPasswordResetRequest(false);
                   setAccessRequestSubmitted(false);
+                  setAccessRequestNotice("");
+                  setAccessRequestError("");
                 }}
                 className={`flex-1 rounded px-3 py-2 ${
                   mode === "signup"
@@ -438,6 +449,14 @@ export function AuthPage() {
           <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
             <div className="font-semibold">Access request submitted</div>
             <div className="mt-1">Your request is waiting for Master Admin review. Once approved, sign in with this same email and password.</div>
+            {accessRequestNotice ? <div className="mt-2 text-xs">{accessRequestNotice}</div> : null}
+          </div>
+        ) : null}
+
+        {accessRequestError && mode === "signup" && !isResetConfirmMode && !isResetRequestMode ? (
+          <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-900" role="alert">
+            <div className="font-semibold">Access request needs attention</div>
+            <div className="mt-1">{accessRequestError}</div>
           </div>
         ) : null}
 

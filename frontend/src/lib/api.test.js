@@ -54,6 +54,12 @@ describe("masterAdminApi user lifecycle endpoints", () => {
     expect(api.post).toHaveBeenCalledWith("/api/auth/request-access", payload);
   });
 
+  it("routes logout through the backend session cleanup endpoint", () => {
+    authApi.logout();
+
+    expect(api.post).toHaveBeenCalledWith("/api/auth/logout");
+  });
+
   it("routes current-user checks through the deployment-friendly /api/me alias", () => {
     authApi.me();
 
