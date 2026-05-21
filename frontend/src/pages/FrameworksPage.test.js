@@ -82,7 +82,17 @@ describe("FrameworksPage baseline settings behavior", () => {
     renderWithClient(<FrameworksPage />);
 
     expect(await screen.findByText("frameworksPage.frameworksLoadFailed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "frameworksPage.retryFrameworks" })).toBeInTheDocument();
     expect(screen.getByText("frameworksPage.recordingCompliancePolicy")).toBeInTheDocument();
+  });
+
+  it("renders a fallback empty state when framework payload omits optional fields", async () => {
+    frameworkApi.list.mockResolvedValue({ data: {} });
+
+    renderWithClient(<FrameworksPage />);
+
+    expect(await screen.findByText("Framework settings are ready when you need them.")).toBeInTheDocument();
+    expect(screen.queryByText("frameworksPage.frameworksLoadFailed")).not.toBeInTheDocument();
   });
 
   it("renders available framework choices for admin settings", async () => {
