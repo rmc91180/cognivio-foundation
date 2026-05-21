@@ -25,6 +25,7 @@ import { evidenceApi, videoApi } from "@/features/videos/api";
 
 export const authApi = {
   login: (payload) => api.post("/api/auth/login", payload),
+  logout: () => api.post("/api/auth/logout"),
   register: (payload) => api.post("/api/auth/register", payload),
   requestAccess: (payload) => api.post("/api/auth/request-access", payload),
   institutionLookup: (params) => api.get("/api/institutions/lookup", { params }),

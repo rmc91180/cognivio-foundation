@@ -3,31 +3,10 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { authApi } from "@/lib/api";
+import { getAccessRequestSuccessMessage, getAuthErrorMessage } from "@/lib/authMessages";
 import { clearPreviewSession } from "@/lib/previewMode";
 
 const AuthContext = createContext(null);
-
-function getErrorMessage(error, fallback) {
-  const detail = error?.response?.data?.detail;
-
-  if (typeof detail === "string" && detail.trim()) {
-    return detail;
-  }
-
-  if (Array.isArray(detail) && detail.length > 0) {
-    const first = detail[0];
-
-    if (typeof first === "string" && first.trim()) {
-      return first;
-    }
-
-    if (first && typeof first.msg === "string" && first.msg.trim()) {
-      return first.msg;
-    }
-  }
-
-  return fallback;
-}
 
 function clearStoredAuth() {
   localStorage.removeItem("cognivio_token");
@@ -106,7 +85,7 @@ export function AuthProvider({ children }) {
       toast.success(t("auth.loggedInSuccessfully"));
     },
     onError: (error) => {
-      toast.error(getErrorMessage(error, t("auth.loginFailed")));
+      toast.error(getAuthErrorMessage(error, t("auth.loginFailed")));
     },
   });
 
@@ -124,17 +103,17 @@ export function AuthProvider({ children }) {
       toast.success(t("auth.accountCreated"));
     },
     onError: (error) => {
-      toast.error(getErrorMessage(error, t("auth.registrationFailed")));
+      toast.error(getAuthErrorMessage(error, t("auth.registrationFailed")));
     },
   });
 
   const requestAccessMutation = useMutation({
     mutationFn: authApi.requestAccess,
     onSuccess: (res) => {
-      toast.success(res?.data?.message || t("auth.requestAccessSubmitted"));
+      toast.success(getAccessRequestSuccessMessage(res?.data, t("auth.requestAccessSubmitted")));
     },
     onError: (error) => {
-      toast.error(getErrorMessage(error, t("auth.requestAccessFailed")));
+      toast.error(getAuthErrorMessage(error, t("auth.requestAccessFailed")));
     },
   });
 
@@ -144,7 +123,7 @@ export function AuthProvider({ children }) {
       toast.success(res?.data?.message || t("auth.passwordResetRequestSubmitted"));
     },
     onError: (error) => {
-      toast.error(getErrorMessage(error, t("auth.passwordResetRequestFailed")));
+      toast.error(getAuthErrorMessage(error, t("auth.passwordResetRequestFailed")));
     },
   });
 
@@ -154,11 +133,12 @@ export function AuthProvider({ children }) {
       toast.success(res?.data?.message || t("auth.passwordResetConfirmSuccess"));
     },
     onError: (error) => {
-      toast.error(getErrorMessage(error, t("auth.passwordResetConfirmFailed")));
+      toast.error(getAuthErrorMessage(error, t("auth.passwordResetConfirmFailed")));
     },
   });
 
   const logout = useCallback(() => {
+    authApi.logout().catch(() => {});
     clearStoredAuth();
     setUser(null);
     queryClient.clear();

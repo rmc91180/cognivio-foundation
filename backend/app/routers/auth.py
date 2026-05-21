@@ -12,6 +12,7 @@ from app.services.auth_service import (
     confirm_password_reset,
     get_current_user_profile,
     login_user,
+    logout_user,
     register_user,
     request_access,
     request_password_reset,
@@ -37,8 +38,8 @@ async def register(user: legacy.UserCreate, request: Request, response: Response
 
 
 @router.post("/auth/login", response_model=legacy.TokenResponse)
-async def login(user: legacy.UserLogin, request: Request):
-    return await login_user(user, request)
+async def login(user: legacy.UserLogin, request: Request, response: Response):
+    return await login_user(user, request, response)
 
 
 @router.post("/auth/request-access")
@@ -54,6 +55,11 @@ async def request_password_reset_route(payload: PasswordResetRequestPayload, req
 @router.post("/auth/password-reset/confirm")
 async def confirm_password_reset_route(payload: PasswordResetConfirmPayload, request: Request):
     return await confirm_password_reset(payload, request)
+
+
+@router.post("/auth/logout")
+async def logout_route(request: Request, response: Response):
+    return await logout_user(response=response, request=request)
 
 
 @router.get("/auth/me", response_model=legacy.UserResponse)

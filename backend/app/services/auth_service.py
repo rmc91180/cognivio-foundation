@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,21 @@ def _now_iso() -> str:
 DELETED_APPROVAL_STATUSES = {"deleted", "hard_deleted", "account_deleted", "approval_deleted"}
 REUSABLE_APPROVAL_STATUSES = DELETED_APPROVAL_STATUSES | {"rejected", "denied"}
 LOGIN_ALLOWED_APPROVAL_STATUSES = {"approved", "active"}
+
+
+def _structured_detail(message: str, reason_code: str, **extra: Any) -> Dict[str, Any]:
+    return {
+        "message": message,
+        "reason_code": reason_code,
+        **{key: value for key, value in extra.items() if value is not None},
+    }
+
+
+def _raise_auth_error(status_code: int, message: str, reason_code: str, **extra: Any) -> None:
+    raise HTTPException(
+        status_code=status_code,
+        detail=_structured_detail(message, reason_code, **extra),
+    )
 
 
 def _normalize_email(value: Any) -> str:
@@ -78,6 +94,61 @@ async def _remove_reusable_user_record(email: str) -> None:
             ]
     except Exception:
         pass
+
+    escaped_email = re.escape(email)
+    regex_query = {
+        "email": {"$regex": f"^{escaped_email}$", "$options": "i"},
+        "$or": query["$or"],
+    }
+    try:
+        if hasattr(users, "delete_many"):
+            await users.delete_many(regex_query)
+        elif hasattr(users, "delete_one"):
+            await users.delete_one({"email": {"$regex": f"^{escaped_email}$", "$options": "i"}})
+    except Exception:
+        pass
+
+    if hasattr(users, "docs"):
+        users.docs = [
+            doc
+            for doc in getattr(users, "docs", [])
+            if _normalize_email(doc.get("email")) != email or _blocks_new_access_request(doc)
+        ]
+
+
+async def _find_user_by_email_case_insensitive(email: str, projection: Optional[Dict[str, int]] = None) -> Optional[Dict[str, Any]]:
+    if not email or not hasattr(legacy, "db") or getattr(legacy.db, "users", None) is None:
+        return None
+
+    users = legacy.db.users
+    normalized_email = _normalize_email(email)
+    exact = await users.find_one({"email": normalized_email}, projection)
+    if exact:
+        return exact
+
+    escaped_email = re.escape(normalized_email)
+    try:
+        cursor = users.find({"email": {"$regex": f"^{escaped_email}$", "$options": "i"}}, projection)
+        matches = await cursor.to_list(2)
+        if matches:
+            return matches[0]
+    except Exception:
+        pass
+
+    for doc in getattr(users, "docs", []) or []:
+        if _normalize_email(doc.get("email")) == normalized_email:
+            if projection is None:
+                return dict(doc)
+            payload = dict(doc)
+            include_keys = {key for key, value in projection.items() if value}
+            exclude_keys = {key for key, value in projection.items() if not value}
+            if include_keys:
+                payload = {key: value for key, value in payload.items() if key in include_keys}
+            for key in exclude_keys:
+                payload.pop(key, None)
+            return payload
+
+    return None
 
 
 def _jwt_secret() -> str:
@@ -505,7 +576,7 @@ async def login_user(user: Any, request: Request, response: Optional[Response] =
     email = _normalize_email(user.email)
     requested_role = str(getattr(user, "role", "") or "").strip().lower()
 
-    db_user = await legacy.db.users.find_one({"email": email})
+    db_user = await _find_user_by_email_case_insensitive(email)
     if (
         not db_user
         or _is_deleted_or_tombstoned_user(db_user)
@@ -518,20 +589,45 @@ async def login_user(user: Any, request: Request, response: Optional[Response] =
             reason="invalid_credentials",
             request=request,
         )
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        _raise_auth_error(
+            401,
+            "Invalid email or password",
+            "invalid_credentials",
+        )
 
     approval_status = _normalize_status(db_user.get("approval_status"), "approved")
     is_active = db_user.get("is_active", True)
     if approval_status not in LOGIN_ALLOWED_APPROVAL_STATUSES or is_active is False:
+        if approval_status == "pending":
+            event_type = "login_blocked_pending"
+            reason_code = "account_pending_approval"
+            message = "Your access request is pending approval."
+        elif approval_status in {"rejected", "denied"}:
+            event_type = "login_blocked_rejected"
+            reason_code = "account_rejected"
+            message = "This access request was not approved. You can submit a new request if your institution details have changed."
+        elif approval_status == "revoked" or is_active is False:
+            event_type = "login_blocked_revoked"
+            reason_code = "account_disabled"
+            message = "This account is not active. Contact your Cognivio administrator for help."
+        else:
+            event_type = "login_failed"
+            reason_code = "access_not_approved"
+            message = "User access is not approved."
         await _maybe_log_auth_event(
-            "login_failed",
+            event_type,
             email=email,
             user_id=db_user.get("id"),
             result="failure",
-            reason="access_not_approved",
+            reason=reason_code,
             request=request,
         )
-        raise HTTPException(status_code=403, detail="User access is not approved")
+        _raise_auth_error(
+            403,
+            message,
+            reason_code,
+            status=approval_status,
+        )
 
     resolved_role = legacy._get_user_role(db_user) if hasattr(legacy, "_get_user_role") else db_user.get("role")
     if requested_role and requested_role not in {"", "auto"}:
@@ -606,17 +702,47 @@ async def request_access(user: Any, request: Optional[Request] = None) -> Dict[s
     school_name = str(getattr(user, "school_name", "") or "").strip()
     requested_manager_email = str(getattr(user, "requested_manager_email", "") or "").strip().lower()
 
-    existing = await legacy.db.users.find_one({"email": email}, {"_id": 0})
+    existing = await _find_user_by_email_case_insensitive(email, {"_id": 0})
     if _blocks_new_access_request(existing):
         existing_status = _normalize_status(existing.get("approval_status"))
         if existing_status == "pending":
-            return {
-                "status": "pending",
-                "message": "Access request is already pending review.",
-                "user_id": existing.get("id"),
-            }
+            await _maybe_log_auth_event(
+                "request_access_rejected",
+                email=email,
+                user_id=existing.get("id"),
+                result="failure",
+                reason="access_request_already_pending",
+                request=request,
+            )
+            _raise_auth_error(
+                409,
+                "Your access request is already pending review.",
+                "access_request_already_pending",
+                status="pending",
+            )
 
-        raise HTTPException(status_code=400, detail="Email already registered")
+        existing_status = existing_status or "approved"
+        reason_code = "account_already_exists"
+        message = "An approved account already exists for this email. Sign in with that email or reset the password."
+        status_code = 409
+        if existing_status == "revoked" or existing.get("is_active") is False:
+            reason_code = "account_disabled"
+            message = "This email is connected to an account that is not active. Contact your Cognivio administrator."
+            status_code = 403
+        await _maybe_log_auth_event(
+            "request_access_rejected",
+            email=email,
+            user_id=existing.get("id"),
+            result="failure",
+            reason=reason_code,
+            request=request,
+        )
+        _raise_auth_error(
+            status_code,
+            message,
+            reason_code,
+            status=existing_status,
+        )
     if existing:
         await _remove_reusable_user_record(email)
 
@@ -647,7 +773,25 @@ async def request_access(user: Any, request: Optional[Request] = None) -> Dict[s
         "assessments_total": 0,
     }
 
-    await legacy.db.users.insert_one(user_doc)
+    try:
+        await legacy.db.users.insert_one(user_doc)
+    except Exception as exc:
+        message = str(exc).lower()
+        if "duplicate" in message or "e11000" in message:
+            await _maybe_log_auth_event(
+                "request_access_rejected",
+                email=email,
+                result="failure",
+                reason="duplicate_email",
+                request=request,
+            )
+            _raise_auth_error(
+                409,
+                "A request or account already exists for this email.",
+                "duplicate_email",
+                status="duplicate",
+            )
+        raise
 
     email_warnings = []
     for helper_name in ("_send_access_request_notification", "_send_access_request_received_confirmation"):
@@ -665,15 +809,25 @@ async def request_access(user: Any, request: Optional[Request] = None) -> Dict[s
                 logger.warning("%s failed after access request creation", helper_name, exc_info=True)
 
     await _maybe_log_auth_event(
-        "access_request_submitted",
+        "request_access_persisted",
         email=email,
         user_id=user_id,
         result="success",
         reason=f"requested_role={tenant_role}",
         request=request,
     )
+    if email_warnings:
+        await _maybe_log_auth_event(
+            "request_access_notification_failed",
+            email=email,
+            user_id=user_id,
+            result="warning",
+            reason="notification_delivery_failed",
+            request=request,
+        )
 
     return {
+        "ok": True,
         "status": "pending",
         "message": "Access request submitted for master-admin review.",
         "user_id": user_id,
@@ -682,6 +836,11 @@ async def request_access(user: Any, request: Optional[Request] = None) -> Dict[s
         "tenant_role": tenant_role,
         "organization_type": organization_type,
         "email_warning": bool(email_warnings),
+        "notification": {
+            "sent": not bool(email_warnings),
+            "warning": "notification_delivery_failed" if email_warnings else None,
+        },
+        "reason_code": "access_request_pending_review",
     }
 
 
