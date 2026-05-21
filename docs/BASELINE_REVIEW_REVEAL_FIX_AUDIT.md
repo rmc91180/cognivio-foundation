@@ -1,5 +1,11 @@
 # Baseline Review, Reveal, and Fix Audit
 
+## 2026-05-21 Deep Audit Addendum
+
+The follow-up `deep-audit-reveal-and-fix-hidden-failures` branch rechecked the Admin Settings Framework selection failure after this baseline repair landed. The route was mounted, but the deeper pass removed the cache wrapper from the framework-list path, added explicit admin role guards, hardened framework selection/detail/custom-domain reads when optional collections are absent, and added a frontend build marker at `window.__COGNIVIO_BUILD__` for stale-bundle detection.
+
+See `docs/DEEP_AUDIT_REVEAL_AND_FIX_HIDDEN_FAILURES.md` for the full route/API/UI/CTA audit and manual verification checklist.
+
 ## Executive Summary
 
 This audit was completed for the `audit-reveal-and-fix-platform-baseline` stabilization branch. The branch was created from protected `main` at commit `92853447e2fb4be63503808ed861fdc2f881fc0f`, which includes the earlier routing, CORS, and demo seed repair PR.

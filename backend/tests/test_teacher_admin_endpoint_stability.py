@@ -183,6 +183,12 @@ def _client(monkeypatch, user):
     return client
 
 
+def _client_with_db(monkeypatch, user, db_obj):
+    monkeypatch.setattr(server, "db", db_obj)
+    server.app.dependency_overrides[server.get_current_user] = lambda: user
+    return TestClient(server.app)
+
+
 @pytest.fixture(autouse=True)
 def _clear_overrides():
     server.app.dependency_overrides.clear()
@@ -198,6 +204,8 @@ def test_endpoint_routes_are_mounted_under_api():
     assert "/api/onboarding/status" in paths
     assert "/api/frameworks" in paths
     assert "/api/frameworks/selection/current" in paths
+    assert "/api/frameworks/custom-domains" in paths
+    assert "/api/recording-policies" in paths
     assert "/api/dashboard/intelligence" in paths
     assert "/api/reports/coaching-snapshot" in paths
     assert "/api/reports/cohort-snapshot" in paths
@@ -213,6 +221,44 @@ def test_endpoint_routes_are_mounted_under_api():
     assert ordered_paths.index("/api/teachers/me/dashboard") < ordered_paths.index("/api/teachers/{teacher_id}/dashboard")
     assert ordered_paths.index("/api/teachers/me/recognition") < ordered_paths.index("/api/teachers/{teacher_id}/recognition")
     assert ordered_paths.index("/api/frameworks/selection/current") < ordered_paths.index("/api/frameworks/{framework_type}")
+
+
+def test_curated_frontend_api_contract_routes_are_mounted_under_api():
+    paths = {route.path for route in server.app.routes}
+    critical_paths = {
+        "/api/me",
+        "/api/health/version",
+        "/api/onboarding/status",
+        "/api/institutions/lookup",
+        "/api/frameworks",
+        "/api/frameworks/custom-domains",
+        "/api/frameworks/selection/current",
+        "/api/recording-policies",
+        "/api/user/notification-preferences",
+        "/api/teachers/me/dashboard",
+        "/api/teachers/me/recognition",
+        "/api/teachers/me/lessons",
+        "/api/teachers/me/coaching",
+        "/api/teachers/me/profile",
+        "/api/teachers/me/reference-images",
+        "/api/admin/workspace/dashboard",
+        "/api/admin/workspace/search",
+        "/api/dashboard/intelligence",
+        "/api/demo/seed",
+        "/api/reports/coaching-snapshot",
+        "/api/reports/cohort-snapshot",
+        "/api/reports/export/coaching-snapshot.csv",
+        "/api/master-admin/users",
+        "/api/master-admin/organizations",
+        "/api/master-admin/dependencies",
+        "/api/admin/internal-readiness",
+        "/api/admin/ai-quality/latest",
+        "/api/admin/ai-quality/history",
+        "/api/recognition/my-badges",
+        "/api/coaching/tasks",
+    }
+
+    assert critical_paths <= paths
 
 
 def test_api_me_alias_returns_current_user(monkeypatch):
@@ -270,15 +316,91 @@ def test_frameworks_route_returns_default_payload_for_empty_settings(monkeypatch
 
     response = client.get("/api/frameworks")
     selection = client.get("/api/frameworks/selection/current")
+    custom_domains = client.get("/api/frameworks/custom-domains")
+    details = client.get("/api/frameworks/training_competency")
 
     assert response.status_code == 200
     assert selection.status_code == 200
+    assert custom_domains.status_code == 200
+    assert details.status_code == 200
     payload = response.json()
     assert isinstance(payload["frameworks"], list)
     assert payload["default_framework_id"] == "danielson"
     assert payload["active_framework_id"] == "danielson"
     assert payload["summary"]["total"] >= 1
     assert payload["empty_state"]["title"]
+
+
+@pytest.mark.parametrize(
+    "tenant_role",
+    ["school_admin", "training_admin", "super_admin"],
+)
+def test_frameworks_route_allows_admin_roles(monkeypatch, tenant_role):
+    user = {
+        "id": f"{tenant_role}-user",
+        "email": f"{tenant_role}@example.com",
+        "tenant_role": tenant_role,
+        "organization_id": "org-1",
+        "approval_status": "approved",
+        "is_active": True,
+    }
+    client = _client(monkeypatch, user)
+
+    response = client.get("/api/frameworks")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert "frameworks" in response.json()
+
+
+def test_frameworks_route_denies_teacher_with_controlled_json(monkeypatch):
+    client = _client(monkeypatch, {"id": "teacher-user", "email": "teacher@example.com", "tenant_role": "teacher", "teacher_id": "teacher-1", "organization_id": "org-1", "approval_status": "approved", "is_active": True})
+
+    response = client.get("/api/frameworks")
+
+    assert response.status_code == 403
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["detail"] == "Framework settings are available to administrators"
+
+
+def test_teacher_can_read_framework_detail_for_visible_focus_panels(monkeypatch):
+    client = _client(monkeypatch, {"id": "teacher-user", "email": "teacher@example.com", "tenant_role": "teacher", "teacher_id": "teacher-1", "organization_id": "org-1", "approval_status": "approved", "is_active": True})
+
+    response = client.get("/api/frameworks/danielson")
+
+    assert response.status_code == 200
+    assert "domains" in response.json()
+
+
+def test_frameworks_routes_survive_missing_optional_collections(monkeypatch):
+    db_without_framework_collections = types.SimpleNamespace(
+        users=_Collection([]),
+        organizations=_Collection([]),
+    )
+    client = _client_with_db(
+        monkeypatch,
+        {
+            "id": "school-admin",
+            "email": "admin@example.com",
+            "tenant_role": "school_admin",
+            "organization_id": "org-1",
+            "approval_status": "approved",
+            "is_active": True,
+        },
+        db_without_framework_collections,
+    )
+
+    list_response = client.get("/api/frameworks")
+    selection_response = client.get("/api/frameworks/selection/current")
+    custom_response = client.get("/api/frameworks/custom-domains")
+    detail_response = client.get("/api/frameworks/custom")
+
+    assert list_response.status_code == 200
+    assert selection_response.status_code == 200
+    assert custom_response.status_code == 200
+    assert custom_response.json() == {"domains": []}
+    assert detail_response.status_code == 200
+    assert "domains" in detail_response.json()
 
 
 def test_teacher_dashboard_and_recognition_empty_payloads_are_200(monkeypatch):

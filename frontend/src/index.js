@@ -6,11 +6,13 @@ import { Toaster } from "sonner";
 import "./index.css";
 import "./i18n";
 import App from "./App";
+import { exposeBuildInfo } from "@/lib/buildInfo";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 
 const queryClient = new QueryClient();
 
 const backendUrl = runtimeConfig.backendUrl;
+exposeBuildInfo();
 
 if (!backendUrl) {
   // Fail fast with a clear message if backend URL is missing

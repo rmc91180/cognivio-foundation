@@ -26,7 +26,13 @@ export function FrameworksPage() {
   const isHebrew = i18n.resolvedLanguage === "he";
   const isAdmin = ["admin", "principal", "super_admin"].includes(user?.role) ||
     ["school_admin", "training_admin", "super_admin"].includes(user?.tenant_role);
-  const { data: frameworksRes, isLoading: frameworksLoading, isError: frameworksError } = useQuery({
+  const {
+    data: frameworksRes,
+    isLoading: frameworksLoading,
+    isError: frameworksError,
+    refetch: refetchFrameworks,
+    isFetching: frameworksFetching,
+  } = useQuery({
     queryKey: ["frameworks"],
     queryFn: () => frameworkApi.list().then((res) => res.data),
   });
@@ -414,7 +420,20 @@ export function FrameworksPage() {
           {frameworksLoading ? (
             <LoadingState message={t("frameworksPage.loadingFrameworks")} />
           ) : frameworksError ? (
-            <ErrorState message={t("frameworksPage.frameworksLoadFailed")} />
+            <ErrorState
+              message={t("frameworksPage.frameworksLoadFailed")}
+              action={
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => refetchFrameworks()}
+                  disabled={frameworksFetching}
+                >
+                  {frameworksFetching ? t("frameworksPage.loadingFrameworks") : t("frameworksPage.retryFrameworks")}
+                </Button>
+              }
+            />
           ) : !(frameworksRes?.frameworks || []).length ? (
             <EmptyState
               title={frameworksRes?.empty_state?.title || "Framework settings are ready when you need them."}

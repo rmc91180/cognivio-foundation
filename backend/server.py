@@ -5375,13 +5375,23 @@ def _build_public_health_payload() -> dict:
         or os.getenv("COMMIT_SHA")
         or ""
     )
+    build_id = (
+        os.getenv("RAILWAY_DEPLOYMENT_ID")
+        or os.getenv("CF_PAGES_COMMIT_SHA")
+        or os.getenv("BUILD_ID")
+        or ""
+    )
     return {
         "status": "healthy",
+        "ok": True,
         "service": "cognivio-api",
         "environment": APP_SETTINGS.environment,
         "railway_environment_name": os.getenv("RAILWAY_ENVIRONMENT_NAME") or None,
+        "commit_sha": commit[:40] or None,
+        "build_id": build_id[:80] or None,
         "build": {
             "commit": commit[:40] or None,
+            "id": build_id[:80] or None,
             "version": os.getenv("APP_VERSION") or None,
             "deployed_at": os.getenv("RAILWAY_DEPLOYMENT_CREATED_AT") or None,
         },
@@ -8227,14 +8237,65 @@ async def set_user_audio_analysis_preference(
     )
 
 # ==================== FRAMEWORK ENDPOINTS ====================
-@cached(ttl=3600, key=lambda workspace_id, user_id, *_args, **_kwargs: f"frameworks:{workspace_id}:{user_id}", client_getter=_cache_client)
-async def _get_frameworks_cached(workspace_id: str, user_id: str) -> dict:
+FRAMEWORK_SETTINGS_TENANT_ROLES = {"school_admin", "training_admin", "super_admin"}
+
+
+def _framework_user_id(current_user: dict) -> str:
+    user_id = (
+        current_user.get("id")
+        or current_user.get("user_id")
+        or current_user.get("sub")
+        or current_user.get("email")
+    )
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Authenticated user id is required")
+    return str(user_id)
+
+
+def _require_framework_settings_user(current_user: dict) -> str:
+    _require_active_approved_api_user(current_user)
+    tenant_role = _get_user_tenant_role(current_user)
+    if tenant_role not in FRAMEWORK_SETTINGS_TENANT_ROLES:
+        raise HTTPException(status_code=403, detail="Framework settings are available to administrators")
+    return _framework_user_id(current_user)
+
+
+async def _safe_framework_selection(user_id: str) -> Optional[dict]:
+    collection = getattr(db, "framework_selections", None)
+    if collection is None:
+        return None
+    try:
+        return await collection.find_one({"user_id": user_id}, {"_id": 0})
+    except Exception as exc:
+        logger.warning("Unable to load current framework selection: %s", exc)
+        return None
+
+
+async def _safe_custom_domain_count(query: dict) -> int:
+    collection = getattr(db, "custom_domains", None)
+    if collection is None:
+        return 0
+    try:
+        return int(await collection.count_documents(query))
+    except Exception as exc:
+        logger.warning("Unable to count framework custom domains: %s", exc)
+        return 0
+
+
+async def _safe_custom_domain_list(query: dict, projection: Optional[dict] = None, limit: int = 1000) -> List[dict]:
+    collection = getattr(db, "custom_domains", None)
+    if collection is None:
+        return []
+    try:
+        return await collection.find(query, projection or {"_id": 0}).to_list(limit)
+    except Exception as exc:
+        logger.warning("Unable to list framework custom domains: %s", exc)
+        return []
+
+
+async def _get_frameworks_payload(workspace_id: str, user_id: str) -> dict:
     async def _safe_count_custom_domains(query: dict) -> int:
-        try:
-            return int(await db.custom_domains.count_documents(query))
-        except Exception as exc:
-            logger.warning("Unable to count framework custom domains: %s", exc)
-            return 0
+        return await _safe_custom_domain_count(query)
 
     custom_domain_count = await _safe_count_custom_domains({"user_id": user_id})
     training_domain_count = await _safe_count_custom_domains(
@@ -8243,11 +8304,7 @@ async def _get_frameworks_cached(workspace_id: str, user_id: str) -> dict:
             "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
         }
     )
-    try:
-        selection = await db.framework_selections.find_one({"user_id": user_id}, {"_id": 0})
-    except Exception as exc:
-        logger.warning("Unable to load current framework selection: %s", exc)
-        selection = None
+    selection = await _safe_framework_selection(user_id)
     frameworks = [
         {"type": "danielson", "name": "Danielson Framework", "domain_count": 4},
         {"type": "marshall", "name": "Marshall Rubrics", "domain_count": 6},
@@ -8280,11 +8337,13 @@ async def _get_frameworks_cached(workspace_id: str, user_id: str) -> dict:
 
 @api_router.get("/frameworks")
 async def get_frameworks(current_user: dict = Depends(get_current_user)):
-    return await _get_frameworks_cached(_workspace_id_for_user(current_user), current_user["id"])
+    user_id = _require_framework_settings_user(current_user)
+    return await _get_frameworks_payload(_workspace_id_for_user(current_user), user_id)
 
 
 @api_router.get("/frameworks/standards")
 async def get_training_framework_standards(current_user: dict = Depends(get_current_user)):
+    _require_framework_settings_user(current_user)
     return {
         "standards": TRAINING_COMPETENCY_STANDARDS,
         "scale": TRAINING_COMPETENCY_SCALE,
@@ -8292,9 +8351,10 @@ async def get_training_framework_standards(current_user: dict = Depends(get_curr
 
 @api_router.get("/frameworks/custom-domains")
 async def list_custom_domains(current_user: dict = Depends(get_current_user)):
-    domains = await db.custom_domains.find(
-        {"user_id": current_user["id"]}, {"_id": 0, "user_id": 0}
-    ).to_list(1000)
+    user_id = _require_framework_settings_user(current_user)
+    domains = await _safe_custom_domain_list(
+        {"user_id": user_id}, {"_id": 0, "user_id": 0}
+    )
     return {"domains": domains}
 
 
@@ -8302,6 +8362,7 @@ async def list_custom_domains(current_user: dict = Depends(get_current_user)):
 async def create_custom_domain(
     payload: CustomDomainCreate, current_user: dict = Depends(get_current_user)
 ):
+    user_id = _require_framework_settings_user(current_user)
     domain_id = f"c{uuid.uuid4().hex[:8]}"
     elements = [
         {"id": f"{domain_id}-{idx+1}", "name": el.name}
@@ -8312,7 +8373,7 @@ async def create_custom_domain(
         "name": payload.name,
         "elements": elements,
         "source_type": "manual",
-        "user_id": current_user["id"],
+        "user_id": user_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.custom_domains.insert_one(domain_doc)
@@ -8325,6 +8386,7 @@ async def upload_focus_rubric(
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user),
 ):
+    user_id = _require_framework_settings_user(current_user)
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="Uploaded rubric file is empty")
@@ -8335,7 +8397,7 @@ async def upload_focus_rubric(
         domain_doc = {
             **domain,
             "rubric_set_name": rubric_name,
-            "user_id": current_user["id"],
+            "user_id": user_id,
             "created_at": created_at,
         }
         await db.custom_domains.insert_one(domain_doc)
@@ -8355,6 +8417,7 @@ async def import_training_competency_framework(
     standard_key: str = Form("program_custom"),
     current_user: dict = Depends(get_current_user),
 ):
+    user_id = _require_framework_settings_user(current_user)
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="Imported framework file is empty")
@@ -8372,7 +8435,7 @@ async def import_training_competency_framework(
         domain_doc = {
             **domain,
             "rubric_set_name": rubric_name,
-            "user_id": current_user["id"],
+            "user_id": user_id,
             "created_at": created_at,
         }
         await db.custom_domains.insert_one(domain_doc)
@@ -8384,11 +8447,11 @@ async def import_training_competency_framework(
         for element in domain.get("elements", [])
     ]
     await db.framework_selections.update_one(
-        {"user_id": current_user["id"]},
+        {"user_id": user_id},
         {
             "$set": {
                 "id": str(uuid.uuid4()),
-                "user_id": current_user["id"],
+                "user_id": user_id,
                 "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
                 "selected_elements": selected_elements,
                 "priority_elements": [],
@@ -8416,8 +8479,9 @@ async def add_custom_element(
     payload: CustomElementCreate,
     current_user: dict = Depends(get_current_user),
 ):
+    user_id = _require_framework_settings_user(current_user)
     domain = await db.custom_domains.find_one(
-        {"id": domain_id, "user_id": current_user["id"]},
+        {"id": domain_id, "user_id": user_id},
         {"_id": 0},
     )
     if not domain:
@@ -8425,11 +8489,11 @@ async def add_custom_element(
     element_id = f"{domain_id}-{uuid.uuid4().hex[:6]}"
     element = {"id": element_id, "name": payload.name}
     await db.custom_domains.update_one(
-        {"id": domain_id, "user_id": current_user["id"]},
+        {"id": domain_id, "user_id": user_id},
         {"$push": {"elements": element}},
     )
     domain = await db.custom_domains.find_one(
-        {"id": domain_id, "user_id": current_user["id"]},
+        {"id": domain_id, "user_id": user_id},
         {"_id": 0, "user_id": 0},
     )
     return {"domain": domain}
@@ -8439,8 +8503,9 @@ async def add_custom_element(
 async def delete_custom_domain(
     domain_id: str, current_user: dict = Depends(get_current_user)
 ):
+    user_id = _require_framework_settings_user(current_user)
     result = await db.custom_domains.delete_one(
-        {"id": domain_id, "user_id": current_user["id"]}
+        {"id": domain_id, "user_id": user_id}
     )
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Domain not found")
@@ -8451,30 +8516,32 @@ async def delete_custom_domain(
 async def get_framework_details(
     framework_type: FrameworkType, current_user: dict = Depends(get_current_user)
 ):
+    _require_active_approved_api_user(current_user)
+    user_id = _framework_user_id(current_user)
     if framework_type == FrameworkType.DANIELSON:
         return DANIELSON_FRAMEWORK
     elif framework_type == FrameworkType.MARSHALL:
         return MARSHALL_FRAMEWORK
     elif framework_type == FrameworkType.TRAINING_COMPETENCY:
-        custom_domains = await db.custom_domains.find(
+        custom_domains = await _safe_custom_domain_list(
             {
-                "user_id": current_user["id"],
+                "user_id": user_id,
                 "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
             },
             {"_id": 0, "user_id": 0},
-        ).to_list(1000)
+        )
         return {
             **TRAINING_COMPETENCY_FRAMEWORK,
             "domains": TRAINING_COMPETENCY_FRAMEWORK["domains"] + custom_domains,
         }
     else:
-        custom_domains = await db.custom_domains.find(
+        custom_domains = await _safe_custom_domain_list(
             {
-                "user_id": current_user["id"],
+                "user_id": user_id,
                 "framework_type": {"$ne": FrameworkType.TRAINING_COMPETENCY.value},
             },
             {"_id": 0, "user_id": 0},
-        ).to_list(1000)
+        )
         domains = (
             DANIELSON_FRAMEWORK["domains"]
             + MARSHALL_FRAMEWORK["domains"]
@@ -8485,6 +8552,7 @@ async def get_framework_details(
 @api_router.post("/frameworks/selection")
 async def save_framework_selection(selection: FrameworkSelection, current_user: dict = Depends(get_current_user)):
     from app.services.workspace_service import sync_framework_memory
+    user_id = _require_framework_settings_user(current_user)
 
     selected_elements = []
     seen_selected = set()
@@ -8504,7 +8572,7 @@ async def save_framework_selection(selection: FrameworkSelection, current_user: 
 
     selection_doc = {
         "id": str(uuid.uuid4()),
-        "user_id": current_user["id"],
+        "user_id": user_id,
         "framework_type": selection.framework_type,
         "selected_elements": selected_elements,
         "priority_elements": priority_elements,
@@ -8512,7 +8580,7 @@ async def save_framework_selection(selection: FrameworkSelection, current_user: 
         "created_at": datetime.now(timezone.utc).isoformat()
     }
     await db.framework_selections.update_one(
-        {"user_id": current_user["id"]},
+        {"user_id": user_id},
         {"$set": selection_doc},
         upsert=True
     )
@@ -8521,10 +8589,8 @@ async def save_framework_selection(selection: FrameworkSelection, current_user: 
 
 @api_router.get("/frameworks/selection/current")
 async def get_current_selection(current_user: dict = Depends(get_current_user)):
-    selection = await db.framework_selections.find_one(
-        {"user_id": current_user["id"]},
-        {"_id": 0}
-    )
+    user_id = _require_framework_settings_user(current_user)
+    selection = await _safe_framework_selection(user_id)
     if not selection:
         if _get_user_tenant_role(current_user) == "training_admin":
             all_training_elements = [
@@ -8553,9 +8619,9 @@ async def get_current_selection(current_user: dict = Depends(get_current_user)):
     if selection.get("framework_type") == "custom" and not selection.get(
         "selected_elements"
     ):
-        custom_domains = await db.custom_domains.find(
-            {"user_id": current_user["id"]}, {"_id": 0, "user_id": 0}
-        ).to_list(1000)
+        custom_domains = await _safe_custom_domain_list(
+            {"user_id": user_id}, {"_id": 0, "user_id": 0}
+        )
         domains = (
             DANIELSON_FRAMEWORK["domains"]
             + MARSHALL_FRAMEWORK["domains"]
@@ -8568,13 +8634,13 @@ async def get_current_selection(current_user: dict = Depends(get_current_user)):
     if selection.get("framework_type") == FrameworkType.TRAINING_COMPETENCY.value and not selection.get(
         "selected_elements"
     ):
-        custom_domains = await db.custom_domains.find(
+        custom_domains = await _safe_custom_domain_list(
             {
-                "user_id": current_user["id"],
+                "user_id": user_id,
                 "framework_type": FrameworkType.TRAINING_COMPETENCY.value,
             },
             {"_id": 0, "user_id": 0},
-        ).to_list(1000)
+        )
         domains = TRAINING_COMPETENCY_FRAMEWORK["domains"] + custom_domains
         selection["selected_elements"] = [
             el["id"] for domain in domains for el in domain.get("elements", [])

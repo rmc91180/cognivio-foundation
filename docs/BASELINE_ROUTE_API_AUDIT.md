@@ -18,6 +18,19 @@ The `audit-reveal-and-fix-platform-baseline` branch adds a deeper settings-speci
 
 See `docs/BASELINE_REVIEW_REVEAL_FIX_AUDIT.md` for the full review, reveal, and fix audit.
 
+## 2026-05-21 Addendum: Deep Framework Settings Recheck
+
+The deep hidden-failure audit rechecked the same Admin Settings Framework selection surface after the first route repair. Additional hardening was added:
+
+- Removed the cache wrapper from `GET /api/frameworks` to eliminate cache/client/decorator failures from this cheap settings endpoint.
+- Added explicit admin-only framework settings guards with controlled JSON 403 for teacher/unauthorized roles.
+- Normalized framework settings user identity so unexpected authenticated user shapes do not become uncaught `KeyError` exceptions.
+- Hardened framework selection, detail, and custom-domain reads when optional backing collections are absent.
+- Added a frontend retry action and removed refresh-oriented framework error copy.
+- Added `window.__COGNIVIO_BUILD__` frontend build exposure for stale production bundle checks.
+
+See `docs/DEEP_AUDIT_REVEAL_AND_FIX_HIDDEN_FAILURES.md`.
+
 ## Executive Summary
 
 This audit was created for the `repair-baseline-routing-cors-demo-seed-audit` stabilization branch. The repo baseline is `main` at commit `01593cc5ae6098134fe726c6aa4207d93bb45402`, which includes PR #21.
