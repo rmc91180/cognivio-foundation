@@ -166,6 +166,14 @@ Domain and cache:
 5. Service worker cache does not trap stale app shells after deploy.
 6. Build/version/API-base diagnostics are visible through safe checks such as `/api/health/version` and `window.__COGNIVIO_BUILD__`.
 
+Pass 2 session/API error checks:
+
+1. Put an expired or invalid value in `localStorage.cognivio_token`, open a protected route, and confirm the app clears auth and returns to login with a controlled session message.
+2. Trigger a failed login with the wrong password and confirm the UI says invalid email or password, not API unreachable or stale session.
+3. Simulate an API/network/CORS failure and confirm the UI says Cognivio API cannot be reached from this site and points to `app.cognivio.live`.
+4. Confirm `/login?next=%2Fdashboard#check` on root or `www` preserves path, query, and hash when redirected to the app domain.
+5. Confirm service worker cache contains static assets only, not `/`, `/index.html`, `/api/*`, `/login`, `/request-access`, or `/reset-password`.
+
 Privacy:
 
 1. Admin privacy setup can be completed or clearly shows missing items.

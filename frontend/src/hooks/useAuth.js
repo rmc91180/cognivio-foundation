@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { authApi } from "@/lib/api";
 import { getAccessRequestSuccessMessage, getAuthErrorMessage } from "@/lib/authMessages";
+import { AUTH_STALE_EVENT } from "@/lib/apiErrors";
 import { clearPreviewSession } from "@/lib/previewMode";
 
 const AuthContext = createContext(null);
@@ -74,6 +75,21 @@ export function AuthProvider({ children }) {
       active = false;
     };
   }, [refreshUser]);
+
+  useEffect(() => {
+    const onAuthStale = (event) => {
+      clearStoredAuth();
+      setUser(null);
+      queryClient.clear();
+      const message = event?.detail?.message;
+      if (message) {
+        toast.error(message);
+      }
+    };
+
+    window.addEventListener(AUTH_STALE_EVENT, onAuthStale);
+    return () => window.removeEventListener(AUTH_STALE_EVENT, onAuthStale);
+  }, [queryClient]);
 
   const loginMutation = useMutation({
     mutationFn: authApi.login,

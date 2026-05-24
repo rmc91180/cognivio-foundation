@@ -71,6 +71,35 @@ Pass 2 must decide and verify:
 - service worker cache invalidation and API bypass,
 - console cleanup so production logs do not leak sensitive state.
 
+## Pass 2 Auth Transport Decision
+
+Pass 2 keeps Cognivio bearer-token-first.
+
+Canonical behavior:
+
+- public request-access and login do not require cookies,
+- login returns a JWT token in JSON,
+- the frontend stores the token as `cognivio_token`,
+- the frontend sends `Authorization: Bearer <token>` on protected API calls,
+- `/api/me` accepts the bearer token,
+- protected `401` responses clear local auth and return users to login through normal auth guards,
+- logout calls backend cleanup best effort and clears local state.
+
+Cookie/session status:
+
+- backend session records and session/CSRF cookies exist and remain supported as compatibility infrastructure,
+- cookie-first auth is not the production canonical strategy in this pass,
+- a future cookie-first migration must validate `SameSite=None; Secure`, CORS credentials, CSRF token refresh, Safari storage behavior, and logout/session revocation before becoming canonical.
+
+Browser behavior matrix:
+
+| Browser | Expected behavior in PR 26 Pass 2 | Verification |
+|---|---|---|
+| Safari | No cookies required for public auth; bearer token works after login; stale token clears; service worker does not cache login shell. | Targeted frontend tests plus existing Safari-like backend auth tests; manual Safari verification still required. |
+| Chrome | Same bearer-token-first behavior; static cache cannot trap app shell. | Targeted frontend tests. |
+| Firefox | Same bearer-token-first behavior; public auth does not need cookies. | Targeted frontend tests. |
+| Edge | Same Chromium behavior; stale token cleanup and service-worker bypass apply. | Targeted frontend tests. |
+
 ## Privacy Policy Implementation Map Summary
 
 The full row-by-row map lives in [PRIVACY_POLICY_DEVELOPMENT_REQUIREMENTS.md](./PRIVACY_POLICY_DEVELOPMENT_REQUIREMENTS.md).
@@ -284,3 +313,79 @@ Tests not run and why:
 - No backend or frontend code was changed in Pass 1.
 - Full unit/build suites were intentionally deferred because this pass is documentation and implementation planning only.
 - Lightweight diff hygiene was run with `git diff --check`.
+
+## Pass 2 Handoff to Pass 3
+
+Files changed in Pass 2:
+
+- `frontend/src/lib/apiErrors.js`
+- `frontend/src/lib/apiClient.js`
+- `frontend/src/lib/authMessages.js`
+- `frontend/src/lib/domainHardening.js`
+- `frontend/src/hooks/useAuth.js`
+- `frontend/src/index.js`
+- `frontend/public/service-worker.js`
+- targeted frontend tests under `frontend/src/lib`
+- `docs/PRODUCTION_DOMAIN_CACHE_SESSION_HARDENING.md`
+- `docs/PR26_SECURITY_PRIVACY_TENANT_SESSION_PLAN.md`
+- `docs/PRIVACY_POLICY_DEVELOPMENT_REQUIREMENTS.md`
+- `docs/INTERNAL_TESTING_RUNBOOK.md`
+
+Auth/session decisions:
+
+- Canonical transport remains bearer-token-first.
+- Cookie/session support remains compatibility infrastructure and is not promoted to canonical production auth in Pass 2.
+- Cookie-first migration is deferred until a dedicated pass can validate cross-site Safari cookie behavior, CSRF refresh, CORS credentials, and logout revocation.
+
+Domain/cache/service-worker status:
+
+- App routes served from `cognivio.live` or `www.cognivio.live` redirect to `https://app.cognivio.live` with path/query/hash preserved.
+- Marketing-site redirects already send `/login`, `/signup`, `/request-access`, and `/app` to the app domain.
+- Service worker no longer pre-caches `/` or `/index.html`.
+- Service worker bypasses `/api/*`, `/login`, `/request-access`, and `/reset-password`.
+- Navigation requests use network-only `cache: "no-store"`.
+
+Global API error status:
+
+- Frontend API errors are normalized in one place.
+- Network/CORS/timeout failures are no longer presented as wrong credentials.
+- Protected stale/expired token `401` responses clear local auth, clear preview mode, dispatch a stale-session event, clear React Query cache, and show a controlled message.
+- Backend reason codes remain preserved for invalid credentials, pending approval, rejected account, disabled account, duplicate request, tenant denial, validation errors, rate limits, and server failures.
+
+Console/log cleanup status:
+
+- Missing backend URL and service-worker registration console messages are development-only.
+- Safe build diagnostics remain at `window.__COGNIVIO_BUILD__`.
+- Backend log redaction review remains for Pass 5, with special attention to tokens, cookies, API keys, signed video URLs, transcripts, and raw request payloads.
+
+Remaining risks:
+
+- Manual Safari browser verification is still required after deployment.
+- `https://api.cognivio.live` vs transitional Railway backend must be confirmed before production cutover.
+- Root/`www` hosting redirect behavior outside the React app still depends on hosting configuration.
+- Cookie-first auth migration remains intentionally deferred.
+
+Commands run in Pass 2:
+
+- `git status --short; git branch --show-current; git rev-parse --short HEAD; git log --oneline -3` -> confirmed branch `pr26-security-privacy-tenant-session-hardening` at Pass 1 commit `64f5cb6`.
+- Read Pass 1 docs: `docs/PRIVACY_POLICY_DEVELOPMENT_REQUIREMENTS.md`, `docs/PR26_SECURITY_PRIVACY_TENANT_SESSION_PLAN.md`, and `docs/INTERNAL_TESTING_RUNBOOK.md`.
+- Code audit searches for auth/login/logout, `/api/me`, bearer/cookie/session/CSRF, service worker, cache, canonical domains, API base, console output, and production URLs.
+- `$env:PYTHONPATH='backend'; $env:PYTHONIOENCODING='utf-8'; python -m pytest backend/tests/test_login_lifecycle_safari.py backend/tests/test_teacher_admin_endpoint_stability.py -q` -> 35 passed, 3 warnings.
+- `$env:CI='true'; npm test -- --watchAll=false --runInBand src/lib/apiClient.test.js src/lib/apiErrors.test.js src/lib/authMessages.test.js src/lib/domainHardening.test.js src/lib/serviceWorkerPolicy.test.js src/pages/AuthPage.test.js` -> 6 suites passed / 18 tests passed; React Router future-flag warnings only.
+- `$env:CI='true'; npm test -- --watchAll=false` from `frontend` -> 24 suites passed / 74 tests passed; React Router future-flag warnings only.
+- `$env:CI='true'; npm run build` from `frontend` -> compiled successfully.
+- `$env:PYTHONPATH='backend'; $env:PYTHONIOENCODING='utf-8'; python backend\scripts\run_quality_gate.py` -> all 5 quality dimensions passed across 10 cases; Requests dependency warning only.
+- `$env:PYTHONPATH='backend'; $env:PYTHONIOENCODING='utf-8'; python -m pytest backend/tests -q` -> 262 passed, 3 warnings.
+- `git diff --check` -> passed; Git reported Windows line-ending normalization warnings only.
+
+Tests not run and why:
+
+- No service-worker browser automation was run; service-worker behavior is covered by static contract tests and requires deployed-browser manual verification.
+
+Pass 3 should consume:
+
+- the privacy obligations map in `docs/PRIVACY_POLICY_DEVELOPMENT_REQUIREMENTS.md`,
+- the bearer-token-first decision and stale session behavior from this handoff,
+- the service-worker/auth-route bypass behavior as a baseline,
+- the global API error normalization helper for privacy/consent UI failures,
+- and the following high-priority privacy tasks: privacy/consent upload gates, destructive blur/source retention verification, biometric/reference image purpose limits, AI reflection-only guardrails, Gold Star/exemplar authorization, unblurred exemplar certification, and privacy request/policy-version controls.

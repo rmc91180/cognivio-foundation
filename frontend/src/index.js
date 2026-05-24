@@ -7,17 +7,20 @@ import "./index.css";
 import "./i18n";
 import App from "./App";
 import { exposeBuildInfo } from "@/lib/buildInfo";
+import { redirectWrongOriginAppRoute } from "@/lib/domainHardening";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 
 const queryClient = new QueryClient();
 
 const backendUrl = runtimeConfig.backendUrl;
 exposeBuildInfo();
+redirectWrongOriginAppRoute();
 
 if (!backendUrl) {
-  // Fail fast with a clear message if backend URL is missing
-  // eslint-disable-next-line no-console
-  console.error("REACT_APP_BACKEND_URL is not set in .env");
+  if (process.env.NODE_ENV !== "production") {
+    // eslint-disable-next-line no-console
+    console.error("REACT_APP_BACKEND_URL is not set in .env");
+  }
 }
 
 const root = ReactDOM.createRoot(document.getElementById("root"));
@@ -43,8 +46,10 @@ root.render(
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("/service-worker.js").catch(() => {
-      // eslint-disable-next-line no-console
-      console.warn("Service worker registration failed");
+      if (process.env.NODE_ENV !== "production") {
+        // eslint-disable-next-line no-console
+        console.warn("Service worker registration failed");
+      }
     });
   });
 }
