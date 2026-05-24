@@ -146,6 +146,8 @@ def test_submit_video_exemplar_creates_pending_submission():
                 "video_id": "video_1",
                 "recognition_status": "awarded",
                 "teacher_opt_in": True,
+                "teacher_authorized_at": "2026-03-18T10:00:00Z",
+                "teacher_authorized_by": "teacher_user_1",
                 "sharing_scope": "cognivio_library",
                 "submission_status": "not_submitted",
                 "badge_type": server.FIVE_STAR_BADGE,
@@ -201,6 +203,8 @@ def test_review_exemplar_submission_approve_creates_library_item():
                 "summary": "High-clarity questioning and pacing.",
                 "sharing_scope": "cognivio_library",
                 "submission_status": "pending_admin_review",
+                "teacher_opt_in": True,
+                "teacher_authorized_by": "teacher_user_1",
                 "tags": ["math", "questioning"],
             }
         ]),

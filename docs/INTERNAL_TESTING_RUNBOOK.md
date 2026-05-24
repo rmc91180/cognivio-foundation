@@ -185,6 +185,19 @@ Privacy:
 7. Unblurred Gold Star/exemplar publication is blocked unless explicit certification exists.
 8. Biometric/reference image processing is limited to privacy blur workflows.
 
+Pass 3 privacy-policy checks:
+
+1. Upload a lesson and confirm the API payload includes `student_data`, `classroom_video_audio`, and `privacy_blurring`.
+2. Confirm new uploads default to `destructive_blurring_enabled=true` unless the workspace explicitly allows unblurred retention.
+3. Force a privacy-setup-required workspace locally and confirm upload returns controlled `privacy_setup_required` guidance.
+4. Confirm Teacher Profile reference image copy says images support the privacy blur workflow and are not used for login, surveillance, tracking, or general identification.
+5. Confirm reference image metadata says `allowed_use=privacy_blur_workflow_only`.
+6. Confirm admin users cannot set teacher exemplar authorization.
+7. Confirm teacher opt-in plus admin review is required before an exemplar appears in the library.
+8. Confirm exemplar library playback uses redacted assets.
+9. Confirm unblurred exemplar sharing remains blocked without consent/certification.
+10. Confirm `GET /api/admin/ops/privacy-runtime` shows destructive blur deferred/failure counts for admin ops users.
+
 Tenant and data:
 
 1. Teacher own video access is allowed.

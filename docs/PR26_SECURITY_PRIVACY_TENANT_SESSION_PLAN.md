@@ -389,3 +389,84 @@ Pass 3 should consume:
 - the service-worker/auth-route bypass behavior as a baseline,
 - the global API error normalization helper for privacy/consent UI failures,
 - and the following high-priority privacy tasks: privacy/consent upload gates, destructive blur/source retention verification, biometric/reference image purpose limits, AI reflection-only guardrails, Gold Star/exemplar authorization, unblurred exemplar certification, and privacy request/policy-version controls.
+
+## Pass 3 Handoff to Pass 4
+
+Files changed in Pass 3:
+
+- `backend/server.py`
+- `backend/app/services/video_service.py`
+- `backend/tests/test_pr26_privacy_controls.py`
+- `backend/tests/test_recognition_contracts.py`
+- `backend/tests/test_exemplar_contracts.py`
+- `frontend/src/pages/TeacherSelfProfilePage.js`
+- `frontend/src/pages/VideoRecorderPage.js`
+- `docs/PRIVACY_CONSENT_BLURRING_GOLD_STAR_CONTROLS.md`
+- `docs/PRIVACY_POLICY_DEVELOPMENT_REQUIREMENTS.md`
+- `docs/PR26_SECURITY_PRIVACY_TENANT_SESSION_PLAN.md`
+- `docs/INTERNAL_TESTING_RUNBOOK.md`
+
+Privacy/consent controls implemented:
+
+- data classification and processing purpose enums,
+- controlled rejection for forbidden Student Data purposes,
+- upload privacy gate metadata and controlled blocking when workspace privacy setup is explicitly required,
+- classroom upload metadata for Student Data, classroom video/audio, behavioral data, and transient biometric processing,
+- teacher reference image metadata limiting use to privacy blur workflows only.
+
+Destructive blur implementation/deferred status:
+
+- uploads now default to destructive blurring where student face blur is enabled,
+- video records carry destructive blur and unblurred retention fields,
+- privacy processing moves videos through explicit `privacy_pipeline_state` values,
+- normal playback still prefers redacted assets and sanitized responses hide raw storage fields,
+- raw access is denied after `unblurred_deleted`,
+- physical source deletion remains deferred and is marked as `deferred_pending_worker` with admin ops visibility.
+
+Biometric, AI, and Gold Star controls implemented:
+
+- biometric processing is limited to privacy blurring, audio masking, and de-identification,
+- persistent biometric fields and non-empty saved embeddings are rejected,
+- audio artifacts record no-voiceprint metadata,
+- assessment outputs include an informational/reflection-only AI disclaimer and prohibited-use metadata,
+- AI output validator blocks determinative fields and phrases,
+- admin users cannot set teacher exemplar authorization,
+- exemplar publication requires teacher authorization plus institution/admin review,
+- exemplar library publication uses redacted playback and blocks unblurred/promotional publication by default,
+- recognition revocation also revokes related exemplar library items.
+
+Remaining risks:
+
+- physical deletion of unblurred source assets is not implemented in Pass 3,
+- backup/archive deletion guarantees remain operationally deferred,
+- policy-version re-consent is still not implemented,
+- privacy request intake/tracking remains incomplete,
+- tenant/video/export route isolation must be proven in Pass 4 before pilot data,
+- manual browser/video verification remains required after deployment.
+
+Commands run in Pass 3:
+
+- `git status --short --branch` -> confirmed branch `pr26-security-privacy-tenant-session-hardening` with Pass 2 work pending before committing it.
+- `git commit -m "Harden auth session domain cache and API error handling"` -> committed Pass 2 as `68546bd`.
+- Read Pass 1 and Pass 2 docs: `docs/PRIVACY_POLICY_DEVELOPMENT_REQUIREMENTS.md`, `docs/PR26_SECURITY_PRIVACY_TENANT_SESSION_PLAN.md`, `docs/PRODUCTION_DOMAIN_CACHE_SESSION_HARDENING.md`, and `docs/INTERNAL_TESTING_RUNBOOK.md`.
+- Code audit searches for privacy, consent, blur, destructive, biometric, reference images, recognition, exemplar, video access, tenant/workspace IDs, demo data, reports, transcript, and audio-analysis terms.
+- `$env:PYTHONPATH='backend'; $env:PYTHONIOENCODING='utf-8'; python -m pytest backend/tests/test_pr26_privacy_controls.py backend/tests/test_recognition_contracts.py backend/tests/test_exemplar_contracts.py backend/tests/test_video_pipeline_helpers.py -q` -> 39 passed, 3 warnings.
+- `$env:PYTHONPATH='backend'; $env:PYTHONIOENCODING='utf-8'; python -m pytest backend/tests/test_tenant_upload_privacy_flow.py -q` -> 4 passed, 3 warnings.
+- `$env:PYTHONPATH='backend'; $env:PYTHONIOENCODING='utf-8'; python -m pytest backend/tests -q` -> 273 passed, 3 warnings.
+- `$env:CI='true'; npm test -- --watchAll=false` from `frontend` -> 24 suites passed / 74 tests passed; React Router future-flag warnings only.
+- `$env:CI='true'; npm run build` from `frontend` -> first attempt timed out at 184 seconds with no pass/fail result; rerun with longer timeout compiled successfully.
+- `$env:PYTHONPATH='backend'; $env:PYTHONIOENCODING='utf-8'; python backend\scripts\run_quality_gate.py` -> all 5 quality dimensions passed across 10 cases; Requests dependency warning only.
+- `git diff --check` -> passed; Git reported Windows line-ending normalization warnings only.
+
+Tests not run and why:
+
+- No browser automation was run for privacy upload, raw-video access, or exemplar publication. Those flows require deployed/manual verification with demo data.
+- No physical destructive-deletion worker test was added because source deletion is explicitly deferred in Pass 3 and represented with status fields plus compensating controls.
+
+Pass 4 should consume:
+
+- the new classification, purpose, biometric, and exemplar authorization helpers,
+- the destructive blur status fields and explicit source-deletion deferral,
+- the raw/unblurred access behavior,
+- the non-identifiable export helper,
+- and focus on tenant/video/demo isolation across videos, comments, transcripts, reports, recognition, exports, share assets, and demo data boundaries.

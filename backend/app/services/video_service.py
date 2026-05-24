@@ -74,6 +74,8 @@ async def upload_video(
                 },
             )
 
+        privacy_policy_fields = legacy._build_upload_privacy_policy_fields(current_user, teacher)
+        legacy._ensure_upload_privacy_gate(privacy_policy_fields)
         subject = subject or teacher.get("subject")
         lesson_title = legacy._clean_optional_string(lesson_title) or file.filename or subject
         class_section = legacy._clean_optional_string(class_section) or teacher.get("class_section") or teacher.get("department")
@@ -184,6 +186,7 @@ async def upload_video(
             "teacher_reference_images_available": reference_count > 0,
             "teacher_reference_image_count": reference_count,
             "privacy_blur_teacher_match_status": reference_status,
+            **privacy_policy_fields,
         }
         await video_repository.insert_video(video_doc)
 
@@ -219,6 +222,10 @@ async def upload_video(
                 "teacher_reference_images_available": reference_count > 0,
                 "teacher_reference_image_count": reference_count,
                 "privacy_blur_teacher_match_status": reference_status,
+                "data_classifications": privacy_policy_fields["data_classifications"],
+                "processing_purposes": privacy_policy_fields["processing_purposes"],
+                "privacy_pipeline_state": privacy_policy_fields["privacy_pipeline_state"],
+                "destructive_blurring_enabled": privacy_policy_fields["destructive_blurring_enabled"],
             }
         )
 
@@ -260,6 +267,8 @@ async def upload_video(
                 "teacher_id": teacher_id,
                 "privacy_status": legacy.PrivacyProcessingStatus.QUEUED.value,
                 "raw_retention_expires_at": video_doc["raw_retention_expires_at"],
+                "destructive_blurring_enabled": video_doc["destructive_blurring_enabled"],
+                "privacy_pipeline_state": video_doc["privacy_pipeline_state"],
                 "upload_source": upload_source,
                 "duration_ms": round((time.perf_counter() - upload_started_perf) * 1000, 2),
             },
@@ -284,6 +293,13 @@ async def upload_video(
             teacher_reference_images_available=reference_count > 0,
             teacher_reference_image_count=reference_count,
             privacy_blur_teacher_match_status=reference_status,
+            data_classifications=privacy_policy_fields["data_classifications"],
+            processing_purposes=privacy_policy_fields["processing_purposes"],
+            student_face_blur_enabled=privacy_policy_fields["student_face_blur_enabled"],
+            destructive_blurring_enabled=privacy_policy_fields["destructive_blurring_enabled"],
+            privacy_pipeline_state=privacy_policy_fields["privacy_pipeline_state"],
+            unblurred_deletion_status=privacy_policy_fields["unblurred_deletion_status"],
+            privacy_gate=privacy_policy_fields["privacy_gate"],
         )
 
     except legacy.HTTPException:
@@ -327,6 +343,11 @@ async def get_video_raw_access(video_id: str, current_user: dict) -> dict:
         raise legacy.HTTPException(status_code=404, detail="Video not found")
 
     await teacher_repository.get_teacher_or_404(video.get("teacher_id"), current_user)
+    if (
+        video.get("privacy_pipeline_state") == legacy.PrivacyPipelineState.UNBLURRED_DELETED.value
+        or video.get("unblurred_deletion_status") == "deleted"
+    ):
+        raise legacy.HTTPException(status_code=404, detail="Raw asset is no longer available")
     raw_url = video.get("raw_file_url")
     raw_path = video.get("raw_file_path")
     access_url = raw_url
@@ -366,6 +387,10 @@ async def get_video_status(video_id: str, current_user: dict) -> dict:
         "transcode_status": legacy._normalize_video_transcode_status(video.get("transcode_status")),
         "privacy_review_required": bool(video.get("privacy_review_required", False)),
         "privacy_review_reason": video.get("privacy_review_reason"),
+        "privacy_pipeline_state": video.get("privacy_pipeline_state"),
+        "destructive_blurring_enabled": bool(video.get("destructive_blurring_enabled", True)),
+        "unblurred_deletion_status": video.get("unblurred_deletion_status"),
+        "source_deletion_deferred_reason": video.get("source_deletion_deferred_reason"),
         "error_message": video.get("error_message"),
         "privacy_error": video.get("privacy_error"),
     }
