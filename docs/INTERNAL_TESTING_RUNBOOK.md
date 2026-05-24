@@ -144,6 +144,58 @@ Use current internal/demo credentials from the secure team source. Do not add re
 11. Repeat request -> approve -> login in Chrome, Edge, and Firefox.
 12. Confirm `OPTIONS /api/auth/request-access`, `OPTIONS /api/auth/login`, and `OPTIONS /api/auth/logout` return 200 from `https://app.cognivio.live`.
 
+## PR 26 Security, Privacy, Tenant, and Session Hardening Checklist
+
+Use this checklist during the PR 26 five-pass hardening sequence. Use demo/internal accounts only until the full PR 26 acceptance criteria are met.
+
+Browser and session:
+
+1. Safari login after clearing site data.
+2. Safari login with stale cache/history from a previous build.
+3. Chrome, Firefox, and Edge login/logout.
+4. Wrong-origin route behavior from `https://cognivio.live/login` and `https://www.cognivio.live/login`.
+5. Stale-token cleanup after an expired or revoked token.
+6. Logout clears local auth state and server session where applicable.
+
+Domain and cache:
+
+1. `https://cognivio.live` login paths redirect to or safely hand off to `https://app.cognivio.live`.
+2. `https://www.cognivio.live/login` redirects or is safely supported.
+3. `https://app.cognivio.live/login` works.
+4. Service worker does not intercept API/auth requests.
+5. Service worker cache does not trap stale app shells after deploy.
+6. Build/version/API-base diagnostics are visible through safe checks such as `/api/health/version` and `window.__COGNIVIO_BUILD__`.
+
+Privacy:
+
+1. Admin privacy setup can be completed or clearly shows missing items.
+2. Mobile upload privacy gate shows clear status before upload.
+3. Teacher reference image missing/ready warning is visible and non-blocking unless policy requires blocking.
+4. Destructive blur status and raw retention state are visible in internal readiness or admin review.
+5. Unblurred video access is restricted and audited.
+6. Gold Star/exemplar authorization requires teacher opt-in and admin review.
+7. Unblurred Gold Star/exemplar publication is blocked unless explicit certification exists.
+8. Biometric/reference image processing is limited to privacy blur workflows.
+
+Tenant and data:
+
+1. Teacher own video access is allowed.
+2. Teacher access to another teacher's video is denied.
+3. Admin access within the same tenant/workspace is allowed.
+4. Admin cross-tenant video/report/export access is denied.
+5. Reports and CSV exports are scoped to the current tenant/workspace.
+6. Demo data is excluded from real customer counts.
+7. Demo seed controls cannot seed real workspaces for non-demo users.
+
+Operations:
+
+1. Public auth/signup, login, upload, and demo seed rate limits are present and tested.
+2. DB health checks show safe status only.
+3. MongoDB index checks cover auth, users, videos, comments, privacy jobs, references, reports, recognition, and demo data.
+4. Production console output contains no sensitive data and minimal diagnostic noise.
+5. Global API error messages are controlled and clear.
+6. Dependency health does not expose secrets.
+
 ## Training Internal Test
 
 1. Log in as a training admin.
