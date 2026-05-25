@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 
 import server as legacy
 
@@ -66,9 +66,10 @@ async def get_video_detail_route(
 @router.get("/videos/{video_id}/raw-access")
 async def get_video_raw_access_route(
     video_id: str,
+    reason: Optional[str] = Query(None, min_length=3),
     current_user: dict = Depends(get_current_user),
 ):
-    return await get_video_raw_access(video_id, current_user)
+    return await get_video_raw_access(video_id, current_user, access_reason=reason)
 
 
 @router.get("/videos/{video_id}/status")

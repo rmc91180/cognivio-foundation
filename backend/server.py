@@ -3408,7 +3408,22 @@ async def _get_teacher_or_404(teacher_id: str, current_user: dict) -> dict:
         raise HTTPException(status_code=404, detail="Teacher not found")
     if await _teacher_is_visible_to_user(teacher, current_user):
         return teacher
-    raise HTTPException(status_code=403, detail="Not authorized for this teacher")
+    await _log_cross_tenant_access_denied(
+        target_type="teacher",
+        target_id=teacher_id,
+        current_user=current_user,
+        details={
+            "teacher_organization_id": teacher.get("organization_id"),
+            "teacher_school_id": teacher.get("school_id"),
+        },
+    )
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "reason_code": "forbidden_tenant_access",
+            "message": "You do not have access to that Cognivio workspace.",
+        },
+    )
 
 
 async def _enrich_teacher_with_tenancy_context(teacher: Optional[dict]) -> dict:
@@ -3677,6 +3692,28 @@ async def _log_privacy_audit_event(
         )
     except Exception as exc:
         logger.warning(f"Unable to write privacy audit event {event_type} for {target_type}:{target_id}: {exc}")
+
+
+async def _log_cross_tenant_access_denied(
+    *,
+    target_type: str,
+    target_id: Optional[str],
+    current_user: dict,
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    safe_details = {
+        "actor_tenant_role": _get_user_tenant_role(current_user),
+        "actor_organization_id": current_user.get("organization_id"),
+        "actor_school_id": current_user.get("school_id"),
+        **(details or {}),
+    }
+    await _log_privacy_audit_event(
+        "cross_tenant_access_denied",
+        target_type,
+        str(target_id or "unknown"),
+        actor_user_id=current_user.get("id"),
+        details=safe_details,
+    )
 
 
 async def _log_recognition_audit_event(
@@ -11520,17 +11557,56 @@ async def get_video_detail(video_id: str, current_user: dict = Depends(get_curre
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    await _log_privacy_audit_event(
+        "video_viewed",
+        "video",
+        video_id,
+        actor_user_id=current_user.get("id"),
+        details={"asset_type": "redacted_or_sanitized"},
+    )
     return _sanitize_video_response(_apply_video_response_defaults(video))
 
 
-async def get_video_raw_access(video_id: str, current_user: dict = Depends(get_current_user)):
+async def get_video_raw_access(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+    access_reason: Optional[str] = None,
+):
     role = _get_user_role(current_user)
     if role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
+    cleaned_reason = _clean_optional_string(access_reason)
+    if not cleaned_reason:
+        await _log_privacy_audit_event(
+            "support_unblurred_access_denied",
+            "video",
+            video_id,
+            actor_user_id=current_user.get("id"),
+            details={"reason_code": "missing_unblurred_access_reason"},
+        )
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "reason_code": "unblurred_access_reason_required",
+                "message": "A specific privacy/support reason is required before unblurred video access.",
+            },
+        )
     video = await db.videos.find_one({"id": video_id}, {"_id": 0})
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    if (
+        video.get("privacy_pipeline_state") == PrivacyPipelineState.UNBLURRED_DELETED.value
+        or video.get("unblurred_deletion_status") == "deleted"
+    ):
+        await _log_privacy_audit_event(
+            "support_unblurred_access_denied",
+            "video",
+            video_id,
+            actor_user_id=current_user.get("id"),
+            details={"reason": cleaned_reason, "reason_code": "unblurred_source_deleted"},
+        )
+        raise HTTPException(status_code=404, detail="Raw asset is no longer available")
     raw_url = video.get("raw_file_url")
     raw_path = video.get("raw_file_path")
     access_url = raw_url
@@ -11538,13 +11614,27 @@ async def get_video_raw_access(video_id: str, current_user: dict = Depends(get_c
         safe_path = str(raw_path).replace("\\", "/").lstrip("/")
         access_url = _to_public_backend_url(f"/uploads/{safe_path}")
     if not access_url:
+        await _log_privacy_audit_event(
+            "support_unblurred_access_denied",
+            "video",
+            video_id,
+            actor_user_id=current_user.get("id"),
+            details={"reason": cleaned_reason, "reason_code": "unblurred_source_missing"},
+        )
         raise HTTPException(status_code=404, detail="Raw asset is no longer available")
     await _log_privacy_audit_event(
-        "raw_asset_accessed",
+        "unblurred_video_viewed",
         "video",
         video_id,
         actor_user_id=current_user["id"],
-        details={"reason": "admin_raw_access_endpoint"},
+        details={"reason": cleaned_reason, "asset_type": "unblurred_source"},
+    )
+    await _log_privacy_audit_event(
+        "support_unblurred_access_granted",
+        "video",
+        video_id,
+        actor_user_id=current_user["id"],
+        details={"reason": cleaned_reason},
     )
     return {
         "video_id": video_id,
@@ -11952,6 +12042,13 @@ async def get_admin_video_audio_transcript(
     doc = await db.video_audio_transcripts.find_one({"video_id": video_id}, {"_id": 0}, sort=[("created_at", -1)])
     if not doc:
         raise HTTPException(status_code=404, detail="Audio transcript not found")
+    await _log_privacy_audit_event(
+        "transcript_viewed",
+        "video_audio_transcript",
+        str(doc.get("id") or video_id),
+        actor_user_id=current_user.get("id"),
+        details={"video_id": video_id},
+    )
     return AudioTranscriptResponse(**doc)
 
 
@@ -11963,6 +12060,13 @@ async def get_admin_video_audio_features(
     doc = await db.video_analysis_features.find_one({"video_id": video_id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Audio features not found")
+    await _log_privacy_audit_event(
+        "audio_analysis_viewed",
+        "video_analysis_features",
+        str(doc.get("id") or video_id),
+        actor_user_id=current_user.get("id"),
+        details={"video_id": video_id},
+    )
     return AudioFeatureResponse(**doc)
 
 
@@ -12115,6 +12219,16 @@ async def get_video_audio_analysis(
     feature_doc = await db.video_analysis_features.find_one(
         {"video_id": video_id},
         {"_id": 0},
+    )
+    await _log_privacy_audit_event(
+        "audio_analysis_viewed",
+        "video",
+        video_id,
+        actor_user_id=current_user.get("id"),
+        details={
+            "transcript_available": bool(transcript_doc),
+            "features_available": bool(feature_doc),
+        },
     )
     return _build_video_audio_analysis_response(transcript_doc, feature_doc, video_id=video_id)
 
@@ -17788,6 +17902,17 @@ async def export_coaching_snapshot_csv(current_user: dict = Depends(get_current_
         ]
         for row in snapshot.get("teacher_rows", [])
     ]
+    await _log_privacy_audit_event(
+        "report_exported",
+        "report",
+        "coaching-snapshot",
+        actor_user_id=current_user.get("id"),
+        details={
+            "report_type": "coaching_snapshot",
+            "row_count": len(rows),
+            "workspace_id": _workspace_id_for_user(current_user),
+        },
+    )
     return _csv_response(
         "coaching-snapshot.csv",
         ["Teacher", "Reviewed lessons", "Open coaching tasks", "Last observation", "Latest coaching summary", "Next action"],
@@ -17811,6 +17936,17 @@ async def export_cohort_snapshot_csv(current_user: dict = Depends(get_current_us
         ]
         for row in snapshot.get("trainee_rows", [])
     ]
+    await _log_privacy_audit_event(
+        "report_exported",
+        "report",
+        "cohort-snapshot",
+        actor_user_id=current_user.get("id"),
+        details={
+            "report_type": "cohort_snapshot",
+            "row_count": len(rows),
+            "workspace_id": _workspace_id_for_user(current_user),
+        },
+    )
     return _csv_response(
         "cohort-snapshot.csv",
         [
@@ -29289,7 +29425,15 @@ async def seed_demo_data_v1(
         raise HTTPException(status_code=400, detail="Unsupported demo seed scope")
     tenant_role = _get_user_tenant_role(current_user)
     if scope == "current_teacher" or tenant_role == "teacher":
-        return await _seed_current_teacher_experience(current_user)
+        result = await _seed_current_teacher_experience(current_user)
+        await _log_privacy_audit_event(
+            "demo_seed_executed",
+            "demo_seed",
+            str(result.get("scope") or scope),
+            actor_user_id=current_user.get("id"),
+            details={"persona": result.get("persona"), "scope": result.get("scope"), "counts": result.get("counts")},
+        )
+        return result
     if scope == "global":
         _require_master_admin_user(current_user)
         if not DEMO_MODE:
@@ -29300,7 +29444,7 @@ async def seed_demo_data_v1(
 
         selected = "all" if persona == "teacher" else persona
         result = await reset_demo_data_for_persona(db, selected)
-        return {
+        response = {
             "ok": True,
             "seeded_at": result.get("reset_at"),
             "persona": selected,
@@ -29319,7 +29463,23 @@ async def seed_demo_data_v1(
             },
             "message": "Demo data was seeded for internal testing.",
         }
-    return await _seed_current_admin_workspace_experience(current_user, persona)
+        await _log_privacy_audit_event(
+            "demo_seed_executed",
+            "demo_seed",
+            "global",
+            actor_user_id=current_user.get("id"),
+            details={"persona": selected, "scope": "global", "counts": response["counts"]},
+        )
+        return response
+    result = await _seed_current_admin_workspace_experience(current_user, persona)
+    await _log_privacy_audit_event(
+        "demo_seed_executed",
+        "demo_seed",
+        str(result.get("scope") or scope),
+        actor_user_id=current_user.get("id"),
+        details={"persona": result.get("persona"), "scope": result.get("scope"), "counts": result.get("counts")},
+    )
+    return result
 
 
 @api_router.post("/demo/reset")

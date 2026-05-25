@@ -80,12 +80,14 @@ async def get_recognition_review_queue(current_user: dict) -> legacy.Recognition
     role = legacy._get_user_role(current_user)
     if role != "admin":
         raise legacy.HTTPException(status_code=403, detail="Admin access required")
-    events = await recognition_repository.list_recognition_events_pending_review()
+    teacher_ids = await video_repository.list_teacher_ids_for_user(current_user)
+    events = await recognition_repository.list_recognition_events_pending_review(teacher_ids)
     items: List[legacy.RecognitionReviewQueueItem] = []
     for event in events:
         video = await video_repository.find_video_by_id(event.get("video_id"))
-        if not video or video.get("uploaded_by") != current_user["id"]:
+        if not video:
             continue
+        await teacher_repository.get_teacher_or_404(video.get("teacher_id"), current_user)
         teacher = await video_repository.find_teacher_by_id(video.get("teacher_id"))
         items.append(
             legacy.RecognitionReviewQueueItem(

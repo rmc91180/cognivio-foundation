@@ -330,13 +330,40 @@ async def get_video_detail(video_id: str, current_user: dict) -> dict:
         raise legacy.HTTPException(status_code=404, detail="Video not found")
 
     await teacher_repository.get_teacher_or_404(video.get("teacher_id"), current_user)
+    await legacy._log_privacy_audit_event(
+        "video_viewed",
+        "video",
+        video_id,
+        actor_user_id=current_user.get("id"),
+        details={"asset_type": "redacted_or_sanitized"},
+    )
     return legacy._sanitize_video_response(legacy._apply_video_response_defaults(video))
 
 
-async def get_video_raw_access(video_id: str, current_user: dict) -> dict:
+async def get_video_raw_access(
+    video_id: str,
+    current_user: dict,
+    access_reason: Optional[str] = None,
+) -> dict:
     role = legacy._get_user_role(current_user)
     if role != "admin":
         raise legacy.HTTPException(status_code=403, detail="Admin access required")
+    cleaned_reason = legacy._clean_optional_string(access_reason)
+    if not cleaned_reason:
+        await legacy._log_privacy_audit_event(
+            "support_unblurred_access_denied",
+            "video",
+            video_id,
+            actor_user_id=current_user.get("id"),
+            details={"reason_code": "missing_unblurred_access_reason"},
+        )
+        raise legacy.HTTPException(
+            status_code=422,
+            detail={
+                "reason_code": "unblurred_access_reason_required",
+                "message": "A specific privacy/support reason is required before unblurred video access.",
+            },
+        )
 
     video = await video_repository.find_video_by_id(video_id)
     if not video:
@@ -347,6 +374,13 @@ async def get_video_raw_access(video_id: str, current_user: dict) -> dict:
         video.get("privacy_pipeline_state") == legacy.PrivacyPipelineState.UNBLURRED_DELETED.value
         or video.get("unblurred_deletion_status") == "deleted"
     ):
+        await legacy._log_privacy_audit_event(
+            "support_unblurred_access_denied",
+            "video",
+            video_id,
+            actor_user_id=current_user.get("id"),
+            details={"reason": cleaned_reason, "reason_code": "unblurred_source_deleted"},
+        )
         raise legacy.HTTPException(status_code=404, detail="Raw asset is no longer available")
     raw_url = video.get("raw_file_url")
     raw_path = video.get("raw_file_path")
@@ -357,14 +391,28 @@ async def get_video_raw_access(video_id: str, current_user: dict) -> dict:
         access_url = legacy._to_public_backend_url(f"/uploads/{safe_path}")
 
     if not access_url:
+        await legacy._log_privacy_audit_event(
+            "support_unblurred_access_denied",
+            "video",
+            video_id,
+            actor_user_id=current_user.get("id"),
+            details={"reason": cleaned_reason, "reason_code": "unblurred_source_missing"},
+        )
         raise legacy.HTTPException(status_code=404, detail="Raw asset is no longer available")
 
     await legacy._log_privacy_audit_event(
-        "raw_asset_accessed",
+        "unblurred_video_viewed",
         "video",
         video_id,
         actor_user_id=current_user["id"],
-        details={"reason": "admin_raw_access_endpoint"},
+        details={"reason": cleaned_reason, "asset_type": "unblurred_source"},
+    )
+    await legacy._log_privacy_audit_event(
+        "support_unblurred_access_granted",
+        "video",
+        video_id,
+        actor_user_id=current_user["id"],
+        details={"reason": cleaned_reason},
     )
     return {
         "video_id": video_id,

@@ -90,6 +90,13 @@ async def get_video_audio_transcript(video_id: str, current_user: dict):
     )
     if not doc:
         raise legacy.HTTPException(status_code=404, detail="Audio transcript not found")
+    await legacy._log_privacy_audit_event(
+        "transcript_viewed",
+        "video_audio_transcript",
+        str(doc.get("id") or video_id),
+        actor_user_id=current_user.get("id"),
+        details={"video_id": video_id},
+    )
     return legacy.AudioTranscriptResponse(**doc)
 
 
@@ -100,6 +107,13 @@ async def get_video_audio_features(video_id: str, current_user: dict):
     )
     if not doc:
         raise legacy.HTTPException(status_code=404, detail="Audio features not found")
+    await legacy._log_privacy_audit_event(
+        "audio_analysis_viewed",
+        "video_analysis_features",
+        str(doc.get("id") or video_id),
+        actor_user_id=current_user.get("id"),
+        details={"video_id": video_id},
+    )
     return legacy.AudioFeatureResponse(**doc)
 
 

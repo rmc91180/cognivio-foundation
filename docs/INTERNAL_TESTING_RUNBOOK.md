@@ -208,6 +208,19 @@ Tenant and data:
 6. Demo data is excluded from real customer counts.
 7. Demo seed controls cannot seed real workspaces for non-demo users.
 
+Pass 4 tenant/video/demo checks:
+
+1. As a teacher, open an owned video and confirm normal playback/metadata works.
+2. As the same teacher, manually try another teacher's video URL and confirm a controlled access denial.
+3. As school admin, open a same-school video and then a known other-school video; only the same-school video should load.
+4. Confirm `/api/videos/{video_id}/audio-analysis` follows the same video access boundary.
+5. Confirm shared comments are visible to the teacher and observer-private comments are hidden from the teacher.
+6. Confirm `/api/videos/{video_id}/raw-access` without `reason` returns controlled `unblurred_access_reason_required`.
+7. Confirm same-tenant raw access with a reason writes unblurred access audit events.
+8. Export coaching/cohort CSVs and confirm rows are current-tenant only.
+9. Run `python backend/scripts/audit_sensitive_query_scoping.py --limit 50` and review new advisory findings before Pass 5.
+10. Confirm `POST /api/demo/seed` writes only `demo_data=true` records in the current eligible scope.
+
 Operations:
 
 1. Public auth/signup, login, upload, and demo seed rate limits are present and tested.

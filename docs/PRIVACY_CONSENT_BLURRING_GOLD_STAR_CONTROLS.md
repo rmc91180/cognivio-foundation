@@ -144,6 +144,19 @@ Compensating controls:
 - block unblurred exemplar publication,
 - document manual verification before any pilot data.
 
+## Pass 4 Tenant And Access Follow-Up
+
+Pass 4 added the tenant/video boundary layer that sits on top of these Pass 3 privacy controls:
+
+- structured `forbidden_tenant_access` responses for cross-tenant teacher/video denials,
+- `cross_tenant_access_denied` privacy audit events,
+- `video_viewed`, `transcript_viewed`, `audio_analysis_viewed`, and `report_exported` audit events,
+- unblurred access reason enforcement plus `support_unblurred_access_granted` and `support_unblurred_access_denied`,
+- demo seed execution audit events,
+- an advisory sensitive-query scanner for Pass 5 triage.
+
+Physical source deletion is still deferred and remains represented by explicit status fields and readiness warnings.
+
 ## Manual Verification Checklist
 
 1. Upload a classroom recording and confirm the response includes Student Data classifications and `destructive_blurring_enabled=true`.

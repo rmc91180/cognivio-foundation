@@ -470,3 +470,90 @@ Pass 4 should consume:
 - the raw/unblurred access behavior,
 - the non-identifiable export helper,
 - and focus on tenant/video/demo isolation across videos, comments, transcripts, reports, recognition, exports, share assets, and demo data boundaries.
+
+## Pass 4 Handoff to Pass 5
+
+Files changed in Pass 4:
+
+- `backend/server.py`
+- `backend/app/routers/videos.py`
+- `backend/app/services/video_service.py`
+- `backend/app/services/privacy_service.py`
+- `backend/app/repositories/recognition_repository.py`
+- `backend/app/services/recognition_service.py`
+- `backend/scripts/audit_sensitive_query_scoping.py`
+- `backend/tests/test_pr26_tenant_video_demo_boundaries.py`
+- `backend/tests/test_sensitive_query_scoping_audit.py`
+- `docs/TENANT_ISOLATION_AND_VIDEO_ACCESS_AUDIT.md`
+- `docs/PRIVACY_POLICY_DEVELOPMENT_REQUIREMENTS.md`
+- `docs/PR26_SECURITY_PRIVACY_TENANT_SESSION_PLAN.md`
+- `docs/PRIVACY_CONSENT_BLURRING_GOLD_STAR_CONTROLS.md`
+- `docs/INTERNAL_TESTING_RUNBOOK.md`
+
+Tenant isolation tests added:
+
+- teacher cannot access another teacher's video,
+- school admin can access same-tenant video and cannot access another tenant's video,
+- transcript/audio access follows video visibility,
+- comments are scoped by source video plus shared/private visibility,
+- real workspace dashboard/report counts exclude demo and other-tenant data,
+- deleted/tombstoned teacher-linked users are excluded from active tenant lists.
+
+Video access controls added or verified:
+
+- `_get_teacher_or_404` now emits `cross_tenant_access_denied` and returns structured `forbidden_tenant_access` JSON for cross-tenant denials,
+- normal video detail access emits `video_viewed`,
+- raw/unblurred access requires an explicit privacy/support reason,
+- raw/unblurred grants emit `unblurred_video_viewed` and `support_unblurred_access_granted`,
+- missing reason, deleted source, and missing source emit `support_unblurred_access_denied`,
+- admin transcript/audio debug routes emit `transcript_viewed` and `audio_analysis_viewed`,
+- CSV report exports emit `report_exported`.
+
+Demo boundary controls added or verified:
+
+- existing demo seed permission checks remain in place for teacher/admin/master scopes,
+- real dashboard counts continue to exclude `demo_data=true` teachers for non-demo workspaces,
+- demo seed execution now emits `demo_seed_executed` with persona, scope, and counts,
+- targeted frontend seed visibility tests were rerun for teacher, school admin, and training admin surfaces.
+
+Audit script status:
+
+- `backend/scripts/audit_sensitive_query_scoping.py` was added,
+- it scans sensitive collection query calls and supports human output, JSON output, and strict mode,
+- it is advisory by default because dynamic query variables and Master Admin/global health routes create expected false positives,
+- current default scan found `97` advisory/warning findings; Pass 5 should triage and annotate intentional exceptions with `tenant-scope-ok` or `master-admin-scope-ok`.
+
+Remaining risks:
+
+- physical unblurred source deletion remains deferred from Pass 3,
+- privacy audit listing needs Pass 5 triage for stricter tenant filtering or documented Master Admin exceptions,
+- some repository functions are scoped by callers but are still flagged by the static scanner until annotated,
+- `video_downloaded` is reserved for future direct download/streaming routes and is not emitted by the current raw-access URL route,
+- manual deployed-browser verification is still required for real route UX and audit visibility.
+
+Commands run in Pass 4:
+
+- `git status --short --branch` -> confirmed branch `pr26-security-privacy-tenant-session-hardening` clean at start.
+- Read Pass 1-3 docs: `docs/PRIVACY_POLICY_DEVELOPMENT_REQUIREMENTS.md`, `docs/PR26_SECURITY_PRIVACY_TENANT_SESSION_PLAN.md`, `docs/PRODUCTION_DOMAIN_CACHE_SESSION_HARDENING.md`, `docs/PRIVACY_CONSENT_BLURRING_GOLD_STAR_CONTROLS.md`, and `docs/INTERNAL_TESTING_RUNBOOK.md`.
+- Code audit searches for tenant roles, video access, unblurred/raw access, comments, transcripts, audio, reports, recognition, coaching, reference images, framework settings, demo seed, and Mongo query calls.
+- `python backend\scripts\audit_sensitive_query_scoping.py --limit 15` -> completed successfully; 97 advisory/warning findings.
+- `$env:PYTHONPATH='backend'; $env:PYTHONIOENCODING='utf-8'; python -m pytest backend/tests/test_pr26_tenant_video_demo_boundaries.py backend/tests/test_sensitive_query_scoping_audit.py -q` -> 8 passed, 3 warnings.
+- `$env:PYTHONPATH='backend'; $env:PYTHONIOENCODING='utf-8'; python -m pytest backend/tests/test_tenant_enforcement.py backend/tests/test_teacher_admin_endpoint_stability.py backend/tests/test_recognition_contracts.py backend/tests/test_audio_debug_endpoints.py backend/tests/test_pr26_privacy_controls.py -q` -> 50 passed, 3 warnings.
+- `$env:CI='true'; npm test -- --watchAll=false src/lib/apiErrors.test.js src/components/dashboard/SchoolAdminPilotDashboard.test.js src/components/dashboard/TrainingDashboard.test.js src/pages/TeacherWorkspacePage.test.js` from `frontend` -> 4 suites passed / 11 tests passed; React Router future-flag warnings only.
+- `$env:PYTHONPATH='backend'; $env:PYTHONIOENCODING='utf-8'; python -m pytest backend/tests -q` -> 281 passed, 3 warnings.
+- `$env:CI='true'; npm test -- --watchAll=false` from `frontend` -> 24 suites passed / 74 tests passed; React Router future-flag warnings only.
+- `$env:CI='true'; npm run build` from `frontend` -> compiled successfully.
+- `$env:PYTHONPATH='backend'; $env:PYTHONIOENCODING='utf-8'; python backend\scripts\run_quality_gate.py` -> all 5 quality dimensions passed across 10 cases; Requests dependency warning only.
+- `$env:PYTHONPATH='backend'; python -m py_compile backend\scripts\audit_sensitive_query_scoping.py` -> passed.
+- `git diff --check` -> passed; Git reported Windows line-ending normalization warnings only.
+
+Tests not run and why:
+
+- No browser automation was run for cross-tenant video URLs or raw access; those require deployed/manual verification with demo/internal accounts.
+
+Pass 5 should consume:
+
+- the tenant/video/demo boundary tests and the new audit script output,
+- the 97 advisory scanner findings for triage and annotation,
+- remaining rate limiting, MongoDB index/health, DB readiness, log redaction, and production security checklist tasks,
+- physical destructive deletion and backup/archive retention verification from the Pass 3 deferrals.
