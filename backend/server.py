@@ -5566,7 +5566,7 @@ VOICE_GATE_REGEN_MAX_ATTEMPTS = APP_SETTINGS.ai.voice_gate_regen_max_attempts
 VOICE_GATE_HUMAN_ESCALATION_ENABLED = APP_SETTINGS.ai.voice_gate_human_escalation_enabled
 FEEDBACK_GOVERNANCE_QUEUE_AGE_WARNING_MINUTES = APP_SETTINGS.operations.feedback_governance_queue_age_warning_minutes
 FEEDBACK_GOVERNANCE_QUEUE_AGE_BLOCKING_MINUTES = APP_SETTINGS.operations.feedback_governance_queue_age_blocking_minutes
-PRIVACY_PROFILE_MIN_REFERENCES = APP_SETTINGS.privacy.privacy_profile_min_references
+PRIVACY_PROFILE_MIN_REFERENCES = max(4, APP_SETTINGS.privacy.privacy_profile_min_references)
 PRIVACY_PROFILE_MAX_REFERENCES = APP_SETTINGS.privacy.privacy_profile_max_references
 PRIVACY_MANUAL_REVIEW_ENABLED = APP_SETTINGS.privacy.privacy_manual_review_enabled
 PRIVACY_ALLOW_BLUR_ALL_FALLBACK = APP_SETTINGS.privacy.privacy_allow_blur_all_fallback
@@ -9364,13 +9364,42 @@ async def create_teacher_self_profile(
     return TeacherResponse(**_localize_teacher_payload(teacher_doc, language))
 
 
-def _teacher_profile_complete(teacher: Optional[dict]) -> bool:
+TEACHER_PROFILE_REQUIRED_FIELDS = ("subject", "grade_level")
+TEACHER_UPLOAD_REFERENCE_IMAGE_REQUIRED_COUNT = 4
+TEACHER_READINESS_BLOCKER_DEFINITIONS = {
+    "PRIVACY_CONSENT_REQUIRED": {
+        "id": "consent",
+        "label": "Review privacy consent",
+        "message": "Complete privacy consent before uploading videos.",
+        "href": "/consent",
+    },
+    "TEACHER_PROFILE_REQUIRED": {
+        "id": "profile",
+        "label": "Finish your teacher profile",
+        "message": "Complete your teacher profile before uploading videos.",
+        "href": "/my-profile",
+    },
+    "REFERENCE_IMAGES_REQUIRED": {
+        "id": "reference_images",
+        "label": "Add teacher reference photos",
+        "message": "Add at least 4 teacher reference photos before uploading videos.",
+        "href": "/my-profile#privacy-reference-images",
+    },
+}
+
+
+def _teacher_missing_profile_fields(teacher: Optional[dict]) -> List[str]:
     if not teacher:
-        return False
-    return all(
-        _clean_optional_string((teacher or {}).get(field))
-        for field in ("subject", "grade_level")
-    )
+        return list(TEACHER_PROFILE_REQUIRED_FIELDS)
+    return [
+        field
+        for field in TEACHER_PROFILE_REQUIRED_FIELDS
+        if not _clean_optional_string((teacher or {}).get(field))
+    ]
+
+
+def _teacher_profile_complete(teacher: Optional[dict]) -> bool:
+    return not _teacher_missing_profile_fields(teacher)
 
 
 def _teacher_subject_list(teacher: Optional[dict]) -> List[str]:
@@ -9445,52 +9474,191 @@ async def _list_teacher_reference_images(teacher_id: str, workspace_id: Optional
         ]
 
 
+def _reference_image_ready_for_upload(reference: dict) -> bool:
+    status = str(reference.get("status") or "ready").strip().lower()
+    if status not in {"uploaded", "ready", "active", "validated", "complete"}:
+        return False
+    validation_status = str(
+        reference.get("validation_status")
+        or reference.get("quality_status")
+        or ((reference.get("quality_checks") or {}).get("validation_status"))
+        or ((reference.get("quality_checks") or {}).get("status"))
+        or "ready"
+    ).strip().lower()
+    if validation_status in {"pending", "processing", "failed", "rejected", "invalid", "error"}:
+        return False
+    if reference.get("placeholder") or reference.get("is_placeholder"):
+        return False
+    return bool(reference.get("s3_key") or reference.get("file_path") or reference.get("file_url"))
+
+
 async def get_teacher_reference_images_for_blur(teacher_id: str, workspace_id: Optional[str]) -> List[dict]:
     references = await _list_teacher_reference_images(teacher_id, workspace_id)
-    return [
-        ref
-        for ref in references
-        if str(ref.get("status") or "ready").lower() in {"uploaded", "ready", "active"}
-        and (ref.get("s3_key") or ref.get("file_path") or ref.get("file_url"))
+    return [ref for ref in references if _reference_image_ready_for_upload(ref)]
+
+
+async def _teacher_consent_completion(
+    teacher: Optional[dict],
+    current_user: dict,
+) -> Dict[str, Any]:
+    legacy_complete = bool(
+        (current_user or {}).get("consent_complete")
+        or (current_user or {}).get("privacy_consent_complete")
+        or (current_user or {}).get("privacy_consent_accepted")
+        or (current_user or {}).get("consent_accepted_at")
+        or (current_user or {}).get("privacy_consent_accepted_at")
+        or (teacher or {}).get("consent_complete")
+        or (teacher or {}).get("privacy_consent_complete")
+        or (teacher or {}).get("privacy_consent_accepted_at")
+    )
+    policy_version = (
+        (current_user or {}).get("privacy_policy_version")
+        or (current_user or {}).get("consent_policy_version")
+        or (teacher or {}).get("privacy_policy_version")
+        or None
+    )
+    if legacy_complete:
+        return {"complete": True, "policy_version": policy_version}
+
+    user_id = None
+    teacher_email = str((teacher or {}).get("email") or "").strip().lower()
+    current_email = str((current_user or {}).get("email") or "").strip().lower()
+    current_teacher_id = (current_user or {}).get("teacher_id")
+    if current_teacher_id and teacher and current_teacher_id == teacher.get("id"):
+        user_id = current_user.get("id")
+    elif teacher_email and current_email and teacher_email == current_email:
+        user_id = current_user.get("id")
+    elif teacher_email:
+        user_doc = await _find_user_by_email(teacher_email)
+        user_id = (user_doc or {}).get("id")
+        policy_version = policy_version or (user_doc or {}).get("privacy_policy_version")
+    else:
+        user_id = current_user.get("id") if not teacher else None
+
+    if not user_id or not hasattr(db, "consent_records"):
+        return {"complete": False, "policy_version": policy_version}
+
+    workspace_candidates = list(
+        dict.fromkeys(
+            [
+                (teacher or {}).get("organization_id"),
+                (teacher or {}).get("school_id"),
+                _workspace_id_for_user(current_user),
+            ]
+        )
+    )
+    status = {}
+    complete = False
+    for workspace_id in [candidate for candidate in workspace_candidates if candidate]:
+        status = await _latest_consent_status(user_id, workspace_id)
+        complete = all(
+            (status.get(kind) or {}).get("granted") is True
+            and not (status.get(kind) or {}).get("withdrawn_at")
+            for kind in CONSENT_TYPES
+        )
+        if complete:
+            break
+    granted_versions = [
+        (status.get(kind) or {}).get("version")
+        for kind in CONSENT_TYPES
+        if (status.get(kind) or {}).get("granted") is True
     ]
+    return {
+        "complete": complete,
+        "policy_version": policy_version or (granted_versions[-1] if granted_versions else None),
+    }
 
 
 async def _teacher_readiness(teacher: Optional[dict], current_user: dict) -> Dict[str, Any]:
-    consent_complete = bool(
-        current_user.get("consent_complete")
-        or current_user.get("privacy_consent_complete")
-        or current_user.get("privacy_consent_accepted")
-        or current_user.get("consent_accepted_at")
-        or current_user.get("privacy_consent_accepted_at")
-    )
-    if not consent_complete:
-        consent_doc = await db.consent_records.find_one(
-            {"user_id": current_user.get("id"), "status": "accepted"},
-            {"_id": 0, "id": 1},
-        ) if hasattr(db, "consent_records") else None
-        consent_complete = bool(consent_doc)
+    consent = await _teacher_consent_completion(teacher, current_user)
+    consent_complete = bool(consent["complete"])
 
     teacher_profile_complete = _teacher_profile_complete(teacher)
-    workspace_id = _workspace_id_for_user(current_user)
+    missing_profile_fields = _teacher_missing_profile_fields(teacher)
+    workspace_id = (teacher or {}).get("organization_id") or (teacher or {}).get("school_id") or _workspace_id_for_user(current_user)
     references = await get_teacher_reference_images_for_blur((teacher or {}).get("id"), workspace_id) if teacher else []
     reference_count = len(references)
-    reference_ready = reference_count > 0
-    missing_items: List[Dict[str, str]] = []
-    if not teacher_profile_complete:
-        missing_items.append({"id": "profile", "label": "Finish your teacher profile", "href": "/my-profile"})
+    reference_ready = reference_count >= TEACHER_UPLOAD_REFERENCE_IMAGE_REQUIRED_COUNT
+    blockers: List[Dict[str, str]] = []
     if not consent_complete:
-        missing_items.append({"id": "consent", "label": "Review privacy consent", "href": "/consent"})
+        blockers.append({"code": "PRIVACY_CONSENT_REQUIRED", **TEACHER_READINESS_BLOCKER_DEFINITIONS["PRIVACY_CONSENT_REQUIRED"]})
+    if not teacher_profile_complete:
+        blockers.append({"code": "TEACHER_PROFILE_REQUIRED", **TEACHER_READINESS_BLOCKER_DEFINITIONS["TEACHER_PROFILE_REQUIRED"]})
     if PRIVACY_REQUIRE_PROFILE and not reference_ready:
-        missing_items.append({"id": "reference_images", "label": "Add privacy reference images", "href": "/my-profile#privacy-reference-images"})
+        blockers.append({"code": "REFERENCE_IMAGES_REQUIRED", **TEACHER_READINESS_BLOCKER_DEFINITIONS["REFERENCE_IMAGES_REQUIRED"]})
+    missing_items = [
+        {
+            "id": blocker["id"],
+            "type": "setup",
+            "code": blocker["code"],
+            "label": blocker["label"],
+            "title": blocker["label"],
+            "message": blocker["message"],
+            "href": blocker["href"],
+            "route": blocker["href"],
+        }
+        for blocker in blockers
+    ]
+    setup_next_step = missing_items[0] if missing_items else None
+    upload_ready = bool(teacher and consent_complete and teacher_profile_complete and (reference_ready or not PRIVACY_REQUIRE_PROFILE))
     return {
+        "privacy_consent_complete": consent_complete,
+        "privacy_policy_version": consent.get("policy_version"),
         "teacher_profile_complete": teacher_profile_complete,
+        "missing_profile_fields": missing_profile_fields,
         "consent_complete": consent_complete,
+        "privacy_reference_images_count": reference_count,
         "privacy_reference_images_ready": reference_ready,
         "privacy_reference_image_count": reference_count,
+        "privacy_reference_images_required_count": TEACHER_UPLOAD_REFERENCE_IMAGE_REQUIRED_COUNT,
+        "upload_ready": upload_ready,
+        "setup_next_step": setup_next_step,
+        "blockers": [
+            {
+                "code": blocker["code"],
+                "message": blocker["message"],
+                "route": blocker["href"],
+                "href": blocker["href"],
+            }
+            for blocker in blockers
+        ],
         "can_record": bool(teacher),
         "can_receive_blur_processing": bool(reference_ready or not PRIVACY_REQUIRE_PROFILE),
         "missing_items": missing_items,
     }
+
+
+def _ensure_teacher_upload_readiness(
+    readiness: Dict[str, Any],
+    teacher: Optional[dict],
+    current_user: dict,
+    *,
+    context: str,
+) -> None:
+    if readiness.get("upload_ready"):
+        return
+    blocker = (readiness.get("blockers") or [{}])[0]
+    code = blocker.get("code") or "TEACHER_PROFILE_REQUIRED"
+    message = blocker.get("message") or "Complete teacher setup before uploading videos."
+    workspace_id = (teacher or {}).get("organization_id") or (teacher or {}).get("school_id") or _workspace_id_for_user(current_user)
+    logger.warning(
+        "Video upload readiness blocked teacher_id=%s workspace_id=%s blocker=%s context=%s",
+        (teacher or {}).get("id"),
+        workspace_id,
+        code,
+        context,
+    )
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": code,
+            "reason_code": code.lower(),
+            "message": message,
+            "route": blocker.get("route") or blocker.get("href"),
+            "teacher_id": (teacher or {}).get("id"),
+            "blockers": readiness.get("blockers") or [],
+        },
+    )
 
 
 async def _current_workspace_demo_eligible(current_user: dict, linked_doc: Optional[dict] = None) -> bool:
@@ -9548,8 +9716,8 @@ async def _current_teacher_profile_payload(current_user: dict, request: Optional
         "profile": teacher,
         "profile_required": teacher is None or not readiness["teacher_profile_complete"],
         "teacher_profile_complete": readiness["teacher_profile_complete"],
-        "privacy_profile_required": bool(PRIVACY_REQUIRE_PROFILE and not privacy_profile),
-        "privacy_profile_complete": bool(privacy_profile),
+        "privacy_profile_required": bool(PRIVACY_REQUIRE_PROFILE and not readiness["privacy_reference_images_ready"]),
+        "privacy_profile_complete": bool(readiness["privacy_reference_images_ready"]),
         "readiness": readiness,
         "reference_images": [_reference_image_payload(ref) for ref in reference_images],
         "demo_eligible": await _current_workspace_demo_eligible(current_user, teacher),
@@ -10158,7 +10326,7 @@ async def delete_teacher_privacy_profile(
         raise HTTPException(status_code=404, detail="Teacher privacy profile not found")
     await db.teacher_face_references.update_many(
         {"teacher_id": teacher_id},
-        {"$set": {"retention_expires_at": deleted_at}},
+        {"$set": {"status": "expired", "updated_at": deleted_at, "retention_expires_at": deleted_at}},
     )
     await _log_privacy_audit_event(
         "privacy_profile_deleted",
@@ -11388,23 +11556,20 @@ async def upload_video(
                     detail="Observation session must belong to the selected teacher",
                 )
         await _ensure_workspace_upload_quota_available(teacher, current_user)
+        readiness = await _teacher_readiness(teacher, current_user)
+        _ensure_teacher_upload_readiness(
+            readiness,
+            teacher,
+            current_user,
+            context="legacy_video_upload",
+        )
         active_profile = await _get_active_privacy_profile(teacher_id)
-        if PRIVACY_REQUIRE_PROFILE and not active_profile:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "PRIVACY_PROFILE_REQUIRED",
-                    "message": "Teacher privacy profile must be completed before video upload.",
-                    "teacher_id": teacher_id,
-                },
-            )
 
         subject = subject or teacher.get("subject")
         lesson_title = _clean_optional_string(lesson_title) or file.filename or subject
         class_section = _clean_optional_string(class_section) or teacher.get("class_section") or teacher.get("department")
-        reference_images = await get_teacher_reference_images_for_blur(teacher_id, _workspace_id_for_user(current_user))
-        reference_count = len(reference_images)
-        reference_status = "ready" if reference_count else "missing_reference_images"
+        reference_count = int(readiness.get("privacy_reference_images_count") or 0)
+        reference_status = "ready" if readiness.get("privacy_reference_images_ready") else "missing_reference_images"
         video_id = str(uuid.uuid4())
         filename = f"{video_id}{file_ext}"
         teacher_dir = UPLOAD_DIR / "videos" / teacher_id
@@ -11494,7 +11659,7 @@ async def upload_video(
             "recorded_at": normalized_recorded_at,
             "upload_date": upload_time,
             "analysis_language": preferred_language,
-            "teacher_reference_images_available": reference_count > 0,
+            "teacher_reference_images_available": bool(readiness.get("privacy_reference_images_ready")),
             "teacher_reference_image_count": reference_count,
             "privacy_blur_teacher_match_status": reference_status,
         }
@@ -11526,7 +11691,7 @@ async def upload_video(
             "analysis_status": VideoProcessingStatus.QUEUED.value,
             "uploaded_by": current_user["id"],
             "uploaded_at": upload_time,
-            "teacher_reference_images_available": reference_count > 0,
+            "teacher_reference_images_available": bool(readiness.get("privacy_reference_images_ready")),
             "teacher_reference_image_count": reference_count,
             "privacy_blur_teacher_match_status": reference_status,
         })
@@ -11595,7 +11760,7 @@ async def upload_video(
             file_path=relative_path,
             file_size_bytes=size,
             content_type=content_type,
-            teacher_reference_images_available=reference_count > 0,
+            teacher_reference_images_available=bool(readiness.get("privacy_reference_images_ready")),
             teacher_reference_image_count=reference_count,
             privacy_blur_teacher_match_status=reference_status,
         )
@@ -19651,10 +19816,7 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
         {"_id": 0},
     ).sort("start_time", 1).to_list(10) if hasattr(db, "schedules") else []
     next_best_action = None
-    if profile_payload.get("readiness", {}).get("missing_items"):
-        item = profile_payload["readiness"]["missing_items"][0]
-        next_best_action = {"title": item["label"], "description": "Take this step so your recordings and coaching notes stay connected.", "href": item["href"]}
-    elif tasks:
+    if tasks:
         task = tasks[0]
         next_best_action = {"title": task.get("title") or "Reflect on one coaching goal", "description": task.get("suggested_action") or task.get("summary") or "Write down what you tried and what you noticed.", "href": f"/my-coaching?task_id={task.get('id')}"}
     elif comments:
@@ -19918,13 +20080,7 @@ async def get_my_teacher_dashboard(
     if not teacher:
         return {
             **profile_payload,
-            "next_best_action": {
-                "id": "finish-profile",
-                "title": "Finish your teacher profile",
-                "description": "Add your teaching details so your workspace can connect lessons, feedback, and coaching.",
-                "href": "/my-profile",
-                "cta_label": "Open profile",
-            },
+            "next_best_action": None,
             "latest_lesson": None,
             "highlights": [],
             "action_items": [],
@@ -19947,8 +20103,9 @@ async def get_my_teacher_dashboard(
     recognition_payload = await _my_teacher_recognition_payload(current_user, teacher)
     gradebook = await _my_gradebook_reminders(teacher)
     latest_lesson = (lessons_payload.get("lessons") or [None])[0]
-    next_best_action = coaching_payload.get("next_best_action")
-    if not next_best_action and latest_lesson:
+    setup_incomplete = bool((profile_payload.get("readiness") or {}).get("setup_next_step"))
+    next_best_action = None if setup_incomplete else coaching_payload.get("next_best_action")
+    if not setup_incomplete and not next_best_action and latest_lesson:
         next_best_action = {
             "id": "latest-lesson",
             "title": "Review your latest lesson",
@@ -19956,7 +20113,7 @@ async def get_my_teacher_dashboard(
             "href": latest_lesson.get("href") or "/my-lessons",
             "cta_label": "Open lesson",
         }
-    if not next_best_action:
+    if not setup_incomplete and not next_best_action:
         next_best_action = {
             "id": "record-lesson",
             "title": "Record or upload a lesson",
@@ -19964,7 +20121,7 @@ async def get_my_teacher_dashboard(
             "href": "/record",
             "cta_label": "Record or upload",
         }
-    else:
+    elif next_best_action:
         next_best_action = {
             "id": next_best_action.get("id") or "next-step",
             "title": next_best_action.get("title") or "Open your next step",

@@ -74,10 +74,16 @@ export function TeacherWorkspacePage() {
 
   const data = dashboardQuery.data || {};
   const readiness = data.readiness || {};
-  const missingItem = readiness.missing_items?.[0];
+  const missingItem = readiness.setup_next_step || readiness.missing_items?.[0];
   const latestLesson = data.latest_lesson;
   const gradebook = data.gradebook_reminders || [];
   const searchResults = searchQuery.data?.results || [];
+  const nextBestAction =
+    data.next_best_action &&
+    (!missingItem || data.next_best_action.id !== missingItem.id) &&
+    (!missingItem?.code || data.next_best_action.code !== missingItem.code)
+      ? data.next_best_action
+      : null;
 
   return (
     <LayoutShell>
@@ -101,7 +107,7 @@ export function TeacherWorkspacePage() {
 
         {!dashboardQuery.isLoading && !dashboardQuery.isError ? (
           <div className="space-y-6">
-            <Panel className="grid gap-4 lg:grid-cols-[1.2fr,0.8fr]">
+            <Panel className={`grid gap-4 ${missingItem ? "lg:grid-cols-[1.2fr,0.8fr]" : ""}`}>
               <div>
                 <Field label="Search your workspace">
                   <div className="relative">
@@ -130,21 +136,15 @@ export function TeacherWorkspacePage() {
                   <p className="mt-2 text-sm leading-6 text-amber-900">This helps your recordings, feedback, and privacy settings stay connected.</p>
                   <Link to={missingItem.href} className="mt-3 inline-flex min-h-[44px] items-center text-sm font-semibold text-amber-950 underline">Continue</Link>
                 </div>
-              ) : (
-                <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Ready to record</div>
-                  <div className="mt-2 font-semibold text-emerald-950">Reference images are ready for the privacy blur pipeline.</div>
-                  <Link to="/record" className="mt-3 inline-flex min-h-[44px] items-center text-sm font-semibold text-emerald-950 underline">Record or upload a lesson</Link>
-                </div>
-              )}
+              ) : null}
             </Panel>
 
-            {data.next_best_action ? (
+            {nextBestAction ? (
               <Panel className="border-primary/20 bg-primary/5">
                 <div className="text-xs font-semibold uppercase tracking-wide text-primary">Next best action</div>
-                <h2 className="mt-2 text-xl font-semibold text-slate-950">{data.next_best_action.title}</h2>
-                <p className="mt-2 text-sm leading-6 text-slate-700">{data.next_best_action.description}</p>
-                {data.next_best_action.href ? <Link to={data.next_best_action.href} className="mt-3 inline-flex min-h-[44px] items-center text-sm font-semibold text-primary hover:text-primary/80">Open next step</Link> : null}
+                <h2 className="mt-2 text-xl font-semibold text-slate-950">{nextBestAction.title}</h2>
+                <p className="mt-2 text-sm leading-6 text-slate-700">{nextBestAction.description}</p>
+                {nextBestAction.href ? <Link to={nextBestAction.href} className="mt-3 inline-flex min-h-[44px] items-center text-sm font-semibold text-primary hover:text-primary/80">Open next step</Link> : null}
               </Panel>
             ) : null}
 

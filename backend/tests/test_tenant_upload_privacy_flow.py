@@ -151,6 +151,7 @@ def _fake_school_db():
                     "tenant_role": "teacher",
                     "organization_id": "org-school-1",
                     "school_id": "school-1",
+                    "teacher_id": "teacher-1",
                 },
                 {
                     "id": "school-admin-2",
@@ -172,6 +173,8 @@ def _fake_school_db():
                     "id": "teacher-1",
                     "name": "Teacher One",
                     "email": "teacher1@example.com",
+                    "subject": "Math",
+                    "grade_level": "5",
                     "school_id": "school-1",
                     "organization_id": "org-school-1",
                     "created_by": "school-admin-1",
@@ -180,6 +183,8 @@ def _fake_school_db():
                     "id": "teacher-2",
                     "name": "Teacher Two",
                     "email": "teacher2@example.com",
+                    "subject": "Science",
+                    "grade_level": "6",
                     "school_id": "school-2",
                     "organization_id": "org-school-2",
                     "created_by": "school-admin-2",
@@ -188,8 +193,49 @@ def _fake_school_db():
         ),
         teacher_face_profiles=_Collection([]),
         teacher_face_references=_Collection([]),
+        consent_records=_Collection([]),
         videos=_Collection([]),
         video_evidence=_Collection([]),
+    )
+
+
+def _grant_required_consents(fake_db, user_id="teacher-user-1", workspace_id="org-school-1"):
+    fake_db.consent_records.docs.extend(
+        {
+            "id": f"consent-{consent_type}",
+            "user_id": user_id,
+            "workspace_id": workspace_id,
+            "consent_type": consent_type,
+            "granted": True,
+            "granted_at": "2026-05-01T00:00:00+00:00",
+            "version": "2026-05",
+            "created_at": "2026-05-01T00:00:00+00:00",
+        }
+        for consent_type in server.CONSENT_TYPES
+    )
+
+
+def _add_ready_reference_images(fake_db, teacher_id="teacher-1", workspace_id="org-school-1", count=4):
+    fake_db.teacher_face_profiles.docs.append(
+        {
+            "id": f"profile-{teacher_id}",
+            "teacher_id": teacher_id,
+            "status": "active",
+            "profile_version": 1,
+            "reference_count": count,
+        }
+    )
+    fake_db.teacher_face_references.docs.extend(
+        {
+            "id": f"ref-{teacher_id}-{index}",
+            "teacher_id": teacher_id,
+            "workspace_id": workspace_id,
+            "profile_id": f"profile-{teacher_id}",
+            "status": "ready",
+            "file_path": f"privacy/{teacher_id}/ref-{index}.png",
+            "created_at": "2026-05-01T00:00:00+00:00",
+        }
+        for index in range(count)
     )
 
 
@@ -206,7 +252,7 @@ def test_teacher_can_upsert_privacy_profile_inside_school_tenant(monkeypatch):
     response = asyncio.run(
         server.upsert_teacher_privacy_profile(
             "teacher-1",
-            files=[_privacy_image("ref1.png"), _privacy_image("ref2.png"), _privacy_image("ref3.png")],
+            files=[_privacy_image("ref1.png"), _privacy_image("ref2.png"), _privacy_image("ref3.png"), _privacy_image("ref4.png")],
             replace_existing=False,
             current_user={
                 "id": "teacher-user-1",
@@ -218,9 +264,9 @@ def test_teacher_can_upsert_privacy_profile_inside_school_tenant(monkeypatch):
     )
 
     assert response.status == "active"
-    assert response.reference_count == 3
+    assert response.reference_count == 4
     assert len(fake_db.teacher_face_profiles.docs) == 1
-    assert len(fake_db.teacher_face_references.docs) == 3
+    assert len(fake_db.teacher_face_references.docs) == 4
 
 
 def test_cross_tenant_school_admin_cannot_upsert_privacy_profile(monkeypatch):
@@ -231,7 +277,7 @@ def test_cross_tenant_school_admin_cannot_upsert_privacy_profile(monkeypatch):
         asyncio.run(
             server.upsert_teacher_privacy_profile(
                 "teacher-1",
-                files=[_privacy_image("ref1.png"), _privacy_image("ref2.png"), _privacy_image("ref3.png")],
+                files=[_privacy_image("ref1.png"), _privacy_image("ref2.png"), _privacy_image("ref3.png"), _privacy_image("ref4.png")],
                 replace_existing=False,
                 current_user={
                     "id": "school-admin-2",
@@ -247,14 +293,8 @@ def test_cross_tenant_school_admin_cannot_upsert_privacy_profile(monkeypatch):
 
 def test_teacher_video_upload_queues_transcode_inside_tenant(monkeypatch, tmp_path):
     fake_db = _fake_school_db()
-    fake_db.teacher_face_profiles.docs.append(
-        {
-            "id": "profile-1",
-            "teacher_id": "teacher-1",
-            "status": "active",
-            "profile_version": 1,
-        }
-    )
+    _grant_required_consents(fake_db)
+    _add_ready_reference_images(fake_db)
     queued_jobs = []
 
     async def _enqueue_video_transcode_job(**kwargs):
@@ -294,6 +334,165 @@ def test_teacher_video_upload_queues_transcode_inside_tenant(monkeypatch, tmp_pa
     assert len(fake_db.videos.docs) == 1
     assert len(fake_db.video_evidence.docs) == 1
     assert queued_jobs[0]["teacher_id"] == "teacher-1"
+
+
+def test_teacher_readiness_progression_separates_consent_profile_and_reference_images(monkeypatch):
+    fake_db = _fake_school_db()
+    monkeypatch.setattr(server, "db", fake_db)
+    user = {
+        "id": "teacher-user-1",
+        "email": "teacher1@example.com",
+        "tenant_role": "teacher",
+        "teacher_id": "teacher-1",
+        "organization_id": "org-school-1",
+    }
+    teacher = dict(fake_db.teachers.docs[0])
+    teacher["subject"] = ""
+
+    readiness = asyncio.run(server._teacher_readiness(teacher, user))
+    assert readiness["setup_next_step"]["code"] == "PRIVACY_CONSENT_REQUIRED"
+    assert readiness["upload_ready"] is False
+
+    _grant_required_consents(fake_db)
+    readiness = asyncio.run(server._teacher_readiness(teacher, user))
+    assert readiness["privacy_consent_complete"] is True
+    assert readiness["setup_next_step"]["code"] == "TEACHER_PROFILE_REQUIRED"
+    assert all(item["code"] != "PRIVACY_CONSENT_REQUIRED" for item in readiness["missing_items"])
+
+    teacher["subject"] = "Math"
+    readiness = asyncio.run(server._teacher_readiness(teacher, user))
+    assert readiness["setup_next_step"]["code"] == "REFERENCE_IMAGES_REQUIRED"
+
+    _add_ready_reference_images(fake_db)
+    readiness = asyncio.run(server._teacher_readiness(teacher, user))
+    assert readiness["setup_next_step"] is None
+    assert readiness["missing_items"] == []
+    assert readiness["privacy_reference_images_count"] == 4
+    assert readiness["upload_ready"] is True
+
+
+def test_upload_endpoint_returns_exact_readiness_blockers(monkeypatch, tmp_path):
+    fake_db = _fake_school_db()
+    monkeypatch.setattr(server, "db", fake_db)
+    monkeypatch.setattr(server, "UPLOAD_DIR", Path(tmp_path))
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            server.upload_video(
+                request=types.SimpleNamespace(headers={}),
+                file=_video_file("lesson.mp4"),
+                teacher_id="teacher-1",
+                subject=None,
+                recorded_at=None,
+                current_user={
+                    "id": "teacher-user-1",
+                    "email": "teacher1@example.com",
+                    "role": "teacher",
+                    "tenant_role": "teacher",
+                    "teacher_id": "teacher-1",
+                    "organization_id": "org-school-1",
+                },
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "PRIVACY_CONSENT_REQUIRED"
+    assert exc.value.detail["message"] == "Complete privacy consent before uploading videos."
+
+    _grant_required_consents(fake_db)
+    fake_db.teachers.docs[0]["subject"] = ""
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            server.upload_video(
+                request=types.SimpleNamespace(headers={}),
+                file=_video_file("lesson.mp4"),
+                teacher_id="teacher-1",
+                subject=None,
+                recorded_at=None,
+                current_user={
+                    "id": "teacher-user-1",
+                    "email": "teacher1@example.com",
+                    "role": "teacher",
+                    "tenant_role": "teacher",
+                    "teacher_id": "teacher-1",
+                    "organization_id": "org-school-1",
+                },
+            )
+        )
+    assert exc.value.detail["code"] == "TEACHER_PROFILE_REQUIRED"
+
+    fake_db.teachers.docs[0]["subject"] = "Math"
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            server.upload_video(
+                request=types.SimpleNamespace(headers={}),
+                file=_video_file("lesson.mp4"),
+                teacher_id="teacher-1",
+                subject=None,
+                recorded_at=None,
+                current_user={
+                    "id": "teacher-user-1",
+                    "email": "teacher1@example.com",
+                    "role": "teacher",
+                    "tenant_role": "teacher",
+                    "teacher_id": "teacher-1",
+                    "organization_id": "org-school-1",
+                },
+            )
+        )
+    assert exc.value.detail["code"] == "REFERENCE_IMAGES_REQUIRED"
+    assert exc.value.detail["message"] == "Add at least 4 teacher reference photos before uploading videos."
+
+
+def test_another_teachers_reference_images_do_not_satisfy_readiness(monkeypatch):
+    fake_db = _fake_school_db()
+    _grant_required_consents(fake_db)
+    _add_ready_reference_images(fake_db, teacher_id="teacher-2", workspace_id="org-school-2", count=4)
+    monkeypatch.setattr(server, "db", fake_db)
+
+    readiness = asyncio.run(
+        server._teacher_readiness(
+            fake_db.teachers.docs[0],
+            {
+                "id": "teacher-user-1",
+                "email": "teacher1@example.com",
+                "tenant_role": "teacher",
+                "teacher_id": "teacher-1",
+                "organization_id": "org-school-1",
+            },
+        )
+    )
+
+    assert readiness["privacy_reference_images_count"] == 0
+    assert readiness["setup_next_step"]["code"] == "REFERENCE_IMAGES_REQUIRED"
+
+
+def test_admin_upload_checks_target_teacher_readiness_not_admin_readiness(monkeypatch, tmp_path):
+    fake_db = _fake_school_db()
+    _grant_required_consents(fake_db, user_id="school-admin-1", workspace_id="org-school-1")
+    _add_ready_reference_images(fake_db)
+    monkeypatch.setattr(server, "db", fake_db)
+    monkeypatch.setattr(server, "UPLOAD_DIR", Path(tmp_path))
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            server.upload_video(
+                request=types.SimpleNamespace(headers={}),
+                file=_video_file("lesson.mp4"),
+                teacher_id="teacher-1",
+                subject=None,
+                recorded_at=None,
+                current_user={
+                    "id": "school-admin-1",
+                    "email": "principal@example.com",
+                    "role": "admin",
+                    "tenant_role": "school_admin",
+                    "organization_id": "org-school-1",
+                },
+            )
+        )
+
+    assert exc.value.detail["code"] == "PRIVACY_CONSENT_REQUIRED"
 
 
 def test_school_admin_video_list_stays_school_scoped(monkeypatch):

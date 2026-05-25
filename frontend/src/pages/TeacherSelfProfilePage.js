@@ -205,6 +205,8 @@ export function TeacherSelfProfilePage() {
   const readiness = profileQuery.data?.readiness || {};
   const referenceImages = profileQuery.data?.reference_images || [];
   const demoEligible = Boolean(profileQuery.data?.demo_eligible);
+  const referenceImageCount = readiness.privacy_reference_images_count ?? readiness.privacy_reference_image_count ?? 0;
+  const referenceImageRequiredCount = readiness.privacy_reference_images_required_count || 4;
   const canSave = form.grade_level.trim() && (form.primary_subject.trim() || form.subject.trim() || splitSubjects(form.subjectsText).length);
   const pageTitle = readiness.teacher_profile_complete ? "Teacher Profile" : "Finish your teacher profile";
 
@@ -279,12 +281,12 @@ export function TeacherSelfProfilePage() {
                 </div>
                 <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
                   <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Privacy reference images</div>
-                  <div className="mt-1 font-semibold text-slate-900">{readiness.privacy_reference_image_count || 0} ready</div>
+                  <div className="mt-1 font-semibold text-slate-900">{referenceImageCount} of {referenceImageRequiredCount} ready</div>
                 </div>
                 <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
                   <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Privacy blur pipeline</div>
                   <div className="mt-1 font-semibold text-slate-900">
-                    {readiness.can_receive_blur_processing ? "Reference images are ready" : "Add reference images"}
+                    {readiness.privacy_reference_images_ready ? "Reference images are ready" : "Add reference images"}
                   </div>
                 </div>
               </div>

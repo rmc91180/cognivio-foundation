@@ -415,7 +415,8 @@ def test_teacher_dashboard_and_recognition_empty_payloads_are_200(monkeypatch):
     for key in ["readiness", "next_best_action", "latest_lesson", "highlights", "action_items", "trends", "communications", "schedule", "gradebook_reminders", "reports", "recognition", "demo_eligible"]:
         assert key in dashboard_payload
     assert dashboard_payload["readiness"]["teacher_profile_complete"] is False
-    assert dashboard_payload["next_best_action"]["href"] == "/my-profile"
+    assert dashboard_payload["readiness"]["setup_next_step"]["href"] == "/consent"
+    assert dashboard_payload["next_best_action"] is None
     recognition_payload = recognition.json()
     for key in ["badges", "accolades", "highlighted_moments", "spotlight_lessons", "share_cards", "summary", "demo_eligible"]:
         assert key in recognition_payload

@@ -349,7 +349,7 @@ class Settings:
             ),
             privacy=PrivacySettings(
                 privacy_require_profile=_env_bool("PRIVACY_REQUIRE_PROFILE", True),
-                privacy_profile_min_references=_env_int("PRIVACY_PROFILE_MIN_REFERENCES", 3),
+                privacy_profile_min_references=_env_int("PRIVACY_PROFILE_MIN_REFERENCES", 4),
                 privacy_profile_max_references=_env_int("PRIVACY_PROFILE_MAX_REFERENCES", 5),
                 privacy_manual_review_enabled=_env_bool("PRIVACY_MANUAL_REVIEW_ENABLED", True),
                 privacy_allow_blur_all_fallback=_env_bool("PRIVACY_ALLOW_BLUR_ALL_FALLBACK", True),

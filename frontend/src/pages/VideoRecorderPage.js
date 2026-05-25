@@ -23,6 +23,20 @@ const normalizeSessions = (payload) => {
   return [];
 };
 
+const uploadBlockerLink = (code) => {
+  if (code === "PRIVACY_CONSENT_REQUIRED") return "/consent";
+  if (code === "TEACHER_PROFILE_REQUIRED") return "/my-profile";
+  if (code === "REFERENCE_IMAGES_REQUIRED") return "/my-profile#privacy-reference-images";
+  return "";
+};
+
+const uploadBlockerLabel = (code) => {
+  if (code === "PRIVACY_CONSENT_REQUIRED") return "Open privacy consent";
+  if (code === "TEACHER_PROFILE_REQUIRED") return "Open Teacher Profile";
+  if (code === "REFERENCE_IMAGES_REQUIRED") return "Open reference photos";
+  return "Open setup";
+};
+
 export function VideoRecorderPage() {
   const { t } = useTranslation();
   const { user } = useAuth();
@@ -42,6 +56,7 @@ export function VideoRecorderPage() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [queued, setQueued] = useState(false);
   const [uploadError, setUploadError] = useState("");
+  const [uploadErrorCode, setUploadErrorCode] = useState("");
   const [lastUploadPayload, setLastUploadPayload] = useState(null);
   const [uploadedVideoId, setUploadedVideoId] = useState("");
   const isTeacher = isTeacherUser(user);
@@ -57,6 +72,12 @@ export function VideoRecorderPage() {
     queryFn: () => teacherApi.currentProfile().then((res) => res.data),
     enabled: isTeacher,
   });
+  const readiness = profileQuery.data?.readiness || {};
+  const readinessBlocker = isTeacher ? (readiness.blockers || [])[0] : null;
+  const uploadBlockerMessage = readinessBlocker?.message || "";
+  const uploadBlockerHref = uploadBlockerLink(readinessBlocker?.code);
+  const uploadErrorHref = uploadBlockerHref || uploadBlockerLink(uploadErrorCode);
+  const uploadErrorLinkLabel = uploadBlockerLabel(readinessBlocker?.code || uploadErrorCode);
 
   const teachers = useMemo(() => normalizeTeachers(teachersPayload), [teachersPayload]);
 
@@ -135,6 +156,7 @@ export function VideoRecorderPage() {
       setUploadedVideoId(response?.data?.video?.id || response?.data?.id || response?.data?.video_id || "");
       setUploadProgress(0);
       setUploadError("");
+      setUploadErrorCode("");
       setLastUploadPayload(null);
       setSelectedVideoFile(null);
       setSelectedVideoName("");
@@ -153,6 +175,10 @@ export function VideoRecorderPage() {
 
       toast.error(message);
       setUploadError(message);
+      setUploadErrorCode(detail?.code || "");
+      if (uploadBlockerLink(detail?.code)) {
+        setLastUploadPayload(null);
+      }
       setUploadProgress(0);
     },
   });
@@ -195,8 +221,18 @@ export function VideoRecorderPage() {
       return null;
     }
 
+    if (isTeacher && readinessBlocker) {
+      const message = uploadBlockerMessage || "Complete teacher setup before uploading videos.";
+      toast.error(message);
+      setUploadError(message);
+      setUploadErrorCode(readinessBlocker.code || "");
+      setLastUploadPayload(null);
+      return null;
+    }
+
     setQueued(false);
     setUploadError("");
+    setUploadErrorCode("");
 
     const subjectValue = subject || selectedTeacherObj?.subject || "";
     const recordedAt = new Date().toISOString();
@@ -294,19 +330,19 @@ export function VideoRecorderPage() {
           <div className="md:col-span-5">
             <div className="rounded-xl border border-slate-200 bg-white p-5">
               {isTeacher ? (
-                <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-3 text-sm text-emerald-950">
+                <div className={`mb-4 rounded-lg border px-3 py-3 text-sm ${readinessBlocker ? "border-amber-200 bg-amber-50 text-amber-950" : "border-emerald-200 bg-emerald-50 text-emerald-950"}`}>
                   <div className="font-semibold">This recording will connect to your teacher workspace.</div>
-                  <div className="mt-1 text-emerald-800">
-                    {profileQuery.data?.readiness?.privacy_reference_images_ready
-                      ? "Reference images are ready for the privacy blur pipeline."
-                      : "Add reference images in Teacher Profile so the privacy blur workflow has what it needs."}
+                  <div className={`mt-2 space-y-1 ${readinessBlocker ? "text-amber-900" : "text-emerald-800"}`}>
+                    <div>{readiness.privacy_consent_complete || readiness.consent_complete ? "Privacy consent complete." : "Complete privacy consent before uploading videos."}</div>
+                    <div>{readiness.teacher_profile_complete ? "Teacher profile complete." : "Complete your teacher profile before uploading videos."}</div>
+                    <div>{readiness.privacy_reference_images_ready ? "Reference images ready." : "Add at least 4 teacher reference photos before uploading videos."}</div>
                   </div>
-                  {!profileQuery.data?.readiness?.privacy_reference_images_ready ? (
+                  {readinessBlocker && uploadBlockerHref ? (
                     <Link
-                      to="/my-profile#privacy-reference-images"
-                      className="mt-2 inline-flex font-semibold text-emerald-950 underline"
+                      to={uploadBlockerHref}
+                      className="mt-2 inline-flex font-semibold text-amber-950 underline"
                     >
-                      Open Teacher Profile
+                      {uploadBlockerLabel(readinessBlocker.code)}
                     </Link>
                   ) : null}
                 </div>
@@ -447,9 +483,9 @@ export function VideoRecorderPage() {
                   <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
                     <div>{uploadError}</div>
 
-                    {String(uploadError).includes("privacy") ? (
-                      <Link to="/privacy" className="mt-2 inline-flex font-semibold text-amber-950 underline">
-                        Open privacy setup
+                    {uploadErrorHref ? (
+                      <Link to={uploadErrorHref} className="mt-2 inline-flex font-semibold text-amber-950 underline">
+                        {uploadErrorLinkLabel}
                       </Link>
                     ) : null}
 
