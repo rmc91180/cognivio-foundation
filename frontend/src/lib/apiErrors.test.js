@@ -56,5 +56,24 @@ describe("normalizeApiError", () => {
       /server issue/i
     );
   });
+
+  it("maps request-access missing identity fields to a clear validation message", () => {
+    const normalized = normalizeApiError({
+      response: {
+        status: 422,
+        data: {
+          detail: [
+            { loc: ["body", "email"], msg: "Field required", type: "missing" },
+            { loc: ["body", "password"], msg: "Field required", type: "missing" },
+            { loc: ["body", "name"], msg: "Field required", type: "missing" },
+          ],
+        },
+      },
+    });
+
+    expect(normalized.message).toBe(
+      "Please complete your name, email, and password before submitting."
+    );
+  });
 });
 

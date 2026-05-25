@@ -47,7 +47,11 @@ describe("masterAdminApi user lifecycle endpoints", () => {
   });
 
   it("routes request access to the canonical approval endpoint", () => {
-    const payload = { email: "tester@example.com" };
+    const payload = {
+      email: "tester@example.com",
+      password: "StrongPassword123",
+      name: "Test Teacher",
+    };
 
     authApi.requestAccess(payload);
 
