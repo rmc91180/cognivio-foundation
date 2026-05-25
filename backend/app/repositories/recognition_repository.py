@@ -23,9 +23,12 @@ async def update_lesson_recognition_event(event_id: str, update_fields: dict) ->
     )
 
 
-async def list_recognition_events_pending_review() -> List[dict]:
+async def list_recognition_events_pending_review(teacher_ids: Optional[List[str]] = None) -> List[dict]:
+    query = {"recognition_status": "pending_admin_review"}
+    if teacher_ids is not None:
+        query["teacher_id"] = {"$in": teacher_ids or ["__none__"]}
     return await legacy.db.lesson_recognition_events.find(
-        {"recognition_status": "pending_admin_review"},
+        query,
         {"_id": 0},
     ).sort("updated_at", -1).to_list(200)
 

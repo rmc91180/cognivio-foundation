@@ -270,7 +270,7 @@ export function TeacherSelfProfilePage() {
             <Panel id="privacy-reference-images" className="space-y-5">
               <SectionHeader
                 title="Privacy & consent"
-                description="Privacy reference images help Cognivio recognize you in your own classroom recordings so the privacy blur can protect everyone else."
+                description="Privacy reference images support the privacy blur workflow for your classroom recordings. They are not used for login, surveillance, tracking, or general identification."
               />
               <div className="grid gap-3 sm:grid-cols-3">
                 <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
@@ -347,7 +347,7 @@ export function TeacherSelfProfilePage() {
                 </div>
               ) : (
                 <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-700">
-                  Add reference images so the privacy blur can recognize you and protect everyone else in the recording.
+                  Add reference images so the privacy blur workflow has what it needs before processing your recordings.
                 </div>
               )}
             </Panel>

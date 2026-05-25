@@ -272,7 +272,7 @@ def test_update_video_recognition_opt_in_persists_teacher_preferences():
                     allow_social_share=True,
                     allow_email_signature=True,
                 ),
-                {"id": "admin_1", "email": "principal@demo.cognivio.app"},
+                {"id": "teacher_user_1", "teacher_id": "teacher_1", "tenant_role": "teacher", "role": "teacher", "email": "teacher@example.com"},
             )
         )
     finally:
@@ -285,6 +285,8 @@ def test_update_video_recognition_opt_in_persists_teacher_preferences():
     stored_event = fake_db.lesson_recognition_events.docs[0]
     assert stored_event["teacher_opt_in"] is True
     assert stored_event["allow_email_signature"] is True
+    assert stored_event["teacher_authorized_by"] == "teacher_user_1"
+    assert stored_event["promotional_use_allowed"] is False
 
 
 def test_review_video_recognition_approve_creates_badge():

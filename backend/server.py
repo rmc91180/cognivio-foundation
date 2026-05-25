@@ -124,9 +124,460 @@ VALID_TENANT_ROLES = {"teacher", "school_admin", "training_admin", "super_admin"
 VALID_ORGANIZATION_TYPES = {"school", "training"}
 
 
+class DataClassification(str, Enum):
+    ACCOUNT_ADMIN_DATA = "account_admin_data"
+    STUDENT_DATA = "student_data"
+    CLASSROOM_VIDEO_AUDIO = "classroom_video_audio"
+    TECHNICAL_USAGE_DATA = "technical_usage_data"
+    NON_IDENTIFIABLE_DATA = "non_identifiable_data"
+    BEHAVIORAL_INTERACTIONAL_DATA = "behavioral_interactional_data"
+    TRANSIENT_BIOMETRIC_PROCESSING = "transient_biometric_processing"
+    EXEMPLARY_CONTENT = "exemplary_content"
+
+
+class ProcessingPurpose(str, Enum):
+    TEACHER_REFLECTION = "teacher_reflection"
+    INSTRUCTIONAL_FEEDBACK = "instructional_feedback"
+    PROFESSIONAL_DEVELOPMENT = "professional_development"
+    EDUCATOR_CONTROLLED_REPORTING = "educator_controlled_reporting"
+    PRIVACY_BLURRING = "privacy_blurring"
+    AUDIO_MASKING = "audio_masking"
+    DEIDENTIFICATION_PIPELINE = "deidentification_pipeline"
+    SECURITY_AUDIT = "security_audit"
+    SUPPORT_TROUBLESHOOTING = "support_troubleshooting"
+
+
+class ForbiddenProcessingPurpose(str, Enum):
+    ADVERTISING = "advertising"
+    MARKETING = "marketing"
+    CONSUMER_PROFILE_BUILDING = "consumer_profile_building"
+    STUDENT_PROFILE_UNRELATED_TO_EDUCATION = "student_profile_unrelated_to_education"
+    BIOMETRIC_IDENTIFICATION = "biometric_identification"
+    BIOMETRIC_AUTHENTICATION = "biometric_authentication"
+    PERSISTENT_TRACKING = "persistent_tracking"
+    INDIVIDUALIZED_STUDENT_PREDICTION = "individualized_student_prediction"
+    EMPLOYMENT_DETERMINATION = "employment_determination"
+
+
+class PrivacyPipelineState(str, Enum):
+    UPLOADED_UNPROCESSED = "uploaded_unprocessed"
+    BLUR_PROCESSING_QUEUED = "blur_processing_queued"
+    BLUR_PROCESSING_RUNNING = "blur_processing_running"
+    BLURRED_GENERATED = "blurred_generated"
+    BLURRED_VERIFIED = "blurred_verified"
+    UNBLURRED_DELETE_QUEUED = "unblurred_delete_queued"
+    UNBLURRED_DELETED = "unblurred_deleted"
+    DESTRUCTIVE_BLUR_FAILED = "destructive_blur_failed"
+    RETAINED_UNBLURRED_BY_INSTITUTION_POLICY = "retained_unblurred_by_institution_policy"
+
+
+ALLOWED_PROCESSING_PURPOSES = {item.value for item in ProcessingPurpose}
+FORBIDDEN_PROCESSING_PURPOSES = {item.value for item in ForbiddenProcessingPurpose}
+ALLOWED_BIOMETRIC_PURPOSES = {
+    ProcessingPurpose.PRIVACY_BLURRING.value,
+    ProcessingPurpose.AUDIO_MASKING.value,
+    ProcessingPurpose.DEIDENTIFICATION_PIPELINE.value,
+    "face_blurring",
+    "audio_masking",
+    "deidentification",
+}
+FORBIDDEN_BIOMETRIC_PURPOSES = {
+    "identify_person",
+    "authenticate_person",
+    "track_person",
+    "recognize_student",
+    "recognize_teacher",
+    "train_biometric_recognition",
+    ForbiddenProcessingPurpose.BIOMETRIC_IDENTIFICATION.value,
+    ForbiddenProcessingPurpose.BIOMETRIC_AUTHENTICATION.value,
+    ForbiddenProcessingPurpose.PERSISTENT_TRACKING.value,
+}
+PROHIBITED_BIOMETRIC_STORAGE_FIELDS = {
+    "face_embedding",
+    "face_embeddings",
+    "voiceprint",
+    "voiceprints",
+    "facial_geometry",
+    "persistent_facial_geometry",
+    "biometric_id",
+    "biometric_ids",
+}
+NON_IDENTIFIABLE_EXPORT_FORBIDDEN_FIELDS = {
+    "raw_file_url",
+    "raw_file_path",
+    "file_url",
+    "file_path",
+    "s3_key",
+    "raw_s3_key",
+    "email",
+    "student_email",
+    "student_id",
+    "student_name",
+    "name",
+    "transcript_text",
+    "text",
+    "segments",
+}
+AI_OUTPUT_PROHIBITED_FIELDS = {
+    "employment_decision",
+    "discipline_recommendation",
+    "student_prediction",
+    "student_profile",
+    "teacher_ranking",
+    "biometric_identification",
+}
+AI_OUTPUT_PROHIBITED_PHRASES = {
+    "employment decision",
+    "discipline recommendation",
+    "biometric identification",
+    "teacher ranking",
+    "student prediction",
+}
+AI_REFLECTION_ONLY_DISCLAIMER = (
+    "Cognivio AI outputs are informational and intended to support educator "
+    "reflection and professional learning. They are not determinations about "
+    "students, teachers, employment, discipline, or educational outcomes."
+)
+
+
 def _clean_optional_string(value: Optional[str]) -> Optional[str]:
     cleaned = str(value or "").strip()
     return cleaned or None
+
+
+def _normalize_policy_value(value: Any) -> str:
+    return str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _coerce_policy_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
+
+
+def _assert_allowed_processing_purpose(purpose: Any) -> str:
+    normalized = _normalize_policy_value(purpose)
+    if normalized in FORBIDDEN_PROCESSING_PURPOSES:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "FORBIDDEN_PROCESSING_PURPOSE",
+                "reason_code": "forbidden_processing_purpose",
+                "purpose": normalized,
+                "message": "This processing purpose is not allowed for Cognivio Student Data.",
+            },
+        )
+    if normalized not in ALLOWED_PROCESSING_PURPOSES:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "UNSUPPORTED_PROCESSING_PURPOSE",
+                "reason_code": "unsupported_processing_purpose",
+                "purpose": normalized,
+                "message": "Unsupported processing purpose.",
+            },
+        )
+    return normalized
+
+
+def _assert_allowed_biometric_processing_purpose(purpose: Any) -> str:
+    normalized = _normalize_policy_value(purpose)
+    if normalized in FORBIDDEN_BIOMETRIC_PURPOSES or normalized in FORBIDDEN_PROCESSING_PURPOSES:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "FORBIDDEN_BIOMETRIC_PURPOSE",
+                "reason_code": "forbidden_biometric_purpose",
+                "purpose": normalized,
+                "message": "Biometric processing is limited to privacy blurring, audio masking, and de-identification.",
+            },
+        )
+    if normalized not in ALLOWED_BIOMETRIC_PURPOSES:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "UNSUPPORTED_BIOMETRIC_PURPOSE",
+                "reason_code": "unsupported_biometric_purpose",
+                "purpose": normalized,
+                "message": "Unsupported biometric processing purpose.",
+            },
+        )
+    return normalized
+
+
+def _iter_nested_payload_items(payload: Any):
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            yield str(key), value
+            yield from _iter_nested_payload_items(value)
+    elif isinstance(payload, list):
+        for item in payload:
+            yield from _iter_nested_payload_items(item)
+
+
+def _validate_saved_biometric_payload(payload: Dict[str, Any]) -> None:
+    for key, value in _iter_nested_payload_items(payload):
+        normalized_key = _normalize_policy_value(key)
+        if normalized_key in PROHIBITED_BIOMETRIC_STORAGE_FIELDS:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "PROHIBITED_BIOMETRIC_FIELD",
+                    "reason_code": "prohibited_biometric_field",
+                    "field": key,
+                    "message": "Persistent biometric identifiers cannot be saved.",
+                },
+            )
+        if normalized_key == "embedding" and value not in (None, [], {}, ""):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "PERSISTENT_BIOMETRIC_EMBEDDING_BLOCKED",
+                    "reason_code": "persistent_biometric_embedding_blocked",
+                    "field": key,
+                    "message": "Persistent face or voice embeddings cannot be saved.",
+                },
+            )
+
+
+def _privacy_policy_metadata(
+    classifications: List[DataClassification],
+    purposes: List[ProcessingPurpose],
+    *,
+    biometric: bool = False,
+) -> Dict[str, Any]:
+    purpose_values = [_assert_allowed_processing_purpose(purpose.value) for purpose in purposes]
+    if biometric:
+        for purpose in purpose_values:
+            _assert_allowed_biometric_processing_purpose(purpose)
+    return {
+        "data_classifications": [classification.value for classification in classifications],
+        "processing_purposes": purpose_values,
+        "forbidden_purposes_blocked": sorted(FORBIDDEN_PROCESSING_PURPOSES),
+        "student_data_purpose_limited": DataClassification.STUDENT_DATA.value in [c.value for c in classifications],
+    }
+
+
+def _resolve_workspace_privacy_settings(current_user: Optional[dict], teacher: Optional[dict] = None) -> Dict[str, Any]:
+    sources = [current_user or {}, teacher or {}]
+
+    def first_value(*keys: str) -> Any:
+        for source in sources:
+            for key in keys:
+                if key in source and source.get(key) is not None:
+                    return source.get(key)
+        return None
+
+    allow_unblurred_retention = _coerce_policy_bool(first_value("allow_unblurred_retention"), default=False)
+    destructive_default = _coerce_policy_bool(
+        first_value("destructive_blurring_enabled_default", "destructive_blurring_enabled"),
+        default=True,
+    )
+    if allow_unblurred_retention and first_value("destructive_blurring_enabled_default", "destructive_blurring_enabled") is None:
+        destructive_default = False
+    return {
+        "student_face_blur_enabled": _coerce_policy_bool(
+            first_value("student_face_blur_enabled"),
+            default=True,
+        ),
+        "destructive_blurring_enabled_default": destructive_default,
+        "allow_unblurred_retention": allow_unblurred_retention,
+        "unblurred_retention_reason": _clean_optional_string(first_value("unblurred_retention_reason")),
+        "recording_notice_confirmed": _coerce_policy_bool(
+            first_value("recording_notice_confirmed", "privacy_setup_completed", "privacy_setup_completed_at"),
+            default=False,
+        ),
+        "student_consent_basis_recorded": _coerce_policy_bool(
+            first_value("student_consent_basis_recorded", "student_consent_basis"),
+            default=False,
+        ),
+        "biometric_consent_required": _coerce_policy_bool(first_value("biometric_consent_required"), default=False),
+        "biometric_consent_confirmed": _coerce_policy_bool(first_value("biometric_consent_confirmed"), default=False),
+        "retention_policy_confirmed": _coerce_policy_bool(first_value("retention_policy_confirmed"), default=False),
+        "privacy_setup_required": _coerce_policy_bool(first_value("privacy_setup_required"), default=False),
+    }
+
+
+def _build_upload_privacy_policy_fields(current_user: Optional[dict], teacher: Optional[dict]) -> Dict[str, Any]:
+    settings = _resolve_workspace_privacy_settings(current_user, teacher)
+    metadata = _privacy_policy_metadata(
+        [
+            DataClassification.STUDENT_DATA,
+            DataClassification.CLASSROOM_VIDEO_AUDIO,
+            DataClassification.BEHAVIORAL_INTERACTIONAL_DATA,
+            DataClassification.TRANSIENT_BIOMETRIC_PROCESSING,
+        ],
+        [
+            ProcessingPurpose.TEACHER_REFLECTION,
+            ProcessingPurpose.INSTRUCTIONAL_FEEDBACK,
+            ProcessingPurpose.PROFESSIONAL_DEVELOPMENT,
+            ProcessingPurpose.PRIVACY_BLURRING,
+        ],
+    )
+    destructive_enabled = bool(settings["student_face_blur_enabled"] and settings["destructive_blurring_enabled_default"])
+    if settings["allow_unblurred_retention"]:
+        destructive_state = PrivacyPipelineState.RETAINED_UNBLURRED_BY_INSTITUTION_POLICY.value
+    else:
+        destructive_state = PrivacyPipelineState.UPLOADED_UNPROCESSED.value
+    missing_items: List[str] = []
+    if settings["privacy_setup_required"] and not settings["recording_notice_confirmed"]:
+        missing_items.append("recording_notice_confirmed")
+    if settings["privacy_setup_required"] and not settings["student_consent_basis_recorded"]:
+        missing_items.append("student_consent_basis_recorded")
+    if settings["biometric_consent_required"] and not settings["biometric_consent_confirmed"]:
+        missing_items.append("biometric_consent_confirmed")
+    return {
+        **metadata,
+        "student_face_blur_enabled": settings["student_face_blur_enabled"],
+        "destructive_blurring_enabled": destructive_enabled,
+        "destructive_blurring_enabled_default": settings["destructive_blurring_enabled_default"],
+        "allow_unblurred_retention": settings["allow_unblurred_retention"],
+        "unblurred_retention_reason": settings["unblurred_retention_reason"],
+        "privacy_pipeline_state": destructive_state,
+        "unblurred_deletion_status": "retained_by_policy" if settings["allow_unblurred_retention"] else "not_started",
+        "biometric_processing_allowed_purposes": sorted(ALLOWED_BIOMETRIC_PURPOSES),
+        "biometric_processing_prohibited": sorted(FORBIDDEN_BIOMETRIC_PURPOSES),
+        "privacy_gate": {
+            "status": "blocked" if missing_items else "allowed",
+            "missing_items": missing_items,
+            "recording_notice_confirmed": settings["recording_notice_confirmed"],
+            "student_consent_basis_recorded": settings["student_consent_basis_recorded"],
+            "biometric_consent_required": settings["biometric_consent_required"],
+            "biometric_consent_confirmed": settings["biometric_consent_confirmed"],
+            "retention_policy_confirmed": settings["retention_policy_confirmed"],
+        },
+    }
+
+
+def _ensure_upload_privacy_gate(policy_fields: Dict[str, Any]) -> None:
+    gate = policy_fields.get("privacy_gate") or {}
+    if gate.get("status") != "blocked":
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "PRIVACY_SETUP_REQUIRED",
+            "reason_code": "privacy_setup_required",
+            "missing_items": list(gate.get("missing_items") or []),
+            "message": "Privacy setup must be completed before recording upload.",
+        },
+    )
+
+
+def _build_reference_image_policy_fields() -> Dict[str, Any]:
+    metadata = _privacy_policy_metadata(
+        [DataClassification.TRANSIENT_BIOMETRIC_PROCESSING, DataClassification.ACCOUNT_ADMIN_DATA],
+        [ProcessingPurpose.PRIVACY_BLURRING],
+        biometric=True,
+    )
+    return {
+        **metadata,
+        "reference_image_policy": {
+            "allowed_use": "privacy_blur_workflow_only",
+            "prohibited_uses": [
+                "authentication",
+                "surveillance",
+                "persistent_tracking",
+                "biometric_identification",
+            ],
+            "persistent_embeddings_allowed": False,
+        },
+        "biometric_artifact_status": "no_persistent_embedding_saved",
+    }
+
+
+def _build_non_identifiable_export_metadata(payload: Dict[str, Any], export_kind: str = "aggregate") -> Dict[str, Any]:
+    for key, _value in _iter_nested_payload_items(payload):
+        normalized_key = _normalize_policy_value(key)
+        if normalized_key in NON_IDENTIFIABLE_EXPORT_FORBIDDEN_FIELDS:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "IDENTIFIABLE_EXPORT_FIELD_BLOCKED",
+                    "reason_code": "identifiable_export_field_blocked",
+                    "field": key,
+                    "message": "Non-identifiable exports cannot include raw Student Data or direct identifiers.",
+                },
+            )
+    return {
+        "data_classifications": [DataClassification.NON_IDENTIFIABLE_DATA.value],
+        "processing_purposes": [ProcessingPurpose.DEIDENTIFICATION_PIPELINE.value],
+        "deidentification_status": "aggregated_only" if export_kind == "aggregate" else "deidentified_verified",
+        "no_reidentification_required": True,
+        "raw_student_data_included": False,
+    }
+
+
+def _assert_ai_output_safeguards(payload: Dict[str, Any]) -> None:
+    for key, value in _iter_nested_payload_items(payload):
+        normalized_key = _normalize_policy_value(key)
+        if normalized_key in AI_OUTPUT_PROHIBITED_FIELDS:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "PROHIBITED_AI_OUTPUT_FIELD",
+                    "reason_code": "prohibited_ai_output_field",
+                    "field": key,
+                    "message": "AI outputs cannot make determinations about students, teachers, employment, discipline, or outcomes.",
+                },
+            )
+        if isinstance(value, str):
+            lowered = value.lower()
+            if any(phrase in lowered for phrase in AI_OUTPUT_PROHIBITED_PHRASES):
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "PROHIBITED_AI_OUTPUT_LANGUAGE",
+                        "reason_code": "prohibited_ai_output_language",
+                        "field": key,
+                        "message": "AI output language must remain informational and reflection-oriented.",
+                    },
+                )
+
+
+def _ai_reflection_only_metadata() -> Dict[str, Any]:
+    return {
+        "ai_output_use": "informational_reflection_only",
+        "ai_output_disclaimer": AI_REFLECTION_ONLY_DISCLAIMER,
+        "prohibited_ai_uses": sorted(FORBIDDEN_PROCESSING_PURPOSES),
+    }
+
+
+def _build_exemplar_authorization_fields(
+    *,
+    teacher_authorized: bool = False,
+    teacher_authorized_by: Optional[str] = None,
+    institution_authorized: bool = False,
+    institution_authorized_by: Optional[str] = None,
+    unblurred_allowed: bool = False,
+    consent_document_id: Optional[str] = None,
+    consent_certification_uploaded: bool = False,
+) -> Dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "data_classifications": [DataClassification.EXEMPLARY_CONTENT.value, DataClassification.CLASSROOM_VIDEO_AUDIO.value],
+        "processing_purposes": [ProcessingPurpose.PROFESSIONAL_DEVELOPMENT.value, ProcessingPurpose.EDUCATOR_CONTROLLED_REPORTING.value],
+        "exemplary_content_status": "authorized" if teacher_authorized and institution_authorized else "pending_authorization",
+        "teacher_authorized_at": now if teacher_authorized else None,
+        "teacher_authorized_by": teacher_authorized_by if teacher_authorized else None,
+        "institution_authorized_at": now if institution_authorized else None,
+        "institution_authorized_by": institution_authorized_by if institution_authorized else None,
+        "blurred_required": True,
+        "unblurred_allowed": bool(unblurred_allowed and consent_document_id and consent_certification_uploaded),
+        "consent_document_id": consent_document_id,
+        "consent_certification_uploaded": bool(consent_certification_uploaded),
+        "promotional_use_allowed": False,
+    }
 
 
 def _normalized_name_key(value: Optional[str]) -> Optional[str]:
@@ -2957,7 +3408,22 @@ async def _get_teacher_or_404(teacher_id: str, current_user: dict) -> dict:
         raise HTTPException(status_code=404, detail="Teacher not found")
     if await _teacher_is_visible_to_user(teacher, current_user):
         return teacher
-    raise HTTPException(status_code=403, detail="Not authorized for this teacher")
+    await _log_cross_tenant_access_denied(
+        target_type="teacher",
+        target_id=teacher_id,
+        current_user=current_user,
+        details={
+            "teacher_organization_id": teacher.get("organization_id"),
+            "teacher_school_id": teacher.get("school_id"),
+        },
+    )
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "reason_code": "forbidden_tenant_access",
+            "message": "You do not have access to that Cognivio workspace.",
+        },
+    )
 
 
 async def _enrich_teacher_with_tenancy_context(teacher: Optional[dict]) -> dict:
@@ -3226,6 +3692,28 @@ async def _log_privacy_audit_event(
         )
     except Exception as exc:
         logger.warning(f"Unable to write privacy audit event {event_type} for {target_type}:{target_id}: {exc}")
+
+
+async def _log_cross_tenant_access_denied(
+    *,
+    target_type: str,
+    target_id: Optional[str],
+    current_user: dict,
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    safe_details = {
+        "actor_tenant_role": _get_user_tenant_role(current_user),
+        "actor_organization_id": current_user.get("organization_id"),
+        "actor_school_id": current_user.get("school_id"),
+        **(details or {}),
+    }
+    await _log_privacy_audit_event(
+        "cross_tenant_access_denied",
+        target_type,
+        str(target_id or "unknown"),
+        actor_user_id=current_user.get("id"),
+        details=safe_details,
+    )
 
 
 async def _log_recognition_audit_event(
@@ -4021,6 +4509,16 @@ async def _sync_video_recognition_state(video: dict) -> dict:
             "reviewed_at": existing.get("reviewed_at"),
             "reviewed_by": existing.get("reviewed_by"),
             "review_reason": existing.get("review_reason"),
+            "exemplary_content_status": existing.get("exemplary_content_status"),
+            "teacher_authorized_at": existing.get("teacher_authorized_at"),
+            "teacher_authorized_by": existing.get("teacher_authorized_by"),
+            "institution_authorized_at": existing.get("institution_authorized_at"),
+            "institution_authorized_by": existing.get("institution_authorized_by"),
+            "blurred_required": existing.get("blurred_required", True),
+            "unblurred_allowed": existing.get("unblurred_allowed", False),
+            "consent_document_id": existing.get("consent_document_id"),
+            "consent_certification_uploaded": existing.get("consent_certification_uploaded", False),
+            "promotional_use_allowed": existing.get("promotional_use_allowed", False),
         }
         update_doc.update(preserved_fields)
         await db.lesson_recognition_events.update_one({"id": existing["id"]}, {"$set": update_doc})
@@ -4041,6 +4539,7 @@ async def _sync_video_recognition_state(video: dict) -> dict:
         "reviewed_at": None,
         "reviewed_by": None,
         "review_reason": None,
+        **_build_exemplar_authorization_fields(),
     }
     await db.lesson_recognition_events.insert_one(doc)
     return doc
@@ -5008,6 +5507,25 @@ POST_RATE_LIMIT_WINDOW_SECONDS = 60
 POST_RATE_LIMIT_MAX_REQUESTS = 30
 POST_RATE_LIMIT_EXEMPT_PATHS = {"/api/auth/login", "/api/videos/upload"}
 POST_RATE_LIMIT_BUCKETS: Dict[Tuple[str, str], Tuple[int, float]] = {}
+ENDPOINT_RATE_LIMIT_RULES: Dict[Tuple[str, str], Tuple[int, int, str]] = {
+    ("POST", "/api/auth/login"): (60, 60, "login_rate_limited"),
+    ("POST", "/api/auth/request-access"): (20, 60, "request_access_rate_limited"),
+    ("POST", "/api/auth/password-reset/request"): (10, 60, "password_reset_rate_limited"),
+    ("GET", "/api/institutions/lookup"): (120, 60, "institution_lookup_rate_limited"),
+    ("POST", "/api/videos/upload"): (20, 60, "video_upload_rate_limited"),
+    ("POST", "/api/teachers/me/reference-images"): (10, 60, "reference_image_upload_rate_limited"),
+    ("POST", "/api/frameworks/upload-rubric"): (10, 60, "framework_upload_rate_limited"),
+    ("POST", "/api/demo/seed"): (10, 60, "demo_seed_rate_limited"),
+    ("POST", "/api/reports/export"): (30, 60, "report_export_rate_limited"),
+    ("POST", "/api/reports/export/csv"): (30, 60, "report_export_rate_limited"),
+    ("POST", "/api/admin/access-users/{user_id}/approve"): (30, 60, "admin_action_rate_limited"),
+    ("POST", "/api/admin/access-users/{user_id}/reject"): (30, 60, "admin_action_rate_limited"),
+    ("POST", "/api/master-admin/users/{user_id}/approve"): (30, 60, "admin_action_rate_limited"),
+    ("POST", "/api/master-admin/users/{user_id}/reject"): (30, 60, "admin_action_rate_limited"),
+    ("POST", "/api/master-admin/users/{user_id}/freeze"): (30, 60, "admin_action_rate_limited"),
+    ("POST", "/api/master-admin/users/{user_id}/reactivate"): (30, 60, "admin_action_rate_limited"),
+}
+ENDPOINT_RATE_LIMIT_BUCKETS: Dict[Tuple[str, str, str], Tuple[int, float]] = {}
 VIDEO_WORKER_COUNT = APP_SETTINGS.video.video_worker_count
 VIDEO_TRANSCODE_PIPELINE_ENABLED = APP_SETTINGS.video.video_transcode_pipeline_enabled
 VIDEO_TRANSCODE_PROFILE = APP_SETTINGS.video.video_transcode_profile.strip() or "analysis_master_v1"
@@ -5228,9 +5746,70 @@ async def _rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded)
     retry_after = _retry_after_from_rate_limit(exc)
     return JSONResponse(
         status_code=429,
-        content={"error": "Too many requests", "retry_after": retry_after},
+        content={
+            "error": "Too many requests",
+            "reason_code": "rate_limited",
+            "retry_after": retry_after,
+            "message": "Too many requests. Please wait and try again.",
+        },
         headers={"Retry-After": str(retry_after)},
     )
+
+
+def _rate_limit_response(retry_after: int, reason_code: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "Too many requests",
+            "reason_code": reason_code,
+            "retry_after": retry_after,
+            "message": "Too many requests. Please wait and try again.",
+        },
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
+def _path_matches_rate_limit_rule(path: str, pattern: str) -> bool:
+    if path == pattern:
+        return True
+    if "{" not in pattern:
+        return False
+    path_parts = path.strip("/").split("/")
+    pattern_parts = pattern.strip("/").split("/")
+    if len(path_parts) != len(pattern_parts):
+        return False
+    return all(
+        pattern_part.startswith("{") and pattern_part.endswith("}") or pattern_part == path_part
+        for path_part, pattern_part in zip(path_parts, pattern_parts)
+    )
+
+
+def _endpoint_rate_limit_rule(request: Request) -> Optional[Tuple[str, int, int, str]]:
+    method = request.method.upper()
+    path = request.url.path
+    for (rule_method, pattern), (max_requests, window_seconds, reason_code) in ENDPOINT_RATE_LIMIT_RULES.items():
+        if method == rule_method and _path_matches_rate_limit_rule(path, pattern):
+            return pattern, max_requests, window_seconds, reason_code
+    return None
+
+
+def _consume_endpoint_rate_limit(request: Request) -> Optional[Tuple[int, str]]:
+    rule = _endpoint_rate_limit_rule(request)
+    if rule is None:
+        return None
+    pattern, max_requests, window_seconds, reason_code = rule
+    now = time.monotonic()
+    client_key = get_remote_address(request) or "unknown"
+    bucket_key = (client_key, request.method.upper(), pattern)
+    count, window_started_at = ENDPOINT_RATE_LIMIT_BUCKETS.get(bucket_key, (0, now))
+    elapsed = now - window_started_at
+    if elapsed >= window_seconds:
+        ENDPOINT_RATE_LIMIT_BUCKETS[bucket_key] = (1, now)
+        return None
+    if count >= max_requests:
+        return max(1, int(math.ceil(window_seconds - elapsed))), reason_code
+    ENDPOINT_RATE_LIMIT_BUCKETS[bucket_key] = (count + 1, window_started_at)
+    return None
 
 
 def _consume_post_rate_limit(request: Request) -> Optional[int]:
@@ -5303,13 +5882,13 @@ async def reject_oversized_video_uploads(request: Request, call_next):
 
 @app.middleware("http")
 async def enforce_general_post_rate_limit(request: Request, call_next):
+    endpoint_retry = _consume_endpoint_rate_limit(request)
+    if endpoint_retry is not None:
+        retry_after, reason_code = endpoint_retry
+        return _rate_limit_response(retry_after, reason_code)
     retry_after = _consume_post_rate_limit(request)
     if retry_after is not None:
-        return JSONResponse(
-            status_code=429,
-            content={"error": "Too many requests", "retry_after": retry_after},
-            headers={"Retry-After": str(retry_after)},
-        )
+        return _rate_limit_response(retry_after, "post_rate_limited")
     return await call_next(request)
 
 
@@ -6839,6 +7418,13 @@ class VideoUploadResponse(BaseModel):
     teacher_reference_images_available: Optional[bool] = None
     teacher_reference_image_count: Optional[int] = None
     privacy_blur_teacher_match_status: Optional[str] = None
+    data_classifications: List[str] = []
+    processing_purposes: List[str] = []
+    student_face_blur_enabled: bool = True
+    destructive_blurring_enabled: bool = True
+    privacy_pipeline_state: Optional[str] = None
+    unblurred_deletion_status: Optional[str] = None
+    privacy_gate: Dict[str, Any] = {}
 
 
 class CurriculumUploadResponse(BaseModel):
@@ -8832,6 +9418,8 @@ def _reference_image_payload(reference: dict) -> Dict[str, Any]:
         "created_at": created_at,
         "updated_at": reference.get("updated_at") or created_at,
         "demo_data": bool(reference.get("demo_data")),
+        "allowed_use": ((reference.get("reference_image_policy") or {}).get("allowed_use") or "privacy_blur_workflow_only"),
+        "biometric_artifact_status": reference.get("biometric_artifact_status") or "no_persistent_embedding_saved",
     }
 
 
@@ -9124,7 +9712,9 @@ async def upload_my_teacher_reference_image(
         "retention_expires_at": (datetime.now(timezone.utc) + timedelta(days=PRIVACY_PROFILE_IMAGE_RETENTION_DAYS)).isoformat(),
         "demo_data": bool(current_user.get("demo_data") or teacher.get("demo_data")),
         "demo_persona": current_user.get("demo_persona") or teacher.get("demo_persona"),
+        **_build_reference_image_policy_fields(),
     }
+    _validate_saved_biometric_payload(reference_doc)
     await db.teacher_face_references.insert_one(reference_doc)
     existing_count = await db.teacher_face_references.count_documents(
         {"teacher_id": teacher["id"], "profile_id": profile_id, "status": {"$nin": ["deleted", "expired"]}}
@@ -9495,25 +10085,26 @@ async def upsert_teacher_privacy_profile(
     reference_docs = []
     for upload in uploads:
         relative_path, file_url, s3_key = await _save_privacy_reference_file(upload, teacher_id, profile_id)
-        reference_docs.append(
-            {
-                "id": str(uuid.uuid4()),
-                "teacher_id": teacher_id,
-                "profile_id": profile_id,
-                "reference_type": "image",
-                "filename": upload.filename,
-                "file_path": relative_path,
-                "file_url": file_url,
-                "s3_key": s3_key,
-                "embedding": [],
-                "quality_checks": {
-                    "validation_mode": "contract_only",
-                    "content_type": upload.content_type,
-                },
-                "created_at": now,
-                "retention_expires_at": (datetime.now(timezone.utc) + timedelta(days=PRIVACY_PROFILE_IMAGE_RETENTION_DAYS)).isoformat(),
-            }
-        )
+        reference_doc = {
+            "id": str(uuid.uuid4()),
+            "teacher_id": teacher_id,
+            "profile_id": profile_id,
+            "reference_type": "image",
+            "filename": upload.filename,
+            "file_path": relative_path,
+            "file_url": file_url,
+            "s3_key": s3_key,
+            "embedding": [],
+            "quality_checks": {
+                "validation_mode": "contract_only",
+                "content_type": upload.content_type,
+            },
+            "created_at": now,
+            "retention_expires_at": (datetime.now(timezone.utc) + timedelta(days=PRIVACY_PROFILE_IMAGE_RETENTION_DAYS)).isoformat(),
+            **_build_reference_image_policy_fields(),
+        }
+        _validate_saved_biometric_payload(reference_doc)
+        reference_docs.append(reference_doc)
     if reference_docs:
         await db.teacher_face_references.insert_many(reference_docs)
     if active_profile and not replace_existing:
@@ -9618,7 +10209,9 @@ async def _enqueue_video_privacy_job(
     teacher_id: str,
     user_id: str,
     file_path: str,
+    processing_purpose: str = ProcessingPurpose.PRIVACY_BLURRING.value,
 ) -> None:
+    normalized_purpose = _assert_allowed_biometric_processing_purpose(processing_purpose)
     now = datetime.now(timezone.utc).isoformat()
     await db.video_privacy_jobs.update_one(
         {"video_id": video_id},
@@ -9629,6 +10222,13 @@ async def _enqueue_video_privacy_job(
                 "user_id": user_id,
                 "file_path": file_path,
                 "status": PrivacyProcessingStatus.QUEUED.value,
+                "data_classifications": [
+                    DataClassification.STUDENT_DATA.value,
+                    DataClassification.CLASSROOM_VIDEO_AUDIO.value,
+                    DataClassification.TRANSIENT_BIOMETRIC_PROCESSING.value,
+                ],
+                "processing_purposes": [normalized_purpose],
+                "biometric_artifact_status": "transient_only",
                 "updated_at": now,
                 "last_error": None,
                 "review_required": False,
@@ -9705,6 +10305,7 @@ async def _run_video_privacy_job(video_id: str) -> None:
                     "$set": {
                         "status": VideoProcessingStatus.PROCESSING.value,
                         "privacy_status": PrivacyProcessingStatus.PROCESSING.value,
+                        "privacy_pipeline_state": PrivacyPipelineState.BLUR_PROCESSING_RUNNING.value,
                         "privacy_started_at": now,
                         "privacy_failed_at": None,
                         "privacy_completed_at": None,
@@ -9757,6 +10358,7 @@ async def _run_video_privacy_job(video_id: str) -> None:
                     {
                         "$set": {
                             "privacy_status": PrivacyProcessingStatus.REVIEW_REQUIRED.value,
+                            "privacy_pipeline_state": PrivacyPipelineState.DESTRUCTIVE_BLUR_FAILED.value,
                             "privacy_review_required": True,
                             "privacy_review_reason": analysis["review_reason"],
                             "privacy_candidate_tracks": analysis["candidate_tracks"],
@@ -9859,6 +10461,25 @@ async def _run_video_privacy_job(video_id: str) -> None:
 
             finished_at = datetime.now(timezone.utc).isoformat()
             raw_cleanup_fields = _build_transcoded_raw_cleanup_fields(video, finished_at)
+            destructive_blurring_enabled = _coerce_policy_bool(video.get("destructive_blurring_enabled"), default=True)
+            allow_unblurred_retention = _coerce_policy_bool(video.get("allow_unblurred_retention"), default=False)
+            retention_update_fields: Dict[str, Any]
+            if allow_unblurred_retention:
+                retention_update_fields = {
+                    "privacy_pipeline_state": PrivacyPipelineState.RETAINED_UNBLURRED_BY_INSTITUTION_POLICY.value,
+                    "unblurred_deletion_status": "retained_by_institution_policy",
+                }
+            elif destructive_blurring_enabled:
+                retention_update_fields = {
+                    "privacy_pipeline_state": PrivacyPipelineState.BLURRED_VERIFIED.value,
+                    "unblurred_deletion_status": "deferred_pending_worker",
+                    "source_deletion_deferred_reason": "source deletion worker is deferred in PR 26 Pass 3; redacted playback is verified and raw retention remains auditable.",
+                }
+            else:
+                retention_update_fields = {
+                    "privacy_pipeline_state": PrivacyPipelineState.RETAINED_UNBLURRED_BY_INSTITUTION_POLICY.value,
+                    "unblurred_deletion_status": "retained_by_institution_policy",
+                }
             await db.videos.update_one(
                 {"id": video_id},
                 {
@@ -9884,6 +10505,7 @@ async def _run_video_privacy_job(video_id: str) -> None:
                         "redacted_thumbnail_path": redacted_thumbnail_relative_path,
                         "redacted_thumbnail_url": redacted_thumbnail_url,
                         "status_updated_at": finished_at,
+                        **retention_update_fields,
                         **raw_cleanup_fields,
                     }
                 },
@@ -9899,6 +10521,7 @@ async def _run_video_privacy_job(video_id: str) -> None:
                     "fallback_mode": analysis["fallback_mode"],
                     "teacher_track_id": analysis["teacher_track_id"],
                     "raw_retention_expires_at": raw_cleanup_fields.get("raw_retention_expires_at"),
+                    "unblurred_deletion_status": retention_update_fields.get("unblurred_deletion_status"),
                 },
             )
             await db.video_evidence.update_one(
@@ -9922,6 +10545,7 @@ async def _run_video_privacy_job(video_id: str) -> None:
                     "$set": {
                         "status": VideoProcessingStatus.FAILED.value,
                         "privacy_status": PrivacyProcessingStatus.FAILED.value,
+                        "privacy_pipeline_state": PrivacyPipelineState.DESTRUCTIVE_BLUR_FAILED.value,
                         "privacy_failed_at": finished_at,
                         "privacy_error": error_message,
                         "status_updated_at": finished_at,
@@ -11013,17 +11637,56 @@ async def get_video_detail(video_id: str, current_user: dict = Depends(get_curre
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    await _log_privacy_audit_event(
+        "video_viewed",
+        "video",
+        video_id,
+        actor_user_id=current_user.get("id"),
+        details={"asset_type": "redacted_or_sanitized"},
+    )
     return _sanitize_video_response(_apply_video_response_defaults(video))
 
 
-async def get_video_raw_access(video_id: str, current_user: dict = Depends(get_current_user)):
+async def get_video_raw_access(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+    access_reason: Optional[str] = None,
+):
     role = _get_user_role(current_user)
     if role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
+    cleaned_reason = _clean_optional_string(access_reason)
+    if not cleaned_reason:
+        await _log_privacy_audit_event(
+            "support_unblurred_access_denied",
+            "video",
+            video_id,
+            actor_user_id=current_user.get("id"),
+            details={"reason_code": "missing_unblurred_access_reason"},
+        )
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "reason_code": "unblurred_access_reason_required",
+                "message": "A specific privacy/support reason is required before unblurred video access.",
+            },
+        )
     video = await db.videos.find_one({"id": video_id}, {"_id": 0})
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    if (
+        video.get("privacy_pipeline_state") == PrivacyPipelineState.UNBLURRED_DELETED.value
+        or video.get("unblurred_deletion_status") == "deleted"
+    ):
+        await _log_privacy_audit_event(
+            "support_unblurred_access_denied",
+            "video",
+            video_id,
+            actor_user_id=current_user.get("id"),
+            details={"reason": cleaned_reason, "reason_code": "unblurred_source_deleted"},
+        )
+        raise HTTPException(status_code=404, detail="Raw asset is no longer available")
     raw_url = video.get("raw_file_url")
     raw_path = video.get("raw_file_path")
     access_url = raw_url
@@ -11031,13 +11694,27 @@ async def get_video_raw_access(video_id: str, current_user: dict = Depends(get_c
         safe_path = str(raw_path).replace("\\", "/").lstrip("/")
         access_url = _to_public_backend_url(f"/uploads/{safe_path}")
     if not access_url:
+        await _log_privacy_audit_event(
+            "support_unblurred_access_denied",
+            "video",
+            video_id,
+            actor_user_id=current_user.get("id"),
+            details={"reason": cleaned_reason, "reason_code": "unblurred_source_missing"},
+        )
         raise HTTPException(status_code=404, detail="Raw asset is no longer available")
     await _log_privacy_audit_event(
-        "raw_asset_accessed",
+        "unblurred_video_viewed",
         "video",
         video_id,
         actor_user_id=current_user["id"],
-        details={"reason": "admin_raw_access_endpoint"},
+        details={"reason": cleaned_reason, "asset_type": "unblurred_source"},
+    )
+    await _log_privacy_audit_event(
+        "support_unblurred_access_granted",
+        "video",
+        video_id,
+        actor_user_id=current_user["id"],
+        details={"reason": cleaned_reason},
     )
     return {
         "video_id": video_id,
@@ -11445,6 +12122,13 @@ async def get_admin_video_audio_transcript(
     doc = await db.video_audio_transcripts.find_one({"video_id": video_id}, {"_id": 0}, sort=[("created_at", -1)])
     if not doc:
         raise HTTPException(status_code=404, detail="Audio transcript not found")
+    await _log_privacy_audit_event(
+        "transcript_viewed",
+        "video_audio_transcript",
+        str(doc.get("id") or video_id),
+        actor_user_id=current_user.get("id"),
+        details={"video_id": video_id},
+    )
     return AudioTranscriptResponse(**doc)
 
 
@@ -11456,6 +12140,13 @@ async def get_admin_video_audio_features(
     doc = await db.video_analysis_features.find_one({"video_id": video_id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Audio features not found")
+    await _log_privacy_audit_event(
+        "audio_analysis_viewed",
+        "video_analysis_features",
+        str(doc.get("id") or video_id),
+        actor_user_id=current_user.get("id"),
+        details={"video_id": video_id},
+    )
     return AudioFeatureResponse(**doc)
 
 
@@ -11609,6 +12300,16 @@ async def get_video_audio_analysis(
         {"video_id": video_id},
         {"_id": 0},
     )
+    await _log_privacy_audit_event(
+        "audio_analysis_viewed",
+        "video",
+        video_id,
+        actor_user_id=current_user.get("id"),
+        details={
+            "transcript_available": bool(transcript_doc),
+            "features_available": bool(feature_doc),
+        },
+    )
     return _build_video_audio_analysis_response(transcript_doc, feature_doc, video_id=video_id)
 
 
@@ -11731,9 +12432,26 @@ async def update_video_recognition_opt_in(
     event = await _get_or_sync_video_recognition_event(video)
     updated_at = datetime.now(timezone.utc).isoformat()
     teacher_opt_in = bool(payload.teacher_opt_in)
+    current_tenant_role = _get_user_tenant_role(current_user)
+    current_teacher_id = current_user.get("teacher_id")
+    if teacher_opt_in and (current_tenant_role != "teacher" or current_teacher_id != video.get("teacher_id")):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "TEACHER_AUTHORIZATION_REQUIRED",
+                "reason_code": "teacher_authorization_required",
+                "message": "Only the teacher can authorize exemplary content sharing.",
+            },
+        )
     sharing_scope = payload.sharing_scope if teacher_opt_in else None
     allow_social_share = bool(payload.allow_social_share) if teacher_opt_in else False
     allow_email_signature = bool(payload.allow_email_signature) if teacher_opt_in else False
+    authorization_fields = _build_exemplar_authorization_fields(
+        teacher_authorized=teacher_opt_in,
+        teacher_authorized_by=current_user["id"] if teacher_opt_in else None,
+        institution_authorized=bool(event.get("institution_authorized_at")),
+        institution_authorized_by=event.get("institution_authorized_by"),
+    )
     await db.lesson_recognition_events.update_one(
         {"id": event["id"]},
         {
@@ -11743,6 +12461,7 @@ async def update_video_recognition_opt_in(
                 "allow_social_share": allow_social_share,
                 "allow_email_signature": allow_email_signature,
                 "updated_at": updated_at,
+                **authorization_fields,
             }
         },
     )
@@ -11938,6 +12657,8 @@ async def review_video_recognition(
                 "criteria_snapshot": (event.get("eligibility") or {}).get("criteria_snapshot") or {},
                 "created_at": reviewed_at,
                 "updated_at": reviewed_at,
+                "data_classifications": [DataClassification.EXEMPLARY_CONTENT.value],
+                "processing_purposes": [ProcessingPurpose.PROFESSIONAL_DEVELOPMENT.value],
             }
             await db.recognition_badges.insert_one(badge_doc)
         await db.lesson_recognition_events.update_one(
@@ -11995,6 +12716,20 @@ async def review_video_recognition(
                     "revoked_by": current_user["id"],
                 }
             },
+        )
+        await db.exemplar_library_items.update_many(
+            {"video_id": video_id},
+            {
+                "$set": {
+                    "status": "revoked",
+                    "revoked_at": reviewed_at,
+                    "revoked_by": current_user["id"],
+                }
+            },
+        )
+        await db.exemplar_submissions.update_many(
+            {"video_id": video_id},
+            {"$set": {"submission_status": "revoked", "updated_at": reviewed_at}},
         )
     await db.lesson_recognition_events.update_one(
         {"id": event["id"]},
@@ -12121,6 +12856,8 @@ async def submit_video_exemplar(
         raise HTTPException(status_code=400, detail="Lesson must be awarded recognition before exemplar submission")
     if not event.get("teacher_opt_in"):
         raise HTTPException(status_code=400, detail="Teacher opt-in is required before exemplar submission")
+    if not event.get("teacher_authorized_at"):
+        raise HTTPException(status_code=400, detail="Teacher authorization is required before exemplar submission")
     if _normalize_privacy_status(video.get("privacy_status")) != PrivacyProcessingStatus.COMPLETED.value:
         raise HTTPException(status_code=400, detail="Privacy processing must be completed before exemplar submission")
 
@@ -12150,6 +12887,11 @@ async def submit_video_exemplar(
             "reviewed_at": None,
             "published_at": None,
             "teacher_display_name": teacher.get("name"),
+            "blurred_required": True,
+            "unblurred_allowed": False,
+            "promotional_use_allowed": False,
+            "data_classifications": [DataClassification.EXEMPLARY_CONTENT.value, DataClassification.CLASSROOM_VIDEO_AUDIO.value],
+            "processing_purposes": [ProcessingPurpose.PROFESSIONAL_DEVELOPMENT.value],
         }
         await db.exemplar_submissions.update_one({"id": submission_id}, {"$set": submission_doc})
     else:
@@ -12170,6 +12912,11 @@ async def submit_video_exemplar(
             "reviewed_at": None,
             "published_at": None,
             "created_at": submitted_at,
+            "blurred_required": True,
+            "unblurred_allowed": False,
+            "promotional_use_allowed": False,
+            "data_classifications": [DataClassification.EXEMPLARY_CONTENT.value, DataClassification.CLASSROOM_VIDEO_AUDIO.value],
+            "processing_purposes": [ProcessingPurpose.PROFESSIONAL_DEVELOPMENT.value],
         }
         await db.exemplar_submissions.insert_one(submission_doc)
 
@@ -12250,12 +12997,22 @@ async def review_exemplar_submission(
     reviewed_at = datetime.now(timezone.utc).isoformat()
 
     if decision == "approve":
+        if not submission.get("teacher_opt_in"):
+            raise HTTPException(status_code=400, detail="Teacher authorization is required before publishing")
+        if submission.get("unblurred_allowed"):
+            raise HTTPException(status_code=400, detail="Unblurred exemplar publishing requires explicit consent certification and is not enabled")
         existing_item = await db.exemplar_library_items.find_one({"video_id": submission["video_id"]}, {"_id": 0})
         library_item_id = existing_item["id"] if existing_item else str(uuid.uuid4())
         playback_url = video.get("redacted_file_url") or _resolve_public_asset_url(video.get("redacted_file_path"))
         thumbnail_url = video.get("redacted_thumbnail_url") or _resolve_public_asset_url(video.get("redacted_thumbnail_path"))
         if not playback_url:
             raise HTTPException(status_code=400, detail="Redacted playback asset is required before publishing to the library")
+        authorization_fields = _build_exemplar_authorization_fields(
+            teacher_authorized=True,
+            teacher_authorized_by=submission.get("teacher_authorized_by") or submission.get("teacher_id"),
+            institution_authorized=True,
+            institution_authorized_by=current_user["id"],
+        )
         library_item_doc = {
             "id": library_item_id,
             "video_id": submission["video_id"],
@@ -12274,6 +13031,7 @@ async def review_exemplar_submission(
             "published_at": reviewed_at,
             "status": "published",
             "updated_at": reviewed_at,
+            **authorization_fields,
         }
         if existing_item:
             await db.exemplar_library_items.update_one({"id": library_item_id}, {"$set": library_item_doc})
@@ -12290,6 +13048,9 @@ async def review_exemplar_submission(
                     "reviewed_at": reviewed_at,
                     "published_at": reviewed_at,
                     "library_item_id": library_item_id,
+                    "institution_authorized_at": reviewed_at,
+                    "institution_authorized_by": current_user["id"],
+                    "exemplary_content_status": "authorized",
                 }
             },
         )
@@ -12299,6 +13060,12 @@ async def review_exemplar_submission(
                 "$set": {
                     "submission_status": "published",
                     "library_item_id": library_item_id,
+                    "institution_authorized_at": reviewed_at,
+                    "institution_authorized_by": current_user["id"],
+                    "exemplary_content_status": "authorized",
+                    "blurred_required": True,
+                    "unblurred_allowed": False,
+                    "promotional_use_allowed": False,
                     "updated_at": reviewed_at,
                 }
             },
@@ -12377,6 +13144,8 @@ async def generate_social_card(
     event = await _get_or_sync_video_recognition_event(video)
     if event.get("recognition_status") != "awarded":
         raise HTTPException(status_code=400, detail="Recognition must be awarded before generating a social card")
+    if not event.get("teacher_authorized_at"):
+        raise HTTPException(status_code=400, detail="Teacher authorization is required before generating share assets")
     if not event.get("allow_social_share"):
         raise HTTPException(status_code=400, detail="Social sharing has not been enabled for this lesson")
     created_at = datetime.now(timezone.utc).isoformat()
@@ -12453,6 +13222,8 @@ async def generate_email_signature(
     event = await _get_or_sync_video_recognition_event(video)
     if event.get("recognition_status") != "awarded":
         raise HTTPException(status_code=400, detail="Recognition must be awarded before generating an email signature badge")
+    if not event.get("teacher_authorized_at"):
+        raise HTTPException(status_code=400, detail="Teacher authorization is required before generating share assets")
     if not event.get("allow_email_signature"):
         raise HTTPException(status_code=400, detail="Email signature sharing has not been enabled for this lesson")
     created_at = datetime.now(timezone.utc).isoformat()
@@ -17211,6 +17982,17 @@ async def export_coaching_snapshot_csv(current_user: dict = Depends(get_current_
         ]
         for row in snapshot.get("teacher_rows", [])
     ]
+    await _log_privacy_audit_event(
+        "report_exported",
+        "report",
+        "coaching-snapshot",
+        actor_user_id=current_user.get("id"),
+        details={
+            "report_type": "coaching_snapshot",
+            "row_count": len(rows),
+            "workspace_id": _workspace_id_for_user(current_user),
+        },
+    )
     return _csv_response(
         "coaching-snapshot.csv",
         ["Teacher", "Reviewed lessons", "Open coaching tasks", "Last observation", "Latest coaching summary", "Next action"],
@@ -17234,6 +18016,17 @@ async def export_cohort_snapshot_csv(current_user: dict = Depends(get_current_us
         ]
         for row in snapshot.get("trainee_rows", [])
     ]
+    await _log_privacy_audit_event(
+        "report_exported",
+        "report",
+        "cohort-snapshot",
+        actor_user_id=current_user.get("id"),
+        details={
+            "report_type": "cohort_snapshot",
+            "row_count": len(rows),
+            "workspace_id": _workspace_id_for_user(current_user),
+        },
+    )
     return _csv_response(
         "cohort-snapshot.csv",
         [
@@ -22232,7 +23025,16 @@ async def _build_db_index_health() -> Dict[str, Any]:
 
     for collection_name, item in collections.items():
         collection = db[collection_name]
-        index_docs = await collection.list_indexes().to_list(None)
+        try:
+            index_docs = await collection.list_indexes().to_list(None)
+        except Exception as exc:
+            item["existing_indexes"] = []
+            item["missing_indexes"] = item["expected_indexes"]
+            item["stats"] = {
+                "error_type": exc.__class__.__name__,
+                "reason_code": "index_health_unavailable",
+            }
+            continue
         item["existing_indexes"] = [
             {
                 "name": index_doc.get("name"),
@@ -24617,6 +25419,12 @@ async def get_admin_ops_privacy_runtime(current_user: dict = Depends(get_current
     server_cv2_available = cv2 is not None
     server_cv2_error = None if server_cv2_available else str(_cv2_import_error)
     privacy_runtime = get_privacy_runtime_status()
+    destructive_blur_failed = await db.videos.count_documents(
+        {"privacy_pipeline_state": PrivacyPipelineState.DESTRUCTIVE_BLUR_FAILED.value}
+    )
+    unblurred_delete_deferred = await db.videos.count_documents(
+        {"unblurred_deletion_status": "deferred_pending_worker"}
+    )
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -24631,6 +25439,11 @@ async def get_admin_ops_privacy_runtime(current_user: dict = Depends(get_current
         },
         "privacy_runtime": privacy_runtime,
         "degraded_runtime_enabled": PRIVACY_ALLOW_DEGRADED_RUNTIME,
+        "destructive_blur": {
+            "failed_count": destructive_blur_failed,
+            "unblurred_delete_deferred_count": unblurred_delete_deferred,
+            "source_deletion_worker_status": "deferred_pr26_pass3",
+        },
     }
 
 
@@ -25077,8 +25890,25 @@ async def analyze_video(
             "specialist_orchestrator": analysis_metadata["specialist_orchestrator"],
             "specialist_trace": analysis_metadata["specialist_trace"],
             "analysis_context_snapshot": analysis_payload.get("analysis_context"),
+            "data_classifications": [
+                DataClassification.STUDENT_DATA.value,
+                DataClassification.BEHAVIORAL_INTERACTIONAL_DATA.value,
+            ],
+            "processing_purposes": [
+                ProcessingPurpose.TEACHER_REFLECTION.value,
+                ProcessingPurpose.INSTRUCTIONAL_FEEDBACK.value,
+                ProcessingPurpose.PROFESSIONAL_DEVELOPMENT.value,
+            ],
+            **_ai_reflection_only_metadata(),
             **release_metadata,
         }
+        _assert_ai_output_safeguards(
+            {
+                "summary": assessment_doc.get("summary"),
+                "recommendations": assessment_doc.get("recommendations"),
+                "observation_summary": assessment_doc.get("observation_summary"),
+            }
+        )
         
         await db.assessments.insert_one(assessment_doc)
         if (
@@ -25578,6 +26408,16 @@ async def build_audio_artifacts(
             "language": AUDIO_TRANSCRIPTION_LANGUAGE or normalized_language,
             "segments": transcript_segments,
             "text": transcript_text,
+            "data_classifications": [
+                DataClassification.STUDENT_DATA.value,
+                DataClassification.CLASSROOM_VIDEO_AUDIO.value,
+                DataClassification.BEHAVIORAL_INTERACTIONAL_DATA.value,
+            ],
+            "processing_purposes": [
+                ProcessingPurpose.INSTRUCTIONAL_FEEDBACK.value,
+                ProcessingPurpose.TEACHER_REFLECTION.value,
+            ],
+            "biometric_artifact_status": "no_voiceprint_saved",
             "retention_expires_at": (
                 datetime.now(timezone.utc) + timedelta(days=AUDIO_TRANSCRIPT_RETENTION_DAYS)
             ).isoformat(),
@@ -25591,6 +26431,12 @@ async def build_audio_artifacts(
                 "video_id": video_id,
                 **features,
                 "modalities_used": ["audio"],
+                "data_classifications": [
+                    DataClassification.BEHAVIORAL_INTERACTIONAL_DATA.value,
+                    DataClassification.CLASSROOM_VIDEO_AUDIO.value,
+                ],
+                "processing_purposes": [ProcessingPurpose.INSTRUCTIONAL_FEEDBACK.value],
+                "biometric_artifact_status": "no_voiceprint_saved",
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
 
@@ -28668,7 +29514,15 @@ async def seed_demo_data_v1(
         raise HTTPException(status_code=400, detail="Unsupported demo seed scope")
     tenant_role = _get_user_tenant_role(current_user)
     if scope == "current_teacher" or tenant_role == "teacher":
-        return await _seed_current_teacher_experience(current_user)
+        result = await _seed_current_teacher_experience(current_user)
+        await _log_privacy_audit_event(
+            "demo_seed_executed",
+            "demo_seed",
+            str(result.get("scope") or scope),
+            actor_user_id=current_user.get("id"),
+            details={"persona": result.get("persona"), "scope": result.get("scope"), "counts": result.get("counts")},
+        )
+        return result
     if scope == "global":
         _require_master_admin_user(current_user)
         if not DEMO_MODE:
@@ -28679,7 +29533,7 @@ async def seed_demo_data_v1(
 
         selected = "all" if persona == "teacher" else persona
         result = await reset_demo_data_for_persona(db, selected)
-        return {
+        response = {
             "ok": True,
             "seeded_at": result.get("reset_at"),
             "persona": selected,
@@ -28698,7 +29552,23 @@ async def seed_demo_data_v1(
             },
             "message": "Demo data was seeded for internal testing.",
         }
-    return await _seed_current_admin_workspace_experience(current_user, persona)
+        await _log_privacy_audit_event(
+            "demo_seed_executed",
+            "demo_seed",
+            "global",
+            actor_user_id=current_user.get("id"),
+            details={"persona": selected, "scope": "global", "counts": response["counts"]},
+        )
+        return response
+    result = await _seed_current_admin_workspace_experience(current_user, persona)
+    await _log_privacy_audit_event(
+        "demo_seed_executed",
+        "demo_seed",
+        str(result.get("scope") or scope),
+        actor_user_id=current_user.get("id"),
+        details={"persona": result.get("persona"), "scope": result.get("scope"), "counts": result.get("counts")},
+    )
+    return result
 
 
 @api_router.post("/demo/reset")
@@ -29074,121 +29944,10 @@ app.add_middleware(
 
 
 async def _ensure_database_indexes() -> None:
-    async def _safe_create_index(collection, keys, **kwargs):
-        try:
-            await collection.create_index(keys, **kwargs)
-        except Exception as exc:
-            message = str(exc)
-            code = getattr(exc, "code", None)
-            is_out_of_disk = (
-                code == 14031
-                or "OutOfDiskSpace" in message
-                or "available disk space" in message
-            )
-            if is_out_of_disk:
-                logger.error(
-                    "Skipping index creation for %s due to Mongo disk constraints: %s",
-                    collection.name,
-                    message,
-                )
-            else:
-                logger.warning(
-                    "Skipping index creation for %s due to startup index error: %s",
-                    collection.name,
-                    message,
-                )
+    from scripts.ensure_indexes import ensure_indexes
 
-    await _safe_create_index(db.videos, [("uploaded_by", 1), ("upload_date", -1)])
+    await ensure_indexes(db, logger=logger)
     await CACHE_CLIENT.ensure_indexes()
-    await _safe_create_index(db.consent_records, [("workspace_id", 1), ("user_id", 1), ("consent_type", 1), ("created_at", -1)])
-    await _safe_create_index(db.web_vitals, [("created_at", -1)])
-    await _safe_create_index(db.worker_heartbeats, [("worker_label", 1)], unique=True)
-    await _safe_create_index(db.videos, [("teacher_id", 1), ("upload_date", -1)])
-    await _safe_create_index(db.videos, [("status", 1), ("upload_date", -1)])
-    await _safe_create_index(db.videos, [("privacy_status", 1), ("upload_date", -1)])
-    await _safe_create_index(db.assessments, [("teacher_id", 1), ("analyzed_at", -1)])
-    await _safe_create_index(db.assessments, [("user_id", 1), ("feedback_release_status", 1), ("analyzed_at", -1)])
-    await _safe_create_index(db.dashboard_intelligence_cache, [("workspace_id", 1)], unique=True)
-    await _safe_create_index(db.dashboard_intelligence_cache, [("expires_at", 1)])
-    await _safe_create_index(
-        db.assessment_report_feedback,
-        [("assessment_id", 1), ("user_id", 1), ("target_type", 1), ("target_id", 1)],
-        unique=True,
-    )
-    await _safe_create_index(db.assessment_report_feedback, [("assessment_id", 1), ("updated_at", -1)])
-    await _safe_create_index(db.action_plans, [("teacher_id", 1), ("user_id", 1)], unique=True)
-    await _safe_create_index(db.action_plan_history, [("teacher_id", 1), ("plan_owner_id", 1), ("saved_at", -1)])
-    await _safe_create_index(db.summary_reflections, [("teacher_id", 1), ("user_id", 1)], unique=True)
-    await _safe_create_index(db.summary_reflection_history, [("teacher_id", 1), ("author_user_id", 1), ("saved_at", -1)])
-    await _safe_create_index(db.published_conference_agendas, [("teacher_id", 1), ("published_at", -1)])
-    await _safe_create_index(db.coaching_tasks, [("teacher_id", 1), ("status", 1), ("due_date", 1)])
-    await _safe_create_index(db.coaching_tasks, [("workspace_id", 1), ("status", 1), ("priority_rank", -1)])
-    await _safe_create_index(db.coaching_task_reflections, [("teacher_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.coaching_task_reflections, [("task_id", 1), ("created_at", -1)])
-    await _safe_create_index(
-        db.coaching_tasks,
-        [("assessment_id", 1), ("teacher_id", 1), ("element_id", 1)],
-        unique=True,
-    )
-    await _safe_create_index(db.observations, [("video_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.video_comments, [("video_id", 1), ("timestamp_seconds", 1), ("created_at", 1)])
-    await _safe_create_index(db.video_comments, [("video_id", 1), ("thread_parent_id", 1), ("created_at", 1)])
-    await _safe_create_index(db.video_comments, [("workspace_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.video_comments, [("author_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.observation_sessions, [("observer_id", 1), ("scheduled_date", 1)])
-    await _safe_create_index(db.observation_sessions, [("teacher_id", 1), ("scheduled_date", -1)])
-    await _safe_create_index(db.observation_sessions, [("status", 1), ("scheduled_date", 1)])
-    await _safe_create_index(db.observation_sessions, [("linked_video_id", 1)])
-    await _safe_create_index(db.observer_goals, [("observer_id", 1), ("achieved", 1), ("created_at", -1)])
-    await _safe_create_index(db.observer_goals, [("workspace_id", 1), ("goal_type", 1)])
-    await _safe_create_index(db.training_cohorts, [("workspace_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.trainee_placements, [("trainee_id", 1), ("start_date", -1)])
-    await _safe_create_index(db.trainee_placements, [("workspace_id", 1), ("status", 1)])
-    await _safe_create_index(db.video_processing_jobs, [("video_id", 1)], unique=True)
-    await _safe_create_index(db.video_processing_jobs, [("status", 1), ("updated_at", -1)])
-    await _safe_create_index(db.video_transcode_jobs, [("video_id", 1)], unique=True)
-    await _safe_create_index(db.video_transcode_jobs, [("status", 1), ("updated_at", -1)])
-    await _safe_create_index(db.video_privacy_jobs, [("video_id", 1)], unique=True)
-    await _safe_create_index(db.video_privacy_jobs, [("status", 1), ("updated_at", -1)])
-    await _safe_create_index(db.teacher_face_profiles, [("teacher_id", 1), ("status", 1)])
-    await _safe_create_index(db.teacher_face_references, [("teacher_id", 1), ("profile_id", 1)])
-    await _safe_create_index(db.teacher_face_references, [("retention_expires_at", 1)])
-    await _safe_create_index(db.auth_event_log, [("created_at", -1)])
-    await _safe_create_index(db.auth_event_log, [("email", 1), ("created_at", -1)])
-    await _safe_create_index(db.auth_event_log, [("user_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.auth_event_log, [("event_type", 1), ("created_at", -1)])
-    await _safe_create_index(db.users, [("tenant_role", 1), ("tenant_status", 1), ("created_at", -1)])
-    await _safe_create_index(db.users, [("organization_id", 1), ("tenant_role", 1), ("created_at", -1)])
-    await _safe_create_index(db.organizations, [("organization_type", 1), ("status", 1), ("name", 1)])
-    await _safe_create_index(db.schools, [("organization_id", 1), ("name", 1)])
-    await _safe_create_index(db.user_sessions, [("user_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.user_sessions, [("revoked_at", 1), ("created_at", -1)])
-    await _safe_create_index(db.master_admin_audit_events, [("created_at", -1)])
-    await _safe_create_index(db.master_admin_audit_events, [("actor_user_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.master_admin_audit_events, [("target_type", 1), ("target_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.processing_incidents, [("state", 1), ("severity", 1), ("last_seen_at", -1)])
-    await _safe_create_index(db.processing_incidents, [("video_id", 1), ("incident_type", 1)], unique=True)
-    await _safe_create_index(db.privacy_audit_events, [("target_type", 1), ("target_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.recognition_badges, [("teacher_id", 1), ("awarded_at", -1)])
-    await _safe_create_index(db.recognition_badges, [("video_id", 1), ("status", 1)])
-    await _safe_create_index(db.lesson_recognition_events, [("teacher_id", 1), ("updated_at", -1)])
-    await _safe_create_index(db.lesson_recognition_events, [("video_id", 1), ("recognition_status", 1)])
-    await _safe_create_index(db.recognition_audit_events, [("target_type", 1), ("target_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.exemplar_submissions, [("submission_status", 1), ("submitted_at", -1)])
-    await _safe_create_index(db.exemplar_submissions, [("teacher_id", 1), ("video_id", 1)])
-    await _safe_create_index(db.exemplar_library_items, [("status", 1), ("published_at", -1)])
-    await _safe_create_index(db.exemplar_library_items, [("subject", 1), ("grade_level", 1)])
-    await _safe_create_index(db.share_assets, [("teacher_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.videos, [("raw_retention_expires_at", 1)])
-    await _safe_create_index(db.video_sampling_manifests, [("video_id", 1), ("strategy_version", 1)], unique=True)
-    await _safe_create_index(db.video_analysis_moments, [("video_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.video_audio_transcripts, [("video_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.video_audio_transcripts, [("retention_expires_at", 1)])
-    await _safe_create_index(db.video_analysis_features, [("video_id", 1)], unique=True)
-    await _safe_create_index(db.feedback_review_queue, [("status", 1), ("created_at", -1)])
-    await _safe_create_index(db.feedback_review_queue, [("assessment_id", 1), ("status", 1)])
-    await _safe_create_index(db.feedback_review_queue, [("owner_user_id", 1), ("status", 1), ("created_at", -1)])
-    await _safe_create_index(db.feedback_review_queue, [("owner_user_id", 1), ("resolved_at", -1)])
 
 
 async def _stop_video_workers() -> None:

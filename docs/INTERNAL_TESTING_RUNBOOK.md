@@ -144,6 +144,94 @@ Use current internal/demo credentials from the secure team source. Do not add re
 11. Repeat request -> approve -> login in Chrome, Edge, and Firefox.
 12. Confirm `OPTIONS /api/auth/request-access`, `OPTIONS /api/auth/login`, and `OPTIONS /api/auth/logout` return 200 from `https://app.cognivio.live`.
 
+## PR 26 Security, Privacy, Tenant, and Session Hardening Checklist
+
+Use this checklist during the PR 26 five-pass hardening sequence. Use demo/internal accounts only until the full PR 26 acceptance criteria are met.
+
+Browser and session:
+
+1. Safari login after clearing site data.
+2. Safari login with stale cache/history from a previous build.
+3. Chrome, Firefox, and Edge login/logout.
+4. Wrong-origin route behavior from `https://cognivio.live/login` and `https://www.cognivio.live/login`.
+5. Stale-token cleanup after an expired or revoked token.
+6. Logout clears local auth state and server session where applicable.
+
+Domain and cache:
+
+1. `https://cognivio.live` login paths redirect to or safely hand off to `https://app.cognivio.live`.
+2. `https://www.cognivio.live/login` redirects or is safely supported.
+3. `https://app.cognivio.live/login` works.
+4. Service worker does not intercept API/auth requests.
+5. Service worker cache does not trap stale app shells after deploy.
+6. Build/version/API-base diagnostics are visible through safe checks such as `/api/health/version` and `window.__COGNIVIO_BUILD__`.
+
+Pass 2 session/API error checks:
+
+1. Put an expired or invalid value in `localStorage.cognivio_token`, open a protected route, and confirm the app clears auth and returns to login with a controlled session message.
+2. Trigger a failed login with the wrong password and confirm the UI says invalid email or password, not API unreachable or stale session.
+3. Simulate an API/network/CORS failure and confirm the UI says Cognivio API cannot be reached from this site and points to `app.cognivio.live`.
+4. Confirm `/login?next=%2Fdashboard#check` on root or `www` preserves path, query, and hash when redirected to the app domain.
+5. Confirm service worker cache contains static assets only, not `/`, `/index.html`, `/api/*`, `/login`, `/request-access`, or `/reset-password`.
+
+Privacy:
+
+1. Admin privacy setup can be completed or clearly shows missing items.
+2. Mobile upload privacy gate shows clear status before upload.
+3. Teacher reference image missing/ready warning is visible and non-blocking unless policy requires blocking.
+4. Destructive blur status and raw retention state are visible in internal readiness or admin review.
+5. Unblurred video access is restricted and audited.
+6. Gold Star/exemplar authorization requires teacher opt-in and admin review.
+7. Unblurred Gold Star/exemplar publication is blocked unless explicit certification exists.
+8. Biometric/reference image processing is limited to privacy blur workflows.
+
+Pass 3 privacy-policy checks:
+
+1. Upload a lesson and confirm the API payload includes `student_data`, `classroom_video_audio`, and `privacy_blurring`.
+2. Confirm new uploads default to `destructive_blurring_enabled=true` unless the workspace explicitly allows unblurred retention.
+3. Force a privacy-setup-required workspace locally and confirm upload returns controlled `privacy_setup_required` guidance.
+4. Confirm Teacher Profile reference image copy says images support the privacy blur workflow and are not used for login, surveillance, tracking, or general identification.
+5. Confirm reference image metadata says `allowed_use=privacy_blur_workflow_only`.
+6. Confirm admin users cannot set teacher exemplar authorization.
+7. Confirm teacher opt-in plus admin review is required before an exemplar appears in the library.
+8. Confirm exemplar library playback uses redacted assets.
+9. Confirm unblurred exemplar sharing remains blocked without consent/certification.
+10. Confirm `GET /api/admin/ops/privacy-runtime` shows destructive blur deferred/failure counts for admin ops users.
+
+Tenant and data:
+
+1. Teacher own video access is allowed.
+2. Teacher access to another teacher's video is denied.
+3. Admin access within the same tenant/workspace is allowed.
+4. Admin cross-tenant video/report/export access is denied.
+5. Reports and CSV exports are scoped to the current tenant/workspace.
+6. Demo data is excluded from real customer counts.
+7. Demo seed controls cannot seed real workspaces for non-demo users.
+
+Pass 4 tenant/video/demo checks:
+
+1. As a teacher, open an owned video and confirm normal playback/metadata works.
+2. As the same teacher, manually try another teacher's video URL and confirm a controlled access denial.
+3. As school admin, open a same-school video and then a known other-school video; only the same-school video should load.
+4. Confirm `/api/videos/{video_id}/audio-analysis` follows the same video access boundary.
+5. Confirm shared comments are visible to the teacher and observer-private comments are hidden from the teacher.
+6. Confirm `/api/videos/{video_id}/raw-access` without `reason` returns controlled `unblurred_access_reason_required`.
+7. Confirm same-tenant raw access with a reason writes unblurred access audit events.
+8. Export coaching/cohort CSVs and confirm rows are current-tenant only.
+9. Run `python backend/scripts/audit_sensitive_query_scoping.py --limit 50` and review new advisory findings before Pass 5.
+10. Confirm `POST /api/demo/seed` writes only `demo_data=true` records in the current eligible scope.
+
+Operations:
+
+1. Public auth/signup, login, institution lookup, upload, framework upload, report export, admin lifecycle action, and demo seed rate limits are present and tested.
+2. Rate limit responses return JSON with `reason_code`, `retry_after`, and CORS headers where applicable.
+3. DB health checks show safe status only.
+4. MongoDB index checks cover auth, users, sessions, videos, comments, privacy jobs, references, reports, recognition, frameworks, coaching, gradebook reminders, and audit logs.
+5. As Master Admin, open `/api/admin/db-health` and confirm missing indexes are reported without secrets.
+6. Production console output contains no sensitive data and minimal diagnostic noise.
+7. Global API error messages are controlled and clear.
+8. Dependency health does not expose secrets.
+
 ## Training Internal Test
 
 1. Log in as a training admin.
@@ -167,7 +255,9 @@ Use current internal/demo credentials from the secure team source. Do not add re
 ## Known Limitations
 
 - This is not real-school security approval.
-- Full security, privacy, tenant isolation, CSRF, rate limiting, and index hardening remain deferred.
+- Distributed/proxy-backed rate limiting remains a production infrastructure enhancement; PR 26 includes app-level baseline limits.
+- Physical destructive deletion of unblurred sources remains deferred and must use readiness warnings/manual purge controls before pilot data.
+- Policy-version re-consent and a formal privacy request queue remain future work.
 - Backend decomposition remains deferred.
 - True resumable upload remains deferred.
 - Scheduled reports and new PDF exports remain deferred.

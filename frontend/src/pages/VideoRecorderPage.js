@@ -198,7 +198,7 @@ export function VideoRecorderPage() {
                   <div className="mt-1 text-emerald-800">
                     {profileQuery.data?.readiness?.privacy_reference_images_ready
                       ? "Reference images are ready for the privacy blur pipeline."
-                      : "Add reference images in Teacher Profile so the privacy blur can recognize you."}
+                      : "Add reference images in Teacher Profile so the privacy blur workflow has what it needs."}
                   </div>
                   {!profileQuery.data?.readiness?.privacy_reference_images_ready ? (
                     <Link to="/my-profile#privacy-reference-images" className="mt-2 inline-flex font-semibold text-emerald-950 underline">

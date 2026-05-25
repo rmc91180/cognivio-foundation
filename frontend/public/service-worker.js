@@ -1,11 +1,8 @@
-/* Simple service worker for offline shell caching */
-const CACHE_NAME = "cognivio-static-v1";
-const CORE_ASSETS = ["/", "/index.html"];
+/* Production-safe service worker: never cache API/auth or the app shell. */
+const CACHE_NAME = "cognivio-static-v2";
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(CORE_ASSETS))
-  );
+  self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {
@@ -16,28 +13,43 @@ self.addEventListener("activate", (event) => {
           .filter((key) => key !== CACHE_NAME)
           .map((key) => caches.delete(key))
       )
-    )
+    ).then(() => self.clients.claim())
   );
 });
 
 self.addEventListener("fetch", (event) => {
   const { request } = event;
+  const url = new URL(request.url);
+
   if (request.method !== "GET") {
     return;
   }
 
-  if (request.mode === "navigate") {
-    event.respondWith(
-      fetch(request).catch(() => caches.match("/index.html"))
-    );
+  if (url.origin !== self.location.origin || url.pathname.startsWith("/api/")) {
     return;
   }
 
-  if (new URL(request.url).origin === self.location.origin) {
+  if (
+    url.pathname.startsWith("/login") ||
+    url.pathname.startsWith("/request-access") ||
+    url.pathname.startsWith("/reset-password")
+  ) {
+    return;
+  }
+
+  if (request.mode === "navigate") {
+    event.respondWith(fetch(request, { cache: "no-store" }));
+    return;
+  }
+
+  if (url.pathname.startsWith("/static/")) {
     event.respondWith(
       caches.match(request).then((cached) => {
         if (cached) return cached;
         return fetch(request).then((response) => {
+          if (!response || response.status !== 200 || response.type !== "basic") {
+            return response;
+          }
           const responseClone = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(request, responseClone));
           return response;
