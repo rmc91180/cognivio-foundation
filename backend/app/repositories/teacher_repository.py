@@ -76,5 +76,5 @@ async def delete_active_privacy_profiles(teacher_id: str, deleted_at: str):
 async def expire_teacher_face_references(teacher_id: str, deleted_at: str) -> None:
     await legacy.db.teacher_face_references.update_many(
         {"teacher_id": teacher_id},
-        {"$set": {"retention_expires_at": deleted_at}},
+        {"$set": {"status": "expired", "updated_at": deleted_at, "retention_expires_at": deleted_at}},
     )

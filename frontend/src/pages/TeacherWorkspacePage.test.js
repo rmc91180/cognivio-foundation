@@ -90,4 +90,59 @@ describe("TeacherWorkspacePage", () => {
 
     expect(demoApi.seed).toHaveBeenCalledWith({ persona: "teacher", scope: "current_teacher" });
   });
+
+  it("shows only the next incomplete setup step and does not duplicate next best action", async () => {
+    teacherApi.myDashboard.mockResolvedValueOnce({
+      data: {
+        readiness: {
+          setup_next_step: {
+            id: "profile",
+            code: "TEACHER_PROFILE_REQUIRED",
+            label: "Finish your teacher profile",
+            href: "/my-profile",
+          },
+          missing_items: [
+            { id: "profile", code: "TEACHER_PROFILE_REQUIRED", label: "Finish your teacher profile", href: "/my-profile" },
+          ],
+        },
+        next_best_action: { id: "profile", code: "TEACHER_PROFILE_REQUIRED", title: "Finish your teacher profile", description: "Duplicate setup.", href: "/my-profile" },
+        latest_lesson: null,
+        highlights: [],
+        action_items: [],
+        trends: [],
+        schedule: [],
+        gradebook_reminders: [],
+        reports: [],
+        demo_eligible: false,
+      },
+    });
+
+    renderWithClient(<TeacherWorkspacePage />);
+
+    expect(await screen.findByText("Finish your teacher profile")).toBeInTheDocument();
+    expect(screen.queryByText("Duplicate setup.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Review privacy consent")).not.toBeInTheDocument();
+  });
+
+  it("hides setup next step when readiness is complete", async () => {
+    teacherApi.myDashboard.mockResolvedValueOnce({
+      data: {
+        readiness: { setup_next_step: null, missing_items: [], upload_ready: true },
+        next_best_action: null,
+        latest_lesson: null,
+        highlights: [],
+        action_items: [],
+        trends: [],
+        schedule: [],
+        gradebook_reminders: [],
+        reports: [],
+        demo_eligible: false,
+      },
+    });
+
+    renderWithClient(<TeacherWorkspacePage />);
+
+    await waitFor(() => expect(screen.queryByText("Setup next step")).not.toBeInTheDocument());
+    expect(screen.queryByText("Ready to record")).not.toBeInTheDocument();
+  });
 });

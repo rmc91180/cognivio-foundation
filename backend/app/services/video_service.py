@@ -63,25 +63,22 @@ async def upload_video(
                 )
 
         await legacy._ensure_workspace_upload_quota_available(teacher, current_user)
+        readiness = await legacy._teacher_readiness(teacher, current_user)
+        legacy._ensure_teacher_upload_readiness(
+            readiness,
+            teacher,
+            current_user,
+            context="video_upload",
+        )
         active_profile = await teacher_repository.get_active_privacy_profile(teacher_id)
-        if legacy.PRIVACY_REQUIRE_PROFILE and not active_profile:
-            raise legacy.HTTPException(
-                status_code=409,
-                detail={
-                    "code": "PRIVACY_PROFILE_REQUIRED",
-                    "message": "Teacher privacy profile must be completed before video upload.",
-                    "teacher_id": teacher_id,
-                },
-            )
 
         privacy_policy_fields = legacy._build_upload_privacy_policy_fields(current_user, teacher)
         legacy._ensure_upload_privacy_gate(privacy_policy_fields)
         subject = subject or teacher.get("subject")
         lesson_title = legacy._clean_optional_string(lesson_title) or file.filename or subject
         class_section = legacy._clean_optional_string(class_section) or teacher.get("class_section") or teacher.get("department")
-        reference_images = await legacy.get_teacher_reference_images_for_blur(teacher_id, workspace_id or legacy._workspace_id_for_user(current_user))
-        reference_count = len(reference_images)
-        reference_status = "ready" if reference_count else "missing_reference_images"
+        reference_count = int(readiness.get("privacy_reference_images_count") or 0)
+        reference_status = "ready" if readiness.get("privacy_reference_images_ready") else "missing_reference_images"
         video_id = str(legacy.uuid.uuid4())
         filename = f"{video_id}{file_ext}"
         teacher_dir = legacy.UPLOAD_DIR / "videos" / teacher_id
@@ -183,7 +180,7 @@ async def upload_video(
             "workspace_id": workspace_id,
             "session_id": session_id,
             "upload_source": upload_source,
-            "teacher_reference_images_available": reference_count > 0,
+            "teacher_reference_images_available": bool(readiness.get("privacy_reference_images_ready")),
             "teacher_reference_image_count": reference_count,
             "privacy_blur_teacher_match_status": reference_status,
             **privacy_policy_fields,
@@ -219,7 +216,7 @@ async def upload_video(
                 "uploaded_at": upload_time,
                 "workspace_id": workspace_id,
                 "session_id": session_id,
-                "teacher_reference_images_available": reference_count > 0,
+                "teacher_reference_images_available": bool(readiness.get("privacy_reference_images_ready")),
                 "teacher_reference_image_count": reference_count,
                 "privacy_blur_teacher_match_status": reference_status,
                 "data_classifications": privacy_policy_fields["data_classifications"],
@@ -290,7 +287,7 @@ async def upload_video(
             file_path=relative_path,
             file_size_bytes=size,
             content_type=content_type or "video/mp4",
-            teacher_reference_images_available=reference_count > 0,
+            teacher_reference_images_available=bool(readiness.get("privacy_reference_images_ready")),
             teacher_reference_image_count=reference_count,
             privacy_blur_teacher_match_status=reference_status,
             data_classifications=privacy_policy_fields["data_classifications"],

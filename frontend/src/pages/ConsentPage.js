@@ -30,6 +30,10 @@ export function ConsentPage() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["consent-status"] });
       await queryClient.invalidateQueries({ queryKey: ["protected-consent-status"] });
+      await queryClient.invalidateQueries({ queryKey: ["teacher-self-profile"] });
+      await queryClient.invalidateQueries({ queryKey: ["teacher-dashboard"] });
+      await queryClient.invalidateQueries({ queryKey: ["teacher-lessons"] });
+      await queryClient.invalidateQueries({ queryKey: ["teacher-coaching"] });
       let refreshedUser = user;
       try {
         refreshedUser = await refreshUser();
