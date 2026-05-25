@@ -168,6 +168,23 @@ def test_auth_lifecycle_routes_are_mounted_under_api():
     assert "/api/me" in paths
 
 
+def test_public_request_access_invalid_body_returns_422_json_with_cors():
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/api/auth/request-access",
+        json={},
+        headers={"Origin": "https://app.cognivio.live"},
+    )
+
+    assert response.status_code == 422
+    assert response.headers["access-control-allow-origin"]
+    assert response.headers["access-control-allow-credentials"] == "true"
+    assert response.headers["content-type"].startswith("application/json")
+    missing_fields = {item["loc"][-1] for item in response.json()["detail"]}
+    assert {"email", "password", "name"} <= missing_fields
+
+
 @pytest.fixture(autouse=True)
 def _clear_overrides():
     server.app.dependency_overrides.clear()
@@ -217,9 +234,14 @@ def test_public_request_access_duplicate_pending_returns_controlled_409(monkeypa
     )
     client = _client(monkeypatch, db_obj)
 
-    response = client.post("/api/auth/request-access", json=_request_payload("pending@example.com"))
+    response = client.post(
+        "/api/auth/request-access",
+        json=_request_payload("pending@example.com"),
+        headers={"Origin": "https://app.cognivio.live"},
+    )
 
     assert response.status_code == 409
+    assert response.headers["access-control-allow-origin"]
     assert response.json()["detail"]["reason_code"] == "access_request_already_pending"
     assert len(db_obj.users.docs) == 1
 

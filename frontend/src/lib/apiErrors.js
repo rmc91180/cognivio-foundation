@@ -55,6 +55,24 @@ function pickDetailMessage(detail) {
   return null;
 }
 
+function missingValidationFields(detail) {
+  if (!Array.isArray(detail)) {
+    return [];
+  }
+
+  return detail
+    .filter((item) => {
+      const type = String(item?.type || "").toLowerCase();
+      const message = String(item?.msg || "").toLowerCase();
+      return type.includes("missing") || message.includes("field required");
+    })
+    .map((item) => {
+      const loc = Array.isArray(item?.loc) ? item.loc : [];
+      return String(loc[loc.length - 1] || "").trim();
+    })
+    .filter(Boolean);
+}
+
 function fallbackForStatus(status) {
   if (status === 400) return "Please check the request and try again.";
   if (status === 401) return "Your session expired. Please sign in again.";
@@ -87,13 +105,23 @@ export function normalizeApiError(error) {
   const { status, data = {} } = error.response;
   const reasonCode = pickReasonCode(data);
   const structuredMessage = reasonCode ? SAFE_REASON_MESSAGES[reasonCode] : null;
+  const missingFields = missingValidationFields(data.detail);
+  const requiredAccessFieldsMissing = ["email", "password", "name"].some((field) =>
+    missingFields.includes(field)
+  );
   const detailMessage = pickDetailMessage(data.detail);
 
   return {
     status,
     reason_code: reasonCode,
     action: data.action || data.detail?.action || null,
-    message: structuredMessage || detailMessage || fallbackForStatus(status),
+    message:
+      structuredMessage ||
+      (status === 422 && requiredAccessFieldsMissing
+        ? "Please complete your name, email, and password before submitting."
+        : null) ||
+      detailMessage ||
+      fallbackForStatus(status),
     isAuthStale:
       status === 401 &&
       !["invalid_credentials", "account_pending_approval", "account_rejected"].includes(reasonCode || ""),

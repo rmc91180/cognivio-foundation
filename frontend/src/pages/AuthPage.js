@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -67,6 +67,7 @@ export function AuthPage() {
     school_name: "",
     requested_manager_email: "",
   });
+  const authFormRef = useRef(null);
 
   const nameInputId = "auth-name";
   const emailInputId = "auth-email";
@@ -173,6 +174,8 @@ export function AuthPage() {
     : t("auth.requestedSchoolManagerEmailHint");
 
   const summaryItems = [
+    { label: t("auth.name"), value: form.name || "—" },
+    { label: t("auth.email"), value: form.email || "—" },
     { label: t("auth.signupSummaryAccess"), value: t(`auth.signupAccessMap.${accessType}`) },
     { label: t("auth.signupSummaryInstitutionType"), value: t(`auth.institutionTypeMap.${institutionType}`) },
     { label: t("auth.signupSummaryDashboard"), value: t(`auth.derivedRoleMap.${derivedRole}`) },
@@ -212,18 +215,82 @@ export function AuthPage() {
     }));
   };
 
+  const reconcileFormFromDom = () => {
+    if (!authFormRef.current) {
+      return form;
+    }
+
+    const formData = new FormData(authFormRef.current);
+    const domValues = {
+      email: String(formData.get("email") || "").trim(),
+      password: String(formData.get("password") || ""),
+      password_confirm: String(formData.get("password_confirm") || ""),
+      name: String(formData.get("name") || "").trim(),
+      organization_name: String(formData.get("organization_name") || "").trim(),
+      school_name: String(formData.get("school_name") || "").trim(),
+      requested_manager_email: String(formData.get("requested_manager_email") || "").trim(),
+    };
+
+    const nextForm = {
+      ...form,
+      ...Object.fromEntries(
+        Object.entries(domValues).map(([key, value]) => [
+          key,
+          value || form[key] || "",
+        ])
+      ),
+    };
+
+    setForm(nextForm);
+    return nextForm;
+  };
+
+  const buildSignupPayload = (sourceForm) => ({
+    email: sourceForm.email,
+    password: sourceForm.password,
+    name: sourceForm.name,
+    organization_type: institutionType,
+    organization_name: sourceForm.organization_name,
+    ...(sourceForm.school_name ? { school_name: sourceForm.school_name } : {}),
+    ...(isTeacherRole && sourceForm.requested_manager_email
+      ? { requested_manager_email: sourceForm.requested_manager_email }
+      : {}),
+    ...(!isDemo ? { role: derivedRole } : {}),
+  });
+
+  const validateRequestAccessPayload = (payload) => {
+    const missingIdentityFields = ["name", "email", "password"].filter(
+      (field) => !String(payload[field] || "").trim()
+    );
+
+    if (missingIdentityFields.length > 0) {
+      return "Please complete your name, email, and password before submitting.";
+    }
+
+    if (requiresOrganizationFields && !String(payload.organization_name || "").trim()) {
+      return "Please enter your institution or organization name before submitting.";
+    }
+
+    if (requiresSubgroupName && !String(payload.school_name || "").trim()) {
+      return "Please enter your school name before submitting.";
+    }
+
+    return "";
+  };
+
   const onSubmit = async (e) => {
     e.preventDefault();
+    const currentForm = reconcileFormFromDom();
 
     if (isResetConfirmMode) {
-      if (form.password !== form.password_confirm) {
+      if (currentForm.password !== currentForm.password_confirm) {
         return;
       }
 
       try {
         await confirmPasswordResetAsync({
           token: resetToken,
-          password: form.password,
+          password: currentForm.password,
         });
         setForm((current) => ({
           ...current,
@@ -240,7 +307,7 @@ export function AuthPage() {
 
     if (isResetRequestMode) {
       try {
-        await requestPasswordResetAsync({ email: form.email });
+        await requestPasswordResetAsync({ email: currentForm.email });
         setShowPasswordResetRequest(false);
       } catch {
         return;
@@ -249,22 +316,16 @@ export function AuthPage() {
       return;
     }
 
-    const signupPayload = {
-      email: form.email,
-      password: form.password,
-      name: form.name || form.email,
-      organization_type: institutionType,
-      organization_name: form.organization_name,
-      school_name: form.school_name || undefined,
-      requested_manager_email: isTeacherRole && form.requested_manager_email
-        ? form.requested_manager_email
-        : undefined,
-      ...(!isDemo ? { role: derivedRole } : {}),
-    };
+    const signupPayload = buildSignupPayload(currentForm);
 
     if (mode === "signup" && approvalRequired) {
       setAccessRequestNotice("");
       setAccessRequestError("");
+      const validationMessage = validateRequestAccessPayload(signupPayload);
+      if (validationMessage) {
+        setAccessRequestError(validationMessage);
+        return;
+      }
       try {
         const res = await requestAccessAsync(signupPayload);
         setForm((current) => ({
@@ -289,8 +350,8 @@ export function AuthPage() {
       mode === "signup"
         ? signupPayload
         : {
-            email: form.email,
-            password: form.password,
+            email: currentForm.email,
+            password: currentForm.password,
             ...(!isDemo ? { role: derivedRole } : {}),
           };
 
@@ -460,7 +521,7 @@ export function AuthPage() {
           </div>
         ) : null}
 
-        <form onSubmit={onSubmit} className="space-y-4">
+        <form ref={authFormRef} onSubmit={onSubmit} className="space-y-4">
           {mode === "signup" && !isDemo && !isResetConfirmMode && !isResetRequestMode && (
             <>
               <Panel className="space-y-4 border-slate-200 bg-slate-50">
@@ -472,10 +533,13 @@ export function AuthPage() {
                 <Field label={organizationFieldLabel} htmlFor={organizationInputId}>
                   <Input
                     id={organizationInputId}
+                    name="organization_name"
+                    autoComplete="organization"
                     type="text"
                     required
                     value={form.organization_name}
                     onChange={(e) => setForm((f) => ({ ...f, organization_name: e.target.value }))}
+                    onInput={(e) => setForm((f) => ({ ...f, organization_name: e.target.value }))}
                   />
                   <p className="mt-2 text-xs text-slate-500">{organizationFieldHint}</p>
                   <InstitutionSuggestionList
@@ -495,10 +559,13 @@ export function AuthPage() {
                   <Field label={subgroupFieldLabel} htmlFor={subgroupInputId}>
                     <Input
                       id={subgroupInputId}
+                      name="school_name"
+                      autoComplete="organization-title"
                       type="text"
                       required={requiresSubgroupName}
                       value={form.school_name}
                       onChange={(e) => setForm((f) => ({ ...f, school_name: e.target.value }))}
+                      onInput={(e) => setForm((f) => ({ ...f, school_name: e.target.value }))}
                     />
                     <p className="mt-2 text-xs text-slate-500">{subgroupFieldHint}</p>
                   </Field>
@@ -508,9 +575,17 @@ export function AuthPage() {
                   <Field label={managerFieldLabel} htmlFor={managerEmailInputId}>
                     <Input
                       id={managerEmailInputId}
+                      name="requested_manager_email"
+                      autoComplete="email"
                       type="email"
                       value={form.requested_manager_email}
                       onChange={(e) =>
+                        setForm((f) => ({
+                          ...f,
+                          requested_manager_email: e.target.value,
+                        }))
+                      }
+                      onInput={(e) =>
                         setForm((f) => ({
                           ...f,
                           requested_manager_email: e.target.value,
@@ -545,9 +620,13 @@ export function AuthPage() {
             <Field label={t("auth.name")} htmlFor={nameInputId}>
               <Input
                 id={nameInputId}
+                name="name"
+                autoComplete="name"
                 type="text"
+                required
                 value={form.name}
                 onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                onInput={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
               />
             </Field>
           )}
@@ -562,10 +641,13 @@ export function AuthPage() {
           >
             <Input
               id={emailInputId}
+              name="email"
+              autoComplete="email"
               type="email"
               required
               value={form.email}
               onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+              onInput={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
             />
           </Field>
 
@@ -576,10 +658,13 @@ export function AuthPage() {
             >
               <Input
                 id={passwordInputId}
+                name="password"
+                autoComplete={isResetConfirmMode ? "new-password" : mode === "signup" ? "new-password" : "current-password"}
                 type="password"
                 required
                 value={form.password}
                 onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
+                onInput={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
               />
             </Field>
           ) : null}
@@ -588,10 +673,13 @@ export function AuthPage() {
             <Field label={t("auth.confirmNewPassword")} htmlFor={passwordConfirmInputId}>
               <Input
                 id={passwordConfirmInputId}
+                name="password_confirm"
+                autoComplete="new-password"
                 type="password"
                 required
                 value={form.password_confirm || ""}
                 onChange={(e) => setForm((f) => ({ ...f, password_confirm: e.target.value }))}
+                onInput={(e) => setForm((f) => ({ ...f, password_confirm: e.target.value }))}
               />
             </Field>
           ) : null}
