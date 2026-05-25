@@ -557,3 +557,69 @@ Pass 5 should consume:
 - the 97 advisory scanner findings for triage and annotation,
 - remaining rate limiting, MongoDB index/health, DB readiness, log redaction, and production security checklist tasks,
 - physical destructive deletion and backup/archive retention verification from the Pass 3 deferrals.
+
+## PR 26 Final Handoff
+
+Summary of all five passes:
+
+- Pass 1 converted the Privacy Policy and PR 26 scope into implementation requirements, pass sequencing, and internal test coverage.
+- Pass 2 hardened bearer-token-first session behavior, domain/cache/service-worker handling, global API errors, and production console hygiene.
+- Pass 3 added privacy-policy enforcement helpers for data classification, processing purpose, consent/upload gates, destructive blur state, biometric limitations, AI safeguards, and Gold Star/exemplar authorization.
+- Pass 4 hardened tenant/video/demo boundaries, added unblurred access audit events, scoped comments/audio/transcripts/reports, and introduced the sensitive query scanner.
+- Pass 5 added operational hardening: app-level baseline rate limits, centralized MongoDB index specs, sanitized DB index health, the production security/privacy checklist, and final policy gap status.
+
+Files changed by category:
+
+- Operational backend: `backend/server.py`, `backend/scripts/ensure_indexes.py`.
+- Operational tests: `backend/tests/test_pr26_operational_hardening.py`.
+- Existing PR 26 docs updated across planning, privacy controls, tenant/video audit, domain/session hardening, and internal testing.
+- New final checklist: `docs/PRODUCTION_SECURITY_PRIVACY_CHECKLIST.md`.
+
+Tests added in Pass 5:
+
+- critical index inventory coverage for users, sessions, videos, comments, reports, reference images, recognition, frameworks, and audit logs,
+- idempotent index helper behavior,
+- sanitized DB/index health failure handling,
+- endpoint-specific rate-limit JSON response with reason code and CORS header,
+- general POST rate-limit JSON response with structured reason code.
+
+Commands run in Pass 5:
+
+- `git status --short --branch` -> branch `pr26-security-privacy-tenant-session-hardening` was clean at start according to the Pass 5 startup inspection.
+- Read Pass 1-4 docs: `docs/PRIVACY_POLICY_DEVELOPMENT_REQUIREMENTS.md`, `docs/PR26_SECURITY_PRIVACY_TENANT_SESSION_PLAN.md`, `docs/PRODUCTION_DOMAIN_CACHE_SESSION_HARDENING.md`, `docs/PRIVACY_CONSENT_BLURRING_GOLD_STAR_CONTROLS.md`, `docs/TENANT_ISOLATION_AND_VIDEO_ACCESS_AUDIT.md`, and `docs/INTERNAL_TESTING_RUNBOOK.md`.
+- Code audit searches for rate limiting, auth/login/request-access, upload/export/demo seed, Mongo index creation, DB health, readiness, dependency health, and existing PR 26 test coverage.
+- `pytest backend/tests/test_pr26_operational_hardening.py -q` from repo root -> unavailable because `pytest` was not on PATH.
+- `python -m pytest backend/tests/test_pr26_operational_hardening.py -q` from repo root -> failed during collection because `server` was not importable without backend as working directory/PYTHONPATH.
+- `python -m pytest tests/test_pr26_operational_hardening.py -q` from `backend` -> first run found one test issue caused by an unintended live Mongo login call; the test was corrected to use a synthetic rate-limit path.
+- `python -m pytest tests/test_pr26_operational_hardening.py -q` from `backend` -> 5 passed, 3 warnings.
+- `python -m py_compile scripts\ensure_indexes.py` from `backend` -> passed.
+- `python -m pytest tests/test_pr26_operational_hardening.py tests/test_teacher_admin_endpoint_stability.py::test_production_frontend_origin_preflight_is_allowed -q` from `backend` -> 10 passed, 3 warnings.
+- `python -m pytest tests -q` from `backend` -> 286 passed, 3 warnings.
+- `$env:CI='true'; npm test -- --watchAll=false` from `frontend` -> 24 suites passed / 74 tests passed; React Router future-flag warnings only.
+- `python scripts\audit_sensitive_query_scoping.py --limit 15` from `backend` -> completed successfully; findings: 0 because the scanner's default root is the current working directory.
+- `python backend\scripts\audit_sensitive_query_scoping.py --limit 15` from repo root -> completed successfully; findings: 97 advisory/warning findings, matching the Pass 4 triage backlog; strict mode remains intentionally disabled.
+- `python scripts\run_quality_gate.py` from `backend` -> all 5 quality dimensions passed across 10 cases; Requests dependency warning only.
+- `$env:CI='true'; npm run build` from `frontend` -> compiled successfully.
+- `npm run` from `frontend` -> confirmed available scripts are `start`, `start:prod`, `build`, `test`, `postinstall`, and `eject`; no separate lint/typecheck scripts are configured.
+- `git diff --check` -> passed; Git reported Windows line-ending normalization warnings only.
+
+Final manual verification checklist:
+
+- Browsers: Safari clean cache login, Safari stale cache/wrong-origin route, Chrome login, Firefox login, Edge login.
+- Domains: `cognivio.live` Login -> `app.cognivio.live/login`, `www.cognivio.live/login` redirect/supported, `app.cognivio.live/login` works, API CORS works, service worker does not trap auth/API.
+- Auth/API: login, logout, stale token, expired token, request access, pending/rejected/disabled messages, global API errors, rate-limit retry guidance.
+- Privacy: admin privacy setup, mobile upload privacy gate, reference image warning/state, destructive blur state visible, unblurred access audited, biometric prohibited uses blocked, Gold Star authorization required.
+- Tenant: teacher own video allowed, other teacher video denied, admin same tenant allowed, admin cross tenant denied, transcript/audio/report scoped, export scoped, demo data excluded from real counts.
+- Operations: rate limits, DB health, index check, internal readiness, no sensitive console logs, no secrets in health output.
+
+Deferred items:
+
+- Distributed/proxy-backed rate limiting remains a production infrastructure enhancement; Pass 5 provides an app-level baseline.
+- Physical unblurred source deletion after verified blur remains deferred with destructive state fields, raw-access denial states, and readiness warnings as compensating controls.
+- Small-cell suppression across every aggregate report remains future work; current non-identifiable export helper blocks raw Student Data and direct identifiers.
+- Policy-version re-consent, formal privacy request queue/SLA tracking, full school export/delete workflow, and backup/archive deletion verification remain future PRs.
+- The sensitive query scanner remains advisory; Pass 4 found 97 findings for continued triage and annotation.
+
+Recommendation for next phase:
+
+Backend Decomposition Phase 2 should start only after PR 26 is deployed to staging, the manual browser/domain/privacy/tenant/operations checklist is completed, and DB index health is reviewed against the target MongoDB environment.

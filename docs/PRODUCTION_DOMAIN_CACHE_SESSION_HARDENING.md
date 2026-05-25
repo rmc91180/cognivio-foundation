@@ -105,6 +105,14 @@ Frontend production console cleanup:
 
 Backend log redaction remains a Pass 5 production checklist item, with special attention to passwords, bearer tokens, cookies, API keys, signed video URLs, transcripts, and raw request payloads.
 
+## Pass 5 Operational Addendum
+
+- Rate limiting now returns structured JSON with `reason_code`, `retry_after`, and a user-safe message for endpoint-specific and general POST limits.
+- Baseline app-level limits cover login, request access, password reset request, institution lookup, video upload, teacher reference image upload, framework rubric upload, demo seed, report export, and admin lifecycle actions.
+- These limits are intentionally local-process safeguards. Production should add distributed enforcement at the proxy/Redis layer before a high-volume pilot so multiple Railway replicas share counters.
+- DB/index readiness is exposed only to Master Admin through `/api/admin/db-health`; failures include collection/index names and error types, not secrets or connection strings.
+- The final production checklist lives in `docs/PRODUCTION_SECURITY_PRIVACY_CHECKLIST.md`.
+
 ## Browser Behavior Matrix
 
 | Browser | Expected auth behavior | Pass 2 status |
@@ -126,4 +134,3 @@ After deployment:
 6. Confirm service worker cache does not contain `/`, `/index.html`, `/api/*`, or auth routes.
 7. Confirm network/CORS failure is not displayed as invalid credentials.
 8. Confirm production console has no sensitive payloads, tokens, cookies, transcripts, or private video URLs.
-

@@ -58,3 +58,44 @@ No critical or high-risk Privacy Policy obligation is intentionally deferred bey
 - Pass 3 focuses on privacy, consent, destructive blurring, biometric/reference image limits, AI safeguards, and Gold Star/exemplar controls.
 - Pass 4 focuses on tenant isolation, video access audit, demo/real boundary, exports/sharing, and route/API audit scripts.
 - Pass 5 focuses on rate limits, MongoDB indexes, DB health, production security checklist, and final regression.
+
+## Final PR 26 Gap Check
+
+This table is the final Pass 5 implementation status. Status values are deliberately stricter than "code exists"; a control is only fully implemented when the behavior is enforced and covered by tests or an existing verified path.
+
+| Privacy Policy section | Final status | Evidence / compensating control | Remaining action / target |
+|---|---|---|---|
+| Account/admin data | implemented in PR 26 | Pass 2 auth/session cleanup, safe API errors, admin lifecycle audits, Pass 5 rate-limit and health redaction checks. | Continue production log review before pilot. |
+| Classroom video/audio | partially implemented | Pass 4 tenant/video/audio/comment/report scope tests and unblurred access audit events. | Physical purge/download routes and broader scanner triage remain future PR 26 follow-up/backlog. |
+| Technical/usage data | partially implemented | Web vitals/indexing/metrics exist and Pass 2 production console cleanup reduces frontend noise. | Add formal telemetry retention schedule outside this PR. |
+| Student Data purpose limitation | implemented in PR 26 | Pass 3 processing-purpose helpers reject forbidden purposes and tag upload/analysis metadata. | Continue applying helpers during backend decomposition. |
+| No sale, advertising, or unrelated student profiling | partially implemented | No advertising integration was added; production checklist now requires no-ad/no-sale verification. | Add automated third-party script scanner in a future hardening PR. |
+| Non-identifiable data creation and use | partially implemented | Pass 3 helper blocks raw Student Data/direct identifiers and adds no-reidentification metadata. | Add universal small-cell suppression across all aggregate report builders. |
+| No re-identification | implemented in PR 26 | Export metadata carries no-reidentification marker and helper blocks identifier joins for non-identifiable exports. | Keep code review checklist active for future analytics work. |
+| Behavioral/interactional data limits | implemented in PR 26 | AI/report safeguards and tenant-scoped coaching/audio/report surfaces keep signals in educational feedback workflows. | Manual copy review for any new dashboard/report surface. |
+| AI outputs as informational/reflection-only | implemented in PR 26 | Pass 3 validators block determinative/prohibited phrases/fields and report disclaimers are tested. | Continue quality gate after every AI prompt/report change. |
+| Human access to unblurred Student Data | implemented in PR 26 | Pass 4 requires reason, tenant access, and grant/deny audit events for raw/unblurred access. | Future support override must be time-bound and audited. |
+| Student face-blurring | partially implemented | Pipeline states, privacy upload gates, readiness warnings, and raw-access controls exist. | Verify worker runtime and real blur outputs in staging. |
+| Destructive blurring default and source deletion | partially implemented | New records carry destructive/default source-deletion state and raw deleted state blocks access. | Physical source deletion worker and backup/archive verification remain target future PR. Compensating control: do not claim physical deletion complete; use readiness warning/manual purge. |
+| Biometric processing limitations | implemented in PR 26 | Forbidden biometric purposes and persistent biometric output fields are rejected; reference images are purpose-limited. | Verify temporary artifact cleanup in production worker. |
+| Teacher reference images | implemented in PR 26 | Upload/list/delete are scoped, copy is constrained, metadata says privacy blur workflow only. | Verify retention purge in staging. |
+| Gold Star / exemplary content authorization | implemented in PR 26 | Teacher opt-in plus institution/admin review required; revocation hides/removes library exposure. | Manual exemplar workflow verification before using pilot content. |
+| Unblurred Gold Star consent/certification | partially implemented | Unblurred publication is blocked unless certification exists; no UI currently enables certification. | Future PR for consent document upload/review. Compensating control: unblurred Gold Star remains unavailable. |
+| Authorized sharing/disclosure | implemented in PR 26 | Tenant-scoped report exports, video/comment/audio/report access, and exemplar review controls are tested. | Add `video_downloaded` audit when direct download route exists. |
+| Sub-processor/cloud infrastructure | partially implemented | Dependency health reports MongoDB/R2/Resend/OpenAI safely and production checklist documents infrastructure. | Maintain vendor inventory and DPA records operationally. |
+| Data custody | partially implemented | Tenant isolation, report export scope, and user lifecycle deletion/tombstone behavior exist. | Formal school export/delete request workflow remains future PR. |
+| School access/export/delete | partially implemented | Scoped CSV/report exports exist and cross-tenant export is denied. | Add school-level self-service export/delete request tracking. |
+| Secure deletion and backups/archives | partially implemented | Tombstone/deleted users are excluded from active views; raw deleted state denies access. | Backup/archive deletion and physical media purge remain manual/future. Risk owner: product/security owner before pilot. |
+| School consent/notice responsibility | implemented in PR 26 | Privacy setup/upload gates support school acknowledgement without claiming legal determination. | Manual institution onboarding review. |
+| COPPA/FERPA school-directed use | implemented in PR 26 | No student login path was added; role/tenant route boundaries and demo/real boundaries are tested. | Keep marketing/app domains separated at deploy. |
+| Individual rights requests | partially implemented | Privacy contact/request handling is documented; notification persistence rules exist. | Build formal privacy request queue/SLA in future PR. |
+| Policy-change notice | deferred | No policy-version re-consent workflow exists. Compensating control: manual notice and release-note process before policy changes. | Future PR: policy version, re-consent gate, admin/user notification. |
+| Contact/privacy request handling | partially implemented | Email/notification failures are non-transactional and documented; checklist includes manual handling. | Add privacy request queue and sanitized Master Admin workflow. |
+
+Critical/high-risk items not fully implemented are explicitly constrained for pilot use by compensating controls:
+
+- destructive deletion: do not claim physical source deletion complete; use readiness warnings and manual purge procedure until worker verification is shipped,
+- unblurred Gold Star: keep unavailable without consent/certification workflow,
+- data export/delete/rights requests: operate manually through privacy owner until request queue exists,
+- policy-change notice: operate manually until policy-version re-consent is implemented,
+- distributed abuse protection: app-level rate limits are active, but production needs proxy/Redis-backed enforcement before high-volume use.

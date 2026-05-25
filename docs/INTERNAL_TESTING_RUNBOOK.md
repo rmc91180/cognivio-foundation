@@ -223,12 +223,14 @@ Pass 4 tenant/video/demo checks:
 
 Operations:
 
-1. Public auth/signup, login, upload, and demo seed rate limits are present and tested.
-2. DB health checks show safe status only.
-3. MongoDB index checks cover auth, users, videos, comments, privacy jobs, references, reports, recognition, and demo data.
-4. Production console output contains no sensitive data and minimal diagnostic noise.
-5. Global API error messages are controlled and clear.
-6. Dependency health does not expose secrets.
+1. Public auth/signup, login, institution lookup, upload, framework upload, report export, admin lifecycle action, and demo seed rate limits are present and tested.
+2. Rate limit responses return JSON with `reason_code`, `retry_after`, and CORS headers where applicable.
+3. DB health checks show safe status only.
+4. MongoDB index checks cover auth, users, sessions, videos, comments, privacy jobs, references, reports, recognition, frameworks, coaching, gradebook reminders, and audit logs.
+5. As Master Admin, open `/api/admin/db-health` and confirm missing indexes are reported without secrets.
+6. Production console output contains no sensitive data and minimal diagnostic noise.
+7. Global API error messages are controlled and clear.
+8. Dependency health does not expose secrets.
 
 ## Training Internal Test
 
@@ -253,7 +255,9 @@ Operations:
 ## Known Limitations
 
 - This is not real-school security approval.
-- Full security, privacy, tenant isolation, CSRF, rate limiting, and index hardening remain deferred.
+- Distributed/proxy-backed rate limiting remains a production infrastructure enhancement; PR 26 includes app-level baseline limits.
+- Physical destructive deletion of unblurred sources remains deferred and must use readiness warnings/manual purge controls before pilot data.
+- Policy-version re-consent and a formal privacy request queue remain future work.
 - Backend decomposition remains deferred.
 - True resumable upload remains deferred.
 - Scheduled reports and new PDF exports remain deferred.

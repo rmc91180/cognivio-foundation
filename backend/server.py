@@ -5507,6 +5507,25 @@ POST_RATE_LIMIT_WINDOW_SECONDS = 60
 POST_RATE_LIMIT_MAX_REQUESTS = 30
 POST_RATE_LIMIT_EXEMPT_PATHS = {"/api/auth/login", "/api/videos/upload"}
 POST_RATE_LIMIT_BUCKETS: Dict[Tuple[str, str], Tuple[int, float]] = {}
+ENDPOINT_RATE_LIMIT_RULES: Dict[Tuple[str, str], Tuple[int, int, str]] = {
+    ("POST", "/api/auth/login"): (60, 60, "login_rate_limited"),
+    ("POST", "/api/auth/request-access"): (20, 60, "request_access_rate_limited"),
+    ("POST", "/api/auth/password-reset/request"): (10, 60, "password_reset_rate_limited"),
+    ("GET", "/api/institutions/lookup"): (120, 60, "institution_lookup_rate_limited"),
+    ("POST", "/api/videos/upload"): (20, 60, "video_upload_rate_limited"),
+    ("POST", "/api/teachers/me/reference-images"): (10, 60, "reference_image_upload_rate_limited"),
+    ("POST", "/api/frameworks/upload-rubric"): (10, 60, "framework_upload_rate_limited"),
+    ("POST", "/api/demo/seed"): (10, 60, "demo_seed_rate_limited"),
+    ("POST", "/api/reports/export"): (30, 60, "report_export_rate_limited"),
+    ("POST", "/api/reports/export/csv"): (30, 60, "report_export_rate_limited"),
+    ("POST", "/api/admin/access-users/{user_id}/approve"): (30, 60, "admin_action_rate_limited"),
+    ("POST", "/api/admin/access-users/{user_id}/reject"): (30, 60, "admin_action_rate_limited"),
+    ("POST", "/api/master-admin/users/{user_id}/approve"): (30, 60, "admin_action_rate_limited"),
+    ("POST", "/api/master-admin/users/{user_id}/reject"): (30, 60, "admin_action_rate_limited"),
+    ("POST", "/api/master-admin/users/{user_id}/freeze"): (30, 60, "admin_action_rate_limited"),
+    ("POST", "/api/master-admin/users/{user_id}/reactivate"): (30, 60, "admin_action_rate_limited"),
+}
+ENDPOINT_RATE_LIMIT_BUCKETS: Dict[Tuple[str, str, str], Tuple[int, float]] = {}
 VIDEO_WORKER_COUNT = APP_SETTINGS.video.video_worker_count
 VIDEO_TRANSCODE_PIPELINE_ENABLED = APP_SETTINGS.video.video_transcode_pipeline_enabled
 VIDEO_TRANSCODE_PROFILE = APP_SETTINGS.video.video_transcode_profile.strip() or "analysis_master_v1"
@@ -5727,9 +5746,70 @@ async def _rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded)
     retry_after = _retry_after_from_rate_limit(exc)
     return JSONResponse(
         status_code=429,
-        content={"error": "Too many requests", "retry_after": retry_after},
+        content={
+            "error": "Too many requests",
+            "reason_code": "rate_limited",
+            "retry_after": retry_after,
+            "message": "Too many requests. Please wait and try again.",
+        },
         headers={"Retry-After": str(retry_after)},
     )
+
+
+def _rate_limit_response(retry_after: int, reason_code: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "Too many requests",
+            "reason_code": reason_code,
+            "retry_after": retry_after,
+            "message": "Too many requests. Please wait and try again.",
+        },
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
+def _path_matches_rate_limit_rule(path: str, pattern: str) -> bool:
+    if path == pattern:
+        return True
+    if "{" not in pattern:
+        return False
+    path_parts = path.strip("/").split("/")
+    pattern_parts = pattern.strip("/").split("/")
+    if len(path_parts) != len(pattern_parts):
+        return False
+    return all(
+        pattern_part.startswith("{") and pattern_part.endswith("}") or pattern_part == path_part
+        for path_part, pattern_part in zip(path_parts, pattern_parts)
+    )
+
+
+def _endpoint_rate_limit_rule(request: Request) -> Optional[Tuple[str, int, int, str]]:
+    method = request.method.upper()
+    path = request.url.path
+    for (rule_method, pattern), (max_requests, window_seconds, reason_code) in ENDPOINT_RATE_LIMIT_RULES.items():
+        if method == rule_method and _path_matches_rate_limit_rule(path, pattern):
+            return pattern, max_requests, window_seconds, reason_code
+    return None
+
+
+def _consume_endpoint_rate_limit(request: Request) -> Optional[Tuple[int, str]]:
+    rule = _endpoint_rate_limit_rule(request)
+    if rule is None:
+        return None
+    pattern, max_requests, window_seconds, reason_code = rule
+    now = time.monotonic()
+    client_key = get_remote_address(request) or "unknown"
+    bucket_key = (client_key, request.method.upper(), pattern)
+    count, window_started_at = ENDPOINT_RATE_LIMIT_BUCKETS.get(bucket_key, (0, now))
+    elapsed = now - window_started_at
+    if elapsed >= window_seconds:
+        ENDPOINT_RATE_LIMIT_BUCKETS[bucket_key] = (1, now)
+        return None
+    if count >= max_requests:
+        return max(1, int(math.ceil(window_seconds - elapsed))), reason_code
+    ENDPOINT_RATE_LIMIT_BUCKETS[bucket_key] = (count + 1, window_started_at)
+    return None
 
 
 def _consume_post_rate_limit(request: Request) -> Optional[int]:
@@ -5802,13 +5882,13 @@ async def reject_oversized_video_uploads(request: Request, call_next):
 
 @app.middleware("http")
 async def enforce_general_post_rate_limit(request: Request, call_next):
+    endpoint_retry = _consume_endpoint_rate_limit(request)
+    if endpoint_retry is not None:
+        retry_after, reason_code = endpoint_retry
+        return _rate_limit_response(retry_after, reason_code)
     retry_after = _consume_post_rate_limit(request)
     if retry_after is not None:
-        return JSONResponse(
-            status_code=429,
-            content={"error": "Too many requests", "retry_after": retry_after},
-            headers={"Retry-After": str(retry_after)},
-        )
+        return _rate_limit_response(retry_after, "post_rate_limited")
     return await call_next(request)
 
 
@@ -22945,7 +23025,16 @@ async def _build_db_index_health() -> Dict[str, Any]:
 
     for collection_name, item in collections.items():
         collection = db[collection_name]
-        index_docs = await collection.list_indexes().to_list(None)
+        try:
+            index_docs = await collection.list_indexes().to_list(None)
+        except Exception as exc:
+            item["existing_indexes"] = []
+            item["missing_indexes"] = item["expected_indexes"]
+            item["stats"] = {
+                "error_type": exc.__class__.__name__,
+                "reason_code": "index_health_unavailable",
+            }
+            continue
         item["existing_indexes"] = [
             {
                 "name": index_doc.get("name"),
@@ -29855,121 +29944,10 @@ app.add_middleware(
 
 
 async def _ensure_database_indexes() -> None:
-    async def _safe_create_index(collection, keys, **kwargs):
-        try:
-            await collection.create_index(keys, **kwargs)
-        except Exception as exc:
-            message = str(exc)
-            code = getattr(exc, "code", None)
-            is_out_of_disk = (
-                code == 14031
-                or "OutOfDiskSpace" in message
-                or "available disk space" in message
-            )
-            if is_out_of_disk:
-                logger.error(
-                    "Skipping index creation for %s due to Mongo disk constraints: %s",
-                    collection.name,
-                    message,
-                )
-            else:
-                logger.warning(
-                    "Skipping index creation for %s due to startup index error: %s",
-                    collection.name,
-                    message,
-                )
+    from scripts.ensure_indexes import ensure_indexes
 
-    await _safe_create_index(db.videos, [("uploaded_by", 1), ("upload_date", -1)])
+    await ensure_indexes(db, logger=logger)
     await CACHE_CLIENT.ensure_indexes()
-    await _safe_create_index(db.consent_records, [("workspace_id", 1), ("user_id", 1), ("consent_type", 1), ("created_at", -1)])
-    await _safe_create_index(db.web_vitals, [("created_at", -1)])
-    await _safe_create_index(db.worker_heartbeats, [("worker_label", 1)], unique=True)
-    await _safe_create_index(db.videos, [("teacher_id", 1), ("upload_date", -1)])
-    await _safe_create_index(db.videos, [("status", 1), ("upload_date", -1)])
-    await _safe_create_index(db.videos, [("privacy_status", 1), ("upload_date", -1)])
-    await _safe_create_index(db.assessments, [("teacher_id", 1), ("analyzed_at", -1)])
-    await _safe_create_index(db.assessments, [("user_id", 1), ("feedback_release_status", 1), ("analyzed_at", -1)])
-    await _safe_create_index(db.dashboard_intelligence_cache, [("workspace_id", 1)], unique=True)
-    await _safe_create_index(db.dashboard_intelligence_cache, [("expires_at", 1)])
-    await _safe_create_index(
-        db.assessment_report_feedback,
-        [("assessment_id", 1), ("user_id", 1), ("target_type", 1), ("target_id", 1)],
-        unique=True,
-    )
-    await _safe_create_index(db.assessment_report_feedback, [("assessment_id", 1), ("updated_at", -1)])
-    await _safe_create_index(db.action_plans, [("teacher_id", 1), ("user_id", 1)], unique=True)
-    await _safe_create_index(db.action_plan_history, [("teacher_id", 1), ("plan_owner_id", 1), ("saved_at", -1)])
-    await _safe_create_index(db.summary_reflections, [("teacher_id", 1), ("user_id", 1)], unique=True)
-    await _safe_create_index(db.summary_reflection_history, [("teacher_id", 1), ("author_user_id", 1), ("saved_at", -1)])
-    await _safe_create_index(db.published_conference_agendas, [("teacher_id", 1), ("published_at", -1)])
-    await _safe_create_index(db.coaching_tasks, [("teacher_id", 1), ("status", 1), ("due_date", 1)])
-    await _safe_create_index(db.coaching_tasks, [("workspace_id", 1), ("status", 1), ("priority_rank", -1)])
-    await _safe_create_index(db.coaching_task_reflections, [("teacher_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.coaching_task_reflections, [("task_id", 1), ("created_at", -1)])
-    await _safe_create_index(
-        db.coaching_tasks,
-        [("assessment_id", 1), ("teacher_id", 1), ("element_id", 1)],
-        unique=True,
-    )
-    await _safe_create_index(db.observations, [("video_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.video_comments, [("video_id", 1), ("timestamp_seconds", 1), ("created_at", 1)])
-    await _safe_create_index(db.video_comments, [("video_id", 1), ("thread_parent_id", 1), ("created_at", 1)])
-    await _safe_create_index(db.video_comments, [("workspace_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.video_comments, [("author_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.observation_sessions, [("observer_id", 1), ("scheduled_date", 1)])
-    await _safe_create_index(db.observation_sessions, [("teacher_id", 1), ("scheduled_date", -1)])
-    await _safe_create_index(db.observation_sessions, [("status", 1), ("scheduled_date", 1)])
-    await _safe_create_index(db.observation_sessions, [("linked_video_id", 1)])
-    await _safe_create_index(db.observer_goals, [("observer_id", 1), ("achieved", 1), ("created_at", -1)])
-    await _safe_create_index(db.observer_goals, [("workspace_id", 1), ("goal_type", 1)])
-    await _safe_create_index(db.training_cohorts, [("workspace_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.trainee_placements, [("trainee_id", 1), ("start_date", -1)])
-    await _safe_create_index(db.trainee_placements, [("workspace_id", 1), ("status", 1)])
-    await _safe_create_index(db.video_processing_jobs, [("video_id", 1)], unique=True)
-    await _safe_create_index(db.video_processing_jobs, [("status", 1), ("updated_at", -1)])
-    await _safe_create_index(db.video_transcode_jobs, [("video_id", 1)], unique=True)
-    await _safe_create_index(db.video_transcode_jobs, [("status", 1), ("updated_at", -1)])
-    await _safe_create_index(db.video_privacy_jobs, [("video_id", 1)], unique=True)
-    await _safe_create_index(db.video_privacy_jobs, [("status", 1), ("updated_at", -1)])
-    await _safe_create_index(db.teacher_face_profiles, [("teacher_id", 1), ("status", 1)])
-    await _safe_create_index(db.teacher_face_references, [("teacher_id", 1), ("profile_id", 1)])
-    await _safe_create_index(db.teacher_face_references, [("retention_expires_at", 1)])
-    await _safe_create_index(db.auth_event_log, [("created_at", -1)])
-    await _safe_create_index(db.auth_event_log, [("email", 1), ("created_at", -1)])
-    await _safe_create_index(db.auth_event_log, [("user_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.auth_event_log, [("event_type", 1), ("created_at", -1)])
-    await _safe_create_index(db.users, [("tenant_role", 1), ("tenant_status", 1), ("created_at", -1)])
-    await _safe_create_index(db.users, [("organization_id", 1), ("tenant_role", 1), ("created_at", -1)])
-    await _safe_create_index(db.organizations, [("organization_type", 1), ("status", 1), ("name", 1)])
-    await _safe_create_index(db.schools, [("organization_id", 1), ("name", 1)])
-    await _safe_create_index(db.user_sessions, [("user_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.user_sessions, [("revoked_at", 1), ("created_at", -1)])
-    await _safe_create_index(db.master_admin_audit_events, [("created_at", -1)])
-    await _safe_create_index(db.master_admin_audit_events, [("actor_user_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.master_admin_audit_events, [("target_type", 1), ("target_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.processing_incidents, [("state", 1), ("severity", 1), ("last_seen_at", -1)])
-    await _safe_create_index(db.processing_incidents, [("video_id", 1), ("incident_type", 1)], unique=True)
-    await _safe_create_index(db.privacy_audit_events, [("target_type", 1), ("target_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.recognition_badges, [("teacher_id", 1), ("awarded_at", -1)])
-    await _safe_create_index(db.recognition_badges, [("video_id", 1), ("status", 1)])
-    await _safe_create_index(db.lesson_recognition_events, [("teacher_id", 1), ("updated_at", -1)])
-    await _safe_create_index(db.lesson_recognition_events, [("video_id", 1), ("recognition_status", 1)])
-    await _safe_create_index(db.recognition_audit_events, [("target_type", 1), ("target_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.exemplar_submissions, [("submission_status", 1), ("submitted_at", -1)])
-    await _safe_create_index(db.exemplar_submissions, [("teacher_id", 1), ("video_id", 1)])
-    await _safe_create_index(db.exemplar_library_items, [("status", 1), ("published_at", -1)])
-    await _safe_create_index(db.exemplar_library_items, [("subject", 1), ("grade_level", 1)])
-    await _safe_create_index(db.share_assets, [("teacher_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.videos, [("raw_retention_expires_at", 1)])
-    await _safe_create_index(db.video_sampling_manifests, [("video_id", 1), ("strategy_version", 1)], unique=True)
-    await _safe_create_index(db.video_analysis_moments, [("video_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.video_audio_transcripts, [("video_id", 1), ("created_at", -1)])
-    await _safe_create_index(db.video_audio_transcripts, [("retention_expires_at", 1)])
-    await _safe_create_index(db.video_analysis_features, [("video_id", 1)], unique=True)
-    await _safe_create_index(db.feedback_review_queue, [("status", 1), ("created_at", -1)])
-    await _safe_create_index(db.feedback_review_queue, [("assessment_id", 1), ("status", 1)])
-    await _safe_create_index(db.feedback_review_queue, [("owner_user_id", 1), ("status", 1), ("created_at", -1)])
-    await _safe_create_index(db.feedback_review_queue, [("owner_user_id", 1), ("resolved_at", -1)])
 
 
 async def _stop_video_workers() -> None:

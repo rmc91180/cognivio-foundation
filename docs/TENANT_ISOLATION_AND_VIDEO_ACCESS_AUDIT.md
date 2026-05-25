@@ -131,6 +131,14 @@ Pass 4 scan result:
 - Some repository functions accept query variables that are scoped by callers; the scanner flags those as advisory until annotated.
 - Physical unblurred source deletion remains deferred from Pass 3 and is not completed here.
 
+## Pass 5 Operational Follow-Up
+
+- `backend/scripts/ensure_indexes.py` now centralizes critical indexes for tenant-sensitive collections including users, sessions, videos, assessments, comments, transcripts, reports, teacher references, recognition, frameworks, coaching, gradebook reminders, and audit logs.
+- Startup index creation now uses the shared helper, and `/api/admin/db-health` reports expected/existing/missing indexes with sanitized failure details.
+- Rate limits now cover demo seed, uploads, framework uploads, report exports, and admin lifecycle actions so tenant-sensitive mutation surfaces have baseline abuse protection.
+- The sensitive-query scanner remains advisory; the 97 Pass 4 findings should be triaged before enabling strict mode.
+- Distributed rate limiting and physical source deletion remain future operational hardening items, documented in `docs/PRODUCTION_SECURITY_PRIVACY_CHECKLIST.md`.
+
 ## Tests Added
 
 Backend tests added:

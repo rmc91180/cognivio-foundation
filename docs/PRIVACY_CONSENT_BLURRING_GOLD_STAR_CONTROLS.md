@@ -157,6 +157,14 @@ Pass 4 added the tenant/video boundary layer that sits on top of these Pass 3 pr
 
 Physical source deletion is still deferred and remains represented by explicit status fields and readiness warnings.
 
+## Pass 5 Final Status
+
+- Pass 5 did not claim physical destructive deletion is complete; the production checklist keeps it `partially implemented` with manual purge/readiness controls.
+- MongoDB index coverage now includes privacy records, videos, privacy jobs, reference images, transcripts, recognition/exemplar records, and audit events through `backend/scripts/ensure_indexes.py`.
+- `/api/admin/db-health` can report missing index coverage to Master Admin without exposing secrets.
+- Rate limits now protect privacy-sensitive upload paths, including video upload, teacher reference image upload, framework rubric upload, and demo seed.
+- Remaining privacy implementation gaps are tracked in `docs/PRIVACY_POLICY_DEVELOPMENT_REQUIREMENTS.md` under the final PR 26 gap check.
+
 ## Manual Verification Checklist
 
 1. Upload a classroom recording and confirm the response includes Student Data classifications and `destructive_blurring_enabled=true`.
