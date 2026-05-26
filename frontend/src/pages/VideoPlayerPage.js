@@ -595,6 +595,12 @@ export function VideoPlayerPage() {
   const recognitionReasons = recognitionRes?.eligibility?.reasons || [];
   const publicationStatus = recognitionRes?.publication?.submission_status || "not_submitted";
   const observationSummary = assessmentRes?.observation_summary;
+  const teacherFeedback = assessmentRes?.teacher_feedback || null;
+  const teacherSummary = teacherFeedback?.latest_summary || {};
+  const teacherDeepDiveMoments = teacherFeedback?.deep_dive?.moments || [];
+  const visibleSummary = isTeacher && teacherFeedback
+    ? [teacherSummary.opening, teacherSummary.strength, teacherSummary.growth_focus, teacherSummary.next_step].filter(Boolean).join(" ")
+    : observationSummary?.executive_summary || assessmentRes?.summary || t("videoPlayer.noSummaryAvailable");
   const recommendedMoments = analysisMomentsRes?.moments || [];
   const recommendedMomentNoteLines = recommendedMoments.slice(0, 3).map((moment) => {
     const jumpTime =
@@ -841,7 +847,7 @@ export function VideoPlayerPage() {
                   )}
                 </div>
                 <div className="mt-3 rounded-md border border-slate-200 bg-white px-3 py-3 text-sm leading-6 text-slate-700">
-                  {observationSummary?.executive_summary || assessmentRes?.summary || t("videoPlayer.noSummaryAvailable")}
+                  {visibleSummary}
                 </div>
                 {assessmentFeedbackEnabled && assessmentId && (
                   <AssessmentFeedbackWidget
@@ -853,14 +859,14 @@ export function VideoPlayerPage() {
                     existingFeedback={feedbackByTarget["summary:video-summary"]}
                   />
                 )}
-                <ObservationFocusPanel
+                {isAdmin ? <ObservationFocusPanel
                   className="mt-3"
                   frameworkType={assessmentRes?.framework_type}
                   priorityElements={assessmentRes?.priority_elements}
                   focusNote={observationSummary?.focus_note || assessmentRes?.focus_note}
                   title={t("videoPlayer.focusContextTitle")}
                   description={t("videoPlayer.focusContextDescription")}
-                />
+                /> : null}
                 {isAdmin && observationSummary?.confidence_note && (
                   <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-[11px] text-amber-800">
                     {observationSummary.confidence_note}
@@ -871,7 +877,13 @@ export function VideoPlayerPage() {
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       {t("videoPlayer.topStrengths")}
                     </div>
-                    {observationSummary?.top_strengths?.length ? (
+                    {isTeacher && teacherFeedback?.highlights?.length ? (
+                      <ul className="mt-2 list-disc space-y-1 ps-4 text-xs text-slate-700">
+                        {teacherFeedback.highlights.slice(0, 3).map((item) => (
+                          <li key={item.id}>{item.body}</li>
+                        ))}
+                      </ul>
+                    ) : observationSummary?.top_strengths?.length ? (
                       <ul className="mt-2 list-disc space-y-1 ps-4 text-xs text-slate-700">
                         {observationSummary.top_strengths.map((item, idx) => (
                           <li key={idx}>{item}</li>
@@ -1508,8 +1520,21 @@ export function VideoPlayerPage() {
                 {t("videoPlayer.summaryActionItems")}
               </h2>
               <div className="mb-2 text-xs text-slate-600">
-                {observationSummary?.executive_summary || assessmentRes?.summary}
+                {visibleSummary}
               </div>
+              {isTeacher && teacherDeepDiveMoments.length ? (
+                <div className="mb-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Moments to revisit</div>
+                  <ul className="mt-2 space-y-2 text-xs text-slate-700">
+                    {teacherDeepDiveMoments.slice(0, 4).map((moment) => (
+                      <li key={moment.id}>
+                        <span className="font-semibold">{moment.start_sec != null ? `${formatClock(moment.start_sec)} ` : ""}</span>
+                        {moment.what_happened} {moment.why_it_matters}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
               {recommendedMomentNoteLines.length ? (
                 <div className="mb-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
                   <div className="flex flex-wrap items-start justify-between gap-2">

@@ -14,8 +14,9 @@ const formatTimestamp = (seconds) => {
 function ReflectionComposer({ taskId, commentId, videoId, onCancel }) {
   const queryClient = useQueryClient();
   const [text, setText] = useState("");
+  const [visibility, setVisibility] = useState("private");
   const mutation = useMutation({
-    mutationFn: () => teacherApi.createReflection({ text, task_id: taskId, comment_id: commentId, video_id: videoId }),
+    mutationFn: () => teacherApi.createReflection({ text, task_id: taskId, comment_id: commentId, video_id: videoId, visibility }),
     onSuccess: () => {
       toast.success("Reflection saved.");
       setText("");
@@ -34,7 +35,13 @@ function ReflectionComposer({ taskId, commentId, videoId, onCancel }) {
       }}
     >
       <Field label="Reflection">
-        <textarea value={text} onChange={(event) => setText(event.target.value)} rows={3} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" placeholder="What did you try, notice, or want to revisit?" />
+        <textarea aria-label="Reflection" value={text} onChange={(event) => setText(event.target.value)} rows={3} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" placeholder="What did you try, notice, or want to revisit?" />
+      </Field>
+      <Field label="Visibility">
+        <select aria-label="Visibility" value={visibility} onChange={(event) => setVisibility(event.target.value)} className="min-h-[44px] w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm">
+          <option value="private">Private</option>
+          <option value="shared_with_admin">Shared with admin</option>
+        </select>
       </Field>
       <div className="flex flex-wrap gap-2">
         <Button type="submit" size="sm" disabled={mutation.isPending || !text.trim()}>{mutation.isPending ? "Saving..." : "Save reflection"}</Button>
@@ -46,6 +53,7 @@ function ReflectionComposer({ taskId, commentId, videoId, onCancel }) {
 
 export function TeacherCoachingPage() {
   const [composer, setComposer] = useState(null);
+  const queryClient = useQueryClient();
   const coachingQuery = useQuery({
     queryKey: ["teacher-coaching"],
     queryFn: () => teacherApi.myCoaching().then((res) => res.data),
@@ -59,6 +67,15 @@ export function TeacherCoachingPage() {
   const improvements = data.suggested_improvements || [];
   const nextBestAction = data.next_best_action;
   const readiness = data.readiness || {};
+  const markTriedMutation = useMutation({
+    mutationFn: (taskId) => teacherApi.updateCoachingTask(taskId, { status: "tried" }),
+    onSuccess: () => {
+      toast.success("Marked as tried.");
+      queryClient.invalidateQueries({ queryKey: ["teacher-coaching"] });
+      queryClient.invalidateQueries({ queryKey: ["teacher-dashboard"] });
+    },
+    onError: () => toast.error("That action could not be updated right now."),
+  });
 
   return (
     <LayoutShell>
@@ -104,7 +121,9 @@ export function TeacherCoachingPage() {
                         <div className="font-semibold text-slate-900">{task.title || "Coaching goal"}</div>
                         <p className="mt-2 text-sm leading-6 text-slate-700">{task.body || "Try one move, then notice how students respond."}</p>
                         <div className="mt-3 flex flex-wrap gap-2">
-                          <Button type="button" size="sm" variant="secondary" onClick={() => setComposer({ taskId: task.id })}>I tried this</Button>
+                          <Button type="button" size="sm" variant="secondary" onClick={() => markTriedMutation.mutate(task.id)} disabled={markTriedMutation.isPending}>I tried this</Button>
+                          <Button type="button" size="sm" variant="secondary" onClick={() => setComposer({ taskId: task.id })}>Reflect</Button>
+                          {task.video_href ? <Link to={task.video_href} className="inline-flex min-h-[36px] items-center text-sm font-semibold text-primary hover:text-primary/80">Watch the moment</Link> : null}
                           {task.href ? <Link to={task.href} className="inline-flex min-h-[36px] items-center text-sm font-semibold text-primary hover:text-primary/80">Open goal</Link> : null}
                         </div>
                         {composer?.taskId === task.id ? <ReflectionComposer taskId={task.id} onCancel={() => setComposer(null)} /> : null}
@@ -167,6 +186,7 @@ export function TeacherCoachingPage() {
                   {reflections.slice(0, 6).map((reflection) => (
                     <div key={reflection.id} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
                       <div className="font-medium text-slate-900">{reflection.tried || "Reflection"}</div>
+                      <div className="mt-1 inline-flex rounded-full bg-white px-2 py-1 text-xs font-semibold text-slate-600">{reflection.visibility === "shared_with_admin" ? "Shared with admin" : "Private"}</div>
                       <p className="mt-2 text-sm leading-6 text-slate-700">{reflection.happened || reflection.text || reflection.body}</p>
                     </div>
                   ))}

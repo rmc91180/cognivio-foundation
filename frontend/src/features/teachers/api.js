@@ -17,6 +17,7 @@ export const teacherApi = {
   myLessons: (params) => api.get("/api/teachers/me/lessons", { params }),
   myCoaching: () => api.get("/api/teachers/me/coaching"),
   createReflection: (payload) => api.post("/api/teachers/me/reflections", payload),
+  updateCoachingTask: (taskId, payload) => api.patch(`/api/coaching/tasks/${taskId}`, payload),
   myRecognition: () => api.get("/api/teachers/me/recognition"),
   get: (id) => api.get(`/api/teachers/${id}`),
   update: (id, payload) => api.patch(`/api/teachers/${id}`, payload),

@@ -110,6 +110,11 @@ from app.observability import (
 )
 from app.analysis.master_observer import render_master_observer_feedback
 from app.analysis.voice_gate import validate_voice_gate
+from app.analysis.teacher_feedback_projection import (
+    build_teacher_coaching_intelligence,
+    sanitize_teacher_feedback_projection,
+    validate_teacher_feedback_projection,
+)
 from share_assets import (
     build_email_signature_html,
     render_email_signature_badge,
@@ -8531,6 +8536,7 @@ class CoachingTaskReflectionCreate(BaseModel):
     happened: str
     comment_id: Optional[str] = None
     video_id: Optional[str] = None
+    visibility: Optional[str] = "shared_with_admin"
 
 
 class TeacherReflectionCreate(BaseModel):
@@ -8540,6 +8546,7 @@ class TeacherReflectionCreate(BaseModel):
     task_id: Optional[str] = None
     comment_id: Optional[str] = None
     video_id: Optional[str] = None
+    visibility: Optional[str] = "private"
 
 
 class DemoSeedRequest(BaseModel):
@@ -13696,7 +13703,7 @@ async def list_syllabi(
     return {"syllabi": docs}
 
 # ==================== ASSESSMENT ENDPOINTS ====================
-@api_router.get("/assessments", response_model=List[AssessmentResult])
+@api_router.get("/assessments")
 async def get_assessments(
     request: Request,
     teacher_id: Optional[str] = None,
@@ -13712,9 +13719,29 @@ async def get_assessments(
     
     assessments = await db.assessments.find(query, {"_id": 0, "user_id": 0}).to_list(1000)
     response_language = _resolve_request_language(request, default="en")
+    if _get_user_tenant_role(current_user) == "teacher":
+        teacher = await _get_current_teacher_for_workspace(current_user)
+        payload = []
+        for assessment in assessments:
+            projection = await _teacher_projection_for_assessment(teacher, current_user, assessment)
+            payload.append(
+                {
+                    "id": assessment.get("id"),
+                    "video_id": assessment.get("video_id"),
+                    "teacher_id": assessment.get("teacher_id"),
+                    "summary": _teacher_feedback_summary_text(projection or {}),
+                    "recommendations": [
+                        item.get("try_next_lesson") or item.get("body")
+                        for item in ((projection or {}).get("action_items") or [])
+                    ],
+                    "analyzed_at": assessment.get("analyzed_at"),
+                    "teacher_feedback": projection,
+                }
+            )
+        return payload
     return [AssessmentResult(**_enrich_assessment_for_response(a, response_language=response_language)) for a in assessments]
 
-@api_router.get("/assessments/{assessment_id}", response_model=AssessmentResult)
+@api_router.get("/assessments/{assessment_id}")
 async def get_assessment(
     assessment_id: str,
     request: Request,
@@ -13728,6 +13755,21 @@ async def get_assessment(
         raise HTTPException(status_code=404, detail="Assessment not found")
     await _get_teacher_or_404(assessment.get("teacher_id"), current_user)
     response_language = _resolve_request_language(request, default="en")
+    if _get_user_tenant_role(current_user) == "teacher":
+        teacher = await _get_current_teacher_for_workspace(current_user)
+        projection = await _teacher_projection_for_assessment(teacher, current_user, assessment)
+        return {
+            "id": assessment.get("id"),
+            "video_id": assessment.get("video_id"),
+            "teacher_id": assessment.get("teacher_id"),
+            "summary": _teacher_feedback_summary_text(projection or {}),
+            "recommendations": [
+                item.get("try_next_lesson") or item.get("body")
+                for item in ((projection or {}).get("action_items") or [])
+            ],
+            "analyzed_at": assessment.get("analyzed_at"),
+            "teacher_feedback": projection,
+        }
     return AssessmentResult(**_enrich_assessment_for_response(assessment, response_language=response_language))
 
 
@@ -15500,8 +15542,9 @@ async def _build_coaching_tasks_for_teacher(teacher: dict, current_user: dict) -
 
 
 COACHING_TASK_YELLOW_THRESHOLD = 6.0
-COACHING_TASK_STATUSES = {"open", "in_progress", "completed", "snoozed"}
+COACHING_TASK_STATUSES = {"open", "in_progress", "tried", "reflected", "completed", "snoozed"}
 COACHING_TASK_PRIORITIES = {"high", "medium", "low"}
+TEACHER_REFLECTION_SHARE_NUDGE_DAYS = int(os.environ.get("TEACHER_REFLECTION_SHARE_NUDGE_DAYS", "14"))
 
 
 def _coaching_task_priority_for_score(score: float) -> str:
@@ -15531,7 +15574,7 @@ def _normalize_coaching_task_priority(priority: Optional[str]) -> str:
 
 
 def _coaching_task_title(teacher_name: str, element_code: str, element_name: str, score: float) -> str:
-    return f"{teacher_name}: coach {element_code} {element_name} after {score:.1f} evidence"
+    return "Try one small move in your next lesson"
 
 
 def _suggested_action_for_element(
@@ -15554,7 +15597,7 @@ def _suggested_action_for_element(
             return text
     if focus_note:
         return f"Use the observation focus note to plan a targeted coaching conversation: {focus_note}"
-    return f"Plan a targeted coaching cycle for {element_code} {element_name}".strip()
+    return "Choose one moment from the lesson and plan a small next move."
 
 
 def _serialize_coaching_task_doc(doc: dict) -> dict:
@@ -15570,6 +15613,15 @@ def _serialize_coaching_task_doc(doc: dict) -> dict:
     payload["priority_rank"] = _coaching_task_priority_rank(priority)
     payload["summary"] = suggested_action
     payload["support_prompt"] = suggested_action
+    safe_task_text = sanitize_teacher_feedback_projection(
+        {
+            "title": payload.get("title") or "Next-lesson move",
+            "body": payload.get("suggested_action") or payload.get("summary") or "",
+        },
+        language="en",
+    )
+    payload["teacher_title"] = safe_task_text.get("title") or "Next-lesson move"
+    payload["teacher_body"] = safe_task_text.get("body") or payload.get("suggested_action") or ""
     payload["due_at"] = due_date
     payload["route_hint"] = payload.get("route_hint") or "coaching_task"
     payload["context_label"] = payload.get("context_label") or payload.get("element_code") or payload.get("element_name")
@@ -15946,6 +15998,10 @@ async def get_teacher_reflection_history(
         {"teacher_id": teacher_id, "author_user_id": {"$in": visible_user_ids or ["__none__"]}},
         {"_id": 0},
     ).sort("saved_at", -1).to_list(100)
+    shared_task_reflections = await db.coaching_task_reflections.find(
+        {"teacher_id": teacher_id, "visibility": "shared_with_admin"},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(100) if hasattr(db, "coaching_task_reflections") else []
 
     current_entries = []
     for doc in current_docs:
@@ -16004,6 +16060,28 @@ async def get_teacher_reflection_history(
                 updated_at=enriched_doc.get("updated_at"),
             )
         )
+    for doc in shared_task_reflections:
+        history_entries.append(
+            ReflectionHistoryEntry(
+                id=doc.get("id") or str(uuid.uuid4()),
+                teacher_id=teacher_id,
+                reflection_id=doc.get("id"),
+                author_user_id=doc.get("author_user_id"),
+                author_name=teacher.get("name"),
+                author_role="teacher",
+                self_reflection=doc.get("happened") or doc.get("text") or doc.get("body"),
+                actions_taken=doc.get("tried"),
+                linked_goal_ids=[doc.get("task_id")] if doc.get("task_id") else [],
+                linked_goal_titles=[],
+                linked_video_id=doc.get("video_id"),
+                linked_assessment_id=None,
+                linked_observation_id=None,
+                linked_evidence_records=[],
+                saved_at=doc.get("created_at") or "",
+                updated_at=doc.get("updated_at"),
+            )
+        )
+    history_entries.sort(key=lambda item: item.saved_at or "", reverse=True)
 
     return ReflectionHistoryResponse(
         current_entries=current_entries,
@@ -17850,6 +17928,49 @@ def _admin_workspace_empty_payload(current_user: dict, period: str) -> Dict[str,
     }
 
 
+async def _build_shared_reflection_nudges(base: Dict[str, Any]) -> List[Dict[str, Any]]:
+    teacher_ids = list(base.get("teacher_ids") or [])
+    if not teacher_ids or not hasattr(db, "coaching_task_reflections"):
+        return []
+    reviewed_by_teacher = {}
+    cutoff = datetime.now(timezone.utc) - timedelta(days=TEACHER_REFLECTION_SHARE_NUDGE_DAYS)
+    for assessment in base.get("cycle_assessments") or base.get("assessments") or []:
+        teacher_id = assessment.get("teacher_id")
+        reviewed_at = _parse_iso_datetime(assessment.get("analyzed_at") or assessment.get("created_at"))
+        if teacher_id and reviewed_at and reviewed_at >= cutoff:
+            reviewed_by_teacher[teacher_id] = max(reviewed_by_teacher.get(teacher_id, reviewed_at), reviewed_at)
+    if not reviewed_by_teacher:
+        return []
+    shared_docs = await db.coaching_task_reflections.find(
+        {"teacher_id": {"$in": list(reviewed_by_teacher.keys())}, "visibility": "shared_with_admin"},
+        {"_id": 0, "teacher_id": 1, "created_at": 1},
+    ).sort("created_at", -1).to_list(500)
+    latest_shared: Dict[str, datetime] = {}
+    for doc in shared_docs:
+        teacher_id = doc.get("teacher_id")
+        created_at = _parse_iso_datetime(doc.get("created_at"))
+        if teacher_id and created_at and teacher_id not in latest_shared:
+            latest_shared[teacher_id] = created_at
+    nudges = []
+    for teacher_id, reviewed_at in reviewed_by_teacher.items():
+        shared_at = latest_shared.get(teacher_id)
+        if shared_at and shared_at >= reviewed_at:
+            continue
+        teacher = (base.get("teacher_by_id") or {}).get(teacher_id) or {}
+        nudges.append(
+            {
+                "id": f"shared-reflection-nudge-{teacher_id}",
+                "teacher_id": teacher_id,
+                "teacher_name": _dashboard_teacher_name(teacher),
+                "reason": "No shared teacher reflection after recent reviewed lessons.",
+                "href": f"/teachers/{teacher_id}/coaching",
+                "severity": "info",
+                "type": "shared_reflection_nudge",
+            }
+        )
+    return nudges[:8]
+
+
 async def _build_admin_workspace_dashboard(current_user: dict, period: Optional[str] = "semester") -> Dict[str, Any]:
     _require_active_approved_api_user(current_user)
     tenant_role = _get_user_tenant_role(current_user)
@@ -17874,6 +17995,7 @@ async def _build_admin_workspace_dashboard(current_user: dict, period: Optional[
     )
     planned_observations = len(base["observations"]) + len(base["sessions"])
     reports_ready = 1 if base["cycle_assessments"] else 0
+    shared_reflection_nudges = await _build_shared_reflection_nudges(base)
     payload = _admin_workspace_empty_payload(current_user, normalized_period)
     payload.update(
         {
@@ -17969,7 +18091,7 @@ async def _build_admin_workspace_dashboard(current_user: dict, period: Optional[
             "severity": "warning",
         }
         for gap in observation_gaps[:8]
-    ]
+    ] + shared_reflection_nudges
     payload["observation_gaps"] = observation_gaps
     payload["coaching_activity"] = [
         {
@@ -18007,6 +18129,16 @@ async def _build_admin_workspace_dashboard(current_user: dict, period: Optional[
         for assessment in base["assessments"][:8]
     ]
     payload["communications"] = [
+        {
+            "id": item.get("id"),
+            "teacher_id": item.get("teacher_id"),
+            "teacher_name": item.get("teacher_name"),
+            "title": "Reflection follow-up",
+            "summary": "Invite this teacher to share one reflection when they are ready.",
+            "href": item.get("href"),
+        }
+        for item in shared_reflection_nudges[:4]
+    ] + [
         {
             "id": comment.get("id"),
             "teacher_id": comment.get("teacher_id"),
@@ -19589,31 +19721,110 @@ def _coaching_action_text(item: Any) -> Optional[str]:
     return None
 
 
+def _teacher_language(current_user: Optional[dict], teacher: Optional[dict] = None, assessment: Optional[dict] = None) -> str:
+    for source in (assessment or {}, teacher or {}, current_user or {}):
+        value = source.get("language") or source.get("locale")
+        if value:
+            normalized = str(value).strip().lower()
+            return "he" if normalized.startswith(("he", "iw")) else "en"
+    return "en"
+
+
+def _teacher_feedback_summary_text(projection: Dict[str, Any]) -> str:
+    summary = projection.get("latest_summary") or {}
+    parts = [
+        summary.get("opening"),
+        summary.get("strength"),
+        summary.get("growth_focus"),
+        summary.get("next_step"),
+    ]
+    return " ".join(_clean_optional_string(part) or "" for part in parts if _clean_optional_string(part)).strip()
+
+
+async def _reflection_counts_by_task(teacher_id: str, task_ids: List[str]) -> Dict[str, Dict[str, int]]:
+    if not task_ids:
+        return {}
+    docs = await db.coaching_task_reflections.find(
+        {"teacher_id": teacher_id, "task_id": {"$in": task_ids}},
+        {"_id": 0, "task_id": 1, "visibility": 1},
+    ).to_list(1000)
+    counts: Dict[str, Dict[str, int]] = {}
+    for doc in docs:
+        task_id = doc.get("task_id")
+        if not task_id:
+            continue
+        bucket = counts.setdefault(task_id, {"reflection_count": 0, "shared_reflection_count": 0})
+        bucket["reflection_count"] += 1
+        if doc.get("visibility") == "shared_with_admin":
+            bucket["shared_reflection_count"] += 1
+    return counts
+
+
+async def _teacher_projection_for_assessment(
+    teacher: dict,
+    current_user: dict,
+    assessment: Optional[dict],
+    *,
+    video: Optional[dict] = None,
+    readiness: Optional[dict] = None,
+    coaching_tasks: Optional[List[dict]] = None,
+    reflections: Optional[List[dict]] = None,
+    admin_comments: Optional[List[dict]] = None,
+    recognition_badges: Optional[List[dict]] = None,
+    lesson_history: Optional[List[dict]] = None,
+) -> Optional[Dict[str, Any]]:
+    if not assessment and not video:
+        return None
+    if not video and (assessment or {}).get("video_id"):
+        video = await db.videos.find_one({"id": assessment.get("video_id"), "teacher_id": teacher["id"]}, {"_id": 0})
+    language = _teacher_language(current_user, teacher, assessment)
+    tasks = list(coaching_tasks or [])
+    task_counts = await _reflection_counts_by_task(teacher["id"], [task.get("id") for task in tasks if task.get("id")])
+    for task in tasks:
+        task.update(task_counts.get(task.get("id"), {}))
+    projection = build_teacher_coaching_intelligence(
+        assessment=assessment or {},
+        video=video or {},
+        teacher=teacher,
+        readiness=readiness,
+        coaching_tasks=tasks,
+        reflections=reflections,
+        admin_comments=admin_comments,
+        recognition_badges=recognition_badges,
+        lesson_history=lesson_history,
+        language=language,
+    )
+    issues = validate_teacher_feedback_projection(projection, language=language)
+    if issues:
+        logger.warning(
+            "teacher_feedback_projection_issues teacher_id=%s assessment_id=%s count=%s",
+            teacher.get("id"),
+            (assessment or {}).get("id"),
+            len(issues),
+        )
+    return projection
+
+
 @api_router.get("/teachers/me/latest-lesson")
 async def get_my_latest_lesson(current_user: dict = Depends(get_current_user)):
     teacher = await _get_current_teacher_for_workspace(current_user)
     assessment = await db.assessments.find_one(
         {"teacher_id": teacher["id"]},
-        {"_id": 0, "element_scores": 0, "overall_score": 0, "analysis_confidence": 0},
+        {"_id": 0},
         sort=[("analyzed_at", -1), ("created_at", -1)],
     )
     if not assessment:
         return {"lesson": None}
     video = await db.videos.find_one({"id": assessment.get("video_id")}, {"_id": 0}) if assessment.get("video_id") else None
-    observation_summary = assessment.get("observation_summary") or {}
-    actions = [
-        text
-        for text in (
-            _coaching_action_text(item)
-            for item in (
-                observation_summary.get("actionable_next_steps_structured")
-                or observation_summary.get("coaching_actions")
-                or assessment.get("recommendations")
-                or []
-            )
-        )
-        if text
-    ][:2]
+    profile_payload = await _current_teacher_profile_payload(current_user)
+    projection = await _teacher_projection_for_assessment(
+        teacher,
+        current_user,
+        assessment,
+        video=video,
+        readiness=profile_payload.get("readiness"),
+    )
+    actions = (projection or {}).get("action_items") or []
     talk_time_summary = (
         (video or {}).get("audio_summary")
         or (assessment.get("audio_summary") if isinstance(assessment.get("audio_summary"), str) else None)
@@ -19628,8 +19839,9 @@ async def get_my_latest_lesson(current_user: dict = Depends(get_current_user)):
             "lesson_date": assessment.get("analyzed_at") or assessment.get("recorded_at") or (video or {}).get("recorded_at"),
             "reviewed_at": assessment.get("analyzed_at"),
             "recorded_at": assessment.get("recorded_at") or (video or {}).get("recorded_at"),
-            "summary": observation_summary.get("executive_summary") or assessment.get("summary"),
-            "actions": actions,
+            "summary": _teacher_feedback_summary_text(projection or {}),
+            "actions": [item.get("try_next_lesson") or item.get("body") for item in actions[:2]],
+            "teacher_feedback": projection,
             "talk_time_summary": talk_time_summary,
         }
     }
@@ -19668,7 +19880,7 @@ async def get_my_lessons(
     video_ids = [video.get("id") for video in videos if video.get("id")]
     assessments = await db.assessments.find(
         {"video_id": {"$in": video_ids}},
-        {"_id": 0, "element_scores": 0, "overall_score": 0, "analysis_confidence": 0},
+        {"_id": 0},
     ).sort("analyzed_at", -1).to_list(200) if video_ids else []
     assessment_by_video_id: Dict[str, dict] = {}
     for assessment in assessments:
@@ -19691,8 +19903,15 @@ async def get_my_lessons(
     lessons = []
     for video in videos:
         assessment = assessment_by_video_id.get(video.get("id"))
-        observation_summary = (assessment or {}).get("observation_summary") or {}
-        summary = observation_summary.get("executive_summary") or (assessment or {}).get("summary")
+        projection = await _teacher_projection_for_assessment(
+            teacher,
+            current_user,
+            assessment,
+            video=video,
+            readiness=profile_payload.get("readiness"),
+            lesson_history=assessments,
+        ) if assessment else None
+        summary = _teacher_feedback_summary_text(projection or {})
         lesson_status = _teacher_lesson_status(video, assessment)
         lesson_subject = video.get("subject") or (assessment or {}).get("subject") or teacher.get("subject")
         lesson_title = video.get("lesson_title") or video.get("title") or video.get("filename") or lesson_subject or "Lesson recording"
@@ -19723,6 +19942,7 @@ async def get_my_lessons(
                 "uploaded_at": uploaded_at,
                 "status": lesson_status,
                 "summary": summary,
+                "teacher_feedback": projection,
                 "href": f"/videos/{video.get('id')}" if video.get("id") else "/videos",
                 "recording_type": video.get("recording_type") or video.get("upload_source"),
                 "shared_moments_count": shared_counts.get(video.get("id"), 0),
@@ -19781,44 +20001,51 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
     ).sort("created_at", -1).to_list(100)
     assessments = await db.assessments.find(
         {"teacher_id": teacher["id"]},
-        {"_id": 0, "element_scores": 0, "overall_score": 0, "analysis_confidence": 0},
+        {"_id": 0},
     ).sort("analyzed_at", -1).to_list(10)
-    recommendations: List[dict] = []
-    suggested_improvements: List[dict] = []
-    for assessment in assessments:
-        summary = assessment.get("observation_summary") or {}
-        video_id = assessment.get("video_id")
-        for index, item in enumerate(summary.get("actionable_next_steps_structured") or summary.get("coaching_actions") or assessment.get("recommendations") or []):
-            text = _coaching_action_text(item)
-            if not text:
-                continue
-            recommendations.append(
-                {
-                    "id": f"{assessment.get('id')}-recommendation-{index}",
-                    "title": "Next-lesson move",
-                    "body": text,
-                    "href": f"/videos/{video_id}" if video_id else "/my-lessons",
-                }
-            )
-        for index, item in enumerate(summary.get("growth_opportunities") or summary.get("focus_areas") or []):
-            text = _coaching_action_text(item)
-            if text:
-                suggested_improvements.append(
-                    {
-                        "id": f"{assessment.get('id')}-improvement-{index}",
-                        "title": "Teaching move to try",
-                        "description": text,
-                        "focus_area": summary.get("focus_area_label") or assessment.get("subject") or "Lesson feedback",
-                    }
-                )
+    recognition_badges = await db.recognition_badges.find(
+        {"teacher_id": teacher["id"], "status": {"$ne": "revoked"}},
+        {"_id": 0},
+    ).sort("awarded_at", -1).to_list(20)
+    latest_assessment = assessments[0] if assessments else None
+    projection = await _teacher_projection_for_assessment(
+        teacher,
+        current_user,
+        latest_assessment,
+        readiness=profile_payload.get("readiness"),
+        coaching_tasks=tasks,
+        reflections=reflections,
+        admin_comments=comments,
+        recognition_badges=recognition_badges,
+        lesson_history=assessments,
+    ) if latest_assessment else None
+    recommendations = (projection or {}).get("action_items") or []
+    suggested_improvements = [
+        {
+            "id": f"{item.get('id')}-why",
+            "title": item.get("title") or "Next-lesson move",
+            "description": item.get("why_it_matters") or item.get("body"),
+            "focus_area": "Coaching practice",
+        }
+        for item in recommendations[:6]
+    ]
     upcoming_meetings = await db.schedules.find(
         {"teacher_id": teacher["id"]},
         {"_id": 0},
     ).sort("start_time", 1).to_list(10) if hasattr(db, "schedules") else []
     next_best_action = None
-    if tasks:
+    if recommendations:
+        item = recommendations[0]
+        next_best_action = {
+            "id": item.get("id"),
+            "title": item.get("title") or "Try one coaching move",
+            "description": item.get("try_next_lesson") or item.get("body"),
+            "href": f"/my-coaching?task_id={item.get('id')}",
+            "cta_label": "Open coaching",
+        }
+    elif tasks:
         task = tasks[0]
-        next_best_action = {"title": task.get("title") or "Reflect on one coaching goal", "description": task.get("suggested_action") or task.get("summary") or "Write down what you tried and what you noticed.", "href": f"/my-coaching?task_id={task.get('id')}"}
+        next_best_action = {"id": task.get("id"), "title": "Reflect on one coaching goal", "description": task.get("suggested_action") or task.get("summary") or "Write down what you tried and what you noticed.", "href": f"/my-coaching?task_id={task.get('id')}"}
     elif comments:
         comment = comments[0]
         next_best_action = {"title": "Revisit a shared lesson moment", "description": comment.get("body") or "Open the timestamp your observer shared.", "href": f"/videos/{comment.get('video_id')}?t={int(comment.get('timestamp_seconds') or 0)}"}
@@ -19826,15 +20053,20 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
         **profile_payload,
         "active_tasks": [
             {
-                "id": task.get("id"),
-                "title": task.get("title") or "Coaching goal",
-                "body": task.get("suggested_action") or task.get("summary") or "",
-                "source": "lesson" if task.get("video_id") else "admin",
-                "due_date": task.get("due_date"),
-                "status": task.get("status"),
-                "href": f"/my-workspace/goals?task_id={task.get('id')}" if task.get("id") else None,
+                "id": item.get("id"),
+                "title": item.get("title") or "Next-lesson move",
+                "body": item.get("try_next_lesson") or item.get("body") or "",
+                "try_next_lesson": item.get("try_next_lesson"),
+                "why_it_matters": item.get("why_it_matters"),
+                "source": "lesson",
+                "due_date": None,
+                "status": item.get("status") or "open",
+                "reflection_count": item.get("reflection_count", 0),
+                "shared_reflection_count": item.get("shared_reflection_count", 0),
+                "video_href": item.get("video_href"),
+                "href": f"/my-coaching?task_id={item.get('id')}" if item.get("id") else None,
             }
-            for task in tasks
+            for item in ((projection or {}).get("action_items") or [])
         ],
         "recommendations": recommendations[:6],
         "shared_moments": [
@@ -19853,6 +20085,8 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
         "teacher_reflections": reflections,
         "reflections": reflections,
         "suggested_improvements": suggested_improvements[:6],
+        "teacher_feedback": projection,
+        "deep_dive": (projection or {}).get("deep_dive") or {"available": False, "moments": []},
         "next_best_action": next_best_action,
         "upcoming_meetings": [
             {
@@ -19896,6 +20130,9 @@ async def create_my_teacher_reflection(
     happened = _clean_optional_string(payload.happened) or _clean_optional_string(payload.text)
     if not happened:
         raise HTTPException(status_code=400, detail="Reflection text is required")
+    visibility = str(payload.visibility or "private").strip().lower()
+    if visibility not in {"private", "shared_with_admin"}:
+        raise HTTPException(status_code=400, detail="Unsupported reflection visibility")
     now = datetime.now(timezone.utc).isoformat()
     reflection_doc = {
         "id": str(uuid.uuid4()),
@@ -19908,6 +20145,8 @@ async def create_my_teacher_reflection(
         "tried": tried,
         "happened": happened,
         "text": happened,
+        "body": happened,
+        "visibility": visibility,
         "created_at": now,
         "updated_at": None,
     }
@@ -19915,7 +20154,7 @@ async def create_my_teacher_reflection(
     if payload.task_id:
         await db.coaching_tasks.update_one(
             {"id": payload.task_id},
-            {"$set": {"status": "in_progress", "updated_at": now}, "$inc": {"reflection_count": 1}},
+            {"$set": {"status": "reflected", "updated_at": now}, "$inc": {"reflection_count": 1}},
         )
     return {"ok": True, "reflection": reflection_doc}
 
@@ -19940,8 +20179,15 @@ async def _my_teacher_recognition_payload(current_user: dict, teacher: Optional[
     items = []
     for badge in badges:
         video = videos_by_id.get(badge.get("video_id")) or {}
-        title = badge.get("title") or badge.get("badge_type") or badge.get("recognition_type") or "Cognivio accolade"
-        description = badge.get("description") or badge.get("awarded_for") or "A reviewed lesson highlighted a strong coaching move worth returning to."
+        cleaned_badge = sanitize_teacher_feedback_projection(
+            {
+                "title": badge.get("title") or badge.get("badge_type") or badge.get("recognition_type") or "Cognivio accolade",
+                "body": badge.get("description") or badge.get("awarded_for") or "A reviewed lesson highlighted a strong coaching move worth returning to.",
+            },
+            language=_teacher_language(current_user, teacher),
+        )
+        title = cleaned_badge.get("title") or "Cognivio accolade"
+        description = cleaned_badge.get("body") or "A reviewed lesson highlighted a strong coaching move worth returning to."
         item = {
             "id": badge.get("id"),
             "title": title,
@@ -20140,18 +20386,22 @@ async def get_my_teacher_dashboard(
         for item in coaching_payload.get("upcoming_meetings", [])
     ]
     action_items = [
-        {"id": task.get("id"), "type": "goal", "title": task.get("title"), "description": task.get("body"), "href": task.get("href") or "/my-coaching"}
+        {"id": task.get("id"), "type": "goal", "title": task.get("title"), "description": task.get("try_next_lesson") or task.get("body"), "href": task.get("href") or "/my-coaching", "video_href": task.get("video_href"), "status": task.get("status")}
         for task in coaching_payload.get("active_tasks", [])[:4]
     ] + [
         {"id": item.get("id"), "type": "grading", "title": item.get("title"), "description": f"{item.get('description')} {item.get('note')}", "href": item.get("href")}
         for item in gradebook[:3]
     ]
     highlights = []
-    if recognition_payload.get("accolades"):
-        latest = recognition_payload["accolades"][0]
-        highlights.append({"id": latest.get("id"), "type": "recognition", "title": latest.get("title"), "description": latest.get("description"), "href": "/my-badges"})
-    if latest_lesson:
-        highlights.append({"id": latest_lesson.get("video_id"), "type": "lesson", "title": latest_lesson.get("title"), "description": latest_lesson.get("summary") or "Your latest lesson is ready to revisit.", "href": latest_lesson.get("href")})
+    lesson_feedback = (latest_lesson or {}).get("teacher_feedback") or {}
+    for highlight in lesson_feedback.get("highlights") or []:
+        highlights.append({
+            "id": highlight.get("id"),
+            "type": "lesson_highlight",
+            "title": highlight.get("title"),
+            "description": highlight.get("body"),
+            "href": highlight.get("video_href") or (latest_lesson or {}).get("href"),
+        })
     return {
         **profile_payload,
         "next_best_action": next_best_action,
@@ -20160,6 +20410,7 @@ async def get_my_teacher_dashboard(
         "action_items": action_items,
         "trends": trends,
         "communications": coaching_payload.get("admin_notes", []),
+        "reflections": (coaching_payload.get("teacher_reflections") or [])[:6],
         "schedule": schedule,
         "gradebook_reminders": gradebook,
         "reports": [{"id": "teacher-progress", "title": "Teacher progress snapshot", "description": "Trends will appear after a few reviewed lessons.", "href": "/reports"}],
@@ -20261,6 +20512,9 @@ async def submit_coaching_task_reflection(
     happened = str(payload.happened or "").strip()
     if not tried or not happened:
         raise HTTPException(status_code=400, detail="Reflection responses are required")
+    visibility = str(payload.visibility or "private").strip().lower()
+    if visibility not in {"private", "shared_with_admin"}:
+        raise HTTPException(status_code=400, detail="Unsupported reflection visibility")
     now = datetime.now(timezone.utc).isoformat()
     reflection_doc = {
         "id": str(uuid.uuid4()),
@@ -20270,6 +20524,9 @@ async def submit_coaching_task_reflection(
         "observer_id": task.get("observer_id"),
         "tried": tried,
         "happened": happened,
+        "text": happened,
+        "body": happened,
+        "visibility": visibility,
         "created_at": now,
         "updated_at": None,
     }
@@ -20277,11 +20534,11 @@ async def submit_coaching_task_reflection(
     await db.coaching_tasks.update_one(
         {"id": task_id},
         {
-            "$set": {"status": "in_progress", "updated_at": now},
+            "$set": {"status": "reflected", "updated_at": now},
             "$inc": {"reflection_count": 1},
         },
     )
-    if task.get("observer_id"):
+    if task.get("observer_id") and visibility == "shared_with_admin":
         await db.notifications.insert_one(
             {
                 "id": str(uuid.uuid4()),
@@ -29381,27 +29638,31 @@ async def _seed_current_teacher_experience(current_user: dict) -> Dict[str, Any]
     await db.teachers.update_one({"id": teacher_id}, {"$set": profile_updates}, upsert=False)
 
     profile_id = f"demo-{persona}-{teacher_id}-privacy-profile"
-    reference_id = f"demo-{persona}-{teacher_id}-reference-1"
-    reference_doc = {
-        "id": reference_id,
-        "teacher_id": teacher_id,
-        "user_id": current_user["id"],
-        "workspace_id": workspace_id,
-        "profile_id": profile_id,
-        "reference_type": "image",
-        "filename": "demo-teacher-reference.jpg",
-        "file_path": None,
-        "file_url": None,
-        "s3_key": f"demo/privacy/{teacher_id}/reference-1.jpg",
-        "status": "ready",
-        "embedding": [],
-        "quality_checks": {"validation_mode": "demo_metadata"},
-        "created_at": now,
-        "updated_at": now,
-        "retention_expires_at": (now_dt + timedelta(days=PRIVACY_PROFILE_IMAGE_RETENTION_DAYS)).isoformat(),
-        "demo_data": True,
-        "demo_persona": persona,
-    }
+    reference_docs = []
+    for reference_index in range(1, 5):
+        reference_docs.append(
+            {
+                "id": f"demo-{persona}-{teacher_id}-reference-{reference_index}",
+                "teacher_id": teacher_id,
+                "user_id": current_user["id"],
+                "workspace_id": workspace_id,
+                "profile_id": profile_id,
+                "reference_type": "image",
+                "filename": f"demo-teacher-reference-{reference_index}.jpg",
+                "file_path": None,
+                "file_url": None,
+                "s3_key": f"demo/privacy/{teacher_id}/reference-{reference_index}.jpg",
+                "status": "ready",
+                "validation_status": "ready",
+                "embedding": [],
+                "quality_checks": {"validation_mode": "demo_metadata"},
+                "created_at": now,
+                "updated_at": now,
+                "retention_expires_at": (now_dt + timedelta(days=PRIVACY_PROFILE_IMAGE_RETENTION_DAYS)).isoformat(),
+                "demo_data": True,
+                "demo_persona": persona,
+            }
+        )
     profile_doc = {
         "id": profile_id,
         "teacher_id": teacher_id,
@@ -29409,7 +29670,7 @@ async def _seed_current_teacher_experience(current_user: dict) -> Dict[str, Any]
         "workspace_id": workspace_id,
         "status": "active",
         "profile_version": 1,
-        "reference_count": 1,
+        "reference_count": 4,
         "quality_score": 1.0,
         "embedding_model": "opencv-sface",
         "embedding_version": "demo-contract-v1",
@@ -29524,6 +29785,25 @@ async def _seed_current_teacher_experience(current_user: dict) -> Dict[str, Any]
             "tried": "I asked students to build on one answer.",
             "happened": "Two more students joined before I summarized the idea.",
             "text": "Two more students joined before I summarized the idea.",
+            "body": "Two more students joined before I summarized the idea.",
+            "visibility": "private",
+            "created_at": now,
+            "updated_at": None,
+            "demo_data": True,
+            "demo_persona": persona,
+        }
+    )
+    reflection_docs.append(
+        {
+            "id": f"demo-{persona}-{teacher_id}-experience-reflection-2",
+            "task_id": task_docs[0]["id"],
+            "teacher_id": teacher_id,
+            "author_user_id": current_user["id"],
+            "tried": "I shared the student-to-student prompt with my admin.",
+            "happened": "I want feedback on how to make the pause feel natural.",
+            "text": "I want feedback on how to make the pause feel natural.",
+            "body": "I want feedback on how to make the pause feel natural.",
+            "visibility": "shared_with_admin",
             "created_at": now,
             "updated_at": None,
             "demo_data": True,
@@ -29589,7 +29869,7 @@ async def _seed_current_teacher_experience(current_user: dict) -> Dict[str, Any]
         "coaching_tasks": await _upsert_demo_docs("coaching_tasks", task_docs),
         "recognition_badges": await _upsert_demo_docs("recognition_badges", badge_docs),
         "grading_items": await _upsert_demo_docs("gradebook_reminders", reminder_docs),
-        "reference_images": await _upsert_demo_docs("teacher_face_references", [reference_doc]),
+        "reference_images": await _upsert_demo_docs("teacher_face_references", reference_docs),
     }
     await _upsert_demo_docs("teacher_face_profiles", [profile_doc])
     await _upsert_demo_docs("coaching_task_reflections", reflection_docs)
