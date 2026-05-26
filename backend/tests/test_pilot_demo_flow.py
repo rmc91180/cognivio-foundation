@@ -78,6 +78,8 @@ class _Collection:
             if isinstance(value, dict):
                 if "$in" in value and doc.get(key) not in value["$in"]:
                     return False
+                if "$ne" in value and doc.get(key) == value["$ne"]:
+                    return False
                 continue
             if doc.get(key) != value:
                 return False
@@ -149,6 +151,18 @@ def test_demo_reset_endpoint_requires_demo_mode(monkeypatch):
 
 def test_teacher_latest_lesson_hides_scores(monkeypatch):
     fake_db = types.SimpleNamespace(
+        users=_Collection([
+            {
+                "id": "user-1",
+                "email": "teacher@example.com",
+                "tenant_role": "teacher",
+                "teacher_id": "teacher-1",
+                "approval_status": "approved",
+                "is_active": True,
+            }
+        ]),
+        organizations=_Collection([]),
+        schools=_Collection([]),
         teachers=_Collection([
             {"id": "teacher-1", "email": "teacher@example.com", "name": "Teacher One", "subject": "Math"}
         ]),
@@ -167,6 +181,11 @@ def test_teacher_latest_lesson_hides_scores(monkeypatch):
         videos=_Collection([
             {"id": "video-1", "teacher_id": "teacher-1", "subject": "Math", "recorded_at": "2026-05-01T00:00:00+00:00"}
         ]),
+        consent_records=_Collection([]),
+        teacher_face_profiles=_Collection([]),
+        teacher_face_references=_Collection([]),
+        coaching_task_reflections=_Collection([]),
+        recognition_badges=_Collection([]),
     )
     monkeypatch.setattr(server, "db", fake_db)
 

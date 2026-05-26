@@ -20019,7 +20019,54 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
         recognition_badges=recognition_badges,
         lesson_history=assessments,
     ) if latest_assessment else None
-    recommendations = (projection or {}).get("action_items") or []
+    projected_action_items = (projection or {}).get("action_items") or []
+
+    def _teacher_coaching_item_from_projection(item: dict) -> dict:
+        return {
+            "id": item.get("id"),
+            "title": item.get("title") or "Next-lesson move",
+            "body": item.get("body") or item.get("try_next_lesson") or "",
+            "try_next_lesson": item.get("try_next_lesson") or item.get("body") or "",
+            "why_it_matters": item.get("why_it_matters"),
+            "source": "lesson",
+            "due_date": None,
+            "status": item.get("status") or "open",
+            "reflection_count": item.get("reflection_count", 0),
+            "shared_reflection_count": item.get("shared_reflection_count", 0),
+            "video_href": item.get("video_href"),
+            "href": f"/my-coaching?task_id={item.get('id')}" if item.get("id") else None,
+        }
+
+    def _teacher_coaching_item_from_task(task: dict) -> dict:
+        body = (
+            task.get("teacher_body")
+            or task.get("suggested_action")
+            or task.get("summary")
+            or task.get("support_prompt")
+            or ""
+        )
+        return {
+            "id": task.get("id"),
+            "title": task.get("teacher_title") or task.get("title") or "Next-lesson move",
+            "body": body,
+            "try_next_lesson": body,
+            "why_it_matters": task.get("why_it_matters")
+            or "This gives you one concrete move to try before your next coaching conversation.",
+            "source": "coaching_task",
+            "due_date": task.get("due_date") or task.get("due_at"),
+            "status": task.get("status") or task.get("state") or "open",
+            "reflection_count": task.get("reflection_count", 0),
+            "shared_reflection_count": task.get("shared_reflection_count", 0),
+            "video_href": f"/videos/{task.get('video_id')}" if task.get("video_id") else None,
+            "href": f"/my-coaching?task_id={task.get('id')}" if task.get("id") else None,
+        }
+
+    active_task_items = (
+        [_teacher_coaching_item_from_projection(item) for item in projected_action_items]
+        if projected_action_items
+        else [_teacher_coaching_item_from_task(task) for task in tasks]
+    )
+    recommendations = active_task_items
     suggested_improvements = [
         {
             "id": f"{item.get('id')}-why",
@@ -20051,23 +20098,7 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
         next_best_action = {"title": "Revisit a shared lesson moment", "description": comment.get("body") or "Open the timestamp your observer shared.", "href": f"/videos/{comment.get('video_id')}?t={int(comment.get('timestamp_seconds') or 0)}"}
     return {
         **profile_payload,
-        "active_tasks": [
-            {
-                "id": item.get("id"),
-                "title": item.get("title") or "Next-lesson move",
-                "body": item.get("try_next_lesson") or item.get("body") or "",
-                "try_next_lesson": item.get("try_next_lesson"),
-                "why_it_matters": item.get("why_it_matters"),
-                "source": "lesson",
-                "due_date": None,
-                "status": item.get("status") or "open",
-                "reflection_count": item.get("reflection_count", 0),
-                "shared_reflection_count": item.get("shared_reflection_count", 0),
-                "video_href": item.get("video_href"),
-                "href": f"/my-coaching?task_id={item.get('id')}" if item.get("id") else None,
-            }
-            for item in ((projection or {}).get("action_items") or [])
-        ],
+        "active_tasks": active_task_items,
         "recommendations": recommendations[:6],
         "shared_moments": [
             {
