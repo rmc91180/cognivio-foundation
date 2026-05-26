@@ -1,0 +1,148 @@
+
+backend\server.py:6133:                {"id": "d4e", "name": "Growing and Developing Professionally"},
+backend\server.py:6216:    {"score": 2, "label": "Developing"},
+backend\server.py:6217:    {"score": 3, "label": "Proficient"},
+backend\server.py:6477:    "growing and developing professionally": "צמיחה והתפתחות מקצועית",
+backend\server.py:6697:        return "Developing readiness"
+backend\server.py:15586:    element_name = element_score.get("element_name") or element_code or "this rubric element"
+backend\server.py:16622:        return "proficient"
+backend\server.py:16624:        return "developing"
+backend\server.py:18627:    readiness_counts = {"Emerging": 0, "Developing": 0, "Proficient": 0, "Distinguished": 0, "No evidence": 0}
+backend\server.py:18635:            readiness_counts["Proficient"] += 1
+backend\server.py:18637:            readiness_counts["Developing"] += 1
+backend\server.py:27112:        "in the sampled frames": "in the recording",
+backend\server.py:27113:        "in sampled frames": "in the recording",
+backend\server.py:27114:        "sampled frames": "recording",
+backend\server.py:27119:        "Visible evidence was limited": "The clip gave us a brief window into your lesson",
+backend\server.py:27120:        "Evidence was limited": "The clip gave us a brief window into your lesson",
+backend\server.py:27317:        "4. Never use system language: do not write 'evidence,' 'sampled frames,' 'analysis', "
+backend\server.py:27320:        "brief — here is what stood out in that window.' Never write 'evidence was limited.'\n"
+backend\server.py:28995:            else "Overall performance: There is a useful starting point for a coaching conversation, with one strength to build on and one growth area to address."
+backend\server.py:29249:    level = "Strong" if overall_score >= 8 else "Developing" if overall_score >= 6 else "Needs Improvement"
+backend\server.py:29251:        f"Overall performance: {level} ({overall_score:.1f}/10).",
+backend\app\analysis\master_observer.py:10:    "evidence was limited",
+backend\app\analysis\master_observer.py:11:    "in the sampled frames",
+backend\app\analysis\master_observer.py:12:    "sampled frames",
+backend\app\analysis\master_observer.py:14:    "confidence score",
+backend\app\analysis\master_observer.py:15:    "the teacher demonstrated",
+backend\app\analysis\master_observer.py:16:    "the teacher used",
+backend\app\analysis\master_observer.py:17:    "the teacher showed",
+backend\app\analysis\master_observer.py:19:    "rubric element",
+backend\app\analysis\master_observer.py:20:    "score of",
+backend\app\analysis\master_observer.py:143:        "Evidence was limited in the sampled frames.": (
+backend\app\analysis\master_observer.py:148:        "evidence was limited": "the clip was brief",
+backend\app\analysis\master_observer.py:149:        "in the sampled frames": "in the clip",
+backend\app\analysis\master_observer.py:150:        "sampled frames": "the clip",
+backend\app\analysis\master_observer.py:155:        "confidence score": "signal",
+backend\app\analysis\master_observer.py:157:        "rubric element": "instructional move",
+backend\app\analysis\master_observer.py:162:        "The teacher demonstrated": "You showed",
+backend\app\analysis\master_observer.py:163:        "the teacher demonstrated": "you showed",
+backend\app\analysis\master_observer.py:164:        "The teacher used": "You used",
+backend\app\analysis\master_observer.py:165:        "the teacher used": "you used",
+backend\app\analysis\master_observer.py:166:        "The teacher showed": "You showed",
+backend\app\analysis\master_observer.py:167:        "the teacher showed": "you showed",
+backend\app\analysis\specialist_orchestrator.py:78:            if "evidence was limited" in first_observation.lower() or "הראיות" in first_observation:
+backend\app\analysis\teacher_feedback_projection.py:16:    r"\boverall performance\b|"
+backend\app\analysis\teacher_feedback_projection.py:17:    r"\bdeveloping\b|"
+backend\app\analysis\teacher_feedback_projection.py:18:    r"\bproficient\b|"
+backend\app\analysis\teacher_feedback_projection.py:21:    r"\bsampled frames?\b|"
+backend\app\analysis\teacher_feedback_projection.py:22:    r"\bevidence was limited\b|"
+backend\app\analysis\teacher_feedback_projection.py:77:        "overall performance": "this lesson",
+backend\app\analysis\teacher_feedback_projection.py:79:        "confidence score": "review signal",
+backend\app\analysis\teacher_feedback_projection.py:81:        "sampled frames": "clip",
+backend\app\analysis\teacher_feedback_projection.py:82:        "evidence was limited": "the clip was brief",
+backend\app\analysis\teacher_feedback_projection.py:83:        "rubric element": "teaching move",
+backend\app\analysis\teacher_feedback_projection.py:87:        "The teacher demonstrated": "You showed",
+backend\app\analysis\teacher_feedback_projection.py:88:        "the teacher demonstrated": "you showed",
+backend\app\analysis\teacher_feedback_projection.py:89:        "The teacher used": "You used",
+backend\app\analysis\teacher_feedback_projection.py:90:        "the teacher used": "you used",
+backend\app\analysis\teacher_feedback_projection.py:91:        "The teacher showed": "You showed",
+backend\app\analysis\teacher_feedback_projection.py:92:        "the teacher showed": "you showed",
+backend\app\analysis\teacher_feedback_projection.py:101:    text = re.sub(r"\bOverall performance:\s*", "", text, flags=re.IGNORECASE)
+backend\app\analysis\teacher_feedback_projection.py:102:    text = re.sub(r"\b(?:Developing|Proficient|Distinguished|Needs Improvement)\b\s*(?:\(\d+(?:\.\d+)?/10\))?", "", text, flags=re.IGNORECASE)
+backend\app\analysis\voice_gate.py:10:    "evidence was limited",
+backend\app\analysis\voice_gate.py:11:    "in the sampled frames",
+backend\app\analysis\voice_gate.py:12:    "sampled frames",
+backend\app\analysis\voice_gate.py:14:    "confidence score",
+backend\app\analysis\voice_gate.py:16:    "the teacher demonstrated",
+backend\app\analysis\voice_gate.py:17:    "the teacher used",
+backend\app\analysis\voice_gate.py:18:    "the teacher showed",
+backend\app\analysis\voice_gate.py:20:    "rubric element",
+backend\app\analysis\voice_gate.py:21:    "score of",
+backend\app\analysis\voice_gate.py:35:    r"evidence|sampled frames?|analysis mode|confidence score|confidence value|"
+backend\app\analysis\voice_gate.py:36:    r"rubric element|data suggests|based on the evidence|this segment|"
+backend\app\analysis\voice_gate.py:429:            "Evidence was limited in the sampled frames.": "החלון שהיה לנו בסרטון היה קצר — הנה מה שבלט בתוכו.",
+backend\app\analysis\voice_gate.py:430:            "evidence was limited": "החלון בסרטון היה קצר",
+backend\app\analysis\voice_gate.py:431:            "in the sampled frames": "בסרטון",
+backend\app\analysis\voice_gate.py:432:            "sampled frames": "הסרטון",
+backend\app\analysis\voice_gate.py:434:            "confidence score": "אות",
+backend\app\analysis\voice_gate.py:435:            "rubric element": "מהלך ההוראה",
+backend\app\analysis\voice_gate.py:441:            "the teacher demonstrated": "ראינו אצלך",
+backend\app\analysis\voice_gate.py:442:            "the teacher used": "השתמשת",
+backend\app\analysis\voice_gate.py:443:            "the teacher showed": "הראית",
+backend\app\analysis\voice_gate.py:448:            "Evidence was limited in the sampled frames.": "The clip gave us a brief window into this lesson — here is what stood out.",
+backend\app\analysis\voice_gate.py:449:            "evidence was limited": "the clip was brief",
+backend\app\analysis\voice_gate.py:450:            "in the sampled frames": "in the clip",
+backend\app\analysis\voice_gate.py:451:            "sampled frames": "the clip",
+backend\app\analysis\voice_gate.py:453:            "confidence score": "signal",
+backend\app\analysis\voice_gate.py:455:            "rubric element": "instructional move",
+backend\app\analysis\voice_gate.py:464:            "The teacher demonstrated": "You showed",
+backend\app\analysis\voice_gate.py:465:            "the teacher demonstrated": "you showed",
+backend\app\analysis\voice_gate.py:466:            "The teacher used": "You used",
+backend\app\analysis\voice_gate.py:467:            "the teacher used": "you used",
+backend\app\analysis\voice_gate.py:468:            "The teacher showed": "You showed",
+backend\app\analysis\voice_gate.py:469:            "the teacher showed": "you showed",
+backend\evals\analysis_gold_set.json:136:              "Student participation cues were uneven across the sampled frames."
+backend\evals\analysis_gold_set.json:162:            "Observed evidence: Student participation cues were uneven across the sampled frames."
+backend\tests\test_analysis_eval_harness.py:39:    result = check_banned_phrases("The teacher used a rubric element in this segment.")
+backend\tests\test_analysis_eval_harness.py:41:    assert "the teacher used" in result["banned_found"]
+backend\tests\test_analysis_eval_harness.py:42:    assert "rubric element" in result["banned_found"]
+backend\tests\test_analysis_eval_harness.py:59:                "coach_voice": {"normalized_score": 0.5, "banned_found": ["rubric element"]},
+backend\tests\test_analysis_eval_harness.py:70:    assert report["banned_phrases"] == [{"case_id": "case-1", "phrase": "rubric element"}]
+backend\tests\test_analysis_eval_harness.py:158:              "banned_phrases": [{"case_id": "case-1", "phrase": "rubric element", "secret": "x"}]
+backend\tests\test_analysis_eval_harness.py:170:    assert history[0]["banned_phrases"] == [{"case_id": "case-1", "phrase": "rubric element"}]
+backend\tests\test_analysis_output_helpers.py:71:    assert "Overall performance" in summary
+backend\tests\test_analysis_output_helpers.py:116:                "observations": ["Student participation cues were uneven across the sampled frames."],
+backend\tests\test_analysis_output_helpers.py:361:            "summary": "Overall performance: Needs Improvement.",
+backend\tests\test_specialist_orchestrator.py:68:                "observations": ["Evidence was limited in the sampled frames."],
+backend\tests\test_specialist_orchestrator.py:129:        "summary": "The teacher demonstrated a score of 6 in this segment.",
+backend\tests\test_specialist_orchestrator.py:131:            {"start_sec": 12.5, "end_sec": 20.0, "text": "The teacher used a rubric element well.", "linked_element_id": "2b"}
+backend\tests\test_specialist_orchestrator.py:137:                "observations": ["Evidence was limited in the sampled frames."],
+backend\tests\test_specialist_orchestrator.py:146:    assert "the teacher demonstrated" not in rendered.lower()
+backend\tests\test_specialist_orchestrator.py:147:    assert "sampled frames" not in rendered.lower()
+backend\tests\test_teacher_feedback_projection.py:19:            "summary": "Overall performance: Developing (6.4/10). The teacher demonstrated rubric element d1b based on the evidence.",
+backend\tests\test_teacher_feedback_projection.py:20:            "recommendations": ["coach d1b after 5.3 evidence"],
+backend\tests\test_teacher_feedback_projection.py:27:                        {"start_sec": 42, "end_sec": 54, "summary": "The teacher used a quick prompt before students responded."}
+backend\tests\test_teacher_feedback_projection.py:40:    assert "overall performance" not in lowered
+backend\tests\test_teacher_feedback_projection.py:41:    assert "developing" not in lowered
+backend\tests\test_teacher_feedback_projection.py:90:                "summary": "Overall performance: Developing (6.4/10).",
+backend\tests\test_teacher_feedback_projection.py:91:                "recommendations": ["coach d1b after 5.3 evidence"],
+backend\tests\test_teacher_feedback_projection.py:122:    assert "developing" not in str(payload).lower()
+backend\tests\test_teacher_feedback_projection.py:123:    assert "overall performance" not in str(payload).lower()
+frontend\src\lib\coachVoice.js:2:  "evidence was limited",
+frontend\src\lib\coachVoice.js:3:  "in the sampled frames",
+frontend\src\lib\coachVoice.js:5:  "confidence score",
+frontend\src\lib\coachVoice.js:6:  "the teacher demonstrated",
+frontend\src\lib\coachVoice.js:7:  "the teacher used",
+frontend\src\lib\coachVoice.js:8:  "rubric element",
+frontend\src\lib\coachVoice.js:9:  "score of",
+frontend\src\lib\coachVoice.js:17:  "overall performance",
+frontend\src\lib\coachVoice.js:18:  "sampled frames",
+frontend\src\lib\coachVoice.js:21:  "proficient",
+frontend\src\lib\coachVoice.js:22:  "developing",
+frontend\src\lib\coachVoice.js:23:  "the teacher showed",
+frontend\src\lib\coachVoice.js:24:  "coach d",
+frontend\src\locales\en\common.js:52:    priorityElements: "Priority rubric elements",
+frontend\src\locales\en\common.js:931:    workspaceFocusConfigured: "Priority rubric elements are configured",
+frontend\src\locales\en\common.js:983:      "Choose the rubric elements and focus note that should shape analysis, evidence summaries, and leadership attention.",
+frontend\src\locales\en\common.js:1033:      "This teacher is currently in the support range with an overall score of {{score}}.",
+frontend\src\locales\en\common.js:1165:    schoolFocusAreasDescription: "Aggregate performance on your top three priority rubric elements.",
+frontend\src\locales\en\common.js:1415:    proficient: "Proficient",
+frontend\src\locales\en\common.js:2078:    curriculumAdherenceDescription: "Separate adherence score contributing to overall performance.",
+frontend\src\locales\en\common.js:2315:    empty: "Consider observing peers who excel in areas you're developing. Recommendations will appear as more data becomes available.",
+frontend\src\locales\he\common.js:1416:    proficient: "מיומן",
+frontend\src\pages\TeachersPage.js:175:        else if (overallScore >= 6) performanceLevel = "proficient";
+frontend\src\pages\TeachersPage.js:505:                    { value: "proficient", label: t("teachersPage.proficient") },
+frontend\src\pages\TeachersPage.js:1139:          ? t("teachersPage.proficient")
+frontend\src\pages\TeachersPage.js:1146:      : levelLabel === t("teachersPage.proficient")
+

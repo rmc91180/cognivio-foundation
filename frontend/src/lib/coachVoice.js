@@ -14,6 +14,14 @@ export const BANNED_COACH_VOICE_PHRASES = [
   "sampled moment",
   "no summary data available",
   "no data available",
+  "overall performance",
+  "sampled frames",
+  "rubric",
+  "confidence",
+  "proficient",
+  "developing",
+  "the teacher showed",
+  "coach d",
 ];
 
 export const findBannedCoachVoicePhrases = (text = "") => {

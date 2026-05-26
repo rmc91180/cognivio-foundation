@@ -112,6 +112,7 @@ def flow_db(monkeypatch):
         coaching_tasks=_Collection(),
         coaching_task_reflections=_Collection(),
         video_comments=_Collection(),
+        recognition_badges=_Collection(),
         notifications=_Collection(),
         auth_event_log=_Collection(),
         master_admin_audit_events=_Collection(),
