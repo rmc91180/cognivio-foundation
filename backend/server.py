@@ -128,6 +128,15 @@ from app.services.teacher_artifact_quarantine import (
     reject_unsafe_teacher_payload,
     validate_teacher_artifact_source_chain,
 )
+from app.services.lesson_moment_quality import (
+    assessment_quality_blocks_teacher_feedback,
+    compute_assessment_quality,
+    compute_moment_quality,
+    dedupe_lesson_moments,
+    detect_fallback_text,
+    normalize_lesson_moment_window,
+    suggested_candidate_window_count,
+)
 from share_assets import (
     build_email_signature_html,
     render_email_signature_badge,
@@ -20145,6 +20154,26 @@ async def _teacher_projection_for_assessment(
             )
             return None
 
+        # PR C3: evidence-quality gate. If the assessment was generated from
+        # weak / fallback evidence, ``analysis_quality.teacher_feedback_allowed``
+        # is False and the teacher must see an honest empty state instead of
+        # rubric-leaking placeholder feedback. Older assessments without the
+        # quality block are NOT blocked here — they still pass through the C2
+        # unsafe-text gate below.
+        if assessment_quality_blocks_teacher_feedback(assessment):
+            log_structured(
+                logger,
+                "info",
+                "teacher_projection_evidence_insufficient",
+                teacher_id=teacher.get("id"),
+                assessment_id=(assessment or {}).get("id"),
+                video_id=(assessment or {}).get("video_id"),
+                quality_reasons=list(
+                    (assessment.get("analysis_quality") or {}).get("quality_reasons") or []
+                ),
+            )
+            return None
+
     language = _teacher_language(current_user, teacher, assessment)
     raw_tasks = list(coaching_tasks or [])
     task_counts = await _reflection_counts_by_task(teacher["id"], [task.get("id") for task in raw_tasks if task.get("id")])
@@ -26837,6 +26866,15 @@ async def analyze_video(
                 language=analysis_language,
             )
         
+        # PR C3: compute assessment evidence-quality before writing so the
+        # teacher-facing projection can fail closed when evidence is weak.
+        analysis_quality = compute_assessment_quality(
+            moments=moment_manifest.get("moments") or [],
+            transcript_doc=transcript_doc,
+            feature_doc=feature_doc,
+            element_scores=element_scores,
+        )
+
         # Create assessment document
         assessment_doc = {
             "id": str(uuid.uuid4()),
@@ -26856,6 +26894,7 @@ async def analyze_video(
             "analysis_mode": analysis_payload.get("analysis_mode", "fallback"),
             "analysis_confidence": analysis_metadata["analysis_confidence"],
             "analysis_modalities_used": analysis_metadata["analysis_modalities_used"],
+            "analysis_quality": analysis_quality,
             "specialist_orchestrator": analysis_metadata["specialist_orchestrator"],
             "specialist_trace": analysis_metadata["specialist_trace"],
             "analysis_context_snapshot": analysis_payload.get("analysis_context"),
@@ -27258,15 +27297,47 @@ def build_moment_manifest(video_id: str, video_path: str, frames: List[dict]) ->
         }
 
     windows = segment_video_windows(video_path, window_sec=VIDEO_ANALYSIS_WINDOW_SEC)
+    duration_sec: Optional[float] = None
+    if windows:
+        try:
+            duration_sec = max(float(window.get("end_sec") or 0.0) for window in windows)
+        except Exception:  # pragma: no cover - defensive
+            duration_sec = None
+
     scored_windows = score_windows(windows, frames)
     moments = select_lesson_moments(scored_windows, max_moments=VIDEO_ANALYSIS_MAX_MOMENTS)
+
+    # PR C3: normalize timestamps, drop duplicates, and attach the per-moment
+    # quality block before persistence. This guarantees that no persisted
+    # moment has representative_frame_sec outside its window and that two
+    # 923.8-943.8 moments cannot both be stored.
+    normalized: List[Dict[str, Any]] = []
+    for moment in moments:
+        normalized.append(
+            normalize_lesson_moment_window(
+                moment,
+                duration_sec=duration_sec,
+                available_frames=frames,
+            )
+        )
+    kept, dropped = dedupe_lesson_moments(normalized)
+    for moment in kept:
+        moment["quality"] = compute_moment_quality(
+            moment,
+            has_transcript_globally=None,  # filled in by build_multimodal_analysis_payload
+        )
+    candidate_target = suggested_candidate_window_count(duration_sec)
     return {
         "id": f"moments_{video_id}_{SMART_MOMENT_SAMPLING_VERSION}",
         "video_id": video_id,
         "strategy_version": SMART_MOMENT_SAMPLING_VERSION,
         "window_sec": VIDEO_ANALYSIS_WINDOW_SEC,
         "max_moments": VIDEO_ANALYSIS_MAX_MOMENTS,
-        "moments": moments,
+        "candidate_target": candidate_target,
+        "candidate_pool_size": len(scored_windows),
+        "duration_sec": duration_sec,
+        "moments": kept,
+        "deduped_moments": dropped,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
