@@ -332,6 +332,15 @@ def test_teacher_video_upload_queues_transcode_inside_tenant(monkeypatch, tmp_pa
     assert response.teacher_id == "teacher-1"
     assert response.transcode_status == "queued"
     assert len(fake_db.videos.docs) == 1
+    video_doc = fake_db.videos.docs[0]
+    assert video_doc["id"] == response.id
+    assert video_doc["teacher_id"] == "teacher-1"
+    assert video_doc["created_at"] == video_doc["upload_date"]
+    assert video_doc["original_filename"] == "lesson.mp4"
+    assert video_doc["raw_asset_state"] == "stored"
+    assert video_doc["processed_asset_state"] == "not_created"
+    assert video_doc["redacted_asset_state"] == "not_created"
+    assert video_doc["source_chain_status"] == "canonical_video_record_created"
     assert len(fake_db.video_evidence.docs) == 1
     assert queued_jobs[0]["teacher_id"] == "teacher-1"
 

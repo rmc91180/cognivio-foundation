@@ -12,7 +12,7 @@ import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, EmailStr
-from typing import List, Optional, Dict, Any, Tuple
+from typing import Iterable, List, Optional, Dict, Any, Tuple
 import uuid
 from datetime import datetime, timezone, timedelta
 import jwt
@@ -1904,6 +1904,225 @@ def _video_asset_state(file_path: Optional[str], *, public_url: Optional[str] = 
     if file_path:
         return "present"
     return "missing"
+
+
+def _build_video_source_chain_upload_fields(
+    *,
+    upload_time: str,
+    original_filename: Optional[str],
+    original_size_bytes: int,
+    raw_file_path: Optional[str],
+    raw_file_url: Optional[str],
+    raw_s3_key: Optional[str],
+) -> Dict[str, Any]:
+    raw_asset_state = "stored" if (raw_file_path or raw_file_url or raw_s3_key) else "missing"
+    return {
+        "created_at": upload_time,
+        "updated_at": upload_time,
+        "original_filename": original_filename,
+        "original_size_bytes": original_size_bytes,
+        "raw_asset_state": raw_asset_state,
+        "source_asset_state": raw_asset_state,
+        "processed_asset_state": "not_created",
+        "redacted_asset_state": "not_created",
+        "source_chain_status": "canonical_video_record_created",
+        "source_chain_version": 1,
+        "source_record_created_at": upload_time,
+        "latest_error": None,
+        "failure_reason": None,
+        "raw_deleted_at": None,
+        "raw_deletion_reason": None,
+    }
+
+
+async def _record_video_source_chain_incident(
+    incident_type: str,
+    *,
+    video_id: Optional[str] = None,
+    teacher_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    assessment_id: Optional[str] = None,
+    stage: str = "source_chain",
+    severity: str = "danger",
+    latest_error: Optional[str] = None,
+    context: Optional[str] = None,
+) -> None:
+    if not hasattr(db, "processing_incidents"):
+        return
+    now_iso = datetime.now(timezone.utc).isoformat()
+    incident_key = video_id or assessment_id or f"unknown:{incident_type}"
+    doc = {
+        "id": f"{incident_key}:{incident_type}",
+        "video_id": video_id,
+        "teacher_id": teacher_id,
+        "uploader_user_id": user_id,
+        "assessment_id": assessment_id,
+        "incident_type": incident_type,
+        "stage": stage,
+        "severity": severity,
+        "state": "active",
+        "latest_error": latest_error,
+        "context": context,
+        "first_seen_at": now_iso,
+        "last_seen_at": now_iso,
+        "resolved_at": None,
+    }
+    try:
+        existing = await db.processing_incidents.find_one({"id": doc["id"]}, {"_id": 0})
+        if existing and existing.get("first_seen_at"):
+            doc["first_seen_at"] = existing["first_seen_at"]
+        await db.processing_incidents.update_one({"id": doc["id"]}, {"$set": doc}, upsert=True)
+    except Exception:
+        logger.warning("Unable to record video source-chain incident", exc_info=True)
+
+
+async def _require_canonical_video_source(
+    video_id: Optional[str],
+    *,
+    context: str,
+    teacher_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> dict:
+    if not video_id:
+        await _record_video_source_chain_incident(
+            "missing_video_id",
+            teacher_id=teacher_id,
+            user_id=user_id,
+            context=context,
+            latest_error="video_id is required for video source-chain operation",
+        )
+        raise RuntimeError("Canonical video source id is required")
+    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
+    if not video:
+        await _record_video_source_chain_incident(
+            "missing_source_video",
+            video_id=video_id,
+            teacher_id=teacher_id,
+            user_id=user_id,
+            context=context,
+            latest_error="Canonical videos document is missing",
+        )
+        log_structured(
+            logger,
+            "error",
+            "video_source_chain_missing",
+            video_id=video_id,
+            teacher_id=teacher_id,
+            user_id=user_id,
+            context=context,
+        )
+        raise RuntimeError("Canonical video source record is missing")
+    return video
+
+
+async def _mark_raw_video_asset_deleted(
+    video_id: str,
+    *,
+    reason: str,
+    deleted_at: Optional[str] = None,
+) -> None:
+    deleted_at = deleted_at or datetime.now(timezone.utc).isoformat()
+    update_fields = {
+        "raw_file_path": None,
+        "raw_file_url": None,
+        "raw_s3_key": None,
+        "raw_purged_at": deleted_at,
+        "raw_deleted_at": deleted_at,
+        "raw_deletion_reason": reason,
+        "raw_asset_state": "deleted",
+        "source_asset_state": "deleted",
+        "updated_at": deleted_at,
+        "status_updated_at": deleted_at,
+    }
+    await db.videos.update_one({"id": video_id}, {"$set": update_fields})
+
+
+# Derived collections that hold references to a canonical video record. When a
+# cleanup/reset path removes the canonical video document, every collection
+# listed here must be scrubbed for the corresponding video_id (and where
+# applicable assessment_id) so the source-chain does not leave orphan derived
+# artifacts behind that future code might surface as if they were reviewed.
+_VIDEO_DERIVED_COLLECTIONS_BY_VIDEO_ID: Tuple[str, ...] = (
+    "coaching_tasks",
+    "video_analysis_moments",
+    "video_audio_transcripts",
+    "transcripts",
+    "video_analysis_features",
+    "analysis_features",
+    "video_sampling_manifests",
+)
+_VIDEO_DERIVED_COLLECTIONS_BY_ASSESSMENT_ID: Tuple[str, ...] = (
+    "coaching_tasks",
+    "coaching_task_reflections",
+)
+
+
+async def _delete_derived_video_artifacts(
+    *,
+    video_ids: Optional[Iterable[str]] = None,
+    assessment_ids: Optional[Iterable[str]] = None,
+    teacher_id: Optional[str] = None,
+    context: str = "video_cleanup",
+) -> Dict[str, int]:
+    """Cascade-delete derived video-linked artifacts for the supplied ids.
+
+    This prevents the orphan-derived-record failure mode (cause G in the
+    source-chain audit) where a cleanup/reset path removes the canonical
+    `videos` document while leaving downstream artifacts behind.
+    """
+    deleted: Dict[str, int] = {}
+    video_id_list = [vid for vid in (video_ids or []) if vid]
+    assessment_id_list = [aid for aid in (assessment_ids or []) if aid]
+
+    if video_id_list:
+        for collection_name in _VIDEO_DERIVED_COLLECTIONS_BY_VIDEO_ID:
+            collection = getattr(db, collection_name, None)
+            if collection is None or not hasattr(collection, "delete_many"):
+                continue
+            try:
+                result = await collection.delete_many({"video_id": {"$in": video_id_list}})
+                deleted[collection_name] = deleted.get(collection_name, 0) + (
+                    getattr(result, "deleted_count", 0) or 0
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to cascade-delete %s for videos %s: %s",
+                    collection_name,
+                    video_id_list,
+                    exc,
+                )
+
+    if assessment_id_list:
+        for collection_name in _VIDEO_DERIVED_COLLECTIONS_BY_ASSESSMENT_ID:
+            collection = getattr(db, collection_name, None)
+            if collection is None or not hasattr(collection, "delete_many"):
+                continue
+            try:
+                result = await collection.delete_many(
+                    {"assessment_id": {"$in": assessment_id_list}}
+                )
+                deleted[collection_name] = deleted.get(collection_name, 0) + (
+                    getattr(result, "deleted_count", 0) or 0
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to cascade-delete %s for assessments %s: %s",
+                    collection_name,
+                    assessment_id_list,
+                    exc,
+                )
+
+    log_structured(
+        logger,
+        "info",
+        "video_source_chain_cascade_delete",
+        context=context,
+        teacher_id=teacher_id,
+        video_id_count=len(video_id_list),
+        assessment_id_count=len(assessment_id_list),
+        deleted=deleted,
+    )
+    return deleted
 
 
 async def _refresh_processing_incidents() -> List[dict]:
@@ -3953,6 +4172,20 @@ async def _cleanup_teacher_smoke_artifacts(
     deleted_counts["teacher_face_profiles"] = (
         await db.teacher_face_profiles.delete_many({"teacher_id": teacher_id})
     ).deleted_count
+    # Cascade-delete derived video-linked artifacts before removing the canonical
+    # video document so the smoke cleanup never leaves orphaned coaching tasks,
+    # moments, transcripts, or analysis features behind. See
+    # docs/codex-reports/video-source-chain-audit.md (cause G).
+    derived_counts = await _delete_derived_video_artifacts(
+        video_ids=video_ids,
+        assessment_ids=assessment_ids,
+        teacher_id=teacher_id,
+        context="admin_smoke_cleanup",
+    )
+    for collection_name, count in derived_counts.items():
+        deleted_counts[collection_name] = (
+            deleted_counts.get(collection_name, 0) + count
+        )
     deleted_counts["videos"] = (
         await db.videos.delete_many({"teacher_id": teacher_id})
     ).deleted_count
@@ -10387,6 +10620,12 @@ async def _enqueue_video_privacy_job(
     processing_purpose: str = ProcessingPurpose.PRIVACY_BLURRING.value,
 ) -> None:
     normalized_purpose = _assert_allowed_biometric_processing_purpose(processing_purpose)
+    await _require_canonical_video_source(
+        video_id,
+        context="enqueue_video_privacy_job",
+        teacher_id=teacher_id,
+        user_id=user_id,
+    )
     now = datetime.now(timezone.utc).isoformat()
     await db.video_privacy_jobs.update_one(
         {"video_id": video_id},
@@ -10452,9 +10691,12 @@ async def _run_video_privacy_job(video_id: str) -> None:
     job_final_status = PrivacyProcessingStatus.FAILED.value
     with app_metrics.track_privacy_job(mode="unknown"):
         try:
-            video = await db.videos.find_one({"id": video_id}, {"_id": 0})
-            if not video:
-                raise RuntimeError("Video not found")
+            video = await _require_canonical_video_source(
+                video_id,
+                context="privacy_worker",
+                teacher_id=job.get("teacher_id"),
+                user_id=job.get("user_id"),
+            )
             manual_override = video.get("privacy_manual_override") or {}
             reference_docs = await db.teacher_face_references.find(
                 {"teacher_id": job["teacher_id"]},
@@ -10679,7 +10921,9 @@ async def _run_video_privacy_job(video_id: str) -> None:
                         "redacted_file_url": redacted_file_url,
                         "redacted_thumbnail_path": redacted_thumbnail_relative_path,
                         "redacted_thumbnail_url": redacted_thumbnail_url,
+                        "redacted_asset_state": "stored",
                         "status_updated_at": finished_at,
+                        "updated_at": finished_at,
                         **retention_update_fields,
                         **raw_cleanup_fields,
                     }
@@ -10723,7 +10967,11 @@ async def _run_video_privacy_job(video_id: str) -> None:
                         "privacy_pipeline_state": PrivacyPipelineState.DESTRUCTIVE_BLUR_FAILED.value,
                         "privacy_failed_at": finished_at,
                         "privacy_error": error_message,
+                        "redacted_asset_state": "failed",
+                        "latest_error": error_message,
+                        "failure_reason": "privacy_failed",
                         "status_updated_at": finished_at,
+                        "updated_at": finished_at,
                     }
                 },
             )
@@ -10737,6 +10985,14 @@ async def _run_video_privacy_job(video_id: str) -> None:
                 video_id,
                 actor_user_id=job.get("user_id"),
                 details={"error": error_message},
+            )
+            await _record_video_source_chain_incident(
+                "privacy_failed",
+                video_id=video_id,
+                teacher_id=job.get("teacher_id"),
+                user_id=job.get("user_id"),
+                context="video_privacy_worker",
+                latest_error=error_message,
             )
             logger.error(f"Privacy worker failed for {video_id}: {error_message}")
         finally:
@@ -10766,6 +11022,12 @@ async def _enqueue_video_processing_job(
 ) -> None:
     if not video_id or not teacher_id or not user_id or not file_path:
         raise ValueError("video_id, teacher_id, user_id, and file_path are required to enqueue")
+    await _require_canonical_video_source(
+        video_id,
+        context="enqueue_video_processing_job",
+        teacher_id=teacher_id,
+        user_id=user_id,
+    )
     now = datetime.now(timezone.utc).isoformat()
     await db.video_processing_jobs.update_one(
         {"video_id": video_id},
@@ -10806,6 +11068,12 @@ async def _enqueue_video_transcode_job(
 ) -> None:
     if not video_id or not teacher_id or not user_id or not file_path:
         raise ValueError("video_id, teacher_id, user_id, and file_path are required to enqueue")
+    await _require_canonical_video_source(
+        video_id,
+        context="enqueue_video_transcode_job",
+        teacher_id=teacher_id,
+        user_id=user_id,
+    )
     now = datetime.now(timezone.utc).isoformat()
     await db.video_transcode_jobs.update_one(
         {"video_id": video_id},
@@ -10876,9 +11144,12 @@ async def _run_video_transcode_job(video_id: str) -> None:
     error_message: Optional[str] = None
     job_final_status = VideoTranscodeStatus.FAILED.value
     try:
-        video = await db.videos.find_one({"id": video_id}, {"_id": 0})
-        if not video:
-            raise RuntimeError("Video not found")
+        video = await _require_canonical_video_source(
+            video_id,
+            context="transcode_worker",
+            teacher_id=job.get("teacher_id"),
+            user_id=job.get("user_id"),
+        )
 
         source_path = job.get("file_path") or video.get("raw_file_path") or video.get("file_path")
         if not source_path:
@@ -10924,8 +11195,10 @@ async def _run_video_transcode_job(video_id: str) -> None:
                     "processed_file_path": output_relative_path,
                     "processed_content_type": transcode_result.get("content_type") or "video/mp4",
                     "processed_file_size_bytes": transcode_result.get("file_size_bytes"),
+                    "processed_asset_state": "stored",
                     "processing_asset_preference": "processed",
                     "status_updated_at": finished_at,
+                    "updated_at": finished_at,
                 }
             },
         )
@@ -10960,9 +11233,21 @@ async def _run_video_transcode_job(video_id: str) -> None:
                     "transcode_completed_at": None,
                     "transcode_failed_at": finished_at,
                     "transcode_error": error_message,
+                    "processed_asset_state": "failed",
+                    "latest_error": error_message,
+                    "failure_reason": "transcode_failed",
                     "status_updated_at": finished_at,
+                    "updated_at": finished_at,
                 }
             },
+        )
+        await _record_video_source_chain_incident(
+            "transcode_failed",
+            video_id=video_id,
+            teacher_id=(job or {}).get("teacher_id"),
+            user_id=(job or {}).get("user_id"),
+            context="video_transcode_worker",
+            latest_error=error_message,
         )
         logger.error(f"Video transcode worker failed for {video_id}: {error_message}")
     finally:
@@ -11469,16 +11754,10 @@ async def _purge_expired_privacy_artifacts() -> None:
             except Exception as exc:
                 logger.warning(f"Failed to remove expired raw video {video.get('id')}: {exc}")
         _delete_s3_key(video.get("raw_s3_key") or video.get("s3_key"))
-        await db.videos.update_one(
-            {"id": video["id"]},
-            {
-                "$set": {
-                    "raw_file_path": None,
-                    "raw_file_url": None,
-                    "raw_s3_key": None,
-                    "raw_purged_at": now_iso,
-                }
-            },
+        await _mark_raw_video_asset_deleted(
+            video["id"],
+            reason="privacy_raw_retention_expired",
+            deleted_at=now_iso,
         )
         await _log_privacy_audit_event(
             "raw_video_purged",
@@ -11669,8 +11948,40 @@ async def upload_video(
             "teacher_reference_images_available": bool(readiness.get("privacy_reference_images_ready")),
             "teacher_reference_image_count": reference_count,
             "privacy_blur_teacher_match_status": reference_status,
+            **_build_video_source_chain_upload_fields(
+                upload_time=upload_time,
+                original_filename=file.filename,
+                original_size_bytes=size,
+                raw_file_path=relative_path,
+                raw_file_url=file_url,
+                raw_s3_key=s3_key,
+            ),
         }
-        await db.videos.insert_one(video_doc)
+        try:
+            await db.videos.insert_one(video_doc)
+        except Exception as exc:
+            log_structured(
+                logger,
+                "error",
+                "video_source_record_insert_failed",
+                video_id=video_id,
+                teacher_id=teacher_id,
+                user_id=current_user["id"],
+                raw_asset_state=video_doc.get("raw_asset_state"),
+                upload_source=upload_source,
+                error_type=exc.__class__.__name__,
+            )
+            raise
+        log_structured(
+            logger,
+            "info",
+            "video_source_record_inserted",
+            video_id=video_id,
+            teacher_id=teacher_id,
+            user_id=current_user["id"],
+            raw_asset_state=video_doc.get("raw_asset_state"),
+            upload_source=upload_source,
+        )
 
         if VIDEO_TRANSCODE_PIPELINE_ENABLED:
             await _enqueue_video_transcode_job(
@@ -15670,6 +15981,25 @@ async def _create_coaching_tasks_for_assessment(
     if not teacher:
         return []
     video = video or await db.videos.find_one({"id": assessment.get("video_id")}, {"_id": 0})
+    if assessment.get("video_id") and not video:
+        await _record_video_source_chain_incident(
+            "missing_source_video",
+            video_id=assessment.get("video_id"),
+            teacher_id=assessment.get("teacher_id"),
+            user_id=(observer_user or {}).get("id") or assessment.get("user_id"),
+            assessment_id=assessment.get("id"),
+            context="create_coaching_tasks_for_assessment",
+            latest_error="Coaching task creation blocked because canonical video is missing",
+        )
+        log_structured(
+            logger,
+            "error",
+            "coaching_tasks_blocked_missing_video_source",
+            video_id=assessment.get("video_id"),
+            assessment_id=assessment.get("id"),
+            teacher_id=assessment.get("teacher_id"),
+        )
+        return []
     observer_id = (
         (observer_user or {}).get("id")
         or assessment.get("user_id")
@@ -26036,6 +26366,13 @@ async def _persist_assessment_evidence_from_scores(
     assessment: dict,
     current_user: dict,
 ) -> List[dict]:
+    if assessment.get("video_id"):
+        await _require_canonical_video_source(
+            assessment.get("video_id"),
+            context="persist_assessment_evidence",
+            teacher_id=assessment.get("teacher_id"),
+            user_id=(current_user or {}).get("id"),
+        )
     framework = _get_framework_by_type(assessment.get("framework_type", "danielson"))
     created_at = datetime.now(timezone.utc).isoformat()
     evidence_docs: List[dict] = []
@@ -26102,9 +26439,12 @@ async def analyze_video(
             teacher_id=teacher_id,
             user_id=user_id,
         )
-        video = await db.videos.find_one({"id": video_id}, {"_id": 0})
-        if not video:
-            raise RuntimeError("Video not found")
+        video = await _require_canonical_video_source(
+            video_id,
+            context="analysis_start",
+            teacher_id=teacher_id,
+            user_id=user_id,
+        )
         if _normalize_privacy_status(video.get("privacy_status")) != PrivacyProcessingStatus.COMPLETED.value:
             raise RuntimeError("Privacy processing must complete before analysis starts")
         file_path = video.get("redacted_file_path") or file_path
@@ -30088,12 +30428,35 @@ async def reset_demo_data(current_user: dict = Depends(get_current_user)):
         return {"message": "No demo data found", "deleted": {}}
 
     deleted = {}
+    # Snapshot ids before deletion so we can cascade derived artifacts that
+    # reference them, even though videos/assessments are removed below.
+    demo_video_docs = await db.videos.find(
+        {"teacher_id": {"$in": teacher_ids}, "uploaded_by": current_user["id"]},
+        {"_id": 0, "id": 1},
+    ).to_list(5000)
+    demo_video_ids = [doc["id"] for doc in demo_video_docs if doc.get("id")]
+    demo_assessment_docs = await db.assessments.find(
+        {"teacher_id": {"$in": teacher_ids}, "user_id": current_user["id"]},
+        {"_id": 0, "id": 1},
+    ).to_list(5000)
+    demo_assessment_ids = [doc["id"] for doc in demo_assessment_docs if doc.get("id")]
+
     deleted["assessments"] = (await db.assessments.delete_many(
         {"teacher_id": {"$in": teacher_ids}, "user_id": current_user["id"]}
     )).deleted_count
     deleted["observations"] = (await db.observations.delete_many(
         {"teacher_id": {"$in": teacher_ids}, "user_id": current_user["id"]}
     )).deleted_count
+    # Cascade derived video-linked artifacts before deleting the canonical
+    # videos so the demo reset never leaves orphan moments/transcripts/
+    # coaching tasks behind that future code might surface as if reviewed.
+    cascade_counts = await _delete_derived_video_artifacts(
+        video_ids=demo_video_ids,
+        assessment_ids=demo_assessment_ids,
+        context="legacy_demo_reset",
+    )
+    for collection_name, count in cascade_counts.items():
+        deleted[collection_name] = deleted.get(collection_name, 0) + count
     deleted["videos"] = (await db.videos.delete_many(
         {"teacher_id": {"$in": teacher_ids}, "uploaded_by": current_user["id"]}
     )).deleted_count
