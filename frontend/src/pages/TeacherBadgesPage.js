@@ -91,7 +91,7 @@ export function TeacherBadgesPage() {
 
             {accolades.length ? (
               <Panel className="space-y-4">
-                <SectionHeader title="Cognivio accolades" description="Celebrations tied to real lesson feedback and highlighted teaching moves." />
+                <SectionHeader title="Gold-Star recognition" description="Awarded recognition — separate from personal lesson highlights you see below." />
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                   {accolades.map((item) => (
                     <article key={item.id} className="rounded-xl border border-amber-100 bg-amber-50 p-5">
@@ -109,9 +109,10 @@ export function TeacherBadgesPage() {
               </Panel>
             ) : (
               <Panel>
+                <SectionHeader title="Gold-Star recognition" description="Awarded recognition — separate from personal lesson highlights below." />
                 <EmptyState
-                  title="Recognition you earn will appear here."
-                  message="When a reviewed lesson highlights a strong coaching move, you’ll be able to return to it from this page."
+                  title="Gold-Star recognition will appear here when awarded."
+                  message="You will still see personal lesson highlights below even before any Gold-Star is awarded."
                 />
                 {data.demo_eligible ? (
                   <div className="mt-4 flex justify-center">
@@ -125,16 +126,16 @@ export function TeacherBadgesPage() {
 
             <div className="grid gap-6 lg:grid-cols-2">
               <Panel className="space-y-4">
-                <SectionHeader title="Highlighted Moments" description="Lesson moments worth revisiting and celebrating." />
+                <SectionHeader title="Personal lesson highlights" description="Lesson moments worth revisiting — these do not require Gold-Star recognition." />
                 {highlightedMoments.length ? highlightedMoments.map((item) => (
                   <Link key={`${item.id}-moment`} to={item.href || `/videos/${item.video_id}`} className="block rounded-lg border border-slate-200 bg-slate-50 p-4 hover:bg-white">
                     <div className="font-semibold text-slate-900">{item.title}</div>
                     <p className="mt-2 text-sm leading-6 text-slate-700">{item.description}</p>
                   </Link>
-                )) : <EmptyState title="Highlighted moments will appear after recognition is awarded." />}
+                )) : <EmptyState title="Personal highlights will appear as your reviewed lessons build up." message="They do not require Gold-Star recognition — Cognivio surfaces a positive moment from every reviewed lesson when valid evidence exists." />}
               </Panel>
               <Panel className="space-y-4">
-                <SectionHeader title="Spotlight Lessons" description="Reviewed lessons you may want to return to before a coaching conversation." />
+                <SectionHeader title="Spotlight lessons" description="Reviewed lessons you may want to return to before a coaching conversation." />
                 {spotlightLessons.length ? spotlightLessons.map((item) => (
                   <Link key={`${item.id}-spotlight`} to={item.href || `/videos/${item.video_id}`} className="block rounded-lg border border-slate-200 bg-slate-50 p-4 hover:bg-white">
                     <div className="font-semibold text-slate-900">{item.lesson_title || item.title}</div>

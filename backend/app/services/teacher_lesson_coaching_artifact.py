@@ -87,69 +87,195 @@ TEACHER_DEEP_DIVE_MAX = 4
 # These phrases are *NEVER* shown verbatim as teacher-facing text; they only
 # guide the generator's word choices when the rubric element is the only
 # signal we have. The teacher actually sees the action item phrasing below.
-RUBRIC_TO_PRACTICE: Dict[str, Dict[str, str]] = {
+RUBRIC_TO_PRACTICE: Dict[str, Dict[str, Dict[str, str]]] = {
     "demonstrating knowledge of students": {
-        "practice": "learn more about how students are thinking",
-        "next_step": "Pick one moment to ask a student to explain their reasoning before you respond.",
+        "en": {
+            "practice": "learn more about how students are thinking",
+            "next_step": "Pick one moment to ask a student to explain their reasoning before you respond.",
+            "reflection": "Who surprised you with how they explained their thinking?",
+        },
+        "he": {
+            "practice": "להבין טוב יותר איך התלמידים חושבים",
+            "next_step": "בחרו רגע אחד שבו תבקשו מתלמיד להסביר איך הוא חשב, לפני שתגיבו.",
+            "reflection": "מי הפתיע אתכם בהסבר שלו על אופן החשיבה?",
+        },
     },
     "demonstrating knowledge of content and pedagogy": {
-        "practice": "make one teaching move clearer for students",
-        "next_step": "Choose one concept in the next lesson and plan how you'll model it step by step.",
+        "en": {
+            "practice": "make one teaching move clearer for students",
+            "next_step": "Choose one concept in the next lesson and plan how you'll model it step by step.",
+            "reflection": "What did students do once you modeled the step you planned?",
+        },
+        "he": {
+            "practice": "להבהיר מהלך הוראה אחד עבור התלמידים",
+            "next_step": "בחרו מושג אחד בשיעור הבא ותכננו כיצד תדגימו אותו צעד-אחר-צעד.",
+            "reflection": "מה התלמידים עשו אחרי שהדגמתם את הצעד שתכננתם?",
+        },
     },
     "creating an environment of respect and rapport": {
-        "practice": "build more student trust and participation",
-        "next_step": "Invite one quieter student into the conversation by name in the next lesson.",
+        "en": {
+            "practice": "build more student trust and participation",
+            "next_step": "Invite one quieter student into the conversation by name in the next lesson.",
+            "reflection": "Who joined the conversation in a way you noticed?",
+        },
+        "he": {
+            "practice": "לחזק אמון והשתתפות של תלמידים",
+            "next_step": "הזמינו בשיעור הבא תלמיד שקט אחד לשיחה, בפנייה אישית בשמו.",
+            "reflection": "מי הצטרף לשיחה באופן ששמתם לב אליו?",
+        },
     },
     "using questioning and discussion techniques": {
-        "practice": "ask questions that open up student thinking",
-        "next_step": "After one student answers, pause and ask, 'Who can build on that?'",
+        "en": {
+            "practice": "ask questions that open up student thinking",
+            "next_step": "After one student answers, pause and ask, 'Who can build on that?'",
+            "reflection": "What changed when you asked someone to build on a peer's answer?",
+        },
+        "he": {
+            "practice": "לשאול שאלות שפותחות את החשיבה של התלמידים",
+            "next_step": "אחרי שתלמיד עונה, עצרו ושאלו: 'מי יכול להוסיף על מה שנאמר?'",
+            "reflection": "מה השתנה כשביקשתם מתלמיד להוסיף על תשובה של חבר?",
+        },
     },
     "engaging students in learning": {
-        "practice": "give students more ways to show their thinking",
-        "next_step": "Plan one moment where students explain their thinking to a partner before sharing with the class.",
+        "en": {
+            "practice": "give students more ways to show their thinking",
+            "next_step": "Plan one moment where students explain their thinking to a partner before sharing with the class.",
+            "reflection": "Who explained more when they spoke with a partner first?",
+        },
+        "he": {
+            "practice": "לתת לתלמידים עוד דרכים להראות את החשיבה שלהם",
+            "next_step": "תכננו רגע אחד שבו התלמידים מסבירים את החשיבה שלהם לחבר לפני שמשתפים בכיתה.",
+            "reflection": "מי הסביר יותר אחרי שהזדמן לו לדבר עם חבר קודם?",
+        },
     },
     "using assessment in instruction": {
-        "practice": "check who is with you in real time",
-        "next_step": "Before moving on, ask one student to restate the goal in their own words.",
+        "en": {
+            "practice": "check who is with you in real time",
+            "next_step": "Before moving on, ask one student to restate the goal in their own words.",
+            "reflection": "What did the student's restatement tell you about what stuck?",
+        },
+        "he": {
+            "practice": "לבדוק בזמן אמת מי מבין אתכם",
+            "next_step": "לפני שתמשיכו, בקשו מתלמיד לחזור על המטרה במילים שלו.",
+            "reflection": "מה לימדה אתכם הניסוח של התלמיד לגבי מה שהבין?",
+        },
     },
     "managing classroom procedures": {
-        "practice": "smooth one transition in the lesson",
-        "next_step": "Pick the one transition that slowed you down and rehearse it briefly with students.",
+        "en": {
+            "practice": "smooth one transition in the lesson",
+            "next_step": "Pick the one transition that slowed you down and rehearse it briefly with students.",
+            "reflection": "How long did that transition take after you rehearsed it?",
+        },
+        "he": {
+            "practice": "לשפר מעבר אחד בתוך השיעור",
+            "next_step": "בחרו את המעבר שעיכב אתכם הכי הרבה והתאמנו עליו בקצרה עם התלמידים.",
+            "reflection": "כמה זמן לקח המעבר הזה אחרי שתרגלתם אותו?",
+        },
     },
     "managing student behavior": {
-        "practice": "set one clear expectation that students can repeat back",
-        "next_step": "Name one expectation at the start of the next lesson and ask a student to restate it.",
+        "en": {
+            "practice": "set one clear expectation that students can repeat back",
+            "next_step": "Name one expectation at the start of the next lesson and ask a student to restate it.",
+            "reflection": "Who showed they remembered the expectation later in the lesson?",
+        },
+        "he": {
+            "practice": "להציב ציפייה אחת ברורה שהתלמידים יכולים לחזור עליה",
+            "next_step": "ציינו ציפייה אחת בתחילת השיעור הבא ובקשו מתלמיד לחזור עליה במילים שלו.",
+            "reflection": "מי הראה שזכר את הציפייה גם בהמשך השיעור?",
+        },
     },
     "organizing physical space": {
-        "practice": "use the room setup to support participation",
-        "next_step": "Adjust where you stand at one point in the lesson so more students can join in.",
+        "en": {
+            "practice": "use the room setup to support participation",
+            "next_step": "Adjust where you stand at one point in the lesson so more students can join in.",
+            "reflection": "Who joined in differently because of where you stood?",
+        },
+        "he": {
+            "practice": "להשתמש בארגון המרחב כדי לתמוך בהשתתפות",
+            "next_step": "בחרו רגע אחד בשיעור ושנו את המקום שבו אתם עומדים, כדי שיותר תלמידים יוכלו להצטרף.",
+            "reflection": "מי הצטרף אחרת בגלל המקום שבו עמדתם?",
+        },
     },
     "setting instructional outcomes": {
-        "practice": "make the learning target clearer for students",
-        "next_step": "Open the next lesson by sharing the goal in plain language and asking a student to repeat it.",
+        "en": {
+            "practice": "make the learning target clearer for students",
+            "next_step": "Open the next lesson by sharing the goal in plain language and asking a student to repeat it.",
+            "reflection": "How did the lesson change once students said the goal in their own words?",
+        },
+        "he": {
+            "practice": "להבהיר לתלמידים את מטרת הלמידה",
+            "next_step": "פתחו את השיעור הבא בשיתוף המטרה בשפה פשוטה, ובקשו מתלמיד לחזור עליה.",
+            "reflection": "איך השיעור השתנה אחרי שהתלמידים אמרו את המטרה במילים שלהם?",
+        },
     },
     "establishing a culture for learning": {
-        "practice": "help students see the value of the work",
-        "next_step": "Spend 30 seconds at the start of the next lesson connecting the work to something students care about.",
+        "en": {
+            "practice": "help students see the value of the work",
+            "next_step": "Spend 30 seconds at the start of the next lesson connecting the work to something students care about.",
+            "reflection": "Who showed more interest because of the connection you made?",
+        },
+        "he": {
+            "practice": "לעזור לתלמידים לראות את הערך בעבודה",
+            "next_step": "הקדישו 30 שניות בתחילת השיעור כדי לקשר את העבודה למשהו שחשוב לתלמידים.",
+            "reflection": "מי הראה יותר עניין בגלל הקשר שיצרתם?",
+        },
     },
     "growing and developing professionally": {
-        "practice": "choose one practice move to keep improving",
-        "next_step": "Pick one specific teaching move from this lesson to refine in your next attempt.",
+        "en": {
+            "practice": "choose one practice move to keep improving",
+            "next_step": "Pick one specific teaching move from this lesson to refine in your next attempt.",
+            "reflection": "What changed when you refined that move?",
+        },
+        "he": {
+            "practice": "לבחור מהלך אחד שתרצו להמשיך לשפר",
+            "next_step": "בחרו מהלך הוראה ספציפי אחד מהשיעור הזה ושפרו אותו בניסיון הבא.",
+            "reflection": "מה השתנה כששיפרתם את המהלך הזה?",
+        },
     },
     "reflecting on teaching": {
-        "practice": "notice what worked and what to try differently",
-        "next_step": "Write one quick note after the next lesson about who joined the conversation and who didn't.",
+        "en": {
+            "practice": "notice what worked and what to try differently",
+            "next_step": "Write one quick note after the next lesson about who joined the conversation and who didn't.",
+            "reflection": "What pattern did you notice across the lesson?",
+        },
+        "he": {
+            "practice": "לשים לב למה שעבד ולמה שכדאי לנסות אחרת",
+            "next_step": "כתבו פתק קצר אחרי השיעור הבא על מי שהצטרף לשיחה ומי לא.",
+            "reflection": "איזה דפוס שמתם לב אליו לאורך השיעור?",
+        },
     },
 }
 
 
-def translate_rubric_label_to_practice(label: Optional[str]) -> Optional[Dict[str, str]]:
-    """Return ``{"practice": ..., "next_step": ...}`` for a rubric label or None."""
+def _language_key(language: Optional[str]) -> str:
+    return "he" if (language or "en").lower().startswith(("he", "iw")) else "en"
+
+
+def translate_rubric_label_to_practice(
+    label: Optional[str],
+    *,
+    language: Optional[str] = "en",
+) -> Optional[Dict[str, str]]:
+    """Return ``{"practice", "next_step", "reflection"}`` for a rubric label.
+
+    PR C5: returns the language-appropriate variant. ``language`` starting
+    with ``he`` returns Hebrew; everything else returns English. If the rubric
+    is not in the table, or the requested language is not available, the
+    function returns ``None`` so the caller falls back to the safe Hebrew /
+    English empty state rather than mixing languages.
+    """
 
     if not label:
         return None
     key = re.sub(r"\s+", " ", str(label).strip().lower())
-    return RUBRIC_TO_PRACTICE.get(key)
+    entry = RUBRIC_TO_PRACTICE.get(key)
+    if not entry:
+        return None
+    lang = _language_key(language)
+    variant = entry.get(lang)
+    if not variant:
+        return None
+    return dict(variant)
 
 
 # ---------------------------------------------------------------------------
@@ -201,11 +327,12 @@ def _generate_action_item_from_rubric(
         or score.get("name")
         or score.get("label")
     )
-    translation = translate_rubric_label_to_practice(label)
+    translation = translate_rubric_label_to_practice(label, language=language)
     if not translation:
         return None
     next_step = translation["next_step"]
     practice = translation["practice"]
+    reflection = translation.get("reflection")
     if not _is_clean_teacher_text(next_step):
         return None
     if not _is_clean_teacher_text(practice):
@@ -220,15 +347,16 @@ def _generate_action_item_from_rubric(
         except (TypeError, ValueError):
             start_sec = end_sec = None
     item_id = f"action-{assessment_id or video_id or 'lesson'}-rubric-{index}"
+    is_he = _language_key(language) == "he"
     return {
         "id": item_id,
-        "title": "Try one small move next lesson",
+        "title": "Try one small move next lesson" if not is_he else "מהלך קטן אחד לשיעור הבא",
         "body": next_step,
         "try_next_lesson": next_step,
         "why_it_matters": (
             f"This keeps your next practice move focused on one thing you can {practice}."
-            if (language or "en").lower().startswith("en")
-            else "כך תרכזו את התרגול במהלך אחד קטן וברור."
+            if not is_he
+            else f"כך תרכזו את התרגול במהלך אחד שמטרתו {practice}."
         ),
         "status": "open",
         "source": "analysis",
@@ -239,7 +367,7 @@ def _generate_action_item_from_rubric(
             if video_id and start_sec is not None
             else f"/videos/{video_id}" if video_id else None
         ),
-        "reflection_prompt": _action_reflection_prompt(next_step, language=language),
+        "reflection_prompt": reflection or _action_reflection_prompt(next_step, language=language),
     }
 
 

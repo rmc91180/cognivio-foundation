@@ -4,6 +4,12 @@ import { useQuery } from "@tanstack/react-query";
 import { LayoutShell } from "@/components/LayoutShell";
 import { EmptyState, ErrorState, Field, Input, LoadingState, PageContextHeader, Panel } from "@/components/ui";
 import { teacherApi } from "@/lib/api";
+import {
+  artifactLessonStatus,
+  artifactSummaryText,
+  isArtifactBlocked,
+  readArtifact,
+} from "@/lib/teacherCoachingArtifact";
 
 const formatDate = (value) => {
   if (!value) return "Recently";
@@ -103,30 +109,46 @@ export function TeacherLessonsPage() {
 
             {lessons.length ? (
               <div className="grid gap-4 md:grid-cols-2">
-                {lessons.map((lesson) => (
-                  <article key={lesson.video_id || lesson.assessment_id || lesson.title} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <h2 className="text-base font-semibold text-slate-900">{lesson.title || "Lesson recording"}</h2>
-                        <p className="mt-1 text-xs text-slate-500">
-                          {[lesson.subject, lesson.class_section, formatDate(lesson.uploaded_at)].filter(Boolean).join(" • ")}
-                        </p>
+                {lessons.map((lesson) => {
+                  // PR C5: when the artifact is blocked we do not display the
+                  // legacy summary text; the status pill drops out of "reviewed".
+                  const artifact = readArtifact(lesson);
+                  const blocked = isArtifactBlocked(artifact);
+                  const safeStatus = artifactLessonStatus(artifact, lesson.status);
+                  const artifactSummary = artifactSummaryText(artifact);
+                  const displaySummary = blocked
+                    ? ""
+                    : artifactSummary || lesson.summary || "";
+                  return (
+                    <article key={lesson.video_id || lesson.assessment_id || lesson.title} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <h2 className="text-base font-semibold text-slate-900">{lesson.title || "Lesson recording"}</h2>
+                          <p className="mt-1 text-xs text-slate-500">
+                            {[lesson.subject, lesson.class_section, formatDate(lesson.uploaded_at)].filter(Boolean).join(" • ")}
+                          </p>
+                        </div>
+                        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">{statusLabel(safeStatus)}</span>
                       </div>
-                      <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">{statusLabel(lesson.status)}</span>
-                    </div>
-                    {lesson.summary ? (
-                      <p className="mt-4 text-sm leading-6 text-slate-700">{lesson.summary}</p>
-                    ) : (
-                      <p className="mt-4 text-sm leading-6 text-slate-600">When this recording is reviewed, your coaching summary and next steps will appear here.</p>
-                    )}
-                    <div className="mt-4 flex flex-wrap items-center gap-3">
-                      <Link to={lesson.href || "/videos"} className="inline-flex min-h-[44px] items-center text-sm font-semibold text-primary hover:text-primary/80">
-                        {lesson.status === "reviewed" ? "View feedback" : "Watch recording"}
-                      </Link>
-                      {lesson.shared_moments_count ? <span className="text-xs font-medium text-slate-500">{lesson.shared_moments_count} moments to revisit</span> : null}
-                    </div>
-                  </article>
-                ))}
+                      {displaySummary ? (
+                        <p className="mt-4 text-sm leading-6 text-slate-700">{displaySummary}</p>
+                      ) : blocked ? (
+                        <p className="mt-4 text-sm leading-6 text-slate-600">
+                          {artifact?.empty_state?.message
+                            || "Feedback will appear after a complete review is ready."}
+                        </p>
+                      ) : (
+                        <p className="mt-4 text-sm leading-6 text-slate-600">When this recording is reviewed, your coaching summary and next steps will appear here.</p>
+                      )}
+                      <div className="mt-4 flex flex-wrap items-center gap-3">
+                        <Link to={lesson.href || "/videos"} className="inline-flex min-h-[44px] items-center text-sm font-semibold text-primary hover:text-primary/80">
+                          {safeStatus === "reviewed" ? "View feedback" : "Watch recording"}
+                        </Link>
+                        {lesson.shared_moments_count ? <span className="text-xs font-medium text-slate-500">{lesson.shared_moments_count} moments to revisit</span> : null}
+                      </div>
+                    </article>
+                  );
+                })}
               </div>
             ) : (
               <EmptyState

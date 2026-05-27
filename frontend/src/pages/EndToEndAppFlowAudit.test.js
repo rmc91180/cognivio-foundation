@@ -133,7 +133,8 @@ describe("end-to-end app flow hotfix pages", () => {
 
     renderWithProviders(<TeacherBadgesPage />);
 
-    expect(await screen.findByText(/Recognition you earn will appear here/i)).toBeInTheDocument();
+    // PR C5: empty-state now reads as the Gold-Star copy.
+    expect(await screen.findByText(/Gold-Star recognition will appear here when awarded/i)).toBeInTheDocument();
     expect(teacherApi.myRecognition).toHaveBeenCalled();
   });
 });

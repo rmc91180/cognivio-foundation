@@ -16,6 +16,14 @@ import { Badge, Button, EmptyState, Field, PageContextHeader, Panel, Textarea } 
 import { useTranslation } from "react-i18next";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 import { resolveCoachingLink } from "@/lib/coachingRoutes";
+import {
+  artifactActionItems,
+  artifactDeepDive,
+  artifactLatestSummary,
+  isArtifactAllowed,
+  isArtifactBlocked,
+  readArtifact,
+} from "@/lib/teacherCoachingArtifact";
 
 export function VideoPlayerPage() {
   const { t, i18n } = useTranslation();
@@ -595,11 +603,34 @@ export function VideoPlayerPage() {
   const recognitionReasons = recognitionRes?.eligibility?.reasons || [];
   const publicationStatus = recognitionRes?.publication?.submission_status || "not_submitted";
   const observationSummary = assessmentRes?.observation_summary;
-  const teacherFeedback = assessmentRes?.teacher_feedback || null;
-  const teacherSummary = teacherFeedback?.latest_summary || {};
-  const teacherDeepDiveMoments = teacherFeedback?.deep_dive?.moments || [];
-  const visibleSummary = isTeacher && teacherFeedback
-    ? [teacherSummary.opening, teacherSummary.strength, teacherSummary.growth_focus, teacherSummary.next_step].filter(Boolean).join(" ")
+  // PR C5: prefer the canonical artifact for teacher view. Blocked artifact
+  // must NOT fall back to legacy teacher_feedback.
+  const teacherArtifact = readArtifact(assessmentRes);
+  const teacherArtifactAllowed = isArtifactAllowed(teacherArtifact);
+  const teacherArtifactBlocked = isArtifactBlocked(teacherArtifact);
+  const teacherFeedback = teacherArtifactBlocked ? null : assessmentRes?.teacher_feedback || null;
+  const teacherSummary = teacherArtifactAllowed
+    ? artifactLatestSummary(teacherArtifact) || {}
+    : teacherFeedback?.latest_summary || {};
+  const teacherDeepDiveMoments = teacherArtifactAllowed
+    ? artifactDeepDive(teacherArtifact).moments
+    : teacherArtifactBlocked
+      ? []
+      : teacherFeedback?.deep_dive?.moments || [];
+  const teacherActionItems = teacherArtifactAllowed
+    ? artifactActionItems(teacherArtifact)
+    : teacherArtifactBlocked
+      ? []
+      : teacherFeedback?.action_items || [];
+  const visibleSummary = isTeacher
+    ? teacherArtifactBlocked
+      ? (teacherArtifact?.empty_state?.message
+          || t("videoPlayer.noSummaryAvailable"))
+      : teacherArtifactAllowed
+        ? [teacherSummary.opening, teacherSummary.strength, teacherSummary.growth_focus, teacherSummary.next_step].filter(Boolean).join(" ")
+        : teacherFeedback
+          ? [teacherSummary.opening, teacherSummary.strength, teacherSummary.growth_focus, teacherSummary.next_step].filter(Boolean).join(" ")
+          : observationSummary?.executive_summary || assessmentRes?.summary || t("videoPlayer.noSummaryAvailable")
     : observationSummary?.executive_summary || assessmentRes?.summary || t("videoPlayer.noSummaryAvailable");
   const recommendedMoments = analysisMomentsRes?.moments || [];
   const recommendedMomentNoteLines = recommendedMoments.slice(0, 3).map((moment) => {
