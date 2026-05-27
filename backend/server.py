@@ -137,6 +137,12 @@ from app.services.lesson_moment_quality import (
     normalize_lesson_moment_window,
     suggested_candidate_window_count,
 )
+from app.services.teacher_lesson_coaching_artifact import (
+    TEACHER_LESSON_COACHING_ARTIFACT_VERSION,
+    admin_view_of_artifact,
+    build_teacher_lesson_coaching_artifact,
+    teacher_visible_summary_text,
+)
 from share_assets import (
     build_email_signature_html,
     render_email_signature_badge,
@@ -14056,19 +14062,32 @@ async def get_assessments(
         teacher = await _get_current_teacher_for_workspace(current_user)
         payload = []
         for assessment in assessments:
-            projection = await _teacher_projection_for_assessment(teacher, current_user, assessment)
+            # PR C4: route teacher list view through the canonical artifact so
+            # the summary/recommendations match the dashboard/coaching/latest
+            # views and never leak admin fields.
+            artifact = await _build_teacher_lesson_coaching_artifact_for(
+                teacher=teacher,
+                current_user=current_user,
+                assessment=assessment,
+            )
+            recommendations: List[str] = []
+            if artifact.get("teacher_feedback_allowed"):
+                for item in artifact.get("action_items") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    text = item.get("try_next_lesson") or item.get("body")
+                    if text:
+                        recommendations.append(text)
             payload.append(
                 {
                     "id": assessment.get("id"),
                     "video_id": assessment.get("video_id"),
                     "teacher_id": assessment.get("teacher_id"),
-                    "summary": _teacher_feedback_summary_text(projection or {}),
-                    "recommendations": [
-                        item.get("try_next_lesson") or item.get("body")
-                        for item in ((projection or {}).get("action_items") or [])
-                    ],
+                    "summary": teacher_visible_summary_text(artifact),
+                    "recommendations": recommendations,
                     "analyzed_at": assessment.get("analyzed_at"),
-                    "teacher_feedback": projection,
+                    "teacher_feedback": artifact.get("legacy_projection") if artifact.get("teacher_feedback_allowed") else None,
+                    "coaching_artifact": artifact,
                 }
             )
         return payload
@@ -14090,18 +14109,32 @@ async def get_assessment(
     response_language = _resolve_request_language(request, default="en")
     if _get_user_tenant_role(current_user) == "teacher":
         teacher = await _get_current_teacher_for_workspace(current_user)
-        projection = await _teacher_projection_for_assessment(teacher, current_user, assessment)
+        artifact = await _build_teacher_lesson_coaching_artifact_for(
+            teacher=teacher,
+            current_user=current_user,
+            assessment=assessment,
+        )
+        # PR C4: teacher view returns the canonical artifact (teacher-safe by
+        # construction) and a small flattened compatibility payload. It never
+        # exposes element_scores / overall_score / rubric labels — those stay
+        # on the admin path below.
+        recommendations: List[str] = []
+        if artifact.get("teacher_feedback_allowed"):
+            for item in artifact.get("action_items") or []:
+                if not isinstance(item, dict):
+                    continue
+                text = item.get("try_next_lesson") or item.get("body")
+                if text:
+                    recommendations.append(text)
         return {
             "id": assessment.get("id"),
             "video_id": assessment.get("video_id"),
             "teacher_id": assessment.get("teacher_id"),
-            "summary": _teacher_feedback_summary_text(projection or {}),
-            "recommendations": [
-                item.get("try_next_lesson") or item.get("body")
-                for item in ((projection or {}).get("action_items") or [])
-            ],
+            "summary": teacher_visible_summary_text(artifact),
+            "recommendations": recommendations,
             "analyzed_at": assessment.get("analyzed_at"),
-            "teacher_feedback": projection,
+            "teacher_feedback": artifact.get("legacy_projection") if artifact.get("teacher_feedback_allowed") else None,
+            "coaching_artifact": artifact,
         }
     return AssessmentResult(**_enrich_assessment_for_response(assessment, response_language=response_language))
 
@@ -20235,6 +20268,60 @@ async def _teacher_projection_for_assessment(
     return cleaned_projection
 
 
+async def _build_teacher_lesson_coaching_artifact_for(
+    *,
+    teacher: dict,
+    current_user: dict,
+    assessment: Optional[dict],
+    video: Optional[dict] = None,
+    readiness: Optional[dict] = None,
+    coaching_tasks: Optional[List[dict]] = None,
+    reflections: Optional[List[dict]] = None,
+    admin_comments: Optional[List[dict]] = None,
+    recognition_badges: Optional[List[dict]] = None,
+    lesson_history: Optional[List[dict]] = None,
+) -> Dict[str, Any]:
+    """PR C4: Build the canonical TeacherLessonCoachingArtifact.
+
+    This is the single source teacher endpoints share. It applies the
+    C1 source-chain, C2 unsafe-text, and C3 evidence-quality gates and
+    returns an artifact that is either fully populated AND teacher-safe
+    OR an honest empty state. Callers should not invent additional
+    teacher-visible text on top of the returned artifact.
+    """
+
+    # Resolve the canonical video if the caller didn't supply it.
+    if not video and (assessment or {}).get("video_id"):
+        video = await db.videos.find_one(
+            {"id": assessment.get("video_id"), "teacher_id": teacher.get("id")},
+            {"_id": 0},
+        )
+
+    # Attach reflection counts before passing tasks to the artifact builder.
+    raw_tasks = list(coaching_tasks or [])
+    if raw_tasks:
+        counts = await _reflection_counts_by_task(
+            teacher["id"], [task.get("id") for task in raw_tasks if task.get("id")]
+        )
+        for task in raw_tasks:
+            task.update(counts.get(task.get("id"), {}))
+
+    language = _teacher_language(current_user, teacher, assessment)
+    return build_teacher_lesson_coaching_artifact(
+        teacher=teacher,
+        current_user=current_user,
+        assessment=assessment,
+        video=video,
+        coaching_tasks=raw_tasks,
+        reflections=reflections,
+        admin_comments=admin_comments,
+        recognition_badges=recognition_badges,
+        lesson_history=lesson_history,
+        readiness=readiness,
+        language=language,
+    )
+
+
 @api_router.get("/teachers/me/latest-lesson")
 async def get_my_latest_lesson(current_user: dict = Depends(get_current_user)):
     teacher = await _get_current_teacher_for_workspace(current_user)
@@ -20247,37 +20334,44 @@ async def get_my_latest_lesson(current_user: dict = Depends(get_current_user)):
         return {"lesson": None}
     video = await db.videos.find_one({"id": assessment.get("video_id")}, {"_id": 0}) if assessment.get("video_id") else None
     profile_payload = await _current_teacher_profile_payload(current_user)
-    projection = await _teacher_projection_for_assessment(
-        teacher,
-        current_user,
-        assessment,
+    artifact = await _build_teacher_lesson_coaching_artifact_for(
+        teacher=teacher,
+        current_user=current_user,
+        assessment=assessment,
         video=video,
         readiness=profile_payload.get("readiness"),
     )
-    # PR C2: when projection is None (source chain invalid or unsafe text
-    # rejected) the teacher must see no "reviewed" lesson rather than a
-    # stitched-together orphan. The caller falls back to the readiness empty
-    # state.
-    if projection is None:
-        return {"lesson": None}
-    actions = projection.get("action_items") or []
+    # PR C4: when the canonical artifact refuses to display (source invalid,
+    # evidence insufficient, or unsafe text rejected) the teacher must see no
+    # "reviewed" lesson rather than a stitched-together orphan. The caller
+    # falls back to the honest readiness empty state.
+    if not artifact.get("teacher_feedback_allowed"):
+        return {"lesson": None, "artifact": artifact}
     talk_time_summary = (
         (video or {}).get("audio_summary")
         or (assessment.get("audio_summary") if isinstance(assessment.get("audio_summary"), str) else None)
     )
+    actions = artifact.get("action_items") or []
     return {
         "lesson": {
             "id": assessment.get("id"),
             "assessment_id": assessment.get("id"),
             "video_id": assessment.get("video_id"),
-            "title": (video or {}).get("filename") or assessment.get("subject") or teacher.get("subject"),
-            "subject": assessment.get("subject") or (video or {}).get("subject") or teacher.get("subject"),
+            "title": (artifact.get("lesson") or {}).get("title")
+            or (video or {}).get("filename")
+            or assessment.get("subject")
+            or teacher.get("subject"),
+            "subject": (artifact.get("lesson") or {}).get("subject")
+            or assessment.get("subject")
+            or (video or {}).get("subject")
+            or teacher.get("subject"),
             "lesson_date": assessment.get("analyzed_at") or assessment.get("recorded_at") or (video or {}).get("recorded_at"),
             "reviewed_at": assessment.get("analyzed_at"),
             "recorded_at": assessment.get("recorded_at") or (video or {}).get("recorded_at"),
-            "summary": _teacher_feedback_summary_text(projection),
+            "summary": teacher_visible_summary_text(artifact),
             "actions": [item.get("try_next_lesson") or item.get("body") for item in actions[:2]],
-            "teacher_feedback": projection,
+            "teacher_feedback": artifact.get("legacy_projection"),
+            "coaching_artifact": artifact,
             "talk_time_summary": talk_time_summary,
         }
     }
@@ -20339,20 +20433,23 @@ async def get_my_lessons(
     lessons = []
     for video in videos:
         assessment = assessment_by_video_id.get(video.get("id"))
-        projection = await _teacher_projection_for_assessment(
-            teacher,
-            current_user,
-            assessment,
+        # PR C4: per-lesson view uses the canonical artifact so the summary
+        # in the lessons list matches the latest-lesson / dashboard views.
+        artifact = await _build_teacher_lesson_coaching_artifact_for(
+            teacher=teacher,
+            current_user=current_user,
+            assessment=assessment,
             video=video,
             readiness=profile_payload.get("readiness"),
             lesson_history=assessments,
         ) if assessment else None
-        summary = _teacher_feedback_summary_text(projection or {})
+        projection = artifact.get("legacy_projection") if (artifact or {}).get("teacher_feedback_allowed") else None
+        summary = teacher_visible_summary_text(artifact or {})
         # PR C2: if the assessment exists but its projection was rejected by
         # the source-validity / unsafe-text gate, do not display the lesson as
         # "reviewed". Fall back to the underlying video processing status so
         # the teacher sees an honest state instead of a fake review.
-        if assessment and projection is None:
+        if assessment and not (artifact or {}).get("teacher_feedback_allowed"):
             lesson_status = _teacher_lesson_status(video, None)
         else:
             lesson_status = _teacher_lesson_status(video, assessment)
@@ -20386,6 +20483,7 @@ async def get_my_lessons(
                 "status": lesson_status,
                 "summary": summary,
                 "teacher_feedback": projection,
+                "coaching_artifact": artifact,
                 "href": f"/videos/{video.get('id')}" if video.get("id") else "/videos",
                 "recording_type": video.get("recording_type") or video.get("upload_source"),
                 "shared_moments_count": shared_counts.get(video.get("id"), 0),
@@ -20498,18 +20596,37 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
                 latest_assessment = candidate
                 break
 
-    projection = await _teacher_projection_for_assessment(
-        teacher,
-        current_user,
-        latest_assessment,
+    # PR C4: build the canonical artifact once and feed every downstream
+    # field from it. The artifact already applies the C1/C2/C3 gates and
+    # the C4 rubric-to-practice translation, so we no longer have to
+    # re-derive action items / next_best_action / deep_dive from the legacy
+    # projection separately.
+    canonical_video = next(
+        (video for video in canonical_videos if video.get("id") == (latest_assessment or {}).get("video_id")),
+        None,
+    )
+    artifact = await _build_teacher_lesson_coaching_artifact_for(
+        teacher=teacher,
+        current_user=current_user,
+        assessment=latest_assessment,
+        video=canonical_video,
         readiness=profile_payload.get("readiness"),
         coaching_tasks=safe_tasks,
         reflections=reflections,
         admin_comments=comments,
         recognition_badges=recognition_badges,
         lesson_history=assessments,
-    ) if latest_assessment else None
-    projected_action_items = (projection or {}).get("action_items") or []
+    ) if latest_assessment else await _build_teacher_lesson_coaching_artifact_for(
+        teacher=teacher,
+        current_user=current_user,
+        assessment=None,
+        readiness=profile_payload.get("readiness"),
+        coaching_tasks=safe_tasks,
+    )
+    projection = artifact.get("legacy_projection") if artifact.get("teacher_feedback_allowed") else None
+    projected_action_items = (
+        artifact.get("action_items") if artifact.get("teacher_feedback_allowed") else []
+    ) or []
     # Carry the safe-tasks list forward — the fallback path below uses it when
     # no projection is available.
     tasks = safe_tasks
@@ -20628,7 +20745,10 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
         "reflections": reflections,
         "suggested_improvements": suggested_improvements[:6],
         "teacher_feedback": projection,
-        "deep_dive": (projection or {}).get("deep_dive") or filter_deep_dive_moments(
+        # PR C4: surface the canonical artifact so the frontend can render
+        # one source of truth across dashboard / coaching / latest lesson.
+        "coaching_artifact": artifact,
+        "deep_dive": artifact.get("deep_dive") if artifact.get("teacher_feedback_allowed") else filter_deep_dive_moments(
             [], language=_teacher_language(current_user, teacher)
         ),
         "next_best_action": next_best_action,

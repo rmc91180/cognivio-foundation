@@ -664,7 +664,14 @@ def test_latest_lesson_returns_none_for_orphan_chain(monkeypatch, _privacy_not_r
     monkeypatch.setattr(server, "db", fake_db)
 
     result = asyncio.run(server.get_my_latest_lesson(current_user=_teacher_user()))
-    assert result == {"lesson": None}
+    # PR C2 invariant: no fake "reviewed" lesson is returned. PR C4 adds an
+    # optional diagnostic ``artifact`` key with ``teacher_feedback_allowed:
+    # False``. Both behaviours are acceptable for this test as long as no
+    # fake teacher lesson appears.
+    assert result["lesson"] is None
+    if "artifact" in result:
+        assert result["artifact"].get("teacher_feedback_allowed") is False
+    assert_no_known_bad_strings(result)
 
 
 def test_lessons_endpoint_marks_orphan_assessment_as_not_reviewed(monkeypatch, _privacy_not_required):
