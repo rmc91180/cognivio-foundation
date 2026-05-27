@@ -63,16 +63,36 @@ def audit_collections(
     assessments: List[Dict[str, Any]],
     coaching_tasks_by_teacher: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     recognition_badges_by_teacher: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    teacher_feedback_reviews_by_assessment: Optional[Dict[str, Dict[str, Any]]] = None,
+    coaching_task_reflections: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Run the artifact-safety audit over in-memory collections.
 
     The audit is fully synchronous — no DB I/O. The caller (CLI or test)
     snapshots Mongo first, then hands the dicts/lists in.
+
+    PR C6 adds three new sources:
+
+      * ``teacher_feedback_reviews_by_assessment`` — admin review records.
+        Used to detect ``admin_hidden_but_teacher_endpoint_allowed`` and
+        ``admin_approved_but_source_invalid`` /
+        ``admin_approved_but_unsafe_text``.
+      * ``coaching_tasks_by_teacher`` — used to detect
+        ``action_item_persisted_with_unsafe_text`` and
+        ``duplicate_artifact_action_task``.
+      * ``coaching_task_reflections`` — used to detect
+        ``shared_reflection_missing_thread_visibility`` and
+        ``private_reflection_visible_to_admin`` (which should never
+        happen given the existing API filter, but we audit anyway).
     """
 
     issues: Dict[str, Dict[str, Any]] = {}
     coaching_tasks_by_teacher = coaching_tasks_by_teacher or {}
     recognition_badges_by_teacher = recognition_badges_by_teacher or {}
+    teacher_feedback_reviews_by_assessment = (
+        teacher_feedback_reviews_by_assessment or {}
+    )
+    coaching_task_reflections = coaching_task_reflections or []
 
     seen = 0
     artifacts_built = 0
@@ -95,6 +115,7 @@ def audit_collections(
         analysis_quality = assessment.get("analysis_quality") or {}
         evidence_blocks = assessment_quality_blocks_teacher_feedback(assessment)
 
+        admin_review = teacher_feedback_reviews_by_assessment.get(assessment.get("id"))
         try:
             artifact = build_teacher_lesson_coaching_artifact(
                 teacher=teacher or {"id": teacher_id},
@@ -104,6 +125,7 @@ def audit_collections(
                 coaching_tasks=coaching_tasks_by_teacher.get(teacher_id) if teacher_id else None,
                 recognition_badges=recognition_badges_by_teacher.get(teacher_id) if teacher_id else None,
                 language=(assessment.get("analysis_language") or "en"),
+                admin_review=admin_review,
             )
             artifacts_built += 1
         except Exception as exc:  # pragma: no cover - defensive
@@ -124,6 +146,23 @@ def audit_collections(
             "video_id": video_id,
             "teacher_id": teacher_id,
         }
+
+        # PR C6: admin-review contradictions.
+        admin_status = str((admin_review or {}).get("status") or "").lower()
+        if admin_status == "admin_hidden" and artifact.get("teacher_feedback_allowed"):
+            _add(issues, "admin_hidden_but_teacher_endpoint_allowed", sample_base)
+        if admin_status == "admin_approved" and not source_validity.get(
+            "valid_for_teacher_display"
+        ):
+            _add(issues, "admin_approved_but_source_invalid", sample_base)
+        # If the artifact builder collapsed an admin_approved record into
+        # unsafe_text the admin needs to know — the approval did not unlock
+        # the artifact because text was still unsafe.
+        if admin_status == "admin_approved" and artifact.get("blocked_reason") in {
+            "unsafe_text",
+            "unsafe_text_post_compose",
+        }:
+            _add(issues, "admin_approved_but_unsafe_text", sample_base)
 
         # 1. Per-artifact audit issues from the C4 helper.
         for entry in audit_teacher_artifact(artifact):
@@ -187,6 +226,69 @@ def audit_collections(
         gold_star = (artifact.get("recognition") or {}).get("gold_star")
         if gold_star and not source_validity.get("valid_for_teacher_display"):
             _add(issues, "gold_star_with_invalid_source", sample_base)
+
+    # PR C6: cross-collection checks (run once, not per-assessment).
+    from app.services.teacher_artifact_quarantine import (  # noqa: E402  (sys.path is set above)
+        is_teacher_visible_text_safe,
+    )
+    seen_action_item_keys: Dict[str, List[str]] = {}
+    for tasks in coaching_tasks_by_teacher.values():
+        for task in tasks or []:
+            if not isinstance(task, dict):
+                continue
+            if task.get("source_type") != "artifact_action_item":
+                continue
+            for field in ("title", "teacher_title", "teacher_body", "suggested_action", "summary", "body"):
+                value = task.get(field)
+                if value and not is_teacher_visible_text_safe(str(value)):
+                    _add(
+                        issues,
+                        "action_item_persisted_with_unsafe_text",
+                        {
+                            "teacher_id": task.get("teacher_id"),
+                            "task_id": task.get("id"),
+                            "field": field,
+                        },
+                    )
+                    break
+            key = (
+                task.get("teacher_id"),
+                task.get("source_action_item_id") or "",
+            )
+            if not all(key):
+                continue
+            seen_action_item_keys.setdefault(key, []).append(task.get("id"))
+    for key, task_ids in seen_action_item_keys.items():
+        if len(task_ids) > 1:
+            _add(
+                issues,
+                "duplicate_artifact_action_task",
+                {
+                    "teacher_id": key[0],
+                    "source_action_item_id": key[1],
+                    "task_ids": task_ids,
+                },
+            )
+
+    for reflection in coaching_task_reflections or []:
+        if not isinstance(reflection, dict):
+            continue
+        visibility = str(reflection.get("visibility") or "").lower()
+        if visibility == "shared_with_admin" and not reflection.get("teacher_id"):
+            _add(
+                issues,
+                "shared_reflection_missing_thread_visibility",
+                {"reflection_id": reflection.get("id")},
+            )
+        # Defensive: assert private reflections actually carry the
+        # ``private`` visibility tag rather than something that would leak
+        # to admins via existing queries.
+        if visibility == "private" and reflection.get("admin_visible") is True:
+            _add(
+                issues,
+                "private_reflection_visible_to_admin",
+                {"reflection_id": reflection.get("id")},
+            )
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -283,6 +385,29 @@ async def _load_from_mongo(args: argparse.Namespace) -> Dict[str, Any]:
             ).to_list(10000)
             for badge in badges_list:
                 recognition_badges_by_teacher.setdefault(badge.get("teacher_id"), []).append(badge)
+
+        # PR C6: persistent admin reviews + reflections.
+        teacher_feedback_reviews_by_assessment: Dict[str, Dict[str, Any]] = {}
+        if assessments:
+            try:
+                reviews_list = await db.teacher_feedback_reviews.find(
+                    {"assessment_id": {"$in": [a.get("id") for a in assessments if a.get("id")]}},
+                    {"_id": 0},
+                ).to_list(10000)
+            except Exception:  # pragma: no cover
+                reviews_list = []
+            for review in reviews_list:
+                if review.get("assessment_id"):
+                    teacher_feedback_reviews_by_assessment[review["assessment_id"]] = review
+
+        coaching_task_reflections: List[Dict[str, Any]] = []
+        if teacher_ids:
+            try:
+                coaching_task_reflections = await db.coaching_task_reflections.find(
+                    {"teacher_id": {"$in": list(teacher_ids)}}, {"_id": 0}
+                ).to_list(10000)
+            except Exception:  # pragma: no cover
+                coaching_task_reflections = []
     finally:
         client.close()
 
@@ -292,6 +417,8 @@ async def _load_from_mongo(args: argparse.Namespace) -> Dict[str, Any]:
         "videos": videos,
         "coaching_tasks_by_teacher": coaching_tasks_by_teacher,
         "recognition_badges_by_teacher": recognition_badges_by_teacher,
+        "teacher_feedback_reviews_by_assessment": teacher_feedback_reviews_by_assessment,
+        "coaching_task_reflections": coaching_task_reflections,
     }
 
 

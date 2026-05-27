@@ -14182,7 +14182,620 @@ def _compute_teacher_feedback_admin_status(artifact: Optional[dict]) -> str:
         return "blocked_quality"
     if reason in {"unsafe_text", "unsafe_text_post_compose"}:
         return "blocked_safety"
+    if reason == "admin_hidden":
+        return "admin_hidden"
+    if reason == "revision_requested":
+        return "revision_requested"
     return "blocked_quality"
+
+
+# ---------------------------------------------------------------------------
+# PR C6: persistent admin review for teacher-facing artifact
+# ---------------------------------------------------------------------------
+
+
+TEACHER_FEEDBACK_REVIEW_STATUSES = {
+    "admin_approved",
+    "admin_hidden",
+    "revision_requested",
+}
+
+
+async def _load_teacher_feedback_review(assessment_id: Optional[str]) -> Optional[dict]:
+    """Return the most recent persistent admin review for the assessment.
+
+    PR C6 stores admin review actions in ``teacher_feedback_reviews``. When
+    no record exists the artifact uses the auto-computed status from C5.
+    """
+
+    if not assessment_id or not hasattr(db, "teacher_feedback_reviews"):
+        return None
+    try:
+        doc = await db.teacher_feedback_reviews.find_one(
+            {"assessment_id": assessment_id},
+            {"_id": 0},
+            sort=[("reviewed_at", -1), ("created_at", -1)],
+        )
+    except Exception:  # pragma: no cover - defensive against missing collection
+        doc = None
+    return doc
+
+
+async def _persist_teacher_feedback_review(
+    *,
+    assessment_id: str,
+    video_id: Optional[str],
+    teacher_id: Optional[str],
+    workspace_id: Optional[str],
+    reviewer_user: dict,
+    status: str,
+    review_note: Optional[str],
+    hidden_reason: Optional[str],
+    revision_reason: Optional[str],
+    artifact_version: Optional[str],
+) -> dict:
+    """Upsert a teacher_feedback_reviews record for the given assessment."""
+
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "assessment_id": assessment_id,
+        "video_id": video_id,
+        "teacher_id": teacher_id,
+        "workspace_id": workspace_id,
+        "organization_id": workspace_id,
+        "artifact_version": artifact_version or TEACHER_LESSON_COACHING_ARTIFACT_VERSION,
+        "status": status,
+        "reviewed_by": reviewer_user.get("id"),
+        "reviewed_by_email": reviewer_user.get("email"),
+        "reviewed_by_name": reviewer_user.get("name"),
+        "reviewed_at": now,
+        "review_note": _clean_optional_string(review_note),
+        "hidden_reason": _clean_optional_string(hidden_reason) if status == "admin_hidden" else None,
+        "revision_reason": _clean_optional_string(revision_reason) if status == "revision_requested" else None,
+        "teacher_visible_override": status == "admin_approved",
+        "created_at": now,
+        "updated_at": now,
+    }
+    if hasattr(db, "teacher_feedback_reviews") and hasattr(db.teacher_feedback_reviews, "update_one"):
+        await db.teacher_feedback_reviews.update_one(
+            {"assessment_id": assessment_id},
+            {"$set": doc},
+            upsert=True,
+        )
+    return doc
+
+
+class TeacherFeedbackReviewRequest(BaseModel):
+    status: str
+    review_note: Optional[str] = None
+    hidden_reason: Optional[str] = None
+    revision_reason: Optional[str] = None
+
+
+def _require_admin_role_for_review(current_user: dict) -> str:
+    """PR C6: only admin/observer roles can persist a teacher-feedback review."""
+
+    role = _get_user_tenant_role(current_user)
+    if role not in {"school_admin", "training_admin", "super_admin"}:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return role
+
+
+def _require_admin_in_same_tenant(current_user: dict, assessment: dict) -> None:
+    """PR C6: enforce workspace isolation for the admin review endpoint."""
+
+    role = _get_user_tenant_role(current_user)
+    if role == "super_admin":
+        return
+    admin_org = (current_user or {}).get("organization_id")
+    admin_school = (current_user or {}).get("school_id")
+    assessment_org = assessment.get("organization_id")
+    assessment_school = assessment.get("school_id")
+    # Best-effort cross-tenant check: allow when admin's org/school matches
+    # the assessment's org/school; otherwise look up the teacher document.
+    if admin_org and assessment_org and admin_org == assessment_org:
+        return
+    if admin_school and assessment_school and admin_school == assessment_school:
+        return
+    # Fall back to the existing per-teacher visibility helper which already
+    # handles tenant + observer-of relations.
+
+
+@api_router.get("/admin/assessments/{assessment_id}/teacher-feedback-review")
+async def get_teacher_feedback_review_endpoint(
+    assessment_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_admin_role_for_review(current_user)
+    assessment = await db.assessments.find_one({"id": assessment_id}, {"_id": 0})
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    _require_admin_in_same_tenant(current_user, assessment)
+    # ``_get_teacher_or_404`` already enforces admin visibility into the
+    # teacher; piggyback on it for cross-tenant safety.
+    await _get_teacher_or_404(assessment.get("teacher_id"), current_user)
+    review = await _load_teacher_feedback_review(assessment_id)
+    return {"review": review}
+
+
+@api_router.post("/admin/assessments/{assessment_id}/teacher-feedback-review")
+async def upsert_teacher_feedback_review_endpoint(
+    assessment_id: str,
+    payload: TeacherFeedbackReviewRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_admin_role_for_review(current_user)
+    status = (payload.status or "").strip().lower()
+    if status not in TEACHER_FEEDBACK_REVIEW_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"status must be one of {sorted(TEACHER_FEEDBACK_REVIEW_STATUSES)}",
+        )
+    assessment = await db.assessments.find_one({"id": assessment_id}, {"_id": 0})
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    _require_admin_in_same_tenant(current_user, assessment)
+    await _get_teacher_or_404(assessment.get("teacher_id"), current_user)
+
+    teacher_doc = await db.teachers.find_one(
+        {"id": assessment.get("teacher_id")}, {"_id": 0}
+    ) if assessment.get("teacher_id") else None
+    workspace_id = (
+        (teacher_doc or {}).get("organization_id")
+        or assessment.get("organization_id")
+        or current_user.get("organization_id")
+    )
+    review_doc = await _persist_teacher_feedback_review(
+        assessment_id=assessment_id,
+        video_id=assessment.get("video_id"),
+        teacher_id=assessment.get("teacher_id"),
+        workspace_id=workspace_id,
+        reviewer_user=current_user,
+        status=status,
+        review_note=payload.review_note,
+        hidden_reason=payload.hidden_reason,
+        revision_reason=payload.revision_reason,
+        artifact_version=TEACHER_LESSON_COACHING_ARTIFACT_VERSION,
+    )
+    # Rebuild the artifact with the new review so the admin sees the
+    # updated teacher_preview immediately.
+    try:
+        rebuilt_artifact = await _build_teacher_lesson_coaching_artifact_for(
+            teacher=teacher_doc or {"id": assessment.get("teacher_id")},
+            current_user=current_user,
+            assessment=assessment,
+        ) if teacher_doc else None
+        teacher_preview = (
+            admin_view_of_artifact(rebuilt_artifact, assessment=assessment)
+            if rebuilt_artifact
+            else None
+        )
+        admin_status = _compute_teacher_feedback_admin_status(rebuilt_artifact)
+    except Exception:  # pragma: no cover - never let the rebuild break the write
+        teacher_preview = None
+        admin_status = status
+    return {
+        "ok": True,
+        "review": review_doc,
+        "teacher_preview": teacher_preview,
+        "teacher_feedback_admin_status": admin_status,
+    }
+
+
+# ---------------------------------------------------------------------------
+# PR C6: coaching thread (teacher reflection <-> admin response)
+# ---------------------------------------------------------------------------
+
+
+async def _load_coaching_thread_for_assessment(
+    *,
+    teacher_id: str,
+    assessment_id: Optional[str],
+    video_id: Optional[str],
+    include_private: bool,
+) -> List[dict]:
+    """Compose a chronological coaching thread for a lesson.
+
+    Reuses existing collections:
+
+      * ``coaching_task_reflections`` — teacher writes. ``visibility`` is
+        ``private`` (teacher-only) or ``shared_with_admin``.
+      * ``video_comments`` — admin/observer writes. The
+        ``shared_with_teacher`` visibility represents admin-to-teacher
+        responses.
+
+    When ``include_private`` is False (admin caller), private teacher
+    reflections are filtered out. Teacher callers always see their own
+    private reflections.
+    """
+
+    messages: List[dict] = []
+    reflection_query: Dict[str, Any] = {"teacher_id": teacher_id}
+    if assessment_id or video_id:
+        ors: List[Dict[str, Any]] = []
+        if assessment_id:
+            ors.append({"assessment_id": assessment_id})
+        if video_id:
+            ors.append({"video_id": video_id})
+        if len(ors) == 1:
+            reflection_query.update(ors[0])
+        elif ors:
+            reflection_query["$or"] = ors
+    try:
+        reflection_docs = await db.coaching_task_reflections.find(
+            reflection_query, {"_id": 0}
+        ).sort("created_at", 1).to_list(500)
+    except Exception:  # pragma: no cover - defensive
+        reflection_docs = []
+    for doc in reflection_docs:
+        visibility = str(doc.get("visibility") or "private").lower()
+        if visibility == "private" and not include_private:
+            continue
+        messages.append(
+            {
+                "id": doc.get("id"),
+                "kind": "teacher_reflection",
+                "sender_role": "teacher",
+                "teacher_id": doc.get("teacher_id"),
+                "assessment_id": doc.get("assessment_id"),
+                "video_id": doc.get("video_id"),
+                "action_item_id": doc.get("action_item_id"),
+                "coaching_task_id": doc.get("task_id"),
+                "body": doc.get("happened") or doc.get("text") or doc.get("body") or "",
+                "tried": doc.get("tried"),
+                "visibility": (
+                    "teacher_admin_thread"
+                    if visibility == "shared_with_admin"
+                    else "teacher_private"
+                ),
+                "shared_with_admin": visibility == "shared_with_admin",
+                "source": "reflection",
+                "created_at": doc.get("created_at"),
+                "updated_at": doc.get("updated_at"),
+            }
+        )
+
+    comment_query: Dict[str, Any] = {
+        "teacher_id": teacher_id,
+        "visibility": "shared_with_teacher",
+        "deleted_at": {"$in": [None, ""]},
+    }
+    if video_id:
+        comment_query["video_id"] = video_id
+    try:
+        comment_docs = await db.video_comments.find(
+            comment_query, {"_id": 0}
+        ).sort("created_at", 1).to_list(500)
+    except Exception:  # pragma: no cover - defensive
+        comment_docs = []
+    for doc in comment_docs:
+        # Optionally narrow to admin responses anchored to this assessment.
+        if assessment_id and doc.get("assessment_id") and doc.get("assessment_id") != assessment_id:
+            continue
+        messages.append(
+            {
+                "id": doc.get("id"),
+                "kind": "admin_response",
+                "sender_role": "admin",
+                "teacher_id": doc.get("teacher_id"),
+                "assessment_id": doc.get("assessment_id"),
+                "video_id": doc.get("video_id"),
+                "action_item_id": doc.get("action_item_id"),
+                "coaching_task_id": doc.get("coaching_task_id"),
+                "body": doc.get("body") or "",
+                "visibility": "teacher_admin_thread",
+                "shared_with_admin": True,
+                "source": doc.get("source") or "admin_response",
+                "author_id": doc.get("author_id"),
+                "author_name": doc.get("author_name"),
+                "timestamp_seconds": doc.get("timestamp_seconds"),
+                "created_at": doc.get("created_at"),
+                "updated_at": doc.get("updated_at"),
+            }
+        )
+
+    messages.sort(key=lambda m: str(m.get("created_at") or ""))
+    return messages
+
+
+class CoachingThreadMessageRequest(BaseModel):
+    assessment_id: Optional[str] = None
+    video_id: Optional[str] = None
+    action_item_id: Optional[str] = None
+    body: str
+    # Admin-only field; ignored when sent by a teacher. Allowed values:
+    # "shared_with_teacher" (default for admin) | "admin_only" (internal).
+    visibility: Optional[str] = None
+
+
+@api_router.get("/teachers/me/coaching-thread")
+async def get_my_coaching_thread(
+    assessment_id: Optional[str] = None,
+    video_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_current_teacher_for_workspace(current_user)
+    messages = await _load_coaching_thread_for_assessment(
+        teacher_id=teacher["id"],
+        assessment_id=assessment_id,
+        video_id=video_id,
+        include_private=True,
+    )
+    return {"messages": messages}
+
+
+@api_router.get(
+    "/admin/teachers/{teacher_id}/coaching-thread",
+)
+async def get_admin_coaching_thread(
+    teacher_id: str,
+    assessment_id: Optional[str] = None,
+    video_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_admin_role_for_review(current_user)
+    # ``_get_teacher_or_404`` enforces tenant + observer visibility.
+    await _get_teacher_or_404(teacher_id, current_user)
+    messages = await _load_coaching_thread_for_assessment(
+        teacher_id=teacher_id,
+        assessment_id=assessment_id,
+        video_id=video_id,
+        include_private=False,
+    )
+    return {"messages": messages}
+
+
+@api_router.post(
+    "/admin/teachers/{teacher_id}/coaching-thread",
+)
+async def post_admin_coaching_thread_message(
+    teacher_id: str,
+    payload: CoachingThreadMessageRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_admin_role_for_review(current_user)
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
+    body = (payload.body or "").strip()
+    if not body:
+        raise HTTPException(status_code=400, detail="Message body is required")
+    if len(body) > 4000:
+        raise HTTPException(status_code=400, detail="Message body is too long")
+    # Default admin reply is teacher-visible. Admin can pass admin_only for
+    # internal notes — those go to video_comments with that visibility.
+    visibility = (payload.visibility or "shared_with_teacher").strip().lower()
+    if visibility not in {"shared_with_teacher", "admin_only"}:
+        raise HTTPException(status_code=400, detail="Unsupported visibility")
+    video_id = payload.video_id
+    if not video_id and payload.assessment_id:
+        assessment_doc = await db.assessments.find_one(
+            {"id": payload.assessment_id}, {"_id": 0, "video_id": 1}
+        )
+        video_id = (assessment_doc or {}).get("video_id")
+    if not video_id:
+        raise HTTPException(status_code=400, detail="video_id or assessment_id is required")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "video_id": video_id,
+        "assessment_id": payload.assessment_id,
+        "workspace_id": teacher.get("organization_id"),
+        "organization_id": teacher.get("organization_id"),
+        "teacher_id": teacher_id,
+        "author_id": current_user["id"],
+        "author_name": (
+            _clean_optional_string(current_user.get("name"))
+            or _clean_optional_string(current_user.get("email"))
+            or "Coach"
+        ),
+        "author_role": _get_user_tenant_role(current_user),
+        "timestamp_seconds": 0.0,
+        "visibility": visibility,
+        "is_private": False,
+        "body": body,
+        "action_item_id": payload.action_item_id,
+        "source": "admin_response",
+        "created_at": now,
+        "updated_at": now,
+        "deleted_at": None,
+    }
+    await db.video_comments.insert_one(doc)
+    return {"ok": True, "message": doc}
+
+
+# ---------------------------------------------------------------------------
+# PR C6: artifact action item -> coaching_task lifecycle
+# ---------------------------------------------------------------------------
+
+
+ARTIFACT_ACTION_SOURCE_TYPE = "artifact_action_item"
+
+
+async def _find_or_promote_action_item_task(
+    *,
+    teacher_id: str,
+    assessment_id: Optional[str],
+    action_item_id: str,
+    current_user: dict,
+) -> dict:
+    """Find an existing coaching_task for an artifact action_item, or create one.
+
+    PR C6 rule: persist the coaching_task ONLY when the teacher (or admin)
+    explicitly accepts/tries the artifact action item. Repeated reads of
+    the artifact must not create duplicates.
+
+    The function rebuilds the artifact, locates the action item by id,
+    runs the C2 unsafe-text gate, and only then persists.
+    """
+
+    if not action_item_id:
+        raise HTTPException(status_code=400, detail="action_item_id is required")
+    existing = await db.coaching_tasks.find_one(
+        {
+            "teacher_id": teacher_id,
+            "source_action_item_id": action_item_id,
+            "source_type": ARTIFACT_ACTION_SOURCE_TYPE,
+        },
+        {"_id": 0},
+    )
+    if existing:
+        return existing
+
+    # Look up the artifact action item by id. We rebuild the artifact from
+    # the assessment to guarantee the C1/C2/C3/C4/C5 gates ran.
+    if not assessment_id:
+        raise HTTPException(
+            status_code=400, detail="assessment_id is required to promote an artifact action item"
+        )
+    assessment = await db.assessments.find_one({"id": assessment_id}, {"_id": 0})
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    teacher_doc = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
+    if not teacher_doc:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+    artifact = await _build_teacher_lesson_coaching_artifact_for(
+        teacher=teacher_doc,
+        current_user=current_user,
+        assessment=assessment,
+    )
+    if not artifact.get("teacher_feedback_allowed"):
+        raise HTTPException(status_code=409, detail="Teacher feedback is currently blocked for this lesson")
+    item = next(
+        (
+            i
+            for i in (artifact.get("action_items") or [])
+            if isinstance(i, dict) and i.get("id") == action_item_id
+        ),
+        None,
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Action item not available in the current artifact")
+    title = (item.get("title") or "Next-lesson move").strip()
+    body = (item.get("try_next_lesson") or item.get("body") or "").strip()
+    if not body or not is_teacher_visible_text_safe(title) or not is_teacher_visible_text_safe(body):
+        # Belt-and-braces: refuse to persist unsafe text. Should be impossible
+        # because the artifact builder already gates it.
+        raise HTTPException(status_code=409, detail="Action item failed the teacher-safe text gate")
+    now = datetime.now(timezone.utc).isoformat()
+    new_task = {
+        "id": str(uuid.uuid4()),
+        "teacher_id": teacher_id,
+        "video_id": item.get("video_id") or artifact.get("lesson", {}).get("video_id") or assessment.get("video_id"),
+        "assessment_id": assessment_id,
+        "title": title,
+        "suggested_action": body,
+        "summary": body,
+        "teacher_title": title,
+        "teacher_body": body,
+        "why_it_matters": item.get("why_it_matters"),
+        "reflection_prompt": item.get("reflection_prompt"),
+        "status": "open",
+        "priority": "medium",
+        "priority_rank": _coaching_task_priority_rank("medium"),
+        "source_type": ARTIFACT_ACTION_SOURCE_TYPE,
+        "source_action_item_id": action_item_id,
+        "source_artifact_version": artifact.get("artifact_version"),
+        "created_by": current_user.get("id"),
+        "created_at": now,
+        "updated_at": now,
+        "reflection_count": 0,
+        "shared_reflection_count": 0,
+    }
+    await db.coaching_tasks.insert_one(new_task)
+    return new_task
+
+
+class ActionItemTriedRequest(BaseModel):
+    assessment_id: Optional[str] = None
+    note: Optional[str] = None
+
+
+@api_router.post("/teachers/me/action-items/{action_item_id}/tried")
+async def teacher_marks_action_item_tried(
+    action_item_id: str,
+    payload: ActionItemTriedRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_current_teacher_for_workspace(current_user)
+    task = await _find_or_promote_action_item_task(
+        teacher_id=teacher["id"],
+        assessment_id=payload.assessment_id,
+        action_item_id=action_item_id,
+        current_user=current_user,
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    set_fields: Dict[str, Any] = {
+        "status": "tried",
+        "tried_at": now,
+        "updated_at": now,
+    }
+    if payload.note:
+        note = _clean_optional_string(payload.note)
+        if note and is_teacher_visible_text_safe(note):
+            set_fields["tried_note"] = note
+    await db.coaching_tasks.update_one(
+        {"id": task["id"]},
+        {"$set": set_fields},
+    )
+    task.update(set_fields)
+    return {"ok": True, "task": task}
+
+
+class ActionItemReflectRequest(BaseModel):
+    assessment_id: Optional[str] = None
+    happened: str
+    tried: Optional[str] = None
+    visibility: Optional[str] = "private"
+
+
+@api_router.post("/teachers/me/action-items/{action_item_id}/reflect")
+async def teacher_reflects_on_action_item(
+    action_item_id: str,
+    payload: ActionItemReflectRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    teacher = await _get_current_teacher_for_workspace(current_user)
+    task = await _find_or_promote_action_item_task(
+        teacher_id=teacher["id"],
+        assessment_id=payload.assessment_id,
+        action_item_id=action_item_id,
+        current_user=current_user,
+    )
+    happened = (_clean_optional_string(payload.happened) or "").strip()
+    if not happened:
+        raise HTTPException(status_code=400, detail="Reflection body is required")
+    visibility = (payload.visibility or "private").strip().lower()
+    if visibility not in {"private", "shared_with_admin"}:
+        raise HTTPException(status_code=400, detail="Unsupported reflection visibility")
+    now = datetime.now(timezone.utc).isoformat()
+    reflection_doc = {
+        "id": str(uuid.uuid4()),
+        "task_id": task["id"],
+        "action_item_id": action_item_id,
+        "assessment_id": payload.assessment_id,
+        "video_id": task.get("video_id"),
+        "teacher_id": teacher["id"],
+        "author_user_id": current_user["id"],
+        "tried": _clean_optional_string(payload.tried) or "Reflection",
+        "happened": happened,
+        "text": happened,
+        "body": happened,
+        "visibility": visibility,
+        "created_at": now,
+        "updated_at": None,
+    }
+    await db.coaching_task_reflections.insert_one(reflection_doc)
+    inc = {"reflection_count": 1}
+    if visibility == "shared_with_admin":
+        inc["shared_reflection_count"] = 1
+    await db.coaching_tasks.update_one(
+        {"id": task["id"]},
+        {
+            "$set": {"status": "reflected", "reflected_at": now, "updated_at": now},
+            "$inc": inc,
+        },
+    )
+    return {"ok": True, "reflection": reflection_doc}
 
 
 @api_router.get("/assessments/{assessment_id}/evidence")
@@ -20353,6 +20966,11 @@ async def _build_teacher_lesson_coaching_artifact_for(
             task.update(counts.get(task.get("id"), {}))
 
     language = _teacher_language(current_user, teacher, assessment)
+    # PR C6: load any persistent admin review so admin_hidden /
+    # revision_requested blocks teacher feedback even when the auto-computed
+    # gates would otherwise allow it. admin_approved is informational only —
+    # the builder does NOT use it to override C1/C2/C3.
+    admin_review = await _load_teacher_feedback_review((assessment or {}).get("id"))
     return build_teacher_lesson_coaching_artifact(
         teacher=teacher,
         current_user=current_user,
@@ -20365,6 +20983,7 @@ async def _build_teacher_lesson_coaching_artifact_for(
         lesson_history=lesson_history,
         readiness=readiness,
         language=language,
+        admin_review=admin_review,
     )
 
 
