@@ -509,12 +509,14 @@ async def main_async(argv: Optional[List[str]] = None) -> int:
                     "performed. Re-run without --dry-run to apply markers."
                 ),
                 "would_mark_codes": [
-                    code for code in (report.get("issues") or {}).keys()
+                    code
+                    for code in (report.get("issues") or {}).keys()
                     if code in _REPAIR_MARKER_CODES
                 ],
             }
     finally:
         client.close()
+
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
