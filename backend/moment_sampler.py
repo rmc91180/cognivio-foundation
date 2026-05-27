@@ -148,9 +148,24 @@ def score_windows(windows: List[Dict[str, Any]], frames: List[Dict[str, Any]]) -
             key=lambda item: float(item.get("selection_score", 0.0)),
             default=None,
         )
+        # PR C3: when no frames fall inside the window we MUST NOT borrow a
+        # frame timestamp from the corpus — that's how representative_frame_sec
+        # ended up at 923.8 inside a 1100-1108.6 window in production. Instead
+        # synthesize the midpoint and mark the window as a synthetic fallback
+        # via representative_frame_source. The quality module flags this
+        # downstream.
+        synthetic_representative = False
         if dominant_frame is None and frames:
+            # We keep the closest-frame lookup so the window still gets the
+            # selection_features from a nearby frame for phase inference, but
+            # we deliberately discard its timestamp.
             midpoint = (float(window["start_sec"]) + float(window["end_sec"])) / 2.0
-            dominant_frame = min(frames, key=lambda item: abs(float(item.get("timestamp_sec", 0.0)) - midpoint))
+            nearest = min(frames, key=lambda item: abs(float(item.get("timestamp_sec", 0.0)) - midpoint))
+            dominant_frame = {
+                **{k: v for k, v in nearest.items() if k != "timestamp_sec"},
+                "timestamp_sec": midpoint,
+            }
+            synthetic_representative = True
 
         features = dict((dominant_frame or {}).get("selection_features") or {})
         window_phase = _infer_phase(
@@ -164,13 +179,29 @@ def score_windows(windows: List[Dict[str, Any]], frames: List[Dict[str, Any]]) -
             dominant_frame or {},
             window_phase,
         )
+
+        # Final clamp so representative_frame_sec is always inside the window.
+        # ``timestamp_sec`` from the dominant frame should already be in
+        # ``[start_sec, end_sec)`` because we filtered ``assigned`` by window,
+        # but defensively clamp anyway.
+        raw_representative = float(
+            (dominant_frame or {}).get("timestamp_sec", window["start_sec"])
+        )
+        window_start = float(window["start_sec"])
+        window_end = float(window["end_sec"])
+        if raw_representative < window_start or raw_representative > window_end:
+            raw_representative = (window_start + window_end) / 2.0
+            synthetic_representative = True
+
         enriched_windows.append(
             {
                 **window,
                 "score": ranking_details["score"],
                 "phase": window_phase,
                 "selection_reason": (dominant_frame or {}).get("selection_reason") or "timeline_coverage",
-                "representative_frame_sec": float((dominant_frame or {}).get("timestamp_sec", window["start_sec"])),
+                "representative_frame_sec": raw_representative,
+                "representative_frame_valid": not synthetic_representative,
+                "representative_frame_source": "synthetic_midpoint" if synthetic_representative else "real_frame",
                 "supporting_features": {
                     **features,
                     "raw_selection_score": ranking_details["raw_selection_score"],
@@ -230,6 +261,8 @@ def select_lesson_moments(windows: List[Dict[str, Any]], max_moments: int = 6) -
                 "phase": window.get("phase", "guided_practice"),
                 "selection_reason": window.get("selection_reason", "timeline_coverage"),
                 "representative_frame_sec": round(float(window.get("representative_frame_sec", window["start_sec"])), 1),
+                "representative_frame_valid": bool(window.get("representative_frame_valid", True)),
+                "representative_frame_source": window.get("representative_frame_source", "real_frame"),
                 "supporting_features": window.get("supporting_features") or {},
                 "score": round(float(window.get("score", 0.0)), 4),
             }
