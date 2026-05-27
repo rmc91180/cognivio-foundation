@@ -115,6 +115,19 @@ from app.analysis.teacher_feedback_projection import (
     sanitize_teacher_feedback_projection,
     validate_teacher_feedback_projection,
 )
+from app.services.teacher_artifact_quarantine import (
+    build_source_validity,
+    filter_deep_dive_moments,
+    filter_teacher_visible_coaching_tasks,
+    find_teacher_visible_text_issues,
+    find_unsafe_text_issues,
+    honest_next_best_action_for_record,
+    is_action_item_teacher_eligible,
+    is_coaching_task_teacher_safe,
+    is_teacher_visible_text_safe,
+    reject_unsafe_teacher_payload,
+    validate_teacher_artifact_source_chain,
+)
 from share_assets import (
     build_email_signature_html,
     render_email_signature_badge,
@@ -20107,24 +20120,82 @@ async def _teacher_projection_for_assessment(
         return None
     if not video and (assessment or {}).get("video_id"):
         video = await db.videos.find_one({"id": assessment.get("video_id"), "teacher_id": teacher["id"]}, {"_id": 0})
+
+    # Source-validity gate (PR C2). If either the canonical video or the
+    # assessment is missing/mismatched the projection is invalid for the
+    # teacher; we return None so the caller falls back to the honest
+    # readiness/record empty state rather than rendering legacy text on top
+    # of orphaned source data.
+    if assessment:
+        source_validity = build_source_validity(
+            artifact=assessment,
+            video=video,
+            assessment=assessment,
+            teacher_id=teacher.get("id"),
+        )
+        if not source_validity.get("valid_for_teacher_display"):
+            log_structured(
+                logger,
+                "info",
+                "teacher_projection_source_invalid",
+                teacher_id=teacher.get("id"),
+                assessment_id=(assessment or {}).get("id"),
+                video_id=(assessment or {}).get("video_id"),
+                invalid_reasons=source_validity.get("invalid_reasons"),
+            )
+            return None
+
     language = _teacher_language(current_user, teacher, assessment)
-    tasks = list(coaching_tasks or [])
-    task_counts = await _reflection_counts_by_task(teacher["id"], [task.get("id") for task in tasks if task.get("id")])
-    for task in tasks:
+    raw_tasks = list(coaching_tasks or [])
+    task_counts = await _reflection_counts_by_task(teacher["id"], [task.get("id") for task in raw_tasks if task.get("id")])
+    for task in raw_tasks:
         task.update(task_counts.get(task.get("id"), {}))
+
+    # Filter coaching tasks before passing to the projection so unsafe legacy
+    # task titles/bodies cannot leak into action_items.
+    valid_video_ids = {video.get("id")} if video and video.get("id") else None
+    valid_assessment_ids = {assessment.get("id")} if assessment and assessment.get("id") else None
+    safe_tasks, quarantined_tasks = filter_teacher_visible_coaching_tasks(
+        raw_tasks,
+        valid_video_ids=valid_video_ids,
+        valid_assessment_ids=valid_assessment_ids,
+    )
+    if quarantined_tasks:
+        log_structured(
+            logger,
+            "info",
+            "teacher_projection_quarantined_tasks",
+            teacher_id=teacher.get("id"),
+            assessment_id=(assessment or {}).get("id"),
+            count=len(quarantined_tasks),
+            reasons=[task.get("hidden_reason") for task in quarantined_tasks],
+        )
+
     projection = build_teacher_coaching_intelligence(
         assessment=assessment or {},
         video=video or {},
         teacher=teacher,
         readiness=readiness,
-        coaching_tasks=tasks,
+        coaching_tasks=safe_tasks,
         reflections=reflections,
         admin_comments=admin_comments,
         recognition_badges=recognition_badges,
         lesson_history=lesson_history,
         language=language,
     )
-    issues = validate_teacher_feedback_projection(projection, language=language)
+
+    cleaned_projection = reject_unsafe_teacher_payload(projection, language=language)
+    if cleaned_projection is None:
+        log_structured(
+            logger,
+            "warning",
+            "teacher_projection_unsafe_rejected",
+            teacher_id=teacher.get("id"),
+            assessment_id=(assessment or {}).get("id"),
+        )
+        return None
+
+    issues = validate_teacher_feedback_projection(cleaned_projection, language=language)
     if issues:
         logger.warning(
             "teacher_feedback_projection_issues teacher_id=%s assessment_id=%s count=%s",
@@ -20132,7 +20203,7 @@ async def _teacher_projection_for_assessment(
             (assessment or {}).get("id"),
             len(issues),
         )
-    return projection
+    return cleaned_projection
 
 
 @api_router.get("/teachers/me/latest-lesson")
@@ -20154,7 +20225,13 @@ async def get_my_latest_lesson(current_user: dict = Depends(get_current_user)):
         video=video,
         readiness=profile_payload.get("readiness"),
     )
-    actions = (projection or {}).get("action_items") or []
+    # PR C2: when projection is None (source chain invalid or unsafe text
+    # rejected) the teacher must see no "reviewed" lesson rather than a
+    # stitched-together orphan. The caller falls back to the readiness empty
+    # state.
+    if projection is None:
+        return {"lesson": None}
+    actions = projection.get("action_items") or []
     talk_time_summary = (
         (video or {}).get("audio_summary")
         or (assessment.get("audio_summary") if isinstance(assessment.get("audio_summary"), str) else None)
@@ -20169,7 +20246,7 @@ async def get_my_latest_lesson(current_user: dict = Depends(get_current_user)):
             "lesson_date": assessment.get("analyzed_at") or assessment.get("recorded_at") or (video or {}).get("recorded_at"),
             "reviewed_at": assessment.get("analyzed_at"),
             "recorded_at": assessment.get("recorded_at") or (video or {}).get("recorded_at"),
-            "summary": _teacher_feedback_summary_text(projection or {}),
+            "summary": _teacher_feedback_summary_text(projection),
             "actions": [item.get("try_next_lesson") or item.get("body") for item in actions[:2]],
             "teacher_feedback": projection,
             "talk_time_summary": talk_time_summary,
@@ -20242,7 +20319,14 @@ async def get_my_lessons(
             lesson_history=assessments,
         ) if assessment else None
         summary = _teacher_feedback_summary_text(projection or {})
-        lesson_status = _teacher_lesson_status(video, assessment)
+        # PR C2: if the assessment exists but its projection was rejected by
+        # the source-validity / unsafe-text gate, do not display the lesson as
+        # "reviewed". Fall back to the underlying video processing status so
+        # the teacher sees an honest state instead of a fake review.
+        if assessment and projection is None:
+            lesson_status = _teacher_lesson_status(video, None)
+        else:
+            lesson_status = _teacher_lesson_status(video, assessment)
         lesson_subject = video.get("subject") or (assessment or {}).get("subject") or teacher.get("subject")
         lesson_title = video.get("lesson_title") or video.get("title") or video.get("filename") or lesson_subject or "Lesson recording"
         uploaded_at = video.get("upload_date") or video.get("created_at")
@@ -20337,19 +20421,69 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
         {"teacher_id": teacher["id"], "status": {"$ne": "revoked"}},
         {"_id": 0},
     ).sort("awarded_at", -1).to_list(20)
-    latest_assessment = assessments[0] if assessments else None
+
+    # PR C2: source-validity gate. Load the canonical videos referenced by the
+    # teacher's tasks/assessments so we can drop orphans before they reach
+    # active_tasks / recommendations / suggested_improvements. Standalone
+    # admin goals (no video_id, no assessment_id) are allowed through if their
+    # text passes the unsafe-text gate.
+    task_video_ids = {task.get("video_id") for task in tasks if task.get("video_id")}
+    task_assessment_ids = {task.get("assessment_id") for task in tasks if task.get("assessment_id")}
+    assessment_video_ids = {a.get("video_id") for a in assessments if a.get("video_id")}
+    candidate_video_ids = list(task_video_ids | assessment_video_ids)
+    candidate_assessment_ids = list(task_assessment_ids | {a.get("id") for a in assessments if a.get("id")})
+
+    canonical_videos = await db.videos.find(
+        {"id": {"$in": candidate_video_ids or ["__none__"]}, "teacher_id": teacher["id"]},
+        {"_id": 0},
+    ).to_list(500) if candidate_video_ids else []
+    valid_video_ids = {video.get("id") for video in canonical_videos if video.get("id")}
+    canonical_assessments = await db.assessments.find(
+        {"id": {"$in": candidate_assessment_ids or ["__none__"]}, "teacher_id": teacher["id"]},
+        {"_id": 0},
+    ).to_list(500) if candidate_assessment_ids else []
+    valid_assessment_ids = {a.get("id") for a in canonical_assessments if a.get("id")}
+
+    safe_tasks, quarantined_tasks = filter_teacher_visible_coaching_tasks(
+        tasks,
+        valid_video_ids=valid_video_ids,
+        valid_assessment_ids=valid_assessment_ids,
+    )
+    if quarantined_tasks:
+        log_structured(
+            logger,
+            "info",
+            "teacher_coaching_tasks_quarantined",
+            teacher_id=teacher.get("id"),
+            count=len(quarantined_tasks),
+            reasons=[task.get("hidden_reason") for task in quarantined_tasks],
+        )
+
+    latest_assessment = None
+    if assessments:
+        # Pick the newest assessment whose source video still exists for this
+        # teacher. This stops orphaned assessments from driving the teacher
+        # projection.
+        for candidate in assessments:
+            if candidate.get("video_id") in valid_video_ids:
+                latest_assessment = candidate
+                break
+
     projection = await _teacher_projection_for_assessment(
         teacher,
         current_user,
         latest_assessment,
         readiness=profile_payload.get("readiness"),
-        coaching_tasks=tasks,
+        coaching_tasks=safe_tasks,
         reflections=reflections,
         admin_comments=comments,
         recognition_badges=recognition_badges,
         lesson_history=assessments,
     ) if latest_assessment else None
     projected_action_items = (projection or {}).get("action_items") or []
+    # Carry the safe-tasks list forward — the fallback path below uses it when
+    # no projection is available.
+    tasks = safe_tasks
 
     def _teacher_coaching_item_from_projection(item: dict) -> dict:
         return {
@@ -20396,6 +20530,12 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
         if projected_action_items
         else [_teacher_coaching_item_from_task(task) for task in tasks]
     )
+    # PR C2 defense-in-depth: even if `safe_tasks` already filtered upstream,
+    # apply the teacher-safety gate to the final rendered shape. Anything that
+    # still trips a known bad pattern is dropped before reaching the response.
+    active_task_items = [
+        item for item in active_task_items if is_action_item_teacher_eligible(item)
+    ]
     recommendations = active_task_items
     suggested_improvements = [
         {
@@ -20405,6 +20545,9 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
             "focus_area": "Coaching practice",
         }
         for item in recommendations[:6]
+        if is_teacher_visible_text_safe(item.get("title"))
+        and is_teacher_visible_text_safe(item.get("why_it_matters"))
+        and is_teacher_visible_text_safe(item.get("body"))
     ]
     upcoming_meetings = await db.schedules.find(
         {"teacher_id": teacher["id"]},
@@ -20413,19 +20556,28 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
     next_best_action = None
     if recommendations:
         item = recommendations[0]
-        next_best_action = {
-            "id": item.get("id"),
-            "title": item.get("title") or "Try one coaching move",
-            "description": item.get("try_next_lesson") or item.get("body"),
-            "href": f"/my-coaching?task_id={item.get('id')}",
-            "cta_label": "Open coaching",
-        }
-    elif tasks:
+        # Final guard: never seed next_best_action from an item that fails the
+        # teacher-safety gate, even if it slipped through earlier filters.
+        if is_action_item_teacher_eligible(item):
+            next_best_action = {
+                "id": item.get("id"),
+                "title": item.get("title") or "Try one coaching move",
+                "description": item.get("try_next_lesson") or item.get("body"),
+                "href": f"/my-coaching?task_id={item.get('id')}",
+                "cta_label": "Open coaching",
+            }
+    if next_best_action is None and tasks:
         task = tasks[0]
-        next_best_action = {"id": task.get("id"), "title": "Reflect on one coaching goal", "description": task.get("suggested_action") or task.get("summary") or "Write down what you tried and what you noticed.", "href": f"/my-coaching?task_id={task.get('id')}"}
-    elif comments:
+        description = task.get("suggested_action") or task.get("summary") or "Write down what you tried and what you noticed."
+        if is_teacher_visible_text_safe(task.get("title")) and is_teacher_visible_text_safe(description):
+            next_best_action = {"id": task.get("id"), "title": "Reflect on one coaching goal", "description": description, "href": f"/my-coaching?task_id={task.get('id')}"}
+    if next_best_action is None and comments:
         comment = comments[0]
-        next_best_action = {"title": "Revisit a shared lesson moment", "description": comment.get("body") or "Open the timestamp your observer shared.", "href": f"/videos/{comment.get('video_id')}?t={int(comment.get('timestamp_seconds') or 0)}"}
+        if is_teacher_visible_text_safe(comment.get("body")):
+            next_best_action = {"title": "Revisit a shared lesson moment", "description": comment.get("body") or "Open the timestamp your observer shared.", "href": f"/videos/{comment.get('video_id')}?t={int(comment.get('timestamp_seconds') or 0)}"}
+    if next_best_action is None and not projection:
+        # PR C2: honest fallback when nothing source-valid is available.
+        next_best_action = honest_next_best_action_for_record(language=_teacher_language(current_user, teacher))
     return {
         **profile_payload,
         "active_tasks": active_task_items,
@@ -20447,7 +20599,9 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
         "reflections": reflections,
         "suggested_improvements": suggested_improvements[:6],
         "teacher_feedback": projection,
-        "deep_dive": (projection or {}).get("deep_dive") or {"available": False, "moments": []},
+        "deep_dive": (projection or {}).get("deep_dive") or filter_deep_dive_moments(
+            [], language=_teacher_language(current_user, teacher)
+        ),
         "next_best_action": next_best_action,
         "upcoming_meetings": [
             {
@@ -20535,11 +20689,21 @@ async def _my_teacher_recognition_payload(current_user: dict, teacher: Optional[
         {"_id": 0},
     ).sort("awarded_at", -1).to_list(100)
     video_ids = [badge.get("video_id") for badge in badges if badge.get("video_id")]
-    videos = await db.videos.find({"id": {"$in": video_ids}}, {"_id": 0, "id": 1, "lesson_title": 1, "subject": 1, "upload_date": 1}).to_list(100) if video_ids else []
+    videos = await db.videos.find({"id": {"$in": video_ids}}, {"_id": 0, "id": 1, "lesson_title": 1, "subject": 1, "upload_date": 1, "teacher_id": 1}).to_list(100) if video_ids else []
     videos_by_id = {video.get("id"): video for video in videos}
+    # PR C2: recognition entries that reference a video must have a
+    # source-valid video for this teacher. Otherwise we drop the entry —
+    # gold-star moments tied to deleted videos must not show in the teacher
+    # workspace.
     items = []
     for badge in badges:
-        video = videos_by_id.get(badge.get("video_id")) or {}
+        badge_video_id = badge.get("video_id")
+        if badge_video_id:
+            video = videos_by_id.get(badge_video_id)
+            if not video or video.get("teacher_id") != teacher.get("id"):
+                continue
+        else:
+            video = {}
         cleaned_badge = sanitize_teacher_feedback_projection(
             {
                 "title": badge.get("title") or badge.get("badge_type") or badge.get("recognition_type") or "Cognivio accolade",
@@ -20549,6 +20713,8 @@ async def _my_teacher_recognition_payload(current_user: dict, teacher: Optional[
         )
         title = cleaned_badge.get("title") or "Cognivio accolade"
         description = cleaned_badge.get("body") or "A reviewed lesson highlighted a strong coaching move worth returning to."
+        if not is_teacher_visible_text_safe(title) or not is_teacher_visible_text_safe(description):
+            continue
         item = {
             "id": badge.get("id"),
             "title": title,
@@ -20709,10 +20875,23 @@ async def get_my_teacher_dashboard(
     coaching_payload = await get_my_teacher_coaching(current_user)
     recognition_payload = await _my_teacher_recognition_payload(current_user, teacher)
     gradebook = await _my_gradebook_reminders(teacher)
-    latest_lesson = (lessons_payload.get("lessons") or [None])[0]
+    # PR C2: only treat a lesson as the "latest reviewed lesson" when its
+    # teacher_feedback projection survived the source-validity + unsafe-text
+    # gate. Lessons whose projection was rejected are still in lessons_payload
+    # (under non-reviewed states) but must not drive the next_best_action /
+    # highlights / action_items contents.
+    latest_lesson = None
+    for lesson in lessons_payload.get("lessons") or []:
+        if lesson.get("status") == "reviewed" and lesson.get("teacher_feedback"):
+            latest_lesson = lesson
+            break
     setup_incomplete = bool((profile_payload.get("readiness") or {}).get("setup_next_step"))
-    next_best_action = None if setup_incomplete else coaching_payload.get("next_best_action")
-    if not setup_incomplete and not next_best_action and latest_lesson:
+    coaching_next_best = coaching_payload.get("next_best_action")
+    # Honor honest empty-state fallback when the coaching payload produced one
+    # — that's the C2 signal that no source-valid lesson exists yet.
+    honest_fallback = honest_next_best_action_for_record(language=_teacher_language(current_user, teacher))
+    next_best_action = None if setup_incomplete else coaching_next_best
+    if not setup_incomplete and not next_best_action and latest_lesson and is_teacher_visible_text_safe(latest_lesson.get("summary")):
         next_best_action = {
             "id": "latest-lesson",
             "title": "Review your latest lesson",
@@ -20721,13 +20900,7 @@ async def get_my_teacher_dashboard(
             "cta_label": "Open lesson",
         }
     if not setup_incomplete and not next_best_action:
-        next_best_action = {
-            "id": "record-lesson",
-            "title": "Record or upload a lesson",
-            "description": "Start with one lesson recording so feedback and coaching notes have a place to land.",
-            "href": "/record",
-            "cta_label": "Record or upload",
-        }
+        next_best_action = honest_fallback
     elif next_best_action:
         next_best_action = {
             "id": next_best_action.get("id") or "next-step",
@@ -20749,13 +20922,19 @@ async def get_my_teacher_dashboard(
     action_items = [
         {"id": task.get("id"), "type": "goal", "title": task.get("title"), "description": task.get("try_next_lesson") or task.get("body"), "href": task.get("href") or "/my-coaching", "video_href": task.get("video_href"), "status": task.get("status")}
         for task in coaching_payload.get("active_tasks", [])[:4]
+        if is_action_item_teacher_eligible(task)
     ] + [
         {"id": item.get("id"), "type": "grading", "title": item.get("title"), "description": f"{item.get('description')} {item.get('note')}", "href": item.get("href")}
         for item in gradebook[:3]
+        if is_teacher_visible_text_safe(item.get("title")) and is_teacher_visible_text_safe(item.get("description"))
     ]
     highlights = []
     lesson_feedback = (latest_lesson or {}).get("teacher_feedback") or {}
     for highlight in lesson_feedback.get("highlights") or []:
+        if not is_teacher_visible_text_safe(highlight.get("title")):
+            continue
+        if not is_teacher_visible_text_safe(highlight.get("body")):
+            continue
         highlights.append({
             "id": highlight.get("id"),
             "type": "lesson_highlight",
@@ -20778,7 +20957,12 @@ async def get_my_teacher_dashboard(
         "recognition": {
             "total_earned": (recognition_payload.get("summary") or {}).get("total_earned", 0),
             "latest_title": (recognition_payload.get("summary") or {}).get("latest_title"),
-            "items": (recognition_payload.get("accolades") or recognition_payload.get("badges") or [])[:4],
+            "items": [
+                item
+                for item in (recognition_payload.get("accolades") or recognition_payload.get("badges") or [])
+                if is_teacher_visible_text_safe(item.get("title"))
+                and is_teacher_visible_text_safe(item.get("description"))
+            ][:4],
         },
         "search_index_summary": {
             "lessons": len(lessons_payload.get("lessons") or []),

@@ -2,6 +2,13 @@
 
 The script reports derived video artifacts whose canonical video or assessment
 parents are missing. It is advisory and non-destructive by default.
+
+PR C2 adds ``--repair-safe`` which is also non-destructive: it never deletes
+records and never rewrites teacher-visible text. It only attaches diagnostic
+markers (``source_integrity``, ``hidden_from_teacher``, ``hidden_reason``,
+``needs_admin_review``, ``source_audited_at``, ``source_audit_reason``) so
+teacher-facing endpoints know to filter the row and admins can see the
+diagnostic state.
 """
 
 from __future__ import annotations
@@ -13,7 +20,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 REPO_BACKEND = Path(__file__).resolve().parents[1]
@@ -266,7 +273,9 @@ def _mongo_query(
     return query
 
 
-async def _load_from_mongo(args: argparse.Namespace) -> Dict[str, List[dict]]:
+def _open_mongo_client() -> Tuple[Any, Any]:
+    """Open a Motor client and return ``(client, db)``."""
+
     try:
         from motor.motor_asyncio import AsyncIOMotorClient
     except ImportError as exc:  # pragma: no cover - depends on local environment
@@ -275,21 +284,147 @@ async def _load_from_mongo(args: argparse.Namespace) -> Dict[str, List[dict]]:
     mongo_url = os.getenv("MONGO_URL", "mongodb://localhost:27017")
     db_name = os.getenv("DB_NAME", "cognivio")
     client = AsyncIOMotorClient(mongo_url)
-    db = client[db_name]
+    return client, client[db_name]
+
+
+async def _load_collections(
+    db: Any,
+    args: argparse.Namespace,
+) -> Dict[str, List[dict]]:
     names = ["videos", "assessments", *DERIVED_COLLECTIONS.keys()]
     collections: Dict[str, List[dict]] = {}
+    for name in names:
+        query = _mongo_query(
+            teacher_id=args.teacher_id,
+            video_id=args.video_id,
+            assessment_id=args.assessment_id,
+            collection=name,
+        )
+        collections[name] = await db[name].find(query, {"_id": 0}).to_list(100000)
+    return collections
+
+
+async def _load_from_mongo(args: argparse.Namespace) -> Dict[str, List[dict]]:
+    client, db = _open_mongo_client()
     try:
-        for name in names:
-            query = _mongo_query(
-                teacher_id=args.teacher_id,
-                video_id=args.video_id,
-                assessment_id=args.assessment_id,
-                collection=name,
-            )
-            collections[name] = await db[name].find(query, {"_id": 0}).to_list(100000)
+        return await _load_collections(db, args)
     finally:
         client.close()
-    return collections
+
+
+# ---------------------------------------------------------------------------
+# Repair-safe (non-destructive) marking
+# ---------------------------------------------------------------------------
+
+# Codes from audit_documents -> mapping for how to mark the row. Each entry is
+# (source_integrity, hidden_reason). For ``completed_video_missing_assessment``
+# and ``raw_deleted_missing_processed_or_redacted_asset`` we attach diagnostic
+# markers to the *video* row (so admins see needs_admin_review) without
+# deleting anything and without hiding the video itself — those signals are
+# advisory.
+_REPAIR_MARKER_CODES: Dict[str, Tuple[str, str, bool]] = {
+    # code -> (source_integrity, hidden_reason, hide_from_teacher)
+    "assessment_missing_video_parent": ("invalid", "missing_source_video", True),
+    "derived_missing_video_parent": ("orphaned", "missing_source_video", True),
+    "derived_missing_assessment_parent": ("orphaned", "missing_source_assessment", True),
+    "completed_video_missing_assessment": ("invalid", "missing_source_assessment", False),
+    "raw_deleted_missing_processed_or_redacted_asset": (
+        "invalid",
+        "missing_playable_asset",
+        False,
+    ),
+    "completed_video_missing_playable_asset": (
+        "invalid",
+        "missing_playable_asset",
+        False,
+    ),
+}
+
+
+def _build_repair_marker(
+    code: str,
+    *,
+    audited_at: str,
+) -> Optional[Dict[str, Any]]:
+    marker_spec = _REPAIR_MARKER_CODES.get(code)
+    if marker_spec is None:
+        return None
+    integrity, hidden_reason, hide_from_teacher = marker_spec
+    marker: Dict[str, Any] = {
+        "source_integrity": integrity,
+        "needs_admin_review": True,
+        "source_audited_at": audited_at,
+        "source_audit_reason": code,
+        "hidden_reason": hidden_reason,
+    }
+    if hide_from_teacher:
+        marker["hidden_from_teacher"] = True
+    return marker
+
+
+async def _apply_repair_marker(
+    db: Any,
+    collection: str,
+    doc: dict,
+    marker: Dict[str, Any],
+) -> int:
+    """Set the marker on the matching row by ``id``. Returns 1 on update."""
+
+    doc_id = doc.get("id") or doc.get(
+        "video_id" if collection == "videos" else "assessment_id" if collection == "assessments" else "id"
+    )
+    if not doc_id:
+        return 0
+    coll = getattr(db, collection, None)
+    if coll is None or not hasattr(coll, "update_one"):
+        return 0
+    try:
+        result = await coll.update_one({"id": doc_id}, {"$set": marker})
+        return int(getattr(result, "modified_count", 0) or 0)
+    except Exception:  # pragma: no cover - defensive
+        return 0
+
+
+async def repair_mark_documents(
+    db: Any,
+    report: Dict[str, Any],
+    *,
+    audited_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Apply non-destructive diagnostic markers based on ``audit_documents``.
+
+    The function iterates samples in the report — the audit script already
+    populates samples up to ``--limit`` per issue type. For exhaustive marking
+    against production data the operator should run with a high ``--limit``
+    (e.g. 10000); the script will mark every sample it surfaced. No row is
+    ever deleted and no text is ever rewritten.
+    """
+
+    audited_at = audited_at or datetime.now(timezone.utc).isoformat()
+    summary: Dict[str, Any] = {
+        "audited_at": audited_at,
+        "by_collection": {},
+        "by_code": {},
+        "marked": 0,
+    }
+
+    for code, issue in (report.get("issues") or {}).items():
+        marker = _build_repair_marker(code, audited_at=audited_at)
+        if marker is None:
+            continue
+        for sample in issue.get("samples") or []:
+            collection = sample.get("collection")
+            doc_id = sample.get("id")
+            if not collection or not doc_id:
+                continue
+            updated = await _apply_repair_marker(db, collection, {"id": doc_id}, marker)
+            if not updated:
+                continue
+            summary["marked"] += updated
+            summary["by_collection"][collection] = summary["by_collection"].get(collection, 0) + updated
+            summary["by_code"][code] = summary["by_code"].get(code, 0) + updated
+
+    return summary
 
 
 def _render_text(report: dict) -> str:
@@ -323,31 +458,73 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--video-id")
     parser.add_argument("--assessment-id")
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of human-readable text.")
-    parser.add_argument("--limit", type=int, default=20, help="Maximum samples per issue type.")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help=(
+            "Maximum samples per issue type. For repair-safe production runs raise"
+            " this to cover every orphan (e.g. --limit 10000)."
+        ),
+    )
     parser.add_argument(
         "--repair-safe",
         action="store_true",
-        help="Reserved for future non-destructive marking; not implemented in PR C1.",
+        help=(
+            "Non-destructive marking: attaches source_integrity, "
+            "hidden_from_teacher, hidden_reason, needs_admin_review, and "
+            "source_audited_at to orphaned/invalid derived rows. No records "
+            "are deleted and no teacher-visible text is rewritten."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Default behavior — print what --repair-safe would mark without "
+            "writing. Implied when --repair-safe is omitted."
+        ),
     )
     return parser.parse_args(argv)
 
 
 async def main_async(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
-    if args.repair_safe:
-        raise SystemExit("--repair-safe is intentionally not implemented in PR C1; run read-only audit instead.")
-    collections = await _load_from_mongo(args)
-    report = audit_documents(
-        collections,
-        teacher_id=args.teacher_id,
-        video_id=args.video_id,
-        assessment_id=args.assessment_id,
-        limit=max(1, args.limit),
-    )
+    client, db = _open_mongo_client()
+    try:
+        collections = await _load_collections(db, args)
+        report = audit_documents(
+            collections,
+            teacher_id=args.teacher_id,
+            video_id=args.video_id,
+            assessment_id=args.assessment_id,
+            limit=max(1, args.limit),
+        )
+        if args.repair_safe and not args.dry_run:
+            report["repair_safe"] = await repair_mark_documents(db, report)
+        elif args.repair_safe and args.dry_run:
+            report["repair_safe_dry_run"] = {
+                "note": (
+                    "--repair-safe combined with --dry-run; no writes were "
+                    "performed. Re-run without --dry-run to apply markers."
+                ),
+                "would_mark_codes": [
+                    code for code in (report.get("issues") or {}).keys()
+                    if code in _REPAIR_MARKER_CODES
+                ],
+            }
+    finally:
+        client.close()
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(_render_text(report))
+        if "repair_safe" in report:
+            print("")
+            print("Repair-safe applied:")
+            print(f"  marked: {report['repair_safe'].get('marked', 0)}")
+            print(f"  by_collection: {json.dumps(report['repair_safe'].get('by_collection', {}), sort_keys=True)}")
+            print(f"  by_code: {json.dumps(report['repair_safe'].get('by_code', {}), sort_keys=True)}")
     return 0
 
 
