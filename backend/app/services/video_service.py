@@ -184,8 +184,40 @@ async def upload_video(
             "teacher_reference_image_count": reference_count,
             "privacy_blur_teacher_match_status": reference_status,
             **privacy_policy_fields,
+            **legacy._build_video_source_chain_upload_fields(
+                upload_time=upload_time,
+                original_filename=file.filename,
+                original_size_bytes=size,
+                raw_file_path=relative_path,
+                raw_file_url=file_url,
+                raw_s3_key=s3_key,
+            ),
         }
-        await video_repository.insert_video(video_doc)
+        try:
+            await video_repository.insert_video(video_doc)
+        except Exception as exc:
+            legacy.log_structured(
+                legacy.logger,
+                "error",
+                "video_source_record_insert_failed",
+                video_id=video_id,
+                teacher_id=teacher_id,
+                user_id=current_user["id"],
+                raw_asset_state=video_doc.get("raw_asset_state"),
+                upload_source=upload_source,
+                error_type=exc.__class__.__name__,
+            )
+            raise
+        legacy.log_structured(
+            legacy.logger,
+            "info",
+            "video_source_record_inserted",
+            video_id=video_id,
+            teacher_id=teacher_id,
+            user_id=current_user["id"],
+            raw_asset_state=video_doc.get("raw_asset_state"),
+            upload_source=upload_source,
+        )
 
         if legacy.VIDEO_TRANSCODE_PIPELINE_ENABLED:
             await legacy._enqueue_video_transcode_job(
