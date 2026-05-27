@@ -16,6 +16,7 @@ import { Badge, Button, EmptyState, Field, PageContextHeader, Panel, Textarea } 
 import { useTranslation } from "react-i18next";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 import { resolveCoachingLink } from "@/lib/coachingRoutes";
+import { AdminTeacherFeedbackReviewCard } from "@/components/admin/AdminTeacherFeedbackReviewCard";
 import {
   artifactActionItems,
   artifactDeepDive,
@@ -1553,6 +1554,20 @@ export function VideoPlayerPage() {
               <div className="mb-2 text-xs text-slate-600">
                 {visibleSummary}
               </div>
+              {isAdmin && assessmentRes?.id ? (
+                <div className="mb-3">
+                  <AdminTeacherFeedbackReviewCard
+                    assessmentId={assessmentRes.id}
+                    teacherPreview={assessmentRes?.teacher_preview}
+                    teacherFeedbackAdminStatus={assessmentRes?.teacher_feedback_admin_status}
+                    invalidateKeys={[
+                      ["assessment", assessmentRes.id],
+                      ["video", videoId],
+                      ["teacher-coaching-thread", assessmentRes.id],
+                    ]}
+                  />
+                </div>
+              ) : null}
               {isTeacher && teacherDeepDiveMoments.length ? (
                 <div className="mb-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Moments to revisit</div>

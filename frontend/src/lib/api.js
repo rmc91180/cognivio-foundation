@@ -17,6 +17,7 @@ import {
 } from "@/features/school-setup/api";
 import {
   actionPlanApi,
+  adminCoachingApi,
   observationApi,
   privacyProfileApi,
   teacherApi,
@@ -49,6 +50,7 @@ export {
 };
 export {
   actionPlanApi,
+  adminCoachingApi,
   observationApi,
   privacyProfileApi,
   teacherApi,

@@ -31,6 +31,27 @@ export const teacherApi = {
   coachingTasks: (params) => api.get("/api/coaching/tasks", { params }),
   getPeerRecommendations: (id) =>
     api.get(`/api/teachers/${id}/peer-recommendations`),
+  // PR C6/C7: artifact-driven coaching workflow.
+  myCoachingThread: (params) =>
+    api.get("/api/teachers/me/coaching-thread", { params }),
+  actionItemTried: (actionItemId, payload) =>
+    api.post(`/api/teachers/me/action-items/${actionItemId}/tried`, payload),
+  actionItemReflect: (actionItemId, payload) =>
+    api.post(`/api/teachers/me/action-items/${actionItemId}/reflect`, payload),
+};
+
+// PR C7: admin-side API methods for the teacher coaching workflow.
+export const adminCoachingApi = {
+  getReview: (assessmentId) =>
+    api.get(`/api/admin/assessments/${assessmentId}/teacher-feedback-review`),
+  upsertReview: (assessmentId, payload) =>
+    api.post(`/api/admin/assessments/${assessmentId}/teacher-feedback-review`, payload),
+  getThread: (teacherId, params) =>
+    api.get(`/api/admin/teachers/${teacherId}/coaching-thread`, { params }),
+  postThreadMessage: (teacherId, payload) =>
+    api.post(`/api/admin/teachers/${teacherId}/coaching-thread`, payload),
+  auditArtifacts: (params) =>
+    api.get("/api/admin/teacher-coaching-artifacts/audit", { params }),
 };
 
 export const privacyProfileApi = {
