@@ -14282,24 +14282,193 @@ def _require_admin_role_for_review(current_user: dict) -> str:
     return role
 
 
-def _require_admin_in_same_tenant(current_user: dict, assessment: dict) -> None:
-    """PR C6: enforce workspace isolation for the admin review endpoint."""
+async def _require_admin_in_same_tenant(current_user: dict, assessment: dict) -> dict:
+    """PR C7: strict workspace authorization for admin review/thread endpoints.
+
+    PR C6 allowed a best-effort match and then fell back to
+    ``_get_teacher_or_404`` (which itself enforces tenant rules via
+    ``_teacher_is_visible_to_user``). C7 makes the check explicit AND keeps
+    the existing helper as the source of truth — the function now always
+    loads the teacher document and runs the canonical visibility check.
+
+    Super_admin bypasses the workspace check (existing behaviour).
+
+    Returns the teacher document so callers don't have to re-load it.
+    Raises 403 ``forbidden_tenant_access`` on cross-tenant attempts.
+    """
 
     role = _get_user_tenant_role(current_user)
+    teacher_id = assessment.get("teacher_id") if isinstance(assessment, dict) else None
+    if not teacher_id:
+        raise HTTPException(status_code=404, detail="Assessment is missing teacher_id")
+    teacher = await _get_teacher_or_404(teacher_id, current_user)
     if role == "super_admin":
-        return
+        return teacher
+    # Additional strict workspace_id assertion when both sides expose one.
     admin_org = (current_user or {}).get("organization_id")
     admin_school = (current_user or {}).get("school_id")
-    assessment_org = assessment.get("organization_id")
-    assessment_school = assessment.get("school_id")
-    # Best-effort cross-tenant check: allow when admin's org/school matches
-    # the assessment's org/school; otherwise look up the teacher document.
-    if admin_org and assessment_org and admin_org == assessment_org:
-        return
-    if admin_school and assessment_school and admin_school == assessment_school:
-        return
-    # Fall back to the existing per-teacher visibility helper which already
-    # handles tenant + observer-of relations.
+    teacher_org = teacher.get("organization_id")
+    teacher_school = teacher.get("school_id")
+    if admin_org and teacher_org and admin_org != teacher_org:
+        await _log_cross_tenant_access_denied(
+            target_type="assessment",
+            target_id=assessment.get("id"),
+            current_user=current_user,
+            details={
+                "teacher_organization_id": teacher_org,
+                "admin_organization_id": admin_org,
+            },
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "reason_code": "forbidden_tenant_access",
+                "message": "Admin cannot review feedback for a teacher in another workspace.",
+            },
+        )
+    if admin_school and teacher_school and admin_school != teacher_school:
+        await _log_cross_tenant_access_denied(
+            target_type="assessment",
+            target_id=assessment.get("id"),
+            current_user=current_user,
+            details={
+                "teacher_school_id": teacher_school,
+                "admin_school_id": admin_school,
+            },
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "reason_code": "forbidden_tenant_access",
+                "message": "Admin cannot review feedback for a teacher in another school.",
+            },
+        )
+    return teacher
+
+
+# ---------------------------------------------------------------------------
+# PR C7: teacher notification fan-out
+# ---------------------------------------------------------------------------
+
+
+async def _find_teacher_user(teacher: dict) -> Optional[dict]:
+    """PR C7: locate the teacher's user account so we can notify them.
+
+    Notification fan-out targets the teacher's user document, not the
+    teacher document. We resolve in this order:
+
+      1. ``users`` with ``teacher_id`` matching the teacher's id.
+      2. ``users`` with email matching the teacher's email (case-insensitive).
+    """
+
+    if not teacher or not hasattr(db, "users"):
+        return None
+    teacher_id = teacher.get("id")
+    if teacher_id:
+        user = await db.users.find_one({"teacher_id": teacher_id}, {"_id": 0})
+        if user:
+            return user
+    email = _clean_optional_string(teacher.get("email"))
+    if email:
+        user = await db.users.find_one(
+            {"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}},
+            {"_id": 0},
+        )
+        if user:
+            return user
+    return None
+
+
+async def _notify_teacher_feedback_review_change(
+    *,
+    review_status: str,
+    artifact_allowed: bool,
+    teacher: dict,
+    assessment_id: Optional[str],
+    video_id: Optional[str],
+    workspace_id: Optional[str],
+    reviewer_user: dict,
+    review_note: Optional[str] = None,
+) -> Optional[dict]:
+    """PR C7: notify a teacher only when the change makes coaching available.
+
+    Rules from the brief:
+
+      * ``admin_approved`` AND ``artifact_allowed`` → notify ``feedback_ready``.
+      * ``admin_approved`` AND artifact still blocked (source/safety/evidence
+        gates failed) → DO NOT notify.
+      * ``admin_hidden`` / ``revision_requested`` → DO NOT notify the teacher;
+        these are admin-internal state changes.
+    """
+
+    if review_status != "admin_approved" or not artifact_allowed:
+        return None
+    teacher_user = await _find_teacher_user(teacher)
+    if not teacher_user:
+        return None
+    return await _create_notification(
+        recipient_user=teacher_user,
+        notification_type="teacher_feedback_ready",
+        title="New coaching feedback is ready.",
+        message="Your coach approved your latest lesson feedback. Open your workspace to see what to try next.",
+        payload={
+            "assessment_id": assessment_id,
+            "video_id": video_id,
+            "source": "teacher_feedback_review",
+            "review_status": review_status,
+            "reviewer_user_id": reviewer_user.get("id"),
+        },
+        teacher_id=teacher.get("id"),
+        workspace_id=workspace_id,
+        cta_url="/my-coaching",
+        channel="in_app",
+    )
+
+
+async def _notify_teacher_admin_thread_reply(
+    *,
+    teacher: dict,
+    assessment_id: Optional[str],
+    video_id: Optional[str],
+    action_item_id: Optional[str],
+    visibility: str,
+    body: str,
+    workspace_id: Optional[str],
+    reviewer_user: dict,
+) -> Optional[dict]:
+    """PR C7: notify the teacher on admin shared replies.
+
+    Rules from the brief:
+
+      * ``shared_with_teacher`` → notify ``coaching_thread_reply``.
+      * ``admin_only`` → DO NOT notify (internal note).
+    """
+
+    if visibility != "shared_with_teacher":
+        return None
+    teacher_user = await _find_teacher_user(teacher)
+    if not teacher_user:
+        return None
+    excerpt = (body or "").strip()
+    if len(excerpt) > 140:
+        excerpt = excerpt[:137] + "..."
+    return await _create_notification(
+        recipient_user=teacher_user,
+        notification_type="coaching_thread_reply",
+        title="Your coach replied.",
+        message=excerpt or "Your coach left a message on your latest lesson.",
+        payload={
+            "assessment_id": assessment_id,
+            "video_id": video_id,
+            "action_item_id": action_item_id,
+            "source": "coaching_thread",
+            "reviewer_user_id": reviewer_user.get("id"),
+        },
+        teacher_id=teacher.get("id"),
+        workspace_id=workspace_id,
+        cta_url="/my-coaching",
+        channel="in_app",
+    )
 
 
 @api_router.get("/admin/assessments/{assessment_id}/teacher-feedback-review")
@@ -14311,10 +14480,7 @@ async def get_teacher_feedback_review_endpoint(
     assessment = await db.assessments.find_one({"id": assessment_id}, {"_id": 0})
     if not assessment:
         raise HTTPException(status_code=404, detail="Assessment not found")
-    _require_admin_in_same_tenant(current_user, assessment)
-    # ``_get_teacher_or_404`` already enforces admin visibility into the
-    # teacher; piggyback on it for cross-tenant safety.
-    await _get_teacher_or_404(assessment.get("teacher_id"), current_user)
+    await _require_admin_in_same_tenant(current_user, assessment)
     review = await _load_teacher_feedback_review(assessment_id)
     return {"review": review}
 
@@ -14335,12 +14501,7 @@ async def upsert_teacher_feedback_review_endpoint(
     assessment = await db.assessments.find_one({"id": assessment_id}, {"_id": 0})
     if not assessment:
         raise HTTPException(status_code=404, detail="Assessment not found")
-    _require_admin_in_same_tenant(current_user, assessment)
-    await _get_teacher_or_404(assessment.get("teacher_id"), current_user)
-
-    teacher_doc = await db.teachers.find_one(
-        {"id": assessment.get("teacher_id")}, {"_id": 0}
-    ) if assessment.get("teacher_id") else None
+    teacher_doc = await _require_admin_in_same_tenant(current_user, assessment)
     workspace_id = (
         (teacher_doc or {}).get("organization_id")
         or assessment.get("organization_id")
@@ -14373,13 +14534,34 @@ async def upsert_teacher_feedback_review_endpoint(
         )
         admin_status = _compute_teacher_feedback_admin_status(rebuilt_artifact)
     except Exception:  # pragma: no cover - never let the rebuild break the write
+        rebuilt_artifact = None
         teacher_preview = None
         admin_status = status
+    # PR C7: fan out a teacher notification only when admin_approved AND the
+    # artifact actually becomes teacher-visible. admin_hidden /
+    # revision_requested deliberately do NOT notify the teacher — these are
+    # admin-internal state changes.
+    notification_doc = None
+    if teacher_doc:
+        try:
+            notification_doc = await _notify_teacher_feedback_review_change(
+                review_status=status,
+                artifact_allowed=bool((rebuilt_artifact or {}).get("teacher_feedback_allowed")),
+                teacher=teacher_doc,
+                assessment_id=assessment_id,
+                video_id=assessment.get("video_id"),
+                workspace_id=workspace_id,
+                reviewer_user=current_user,
+                review_note=payload.review_note,
+            )
+        except Exception:  # pragma: no cover - never let notification break the write
+            notification_doc = None
     return {
         "ok": True,
         "review": review_doc,
         "teacher_preview": teacher_preview,
         "teacher_feedback_admin_status": admin_status,
+        "notification_created": bool(notification_doc),
     }
 
 
@@ -14600,7 +14782,142 @@ async def post_admin_coaching_thread_message(
         "deleted_at": None,
     }
     await db.video_comments.insert_one(doc)
-    return {"ok": True, "message": doc}
+    # PR C7 reuse marker (this block ends a thread-write path that the
+    # notification helper below now uses).
+    # PR C7: notify the teacher when the admin posts a shared response.
+    # admin_only notes do NOT notify (internal review notes).
+    notification_doc = None
+    try:
+        notification_doc = await _notify_teacher_admin_thread_reply(
+            teacher=teacher,
+            assessment_id=payload.assessment_id,
+            video_id=video_id,
+            action_item_id=payload.action_item_id,
+            visibility=visibility,
+            body=body,
+            workspace_id=teacher.get("organization_id"),
+            reviewer_user=current_user,
+        )
+    except Exception:  # pragma: no cover - never let notification break the write
+        notification_doc = None
+    return {"ok": True, "message": doc, "notification_created": bool(notification_doc)}
+
+
+# ---------------------------------------------------------------------------
+# PR C7: admin-accessible artifact audit endpoint
+# ---------------------------------------------------------------------------
+
+
+@api_router.get("/admin/teacher-coaching-artifacts/audit")
+async def admin_teacher_coaching_artifact_audit(
+    teacher_id: Optional[str] = None,
+    video_id: Optional[str] = None,
+    assessment_id: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    limit: int = 200,
+    current_user: dict = Depends(get_current_user),
+):
+    """PR C7: admin-accessible read-only artifact audit.
+
+    Mirrors ``backend/scripts/audit_teacher_coaching_artifacts.py``. Returns
+    the issue counts + samples for the loaded scope. Tenant isolation: a
+    teacher_id (or assessment_id resolving to a teacher_id) must belong to
+    the admin's workspace unless the caller is super_admin.
+    """
+
+    role = _get_user_tenant_role(current_user)
+    if role not in {"school_admin", "training_admin", "super_admin"}:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from scripts.audit_teacher_coaching_artifacts import audit_collections  # noqa: WPS433
+
+    assessment_filter: Dict[str, Any] = {}
+    if assessment_id:
+        assessment_filter["id"] = assessment_id
+    if video_id:
+        assessment_filter["video_id"] = video_id
+    if teacher_id:
+        # Tenant enforcement: load the teacher and check visibility.
+        await _get_teacher_or_404(teacher_id, current_user)
+        assessment_filter["teacher_id"] = teacher_id
+    if workspace_id and role != "super_admin":
+        admin_org = (current_user or {}).get("organization_id")
+        if admin_org and workspace_id != admin_org:
+            raise HTTPException(status_code=403, detail="forbidden_tenant_access")
+
+    assessments = await db.assessments.find(
+        assessment_filter, {"_id": 0}
+    ).to_list(max(1, min(int(limit or 200), 2000))) if assessment_filter else []
+    teacher_ids = {a.get("teacher_id") for a in assessments if a.get("teacher_id")}
+    video_ids = {a.get("video_id") for a in assessments if a.get("video_id")}
+    assessment_ids = {a.get("id") for a in assessments if a.get("id")}
+
+    # When the admin did not supply a teacher_id but supplied an assessment,
+    # we still need to enforce tenant. Run the visibility check on each
+    # discovered teacher.
+    if teacher_ids and not teacher_id:
+        for tid in teacher_ids:
+            await _get_teacher_or_404(tid, current_user)
+
+    teachers_list = await db.teachers.find(
+        {"id": {"$in": list(teacher_ids)}}, {"_id": 0}
+    ).to_list(2000) if teacher_ids else []
+    teachers = {t.get("id"): t for t in teachers_list if t.get("id")}
+    videos_list = await db.videos.find(
+        {"id": {"$in": list(video_ids)}}, {"_id": 0}
+    ).to_list(2000) if video_ids else []
+    videos = {v.get("id"): v for v in videos_list if v.get("id")}
+
+    coaching_tasks_list = await db.coaching_tasks.find(
+        {"teacher_id": {"$in": list(teacher_ids) or ["__none__"]}}, {"_id": 0}
+    ).to_list(5000) if teacher_ids else []
+    coaching_tasks_by_teacher: Dict[str, List[dict]] = {}
+    for task in coaching_tasks_list:
+        coaching_tasks_by_teacher.setdefault(task.get("teacher_id"), []).append(task)
+    recognition_badges_list = await db.recognition_badges.find(
+        {"teacher_id": {"$in": list(teacher_ids) or ["__none__"]}, "status": {"$ne": "revoked"}},
+        {"_id": 0},
+    ).to_list(5000) if teacher_ids else []
+    recognition_badges_by_teacher: Dict[str, List[dict]] = {}
+    for badge in recognition_badges_list:
+        recognition_badges_by_teacher.setdefault(badge.get("teacher_id"), []).append(badge)
+    review_docs: List[dict] = []
+    if assessment_ids and hasattr(db, "teacher_feedback_reviews"):
+        try:
+            review_docs = await db.teacher_feedback_reviews.find(
+                {"assessment_id": {"$in": list(assessment_ids)}}, {"_id": 0}
+            ).to_list(5000)
+        except Exception:  # pragma: no cover
+            review_docs = []
+    teacher_feedback_reviews_by_assessment = {
+        r.get("assessment_id"): r for r in review_docs if r.get("assessment_id")
+    }
+    coaching_task_reflections: List[dict] = []
+    if teacher_ids and hasattr(db, "coaching_task_reflections"):
+        try:
+            coaching_task_reflections = await db.coaching_task_reflections.find(
+                {"teacher_id": {"$in": list(teacher_ids)}}, {"_id": 0}
+            ).to_list(5000)
+        except Exception:  # pragma: no cover
+            coaching_task_reflections = []
+
+    report = audit_collections(
+        teachers=teachers,
+        videos=videos,
+        assessments=assessments,
+        coaching_tasks_by_teacher=coaching_tasks_by_teacher,
+        recognition_badges_by_teacher=recognition_badges_by_teacher,
+        teacher_feedback_reviews_by_assessment=teacher_feedback_reviews_by_assessment,
+        coaching_task_reflections=coaching_task_reflections,
+    )
+    report["filters"] = {
+        "teacher_id": teacher_id,
+        "video_id": video_id,
+        "assessment_id": assessment_id,
+        "workspace_id": workspace_id,
+        "limit": limit,
+    }
+    return report
 
 
 # ---------------------------------------------------------------------------

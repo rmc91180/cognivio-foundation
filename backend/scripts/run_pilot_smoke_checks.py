@@ -515,10 +515,111 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         description="Cognivio pilot smoke checks (read-only)."
     )
     parser.add_argument("--teacher-id")
+    parser.add_argument(
+        "--forensic-teacher-id",
+        dest="teacher_id",
+        help="Alias for --teacher-id (convenient for the forensic orphan check).",
+    )
     parser.add_argument("--video-id")
     parser.add_argument("--assessment-id")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--base-url",
+        default=os.getenv("COGNIVIO_BASE_URL"),
+        help=(
+            "Optional API base URL (e.g. https://api.example.com). When set "
+            "alongside --teacher-token / --admin-token the script also runs "
+            "API-level smoke checks via requests."
+        ),
+    )
+    parser.add_argument(
+        "--teacher-token",
+        default=os.getenv("COGNIVIO_TEACHER_TOKEN"),
+        help="Teacher JWT for API-level checks.",
+    )
+    parser.add_argument(
+        "--admin-token",
+        default=os.getenv("COGNIVIO_ADMIN_TOKEN"),
+        help="Admin JWT for API-level checks.",
+    )
     return parser.parse_args(argv)
+
+
+# ---------------------------------------------------------------------------
+# Optional API-mode checks (run only when --base-url + tokens are present)
+# ---------------------------------------------------------------------------
+
+
+def _api_get(base_url: str, path: str, token: Optional[str]) -> Dict[str, Any]:
+    import requests  # local import so the script still works without requests
+
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    resp = requests.get(base_url.rstrip("/") + path, headers=headers, timeout=15)
+    return {"status_code": resp.status_code, "body": (resp.json() if resp.content else None)}
+
+
+def check_api_teacher_endpoint_no_banned_strings(
+    base_url: str, teacher_token: str, assessment_id: Optional[str]
+) -> CheckResult:
+    try:
+        latest = _api_get(base_url, "/api/teachers/me/latest-lesson", teacher_token)
+    except Exception as exc:  # pragma: no cover
+        return CheckResult(
+            code="api_teacher_latest_lesson",
+            status="fail",
+            message=f"latest-lesson request failed: {exc}",
+        )
+    if latest["status_code"] != 200:
+        return CheckResult(
+            code="api_teacher_latest_lesson",
+            status="fail",
+            message=f"latest-lesson returned HTTP {latest['status_code']}",
+        )
+    hits = _scan_for_banned(latest["body"])
+    if hits:
+        return CheckResult(
+            code="api_teacher_latest_lesson",
+            status="fail",
+            message=f"teacher latest-lesson response contains banned strings: {hits}",
+        )
+    return CheckResult(
+        code="api_teacher_latest_lesson",
+        status="ok",
+        message="Teacher latest-lesson response is teacher-safe.",
+    )
+
+
+def check_api_admin_assessment_has_teacher_preview(
+    base_url: str, admin_token: str, assessment_id: str
+) -> CheckResult:
+    try:
+        resp = _api_get(base_url, f"/api/assessments/{assessment_id}", admin_token)
+    except Exception as exc:  # pragma: no cover
+        return CheckResult(
+            code="api_admin_assessment_preview",
+            status="fail",
+            message=f"admin assessment request failed: {exc}",
+        )
+    if resp["status_code"] != 200:
+        return CheckResult(
+            code="api_admin_assessment_preview",
+            status="fail",
+            message=f"admin assessment returned HTTP {resp['status_code']}",
+        )
+    body = resp.get("body") or {}
+    preview = body.get("teacher_preview") if isinstance(body, dict) else None
+    status_value = body.get("teacher_feedback_admin_status") if isinstance(body, dict) else None
+    if preview is None or status_value is None:
+        return CheckResult(
+            code="api_admin_assessment_preview",
+            status="fail",
+            message="admin assessment response is missing teacher_preview / teacher_feedback_admin_status",
+        )
+    return CheckResult(
+        code="api_admin_assessment_preview",
+        status="ok",
+        message=f"admin assessment preview present, status={status_value}.",
+    )
 
 
 def _render_text(report: Dict[str, Any]) -> str:
@@ -546,6 +647,29 @@ async def main_async(argv: Optional[List[str]] = None) -> int:
         video_id=args.video_id,
         assessment_id=args.assessment_id,
     )
+    # PR C7: optional API-mode checks. They run only when the operator
+    # supplied a base URL + at least one token. DB-only smoke runs without
+    # them.
+    if args.base_url and (args.teacher_token or args.admin_token):
+        api_checks: List[CheckResult] = []
+        if args.teacher_token:
+            api_checks.append(
+                check_api_teacher_endpoint_no_banned_strings(
+                    args.base_url, args.teacher_token, args.assessment_id
+                )
+            )
+        if args.admin_token and args.assessment_id:
+            api_checks.append(
+                check_api_admin_assessment_has_teacher_preview(
+                    args.base_url, args.admin_token, args.assessment_id
+                )
+            )
+        for r in api_checks:
+            report["checks"].append(
+                {"code": r.code, "status": r.status, "message": r.message, "samples": r.samples}
+            )
+            report["counts"][r.status] = report["counts"].get(r.status, 0) + 1
+        report["overall"] = "fail" if report["counts"].get("fail", 0) else "ok"
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True, default=str))
     else:

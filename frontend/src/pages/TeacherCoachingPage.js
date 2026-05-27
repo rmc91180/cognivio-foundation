@@ -81,6 +81,7 @@ export function TeacherCoachingPage() {
   // recommendations when artifact is allowed; suppress legacy lists when
   // the artifact blocks teacher feedback.
   const artifactActions = artifactAllowed ? artifactActionItems(artifact) : [];
+  const artifactAssessmentId = artifact?.lesson?.assessment_id || null;
   const tasks = artifactBlocked
     ? []
     : artifactActions.length
@@ -90,6 +91,12 @@ export function TeacherCoachingPage() {
           body: item.try_next_lesson || item.body || "",
           why_it_matters: item.why_it_matters,
           video_href: item.video_href || null,
+          // PR C7: mark the source so the "I tried this" handler routes
+          // to the artifact action-item endpoint (C6) instead of the
+          // legacy coaching_tasks endpoint.
+          source_kind: "artifact_action_item",
+          action_item_id: item.id,
+          assessment_id: artifactAssessmentId,
           href: `/my-coaching${item.id ? `?task_id=${item.id}` : ""}`,
         }))
       : legacyTasks;
@@ -123,7 +130,18 @@ export function TeacherCoachingPage() {
   const nextBestAction = artifactNextBestAction(artifact, data.next_best_action);
   const readiness = data.readiness || {};
   const markTriedMutation = useMutation({
-    mutationFn: (taskId) => teacherApi.updateCoachingTask(taskId, { status: "tried" }),
+    // PR C7: artifact-derived action items go through the C6 endpoint so we
+    // get the dedupe-safe persistence + admin status updates. Legacy
+    // coaching_tasks rows continue to use the original endpoint.
+    mutationFn: (task) => {
+      if (task && task.source_kind === "artifact_action_item" && task.action_item_id) {
+        return teacherApi.actionItemTried(task.action_item_id, {
+          assessment_id: task.assessment_id || undefined,
+        });
+      }
+      const taskId = typeof task === "string" ? task : task && task.id;
+      return teacherApi.updateCoachingTask(taskId, { status: "tried" });
+    },
     onSuccess: () => {
       toast.success("Marked as tried.");
       queryClient.invalidateQueries({ queryKey: ["teacher-coaching"] });
@@ -182,7 +200,7 @@ export function TeacherCoachingPage() {
                         <p className="mt-2 text-sm leading-6 text-slate-700">{task.body || "Try one move, then notice how students respond."}</p>
                         {task.why_it_matters ? <p className="mt-2 text-xs leading-5 text-slate-500">{task.why_it_matters}</p> : null}
                         <div className="mt-3 flex flex-wrap gap-2">
-                          <Button type="button" size="sm" variant="secondary" onClick={() => markTriedMutation.mutate(task.id)} disabled={markTriedMutation.isPending}>I tried this</Button>
+                          <Button type="button" size="sm" variant="secondary" data-testid="teacher-coaching-tried-button" onClick={() => markTriedMutation.mutate(task)} disabled={markTriedMutation.isPending}>I tried this</Button>
                           <Button type="button" size="sm" variant="secondary" onClick={() => setComposer({ taskId: task.id })}>Reflect</Button>
                           {task.video_href ? <Link to={task.video_href} className="inline-flex min-h-[36px] items-center text-sm font-semibold text-primary hover:text-primary/80">Watch the moment</Link> : null}
                           {task.id && task.href ? <Link to={task.href} className="inline-flex min-h-[36px] items-center text-sm font-semibold text-primary hover:text-primary/80">Open goal</Link> : null}
