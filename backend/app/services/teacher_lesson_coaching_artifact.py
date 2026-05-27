@@ -651,6 +651,45 @@ def _empty_state_for_unsafe_content(language: Optional[str]) -> Dict[str, Any]:
     }
 
 
+def _empty_state_for_admin_hidden(language: Optional[str]) -> Dict[str, Any]:
+    """PR C6: admin chose to hide this lesson's teacher feedback.
+
+    The teacher must not see the admin's internal note. The empty state
+    reads as "review pending" so the teacher sees an honest signal that
+    the lesson is in human review.
+    """
+
+    is_he = (language or "en").lower().startswith("he")
+    if is_he:
+        return {
+            "code": "admin_review_pending",
+            "title": "המאמן ממשיך לבדוק את השיעור.",
+            "message": "תוכלו לחזור לכאן אחרי שהבדיקה תושלם.",
+        }
+    return {
+        "code": "admin_review_pending",
+        "title": "A coach is still reviewing this lesson.",
+        "message": "Come back here once the review is complete.",
+    }
+
+
+def _empty_state_for_revision_requested(language: Optional[str]) -> Dict[str, Any]:
+    """PR C6: admin requested a revision before showing teacher feedback."""
+
+    is_he = (language or "en").lower().startswith("he")
+    if is_he:
+        return {
+            "code": "admin_revision_requested",
+            "title": "המאמן ביקש עוד התאמות לפני שמציגים את ההערות.",
+            "message": "תוכלו לחזור לכאן אחרי שהמאמן יסיים את ההתאמות.",
+        }
+    return {
+        "code": "admin_revision_requested",
+        "title": "A coach asked for one more adjustment before sharing feedback.",
+        "message": "Come back here once the coach has finished the adjustments.",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Honest next_best_action
 # ---------------------------------------------------------------------------
@@ -683,6 +722,24 @@ def _next_best_action_from_artifact(
 # ---------------------------------------------------------------------------
 
 
+def _admin_review_public_block(admin_review: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Return the admin_review snapshot to publish on the artifact.
+
+    Teacher-visible fields ONLY include the status code (so the frontend
+    can choose its empty-state copy). Internal admin notes / hidden_reason
+    / review_note are NOT included — they live in ``admin_review_internal``
+    which only the admin path consults.
+    """
+
+    review = dict(admin_review or {})
+    status = str(review.get("status") or "").lower().strip() or None
+    return {
+        "status": status,
+        "reviewed_at": review.get("reviewed_at"),
+        "has_admin_review": bool(status),
+    }
+
+
 def _empty_artifact(
     *,
     assessment: Optional[Mapping[str, Any]],
@@ -693,6 +750,7 @@ def _empty_artifact(
     source_validity: Optional[Mapping[str, Any]],
     analysis_quality: Optional[Mapping[str, Any]],
     blocked_reason: str,
+    admin_review: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     video_id = (assessment or {}).get("video_id") or (video or {}).get("id")
     return {
@@ -742,6 +800,7 @@ def _empty_artifact(
             "shared_reflection_count": 0,
             "admin_response_count": 0,
         },
+        "admin_review": _admin_review_public_block(admin_review),
         "next_best_action": honest_next_best_action_for_record(language=language),
         "empty_state": empty_state,
         "guardrails": {
@@ -774,6 +833,7 @@ def build_teacher_lesson_coaching_artifact(
     lesson_history: Optional[Sequence[Mapping[str, Any]]] = None,
     readiness: Optional[Mapping[str, Any]] = None,
     language: Optional[str] = "en",
+    admin_review: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compose the canonical teacher-facing coaching artifact.
 
@@ -781,10 +841,25 @@ def build_teacher_lesson_coaching_artifact(
     endpoints. Always teacher-safe: when any gate fails the returned
     artifact has ``teacher_feedback_allowed: False`` and empty content
     sections.
+
+    PR C6: an optional ``admin_review`` dict is consulted in addition to
+    the C1/C2/C3 gates. Status values:
+
+      * ``admin_hidden`` — block teacher feedback even if other gates pass.
+      * ``revision_requested`` — block teacher feedback (admin asked for an
+        adjustment first).
+      * ``admin_approved`` — informational. Does NOT override missing
+        source, insufficient evidence, or unsafe text. Marked on the
+        artifact so the admin UI can show "admin-approved" badge once the
+        teacher-facing artifact is actually allowed.
+      * anything else (or missing) — fall through to the auto-computed
+        gates.
     """
 
     teacher = teacher or {}
     language = (language or "en").lower()
+    review = dict(admin_review or {})
+    review_status = str(review.get("status") or "").lower().strip()
 
     # 0. No assessment at all → honest "no reviewed lesson" empty state.
     if not assessment:
@@ -797,9 +872,39 @@ def build_teacher_lesson_coaching_artifact(
             source_validity=None,
             analysis_quality=None,
             blocked_reason="no_reviewed_lesson",
+            admin_review=review,
         )
 
-    # 1. C1/C2 source-validity gate.
+    # 0a. PR C6: admin-side blocks (admin_hidden / revision_requested) win
+    #     over the auto-computed gates. They never allow leaking the admin
+    #     note to the teacher — the empty state is generic "review pending".
+    if review_status == "admin_hidden":
+        return _empty_artifact(
+            assessment=assessment,
+            video=video,
+            teacher=teacher,
+            language=language,
+            empty_state=_empty_state_for_admin_hidden(language),
+            source_validity=None,
+            analysis_quality=assessment.get("analysis_quality"),
+            blocked_reason="admin_hidden",
+            admin_review=review,
+        )
+    if review_status == "revision_requested":
+        return _empty_artifact(
+            assessment=assessment,
+            video=video,
+            teacher=teacher,
+            language=language,
+            empty_state=_empty_state_for_revision_requested(language),
+            source_validity=None,
+            analysis_quality=assessment.get("analysis_quality"),
+            blocked_reason="revision_requested",
+            admin_review=review,
+        )
+
+    # 1. C1/C2 source-validity gate. Admin approval CANNOT override missing
+    #    source.
     source_validity = build_source_validity(
         artifact=assessment,
         video=video,
@@ -816,9 +921,11 @@ def build_teacher_lesson_coaching_artifact(
             source_validity=source_validity,
             analysis_quality=assessment.get("analysis_quality"),
             blocked_reason="source_invalid",
+            admin_review=review,
         )
 
-    # 2. C3 evidence-quality gate.
+    # 2. C3 evidence-quality gate. Admin approval CANNOT override
+    #    insufficient evidence.
     if assessment_quality_blocks_teacher_feedback(assessment):
         return _empty_artifact(
             assessment=assessment,
@@ -829,6 +936,7 @@ def build_teacher_lesson_coaching_artifact(
             source_validity=source_validity,
             analysis_quality=assessment.get("analysis_quality"),
             blocked_reason="evidence_insufficient",
+            admin_review=review,
         )
 
     # 3. Build the legacy projection (already C2-cleaned via
@@ -869,6 +977,7 @@ def build_teacher_lesson_coaching_artifact(
             source_validity=source_validity,
             analysis_quality=assessment.get("analysis_quality"),
             blocked_reason="unsafe_text",
+            admin_review=review,
         )
 
     # 4. Compose the C4 artifact sections.
@@ -1013,6 +1122,7 @@ def build_teacher_lesson_coaching_artifact(
             "prompts": reflection_prompts,
         },
         "admin_connection": admin_connection,
+        "admin_review": _admin_review_public_block(review),
         "next_best_action": _next_best_action_from_artifact(
             action_items=action_items,
             empty_state=None,
@@ -1055,6 +1165,7 @@ def build_teacher_lesson_coaching_artifact(
             source_validity=source_validity,
             analysis_quality=assessment.get("analysis_quality"),
             blocked_reason="unsafe_text_post_compose",
+            admin_review=review,
         )
 
     return artifact

@@ -1566,6 +1566,50 @@ export function VideoPlayerPage() {
                   </ul>
                 </div>
               ) : null}
+              {isTeacher && teacherArtifactBlocked ? (
+                <div
+                  className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-xs text-amber-900"
+                  data-testid="teacher-artifact-blocked-state"
+                >
+                  {teacherArtifact?.empty_state?.title ? (
+                    <div className="font-semibold">{teacherArtifact.empty_state.title}</div>
+                  ) : null}
+                  <div className="mt-1">
+                    {teacherArtifact?.empty_state?.message
+                      || "This lesson's feedback isn't ready yet."}
+                  </div>
+                </div>
+              ) : null}
+              {isTeacher && teacherArtifactAllowed && teacherActionItems.length ? (
+                <div
+                  className="mb-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3"
+                  data-testid="teacher-artifact-action-items"
+                >
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Try one move next lesson</div>
+                  <ul className="mt-2 space-y-3 text-xs text-slate-700">
+                    {teacherActionItems.slice(0, 3).map((item) => (
+                      <li key={item.id} className="rounded border border-slate-200 bg-white p-2">
+                        <div className="font-semibold text-slate-900">{item.title}</div>
+                        <div className="mt-1 text-slate-700">
+                          {item.try_next_lesson || item.body}
+                        </div>
+                        {item.why_it_matters ? (
+                          <div className="mt-1 text-[11px] text-slate-500">{item.why_it_matters}</div>
+                        ) : null}
+                        {item.reflection_prompt ? (
+                          <div className="mt-2 text-[11px] italic text-slate-500">{item.reflection_prompt}</div>
+                        ) : null}
+                        <div className="mt-2 flex flex-wrap gap-3 text-[11px] font-semibold text-primary">
+                          {item.video_href ? (
+                            <a href={item.video_href}>Watch the moment</a>
+                          ) : null}
+                          <Link to={`/my-coaching${item.id ? `?task_id=${item.id}` : ""}`}>Open in coaching</Link>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
               {recommendedMomentNoteLines.length ? (
                 <div className="mb-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
                   <div className="flex flex-wrap items-start justify-between gap-2">
