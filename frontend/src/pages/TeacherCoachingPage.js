@@ -5,6 +5,15 @@ import { toast } from "sonner";
 import { LayoutShell } from "@/components/LayoutShell";
 import { Button, EmptyState, ErrorState, Field, Input, LoadingState, PageContextHeader, Panel, SectionHeader } from "@/components/ui";
 import { teacherApi } from "@/lib/api";
+import {
+  artifactActionItems,
+  artifactDeepDive,
+  artifactNextBestAction,
+  artifactReflectionPrompts,
+  isArtifactAllowed,
+  isArtifactBlocked,
+  readArtifact,
+} from "@/lib/teacherCoachingArtifact";
 
 const formatTimestamp = (seconds) => {
   const value = Number(seconds || 0);
@@ -60,12 +69,58 @@ export function TeacherCoachingPage() {
     retry: 1,
   });
   const data = coachingQuery.data || {};
-  const tasks = data.active_tasks || [];
+  // PR C5: read from the canonical artifact when present and allowed. Blocked
+  // artifact wins over legacy fields — we must not bypass the gate.
+  const artifact = readArtifact(data);
+  const artifactAllowed = isArtifactAllowed(artifact);
+  const artifactBlocked = isArtifactBlocked(artifact);
+  const legacyTasks = data.active_tasks || [];
+  const legacyRecommendations = data.recommendations || [];
+  const legacyImprovements = data.suggested_improvements || [];
+  // Use artifact action items as the primary list of active tasks /
+  // recommendations when artifact is allowed; suppress legacy lists when
+  // the artifact blocks teacher feedback.
+  const artifactActions = artifactAllowed ? artifactActionItems(artifact) : [];
+  const tasks = artifactBlocked
+    ? []
+    : artifactActions.length
+      ? artifactActions.map((item) => ({
+          id: item.id,
+          title: item.title || "Coaching goal",
+          body: item.try_next_lesson || item.body || "",
+          why_it_matters: item.why_it_matters,
+          video_href: item.video_href || null,
+          href: `/my-coaching${item.id ? `?task_id=${item.id}` : ""}`,
+        }))
+      : legacyTasks;
   const moments = data.shared_moments || [];
   const reflections = data.teacher_reflections || data.reflections || [];
-  const recommendations = data.recommendations || [];
-  const improvements = data.suggested_improvements || [];
-  const nextBestAction = data.next_best_action;
+  const recommendations = artifactBlocked
+    ? []
+    : artifactActions.length
+      ? artifactActions.map((item) => ({
+          id: item.id,
+          title: item.title || "Next-lesson move",
+          body: item.try_next_lesson || item.body || "",
+          href: item.video_href || `/my-coaching${item.id ? `?task_id=${item.id}` : ""}`,
+        }))
+      : legacyRecommendations;
+  const improvements = artifactBlocked
+    ? []
+    : artifactActions.length
+      ? artifactActions.map((item) => ({
+          id: `${item.id}-why`,
+          title: item.title || "Next-lesson move",
+          description: item.why_it_matters || item.body || "",
+          focus_area: "Coaching practice",
+        }))
+      : legacyImprovements;
+  // Deep dive comes from the artifact when allowed. When blocked, an honest
+  // empty state is shown.
+  const deepDive = artifactDeepDive(artifact);
+  // Reflection prompts: artifact wins when allowed.
+  const reflectionPrompts = artifactReflectionPrompts(artifact);
+  const nextBestAction = artifactNextBestAction(artifact, data.next_best_action);
   const readiness = data.readiness || {};
   const markTriedMutation = useMutation({
     mutationFn: (taskId) => teacherApi.updateCoachingTask(taskId, { status: "tried" }),
@@ -114,17 +169,23 @@ export function TeacherCoachingPage() {
             <div className="grid gap-6 lg:grid-cols-[1.05fr,0.95fr]">
               <Panel className="space-y-4">
                 <SectionHeader title="What you’re working on" description="Choose one goal and keep the next step small enough to try in your next lesson." />
-                {tasks.length ? (
+                {artifactBlocked ? (
+                  <EmptyState
+                    title={artifact?.empty_state?.title || "This lesson’s feedback isn’t ready yet."}
+                    message={artifact?.empty_state?.message || "Once a complete review is ready, you’ll see specific coaching moments and next steps here."}
+                  />
+                ) : tasks.length ? (
                   <div className="space-y-3">
                     {tasks.map((task) => (
                       <div key={task.id} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
                         <div className="font-semibold text-slate-900">{task.title || "Coaching goal"}</div>
                         <p className="mt-2 text-sm leading-6 text-slate-700">{task.body || "Try one move, then notice how students respond."}</p>
+                        {task.why_it_matters ? <p className="mt-2 text-xs leading-5 text-slate-500">{task.why_it_matters}</p> : null}
                         <div className="mt-3 flex flex-wrap gap-2">
                           <Button type="button" size="sm" variant="secondary" onClick={() => markTriedMutation.mutate(task.id)} disabled={markTriedMutation.isPending}>I tried this</Button>
                           <Button type="button" size="sm" variant="secondary" onClick={() => setComposer({ taskId: task.id })}>Reflect</Button>
                           {task.video_href ? <Link to={task.video_href} className="inline-flex min-h-[36px] items-center text-sm font-semibold text-primary hover:text-primary/80">Watch the moment</Link> : null}
-                          {task.href ? <Link to={task.href} className="inline-flex min-h-[36px] items-center text-sm font-semibold text-primary hover:text-primary/80">Open goal</Link> : null}
+                          {task.id && task.href ? <Link to={task.href} className="inline-flex min-h-[36px] items-center text-sm font-semibold text-primary hover:text-primary/80">Open goal</Link> : null}
                         </div>
                         {composer?.taskId === task.id ? <ReflectionComposer taskId={task.id} onCancel={() => setComposer(null)} /> : null}
                       </div>
@@ -178,6 +239,45 @@ export function TeacherCoachingPage() {
                 )) : <EmptyState title="Suggested improvements will appear as your reviewed lessons build up." />}
               </Panel>
             </div>
+
+            <Panel className="space-y-4">
+              <SectionHeader title="Deep-dive moments" description="Watch the exact moment to revisit, when valid evidence is available." />
+              {artifactBlocked ? (
+                <EmptyState
+                  title={artifact?.empty_state?.title || "Deep-dive moments will appear after a complete review is ready."}
+                  message={artifact?.empty_state?.message}
+                />
+              ) : deepDive.available && deepDive.moments.length ? (
+                <div className="grid gap-3 md:grid-cols-2">
+                  {deepDive.moments.map((moment) => (
+                    <div key={moment.id || `${moment.start_sec}-${moment.end_sec}`} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{formatTimestamp(moment.start_sec)} – {formatTimestamp(moment.end_sec)}</div>
+                      <div className="mt-1 font-semibold text-slate-900">{moment.title}</div>
+                      <p className="mt-2 text-sm leading-6 text-slate-700">{moment.what_happened}</p>
+                      {moment.why_it_matters ? <p className="mt-2 text-xs leading-5 text-slate-500">{moment.why_it_matters}</p> : null}
+                      {moment.video_href ? (
+                        <Link to={moment.video_href} className="mt-3 inline-flex min-h-[36px] items-center text-sm font-semibold text-primary hover:text-primary/80">Watch the moment</Link>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <EmptyState
+                  title={deepDive.empty_state || "Detailed lesson moments will appear after a complete review is ready."}
+                />
+              )}
+            </Panel>
+
+            {reflectionPrompts.length ? (
+              <Panel className="space-y-4">
+                <SectionHeader title="Reflect on what you tried" description="Private by default — share with admin only when you choose to." />
+                <ul className="space-y-2 text-sm leading-6 text-slate-700">
+                  {reflectionPrompts.slice(0, 3).map((prompt, index) => (
+                    <li key={`${index}-${prompt}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">{prompt}</li>
+                  ))}
+                </ul>
+              </Panel>
+            ) : null}
 
             <Panel className="space-y-4">
               <SectionHeader title="Your reflections" description="A light record of what you tried and what you noticed." />

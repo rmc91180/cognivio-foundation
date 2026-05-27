@@ -48,7 +48,9 @@ describe("TeacherBadgesPage", () => {
 
     renderWithClient(<TeacherBadgesPage />);
 
-    expect(await screen.findByText("Recognition you earn will appear here.")).toBeInTheDocument();
+    // PR C5: Gold-Star empty-state copy clarifies it is separate from
+    // personal lesson highlights.
+    expect(await screen.findByText(/Gold-Star recognition will appear here when awarded/i)).toBeInTheDocument();
     expect(screen.queryByText("Recognition could not be opened")).not.toBeInTheDocument();
   });
 

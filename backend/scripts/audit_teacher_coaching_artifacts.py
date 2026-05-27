@@ -1,0 +1,337 @@
+"""Read-only audit for Cognivio teacher coaching artifact safety.
+
+PR C5 audit script. Rebuilds the canonical TeacherLessonCoachingArtifact
+for selected assessments and surfaces issues that would land bad coaching
+on a teacher page:
+
+  * unsafe teacher-visible text
+  * teacher_feedback_allowed contradicts analysis_quality.teacher_feedback_allowed
+  * artifact says teacher_visible true but unsafe text exists
+  * action item duplicates summary
+  * action item fails teacher-eligibility gate
+  * deep_dive.available true with no valid moments
+  * Gold-Star recognition tied to invalid source
+  * reviewed/source-valid assessment with NO artifact (legacy data)
+  * teacher endpoint would show feedback despite source/evidence block
+
+The script never writes data. It is intended for production read-only
+operator use.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+
+REPO_BACKEND = Path(__file__).resolve().parents[1]
+if str(REPO_BACKEND) not in sys.path:
+    sys.path.insert(0, str(REPO_BACKEND))
+
+
+from app.services.teacher_artifact_quarantine import (  # noqa: E402
+    build_source_validity,
+    find_teacher_visible_text_issues,
+)
+from app.services.lesson_moment_quality import (  # noqa: E402
+    assessment_quality_blocks_teacher_feedback,
+)
+from app.services.teacher_lesson_coaching_artifact import (  # noqa: E402
+    TEACHER_LESSON_COACHING_ARTIFACT_VERSION,
+    audit_teacher_artifact,
+    build_teacher_lesson_coaching_artifact,
+)
+
+
+def _add(issues: Dict[str, Dict[str, Any]], code: str, sample: Dict[str, Any]) -> None:
+    bucket = issues.setdefault(code, {"code": code, "count": 0, "samples": []})
+    bucket["count"] += 1
+    if len(bucket["samples"]) < 25:
+        bucket["samples"].append(sample)
+
+
+def audit_collections(
+    *,
+    teachers: Dict[str, Dict[str, Any]],
+    videos: Dict[str, Dict[str, Any]],
+    assessments: List[Dict[str, Any]],
+    coaching_tasks_by_teacher: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    recognition_badges_by_teacher: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+) -> Dict[str, Any]:
+    """Run the artifact-safety audit over in-memory collections.
+
+    The audit is fully synchronous — no DB I/O. The caller (CLI or test)
+    snapshots Mongo first, then hands the dicts/lists in.
+    """
+
+    issues: Dict[str, Dict[str, Any]] = {}
+    coaching_tasks_by_teacher = coaching_tasks_by_teacher or {}
+    recognition_badges_by_teacher = recognition_badges_by_teacher or {}
+
+    seen = 0
+    artifacts_built = 0
+
+    for assessment in assessments or []:
+        seen += 1
+        teacher_id = assessment.get("teacher_id")
+        video_id = assessment.get("video_id")
+        teacher = teachers.get(teacher_id) if teacher_id else None
+        video = videos.get(video_id) if video_id else None
+
+        # Source-valid + analysis_quality-passed assessments with no artifact
+        # at all are legacy data — flag for migration / regeneration.
+        source_validity = build_source_validity(
+            artifact=assessment,
+            video=video,
+            assessment=assessment,
+            teacher_id=teacher_id,
+        )
+        analysis_quality = assessment.get("analysis_quality") or {}
+        evidence_blocks = assessment_quality_blocks_teacher_feedback(assessment)
+
+        try:
+            artifact = build_teacher_lesson_coaching_artifact(
+                teacher=teacher or {"id": teacher_id},
+                current_user=None,
+                assessment=assessment,
+                video=video,
+                coaching_tasks=coaching_tasks_by_teacher.get(teacher_id) if teacher_id else None,
+                recognition_badges=recognition_badges_by_teacher.get(teacher_id) if teacher_id else None,
+                language=(assessment.get("analysis_language") or "en"),
+            )
+            artifacts_built += 1
+        except Exception as exc:  # pragma: no cover - defensive
+            _add(
+                issues,
+                "artifact_build_failed",
+                {
+                    "assessment_id": assessment.get("id"),
+                    "video_id": video_id,
+                    "teacher_id": teacher_id,
+                    "error": str(exc),
+                },
+            )
+            continue
+
+        sample_base = {
+            "assessment_id": assessment.get("id"),
+            "video_id": video_id,
+            "teacher_id": teacher_id,
+        }
+
+        # 1. Per-artifact audit issues from the C4 helper.
+        for entry in audit_teacher_artifact(artifact):
+            _add(issues, entry["code"], {**sample_base, **{k: v for k, v in entry.items() if k != "code"}})
+
+        # 2. Recursive negative-assertion scan on the teacher-visible
+        #    surfaces. Belt-and-braces — should already be guarded by
+        #    audit_teacher_artifact but we re-run here.
+        teacher_scope = {
+            "summary": artifact.get("summary"),
+            "highlights": artifact.get("highlights"),
+            "action_items": artifact.get("action_items"),
+            "deep_dive": artifact.get("deep_dive"),
+            "recognition": artifact.get("recognition"),
+            "reflection": artifact.get("reflection"),
+            "next_best_action": artifact.get("next_best_action"),
+        }
+        for entry in find_teacher_visible_text_issues(teacher_scope):
+            _add(issues, "unsafe_teacher_visible_text", {**sample_base, **entry})
+
+        # 3. Quality vs. visible-flag contradiction (already in audit helper,
+        #    re-checked here for the JSON output).
+        if (
+            artifact.get("teacher_feedback_allowed") is True
+            and analysis_quality.get("teacher_feedback_allowed") is False
+        ):
+            _add(issues, "teacher_feedback_allowed_contradicts_quality", sample_base)
+
+        # 4. teacher_endpoint_would_show_despite_source_block — a "teacher
+        #    feedback allowed" artifact MUST have a valid source chain.
+        if artifact.get("teacher_feedback_allowed") and not source_validity.get(
+            "valid_for_teacher_display"
+        ):
+            _add(issues, "teacher_endpoint_would_show_despite_source_block", sample_base)
+
+        # 5. teacher_endpoint_would_show_despite_evidence_block.
+        if artifact.get("teacher_feedback_allowed") and evidence_blocks:
+            _add(issues, "teacher_endpoint_would_show_despite_evidence_block", sample_base)
+
+        # 6. Legacy data: source-valid + quality-allowed but no artifact_version.
+        if (
+            source_validity.get("valid_for_teacher_display")
+            and not evidence_blocks
+            and not analysis_quality
+        ):
+            _add(issues, "assessment_missing_analysis_quality_for_review", sample_base)
+
+        if (
+            source_validity.get("valid_for_teacher_display")
+            and not evidence_blocks
+            and not assessment.get("analysis_quality")
+        ):
+            _add(issues, "reviewed_assessment_without_quality_block", sample_base)
+
+        # 7. Deep dive available with no valid moments.
+        deep_dive = artifact.get("deep_dive") or {}
+        if deep_dive.get("available") and not deep_dive.get("moments"):
+            _add(issues, "deep_dive_available_but_empty", sample_base)
+
+        # 8. Gold-Star tied to invalid source.
+        gold_star = (artifact.get("recognition") or {}).get("gold_star")
+        if gold_star and not source_validity.get("valid_for_teacher_display"):
+            _add(issues, "gold_star_with_invalid_source", sample_base)
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "artifact_version": TEACHER_LESSON_COACHING_ARTIFACT_VERSION,
+        "counts": {
+            "assessments_seen": seen,
+            "artifacts_built": artifacts_built,
+            "teachers_seen": len(teachers or {}),
+            "videos_seen": len(videos or {}),
+        },
+        "issues": issues,
+    }
+
+
+def _render_text(report: Dict[str, Any]) -> str:
+    lines = [
+        "Teacher coaching artifact audit",
+        f"Generated: {report['generated_at']}",
+        f"Artifact version: {report['artifact_version']}",
+        f"Filters: {json.dumps(report.get('filters') or {}, sort_keys=True)}",
+        "",
+    ]
+    counts = report.get("counts", {})
+    lines.append(f"Assessments inspected: {counts.get('assessments_seen', 0)}")
+    lines.append(f"Artifacts built:       {counts.get('artifacts_built', 0)}")
+    lines.append("")
+    issues = report.get("issues") or {}
+    if not issues:
+        lines.append("No artifact-safety issues detected in the loaded scope.")
+        return "\n".join(lines)
+    for code, issue in sorted(issues.items()):
+        lines.append(f"{code}: {issue['count']}")
+        for sample in issue.get("samples") or []:
+            extracted = ", ".join(
+                f"{k}={v}"
+                for k, v in sample.items()
+                if v is not None and not isinstance(v, (dict, list))
+            )
+            lines.append(f"  - {extracted}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+async def _load_from_mongo(args: argparse.Namespace) -> Dict[str, Any]:
+    try:
+        from motor.motor_asyncio import AsyncIOMotorClient
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("motor is required to run the artifact audit script") from exc
+
+    mongo_url = os.getenv("MONGO_URL", "mongodb://localhost:27017")
+    db_name = os.getenv("DB_NAME", "cognivio")
+    client = AsyncIOMotorClient(mongo_url)
+    db = client[db_name]
+    try:
+        assessment_query: Dict[str, Any] = {}
+        if args.teacher_id:
+            assessment_query["teacher_id"] = args.teacher_id
+        if args.video_id:
+            assessment_query["video_id"] = args.video_id
+        if args.assessment_id:
+            assessment_query["id"] = args.assessment_id
+        assessments = await db.assessments.find(assessment_query, {"_id": 0}).to_list(args.limit)
+
+        teacher_ids = {a.get("teacher_id") for a in assessments if a.get("teacher_id")}
+        video_ids = {a.get("video_id") for a in assessments if a.get("video_id")}
+
+        teacher_query: Dict[str, Any] = {}
+        if args.workspace_id:
+            teacher_query["organization_id"] = args.workspace_id
+        if teacher_ids:
+            teacher_query.setdefault("id", {"$in": list(teacher_ids)})
+        teachers_list = await db.teachers.find(teacher_query, {"_id": 0}).to_list(10000) if teacher_query else []
+        teachers = {t["id"]: t for t in teachers_list if t.get("id")}
+
+        video_query: Dict[str, Any] = {}
+        if video_ids:
+            video_query["id"] = {"$in": list(video_ids)}
+        videos_list = await db.videos.find(video_query, {"_id": 0}).to_list(10000) if video_query else []
+        videos = {v["id"]: v for v in videos_list if v.get("id")}
+
+        coaching_tasks_by_teacher: Dict[str, List[Dict[str, Any]]] = {}
+        if teacher_ids:
+            tasks_list = await db.coaching_tasks.find(
+                {"teacher_id": {"$in": list(teacher_ids)}}, {"_id": 0}
+            ).to_list(10000)
+            for task in tasks_list:
+                coaching_tasks_by_teacher.setdefault(task.get("teacher_id"), []).append(task)
+
+        recognition_badges_by_teacher: Dict[str, List[Dict[str, Any]]] = {}
+        if teacher_ids:
+            badges_list = await db.recognition_badges.find(
+                {"teacher_id": {"$in": list(teacher_ids)}, "status": {"$ne": "revoked"}},
+                {"_id": 0},
+            ).to_list(10000)
+            for badge in badges_list:
+                recognition_badges_by_teacher.setdefault(badge.get("teacher_id"), []).append(badge)
+    finally:
+        client.close()
+
+    return {
+        "assessments": assessments,
+        "teachers": teachers,
+        "videos": videos,
+        "coaching_tasks_by_teacher": coaching_tasks_by_teacher,
+        "recognition_badges_by_teacher": recognition_badges_by_teacher,
+    }
+
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Audit Cognivio teacher coaching artifact safety.",
+    )
+    parser.add_argument("--teacher-id")
+    parser.add_argument("--video-id")
+    parser.add_argument("--assessment-id")
+    parser.add_argument(
+        "--workspace-id",
+        help="Restrict teacher lookup to a workspace/organization id.",
+    )
+    parser.add_argument("--limit", type=int, default=500)
+    parser.add_argument("--json", action="store_true")
+    return parser.parse_args(argv)
+
+
+async def main_async(argv: Optional[List[str]] = None) -> int:
+    args = parse_args(argv)
+    snapshot = await _load_from_mongo(args)
+    report = audit_collections(**snapshot)
+    report["filters"] = {
+        "teacher_id": args.teacher_id,
+        "video_id": args.video_id,
+        "assessment_id": args.assessment_id,
+        "workspace_id": args.workspace_id,
+        "limit": args.limit,
+    }
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+    else:
+        print(_render_text(report))
+    return 0
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    return asyncio.run(main_async(argv))
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

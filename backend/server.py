@@ -14136,7 +14136,53 @@ async def get_assessment(
             "teacher_feedback": artifact.get("legacy_projection") if artifact.get("teacher_feedback_allowed") else None,
             "coaching_artifact": artifact,
         }
-    return AssessmentResult(**_enrich_assessment_for_response(assessment, response_language=response_language))
+    # PR C5: admin path includes a non-mutating teacher_preview so admin
+    # reviewers can see exactly what the teacher would (or would not) see
+    # without losing access to rubric scores, element labels, and analysis
+    # quality diagnostics. The original AssessmentResult shape is preserved
+    # for backwards compatibility; the new ``teacher_preview`` is additive.
+    admin_response = AssessmentResult(**_enrich_assessment_for_response(assessment, response_language=response_language))
+    try:
+        teacher_doc = await db.teachers.find_one(
+            {"id": assessment.get("teacher_id")}, {"_id": 0}
+        ) if assessment.get("teacher_id") else None
+        admin_artifact = await _build_teacher_lesson_coaching_artifact_for(
+            teacher=teacher_doc or {"id": assessment.get("teacher_id")},
+            current_user=current_user,
+            assessment=assessment,
+        ) if teacher_doc else None
+        teacher_preview = admin_view_of_artifact(admin_artifact, assessment=assessment) if admin_artifact else None
+    except Exception:  # pragma: no cover - never let preview break the admin response
+        teacher_preview = None
+    response = admin_response.model_dump() if hasattr(admin_response, "model_dump") else admin_response.dict()
+    if teacher_preview is not None:
+        response["teacher_preview"] = teacher_preview
+        response["teacher_feedback_admin_status"] = _compute_teacher_feedback_admin_status(admin_artifact)
+    return response
+
+
+def _compute_teacher_feedback_admin_status(artifact: Optional[dict]) -> str:
+    """PR C5: derive a stable admin status string from the artifact.
+
+    Returns one of: ``auto_allowed`` | ``blocked_quality`` | ``blocked_source``
+    | ``blocked_safety`` | ``admin_approved`` | ``admin_hidden``.
+
+    This is a *computed* status — no persistent fields are added in C5. C6
+    can wire admin approve/hide actions through the same vocabulary.
+    """
+
+    if not artifact:
+        return "blocked_source"
+    if artifact.get("teacher_feedback_allowed"):
+        return "auto_allowed"
+    reason = (artifact.get("blocked_reason") or "").lower()
+    if reason in {"source_invalid", "no_reviewed_lesson"}:
+        return "blocked_source"
+    if reason in {"evidence_insufficient"}:
+        return "blocked_quality"
+    if reason in {"unsafe_text", "unsafe_text_post_compose"}:
+        return "blocked_safety"
+    return "blocked_quality"
 
 
 @api_router.get("/assessments/{assessment_id}/evidence")

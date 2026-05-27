@@ -7,6 +7,16 @@ import { LayoutShell } from "@/components/LayoutShell";
 import { Button, EmptyState, ErrorState, Field, Input, LoadingState, PageContextHeader, Panel, SectionHeader } from "@/components/ui";
 import { demoApi, teacherApi } from "@/lib/api";
 import { useAuth } from "@/hooks/useAuth";
+import {
+  artifactActionItems,
+  artifactGoldStar,
+  artifactHighlights,
+  artifactLatestSummary,
+  artifactNextBestAction,
+  isArtifactAllowed,
+  isArtifactBlocked,
+  readArtifact,
+} from "@/lib/teacherCoachingArtifact";
 
 const formatDate = (value) => {
   if (!value) return "Soon";
@@ -94,24 +104,93 @@ export function TeacherWorkspacePage() {
   const readiness = data.readiness || {};
   const missingItem = readiness.setup_next_step || readiness.missing_items?.[0];
   const latestLesson = data.latest_lesson;
-  const latestFeedback = latestLesson?.teacher_feedback || {};
-  const latestSummary = latestFeedback.latest_summary || {};
-  const recordingCompliance = latestFeedback.recording_compliance || {
+  // PR C5: prefer the canonical artifact when present. A blocked artifact
+  // forbids falling back to legacy fields.
+  const lessonArtifact = readArtifact(latestLesson);
+  const dashboardArtifact = readArtifact(data);
+  const artifactForReading = lessonArtifact || dashboardArtifact;
+  const artifactAllowed = isArtifactAllowed(artifactForReading);
+  const artifactBlocked = isArtifactBlocked(artifactForReading);
+  const legacyTeacherFeedback = latestLesson?.teacher_feedback || {};
+  const artifactSummary = artifactLatestSummary(artifactForReading);
+  // When the artifact is BLOCKED we MUST NOT render legacy summary text. When
+  // the artifact is absent (legacy response) we fall back to the projection.
+  const latestSummary = artifactAllowed
+    ? artifactSummary
+    : artifactBlocked
+      ? null
+      : legacyTeacherFeedback.latest_summary || {};
+  const recordingCompliance = legacyTeacherFeedback.recording_compliance || {
     ready_to_record: Boolean(readiness.upload_ready),
     blockers: readiness.blockers || readiness.missing_items || [],
     next_step: missingItem,
   };
   const gradebook = data.gradebook_reminders || [];
   const searchResults = searchQuery.data?.results || [];
-  const recognitionItems = data.recognition?.items || [];
+  // Personal lesson highlights and Gold-Star recognition are different
+  // surfaces. We pull personal highlights from the artifact when allowed,
+  // and keep the existing recognition.items list for Gold-Star recognition.
+  const artifactHighlightItems = artifactAllowed
+    ? artifactHighlights(artifactForReading).map((highlight) => ({
+        id: highlight.id,
+        title: highlight.title,
+        description: highlight.body,
+        href: highlight.video_href || "/my-lessons",
+      }))
+    : null;
+  const legacyHighlights = data.highlights || [];
+  const personalHighlights = artifactBlocked
+    ? []
+    : artifactHighlightItems !== null && artifactHighlightItems.length
+      ? artifactHighlightItems
+      : legacyHighlights;
+  const goldStar = artifactGoldStar(artifactForReading);
+  const recognitionItemsLegacy = data.recognition?.items || [];
+  const recognitionItems = goldStar
+    ? [
+        {
+          id: goldStar.id,
+          title: goldStar.title,
+          description: goldStar.body,
+          href: "/my-badges",
+        },
+        ...recognitionItemsLegacy,
+      ]
+    : recognitionItemsLegacy;
   const reflections = data.reflections || [];
-  const nextBestAction =
+  const artifactActions = artifactAllowed ? artifactActionItems(artifactForReading) : [];
+  // Hide legacy data.action_items when artifact is blocked so we don't show
+  // stale/orphaned action cards.
+  const legacyActionItems = artifactBlocked ? [] : data.action_items || [];
+  const renderedActionItems = artifactActions.length
+    ? artifactActions.map((item) => ({
+        id: item.id,
+        title: item.title,
+        description: item.try_next_lesson || item.body,
+        href: item.video_href || `/my-coaching?task_id=${item.id || ""}`,
+      }))
+    : legacyActionItems;
+  const nextBestActionLegacy =
     data.next_best_action &&
     (!missingItem || data.next_best_action.id !== missingItem.id) &&
     (!missingItem?.code || data.next_best_action.code !== missingItem.code)
       ? data.next_best_action
       : null;
-  const primaryAction = (data.action_items || [])[0] || nextBestAction;
+  const nextBestAction = artifactNextBestAction(artifactForReading, nextBestActionLegacy);
+  const primaryArtifactAction = artifactActions[0];
+  const primaryAction = artifactBlocked
+    ? null
+    : primaryArtifactAction
+      ? {
+          id: primaryArtifactAction.id,
+          title: primaryArtifactAction.title || "Try one coaching move",
+          description: primaryArtifactAction.try_next_lesson || primaryArtifactAction.body,
+          body: primaryArtifactAction.body,
+          try_next_lesson: primaryArtifactAction.try_next_lesson,
+          video_href: primaryArtifactAction.video_href,
+          href: `/my-coaching?task_id=${primaryArtifactAction.id || ""}`,
+        }
+      : legacyActionItems[0] || nextBestAction;
 
   return (
     <LayoutShell>
@@ -197,7 +276,12 @@ export function TeacherWorkspacePage() {
             <div className="grid gap-6 lg:grid-cols-[1.15fr,0.85fr]">
               <Panel className="space-y-4">
                 <SectionHeader title="Your latest coaching summary" description="A warm, plain-language look at what to carry into the next lesson." />
-                {latestLesson ? (
+                {artifactBlocked ? (
+                  <EmptyState
+                    title={artifactForReading?.empty_state?.title || "This lesson’s feedback isn’t ready yet."}
+                    message={artifactForReading?.empty_state?.message || "Once a complete review is ready, you’ll see specific coaching moments and next steps here."}
+                  />
+                ) : latestLesson && latestSummary ? (
                   <Link to={latestLesson.href || "/my-lessons"} className="block rounded-lg border border-slate-200 bg-slate-50 p-4 hover:bg-white">
                     <div className="font-semibold text-slate-900">{latestLesson.title}</div>
                     <div className="mt-1 text-xs text-slate-500">{[latestLesson.subject, formatDate(latestLesson.uploaded_at)].filter(Boolean).join(" • ")}</div>
@@ -217,13 +301,13 @@ export function TeacherWorkspacePage() {
               </Panel>
               <Panel className="space-y-4">
                 <SectionHeader title="Moments worth revisiting" description="Personal highlights from lesson feedback, separate from recognition." />
-                <CardList items={data.highlights || []} emptyTitle="Highlights will appear as your reviewed lessons build up." />
+                <CardList items={personalHighlights} emptyTitle="Highlights will appear as your reviewed lessons build up." />
               </Panel>
             </div>
 
             <div className="grid gap-6 lg:grid-cols-2">
               <Panel className="space-y-4">
-                <SectionHeader title="Gold-Star recognition" description="Recognition is separate from personal lesson highlights." />
+                <SectionHeader title="Gold-Star recognition" description="Recognition is separate from personal lesson highlights — personal highlights show automatically; Gold-Star is awarded." />
                 <CardList items={recognitionItems.map((item) => ({ id: item.id, title: item.title, description: item.description, href: "/my-badges" }))} emptyTitle="Gold-Star and badge recognition will appear here when awarded." />
               </Panel>
               <Panel className="space-y-4">
@@ -247,7 +331,7 @@ export function TeacherWorkspacePage() {
             <div className="grid gap-6 lg:grid-cols-2">
               <Panel className="space-y-4">
                 <SectionHeader title="Action items" description="Goals, reflections, reminders, and meeting prep in one place." />
-                <CardList items={data.action_items || []} emptyTitle="Action items will appear after your first reviewed lesson." />
+                <CardList items={renderedActionItems} emptyTitle="Action items will appear after your first reviewed lesson." />
               </Panel>
               <Panel className="space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -259,7 +343,7 @@ export function TeacherWorkspacePage() {
                     <option value="year">Year</option>
                   </select>
                 </div>
-                <CardList items={(latestFeedback.growth_over_time?.available ? latestFeedback.growth_over_time.items : data.trends || []).map((trend) => ({ ...trend, description: trend.body || trend.description, href: "/my-coaching" }))} emptyTitle={latestFeedback.growth_over_time?.empty_state || "Trends will appear after a few reviewed lessons."} />
+                <CardList items={(legacyTeacherFeedback.growth_over_time?.available ? legacyTeacherFeedback.growth_over_time.items : data.trends || []).map((trend) => ({ ...trend, description: trend.body || trend.description, href: "/my-coaching" }))} emptyTitle={legacyTeacherFeedback.growth_over_time?.empty_state || "Trends will appear after a few reviewed lessons."} />
               </Panel>
             </div>
 
