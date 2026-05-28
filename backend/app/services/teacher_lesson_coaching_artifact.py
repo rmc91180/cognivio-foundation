@@ -1829,7 +1829,30 @@ def admin_view_of_artifact(
         "action_items_count": len(artifact.get("action_items") or []),
         "deep_dive_available": (artifact.get("deep_dive") or {}).get("available"),
     }
+    # PR C9: surface the admin-only coach-voice diagnostics next to the
+    # teacher_preview block. The teacher-visible artifact only exposes the
+    # short coach_voice status; admins also see provider/model/token
+    # estimates / validation issues / sufficiency reasons / used moments.
+    coach_voice_admin = artifact.get("_coach_voice_admin")
+    if coach_voice_admin:
+        admin_payload["coach_voice_diagnostics"] = dict(coach_voice_admin)
     return admin_payload
+
+
+def teacher_safe_artifact(artifact: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """PR C9: strip admin-only diagnostics from an artifact before returning to a teacher.
+
+    The C9 coach-voice integration writes ``_coach_voice_admin`` onto the
+    artifact for admin consumption. The teacher view must never see those
+    diagnostics (provider, model, token estimates, sufficiency signals,
+    validation issues, evidence hash).
+    """
+
+    if not artifact:
+        return artifact  # type: ignore[return-value]
+    stripped = dict(artifact)
+    stripped.pop("_coach_voice_admin", None)
+    return stripped
 
 
 def teacher_visible_summary_text(artifact: Mapping[str, Any]) -> str:
