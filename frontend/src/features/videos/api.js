@@ -3,7 +3,6 @@ import api from "@/lib/apiClient";
 export const videoApi = {
   upload: (formData, config = {}) =>
     api.post("/api/videos/upload", formData, {
-      headers: { "Content-Type": "multipart/form-data" },
       ...config,
     }),
   list: (params) => api.get("/api/videos", { params }),
