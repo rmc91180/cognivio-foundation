@@ -233,6 +233,8 @@ def _add_ready_reference_images(fake_db, teacher_id="teacher-1", workspace_id="o
             "profile_id": f"profile-{teacher_id}",
             "status": "ready",
             "file_path": f"privacy/{teacher_id}/ref-{index}.png",
+            "file_url": f"https://cdn.example.com/privacy/{teacher_id}/ref-{index}.png",
+            "s3_key": f"uploads/privacy/{teacher_id}/ref-{index}.png",
             "created_at": "2026-05-01T00:00:00+00:00",
         }
         for index in range(count)
@@ -303,6 +305,10 @@ def test_teacher_video_upload_queues_transcode_inside_tenant(monkeypatch, tmp_pa
     monkeypatch.setattr(server, "db", fake_db)
     monkeypatch.setattr(server, "UPLOAD_DIR", Path(tmp_path))
     monkeypatch.setattr(server, "VIDEO_TRANSCODE_PIPELINE_ENABLED", True)
+    # PR C9.1: explicitly enable size-driven transcoding so the small fixture
+    # video also queues (production policy will set a real 25MB threshold).
+    monkeypatch.setattr(server, "VIDEO_TRANSCODE_ENABLED", True)
+    monkeypatch.setattr(server, "VIDEO_TRANSCODE_MIN_BYTES", 0)
     monkeypatch.setattr(
         server,
         "_upload_path_to_s3",

@@ -185,6 +185,10 @@ class VideoSettings:
     video_transcode_raw_retention_hours: int
     workspace_video_quota: int
     cleanup_video_source_after_analysis: bool
+    # PR C9.1: compression-decision controls
+    video_transcode_enabled: bool = False
+    video_transcode_min_bytes: int = 25 * 1024 * 1024
+    video_upload_timeout_ms: int = 5 * 60 * 1000
 
     @property
     def max_upload_bytes(self) -> int:
@@ -372,6 +376,14 @@ class Settings:
                 video_transcode_raw_retention_hours=_env_int("VIDEO_TRANSCODE_RAW_RETENTION_HOURS", 24),
                 workspace_video_quota=_env_int("WORKSPACE_VIDEO_QUOTA", 50),
                 cleanup_video_source_after_analysis=_env_bool("CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS", False),
+                # PR C9.1: compression decision (independent of pipeline-enabled flag).
+                video_transcode_enabled=_env_bool("VIDEO_TRANSCODE_ENABLED", False),
+                video_transcode_min_bytes=_env_int(
+                    "VIDEO_TRANSCODE_MIN_BYTES", 25 * 1024 * 1024
+                ),
+                video_upload_timeout_ms=_env_int(
+                    "VIDEO_UPLOAD_TIMEOUT_MS", 5 * 60 * 1000
+                ),
             ),
             ai=AISettings(
                 openai_api_key=os.getenv("OPENAI_API_KEY", ""),
