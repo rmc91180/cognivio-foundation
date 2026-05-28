@@ -120,6 +120,11 @@ class PrivacySettings:
     privacy_raw_video_retention_days: int
     privacy_profile_image_retention_days: int
     privacy_purge_interval_minutes: int
+    # PR C9.2: reference materialization controls
+    privacy_reference_url_fetch_enabled: bool = False
+    privacy_reference_url_fetch_timeout_seconds: int = 20
+    privacy_reference_max_bytes: int = 10 * 1024 * 1024
+    privacy_reference_url_allowed_hosts: str = ""
 
     @property
     def require_profile(self) -> bool:
@@ -365,6 +370,20 @@ class Settings:
                 privacy_raw_video_retention_days=_env_int("PRIVACY_RAW_VIDEO_RETENTION_DAYS", 30),
                 privacy_profile_image_retention_days=_env_int("PRIVACY_PROFILE_IMAGE_RETENTION_DAYS", 30),
                 privacy_purge_interval_minutes=_env_int("PRIVACY_PURGE_INTERVAL_MINUTES", 60),
+                # PR C9.2: reference materialization. Defaults are safe — public
+                # URL fetch stays off until the operator explicitly enables it.
+                privacy_reference_url_fetch_enabled=_env_bool(
+                    "PRIVACY_REFERENCE_URL_FETCH_ENABLED", False
+                ),
+                privacy_reference_url_fetch_timeout_seconds=_env_int(
+                    "PRIVACY_REFERENCE_URL_FETCH_TIMEOUT_SECONDS", 20
+                ),
+                privacy_reference_max_bytes=_env_int(
+                    "PRIVACY_REFERENCE_MAX_BYTES", 10 * 1024 * 1024
+                ),
+                privacy_reference_url_allowed_hosts=os.getenv(
+                    "PRIVACY_REFERENCE_URL_ALLOWED_HOSTS", ""
+                ),
             ),
             video=VideoSettings(
                 max_video_bytes=_env_int("VIDEO_MAX_UPLOAD_BYTES", 500 * 1024 * 1024),

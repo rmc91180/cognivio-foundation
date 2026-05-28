@@ -165,6 +165,8 @@ def test_teacher_readiness_reports_usable_count_and_failure_codes(monkeypatch, t
             "status": "ready",
             "file_url": "S3_PUBLIC_BASE_URL=https://pub.example.com/x.jpg",
             "file_path": "missing.jpg",
+            # PR C9.2: storage-downloadable reference unblocks the worker.
+            "s3_key": "uploads/privacy/teacher-1/profile/r-1.jpg",
         }
     ]
 
@@ -179,6 +181,9 @@ def test_teacher_readiness_reports_usable_count_and_failure_codes(monkeypatch, t
     monkeypatch.setattr(server, "_teacher_consent_completion", fake_consent)
     monkeypatch.setattr(server, "_teacher_profile_complete", lambda *_a, **_k: True)
     monkeypatch.setattr(server, "_teacher_missing_profile_fields", lambda *_a, **_k: [])
+    # PR C9.2: pretend the operator has valid R2/S3 credentials so the
+    # readiness check considers the s3_key materializable.
+    monkeypatch.setattr(server, "_storage_download_available", lambda: True)
 
     readiness = asyncio.run(server._teacher_readiness(teacher, current_user))
     assert readiness["privacy_reference_images_usable_count"] == 1

@@ -3678,6 +3678,101 @@ def _delete_s3_key(key: Optional[str]) -> None:
         logger.warning(f"Unable to delete S3 object {key}: {exc}")
 
 
+def _storage_download_available() -> bool:
+    """PR C9.2: True when the worker can pull a reference s3_key into a temp file.
+
+    Returns ``False`` when the bucket / credentials are not configured. Used by
+    the readiness endpoint, the materializer, the audit script, and the smoke
+    runner so they all agree on whether remote-only references are usable.
+    """
+    if not S3_BUCKET:
+        return False
+    if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+        return False
+    return True
+
+
+def download_s3_key_to_file(s3_key: str, destination_path: Path) -> None:
+    """PR C9.2: download an S3/R2 object key to *destination_path*.
+
+    Used by the privacy reference materializer. Raises:
+
+    - ``RuntimeError("storage_download_unavailable")`` when bucket / credentials
+      are missing.
+    - ``FileNotFoundError`` when the object does not exist (NoSuchKey / 404).
+    - The boto exception class for other backend errors — the caller maps
+      them onto structured failure codes.
+
+    Never logs the access key, secret, or full URL.
+    """
+    if not _storage_download_available():
+        raise RuntimeError("storage_download_unavailable")
+    cleaned = (s3_key or "").lstrip("/")
+    if not cleaned:
+        raise FileNotFoundError("empty_s3_key")
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    client = _get_s3_client()
+    try:
+        client.download_file(S3_BUCKET, cleaned, str(destination_path))
+    except ClientError as exc:
+        code = (exc.response.get("Error", {}) or {}).get("Code") if hasattr(exc, "response") else None
+        if code in {"NoSuchKey", "404", "NotFound"}:
+            raise FileNotFoundError("reference_object_not_found") from exc
+        raise
+
+
+def fetch_public_url_to_file(
+    url: str,
+    destination_path: Path,
+    timeout_seconds: int,
+    max_bytes: int,
+) -> None:
+    """PR C9.2: fetch *url* to *destination_path*, capped at *max_bytes*.
+
+    Only HTTPS is accepted by the caller (the materializer's host allow-list
+    enforces that). This helper exists so the materializer never imports
+    ``requests`` directly; tests inject a stub instead.
+    """
+    try:
+        import requests  # local import — keeps test surface narrow
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("storage_download_unavailable") from exc
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    bytes_written = 0
+    try:
+        with requests.get(url, stream=True, timeout=timeout_seconds) as resp:
+            if resp.status_code == 404:
+                raise FileNotFoundError("reference_object_not_found")
+            resp.raise_for_status()
+            with destination_path.open("wb") as out:
+                for chunk in resp.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    bytes_written += len(chunk)
+                    if max_bytes and bytes_written > max_bytes:
+                        try:
+                            destination_path.unlink()
+                        except OSError:
+                            pass
+                        raise RuntimeError("max bytes exceeded")
+                    out.write(chunk)
+    except FileNotFoundError:
+        raise
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        # Never log the full URL — could contain a presigned signature.
+        logger.warning("Privacy reference URL fetch failed (host=%s)", _safe_host_label(url))
+        raise
+
+
+def _safe_host_label(url: str) -> str:
+    try:
+        return url.split("/", 3)[2].split(":", 1)[0]
+    except Exception:
+        return "unknown"
+
+
 def _materialize_video_asset_locally(
     video: dict,
     *,
@@ -5900,6 +5995,15 @@ RECOGNITION_FIVE_STAR_SCORE_MIN = (
     else DEFAULT_FIVE_STAR_SCORE_MIN
 )
 PRIVACY_ALLOW_DEGRADED_RUNTIME = APP_SETTINGS.privacy.privacy_allow_degraded_runtime
+# PR C9.2: reference materialization controls.
+PRIVACY_REFERENCE_URL_FETCH_ENABLED = APP_SETTINGS.privacy.privacy_reference_url_fetch_enabled
+PRIVACY_REFERENCE_URL_FETCH_TIMEOUT_SECONDS = APP_SETTINGS.privacy.privacy_reference_url_fetch_timeout_seconds
+PRIVACY_REFERENCE_MAX_BYTES = APP_SETTINGS.privacy.privacy_reference_max_bytes
+PRIVACY_REFERENCE_URL_ALLOWED_HOSTS = tuple(
+    host.strip()
+    for host in (APP_SETTINGS.privacy.privacy_reference_url_allowed_hosts or "").split(",")
+    if host.strip()
+)
 
 # S3 configuration (required for file uploads)
 from app.services.storage_urls import (
@@ -5917,6 +6021,13 @@ from app.services.privacy_references import (
     has_usable_privacy_references,
     summarize_privacy_references,
     validate_privacy_reference_usability,
+)
+from app.services.privacy_reference_materialization import (
+    PRIVACY_MATERIALIZATION_FAILURE_CODES,
+    PrivacyReferenceMaterializationResult,
+    cleanup_materialized_privacy_references,
+    evaluate_materialization_capability,
+    materialize_privacy_references,
 )
 from app.services.video_assets import (
     VIDEO_ANALYSIS_FAILURE_CODES,
@@ -9851,20 +9962,39 @@ async def get_teacher_reference_images_for_blur(teacher_id: str, workspace_id: O
 def _summarize_teacher_privacy_references(
     references: List[dict],
     *,
-    allow_url_fetch: bool = True,
+    allow_url_fetch: Optional[bool] = None,
+    allow_storage_download: Optional[bool] = None,
 ) -> "PrivacyReferenceSummary":
-    """PR C9.1: align readiness with the privacy worker's usability rules.
+    """PR C9.1/C9.2: align readiness with the privacy worker's usability rules.
 
-    The readiness endpoint and privacy worker MUST agree on what "usable" means
-    so the teacher UI never says "ready" while the worker fails with
-    "Teacher privacy profile has no usable references".
+    PR C9.2 lets the readiness check honor the worker's actual capabilities:
+
+    - If the operator has authenticated S3/R2 access, ``s3_key`` references are
+      considered usable because :func:`download_s3_key_to_file` can pull them
+      into a temp file at worker time.
+    - If ``PRIVACY_REFERENCE_URL_FETCH_ENABLED`` is set, normalized HTTPS
+      ``file_url`` is also considered usable.
+
+    Callers may override either dimension explicitly (the audit script does so
+    to enumerate "what would be usable IF storage were configured?").
     """
     now_iso = datetime.now(timezone.utc).isoformat()
+    storage_ok = (
+        allow_storage_download
+        if allow_storage_download is not None
+        else _storage_download_available()
+    )
+    url_fetch_ok = (
+        allow_url_fetch
+        if allow_url_fetch is not None
+        else PRIVACY_REFERENCE_URL_FETCH_ENABLED
+    )
     return summarize_privacy_references(
         references,
         upload_dir=UPLOAD_DIR,
         now_iso=now_iso,
-        allow_url_fetch=allow_url_fetch,
+        allow_url_fetch=url_fetch_ok,
+        allow_storage_download=storage_ok,
     )
 
 
@@ -10832,6 +10962,9 @@ async def _run_video_privacy_job(video_id: str) -> None:
     success = False
     error_message: Optional[str] = None
     job_final_status = PrivacyProcessingStatus.FAILED.value
+    # PR C9.2: temp directory holding materialized references. Cleanup runs in
+    # the finally block — even on uncaught exceptions or runtime fallbacks.
+    materialization_result: Optional[PrivacyReferenceMaterializationResult] = None
     with app_metrics.track_privacy_job(mode="unknown"):
         try:
             video = await _require_canonical_video_source(
@@ -10845,47 +10978,56 @@ async def _run_video_privacy_job(video_id: str) -> None:
                 {"teacher_id": job["teacher_id"], "status": {"$nin": ["deleted", "replaced", "expired"]}},
                 {"_id": 0},
             ).to_list(50)
-            # PR C9.1: shared usability check + structured failure codes so the
-            # readiness UI, the worker, and the retry endpoint agree.
             now_iso_for_worker = datetime.now(timezone.utc).isoformat()
-            reference_summary = summarize_privacy_references(
+            storage_ok = _storage_download_available()
+            # PR C9.2: materialize references into a per-job temp directory so
+            # the OpenCV blur worker has local files even when reference rows
+            # live only in R2/S3.
+            materialization_result = await asyncio.to_thread(
+                materialize_privacy_references,
                 reference_docs,
                 upload_dir=UPLOAD_DIR,
+                storage_downloader=download_s3_key_to_file if storage_ok else None,
+                url_fetcher=fetch_public_url_to_file if PRIVACY_REFERENCE_URL_FETCH_ENABLED else None,
+                url_fetch_enabled=PRIVACY_REFERENCE_URL_FETCH_ENABLED,
+                allowed_hosts=PRIVACY_REFERENCE_URL_ALLOWED_HOSTS,
+                timeout_seconds=PRIVACY_REFERENCE_URL_FETCH_TIMEOUT_SECONDS,
+                max_bytes=PRIVACY_REFERENCE_MAX_BYTES,
                 now_iso=now_iso_for_worker,
-                allow_url_fetch=False,
+                temp_dir_prefix=f"cognivio-privacy-refs-{video_id}-",
             )
-            reference_paths = extract_reference_paths(reference_summary)
-            privacy_reference_failure_codes = list(reference_summary.failure_codes)
-            if privacy_reference_failure_codes:
-                await db.videos.update_one(
-                    {"id": video_id},
-                    {
-                        "$set": {
-                            "privacy_reference_failure_codes": privacy_reference_failure_codes,
-                            "privacy_reference_usable_count": reference_summary.usable_count,
-                            "privacy_reference_total_count": reference_summary.total,
-                            "privacy_reference_failure_at": now_iso_for_worker,
-                        }
-                    },
-                )
-            else:
-                await db.videos.update_one(
-                    {"id": video_id},
-                    {
-                        "$set": {
-                            "privacy_reference_failure_codes": [],
-                            "privacy_reference_usable_count": reference_summary.usable_count,
-                            "privacy_reference_total_count": reference_summary.total,
-                            "privacy_reference_failure_at": None,
-                        }
-                    },
-                )
+            reference_paths = materialization_result.usable_local_paths()
+            privacy_reference_failure_codes = list(materialization_result.failure_codes)
+            await db.videos.update_one(
+                {"id": video_id},
+                {
+                    "$set": {
+                        "privacy_reference_failure_codes": privacy_reference_failure_codes,
+                        "privacy_reference_usable_count": materialization_result.usable_count,
+                        "privacy_reference_materialized_count": sum(
+                            1 for ref in materialization_result.usable if ref.cleanup_required
+                        ),
+                        "privacy_reference_total_count": materialization_result.total,
+                        "privacy_reference_failure_at": (
+                            now_iso_for_worker if privacy_reference_failure_codes else None
+                        ),
+                        "privacy_reference_materialization_notes": list(
+                            materialization_result.notes
+                        ),
+                    }
+                },
+            )
             if not reference_paths:
                 if PRIVACY_ALLOW_DEGRADED_RUNTIME:
+                    primary_code = (
+                        privacy_reference_failure_codes[0]
+                        if privacy_reference_failure_codes
+                        else "no_usable_references"
+                    )
                     logger.warning(
                         "Privacy reference fallback activated for video_id=%s reason=%s",
                         video_id,
-                        reference_summary.primary_failure_code,
+                        primary_code,
                     )
                     privacy_mode = "degraded"
                 else:
@@ -11190,6 +11332,16 @@ async def _run_video_privacy_job(video_id: str) -> None:
                 duration_seconds=time.perf_counter() - privacy_started_perf,
                 mode=privacy_mode,
             )
+            # PR C9.2: always clean up the per-job materialization temp dir,
+            # even when the worker crashed before reaching success.
+            if materialization_result is not None:
+                try:
+                    cleanup_materialized_privacy_references(materialization_result)
+                except Exception:  # pragma: no cover
+                    logger.warning(
+                        "Privacy reference temp cleanup failed for video_id=%s",
+                        video_id,
+                    )
 
 
 async def _enqueue_video_processing_job(
@@ -12699,13 +12851,21 @@ async def retry_video_privacy(video_id: str, current_user: dict = Depends(get_cu
         or _workspace_id_for_user(current_user)
     )
     retry_references = await _list_teacher_reference_images(video.get("teacher_id"), workspace_id)
-    retry_summary = _summarize_teacher_privacy_references(retry_references, allow_url_fetch=False)
+    # PR C9.2: retry must honor the same materialization capability the worker
+    # has. Storage-downloadable s3_key references unblock retry; missing
+    # credentials surface as ``storage_download_unavailable``.
+    retry_summary = _summarize_teacher_privacy_references(retry_references)
     if retry_summary.usable_count < 1:
+        primary_code = retry_summary.primary_failure_code or "no_usable_references"
+        if not _storage_download_available() and any(
+            ref.get("s3_key") for ref in retry_references
+        ):
+            primary_code = "storage_download_unavailable"
         raise HTTPException(
             status_code=409,
             detail={
                 "code": "PRIVACY_REFERENCES_NOT_USABLE",
-                "reason_code": retry_summary.primary_failure_code or "no_usable_references",
+                "reason_code": primary_code,
                 "message": (
                     "Teacher privacy references are not usable by the worker. "
                     "Upload at least one usable reference image, then retry."
@@ -12713,6 +12873,8 @@ async def retry_video_privacy(video_id: str, current_user: dict = Depends(get_cu
                 "failure_codes": list(retry_summary.failure_codes),
                 "reference_total": retry_summary.total,
                 "reference_usable_count": retry_summary.usable_count,
+                "storage_download_available": _storage_download_available(),
+                "url_fetch_enabled": PRIVACY_REFERENCE_URL_FETCH_ENABLED,
             },
         )
     queued_at = datetime.now(timezone.utc).isoformat()

@@ -189,14 +189,28 @@ def validate_privacy_reference_usability(
     upload_dir: Optional[Path] = None,
     now_iso: Optional[str] = None,
     allow_url_fetch: bool = True,
+    allow_storage_download: bool = False,
 ) -> PrivacyReferenceUsability:
     """Compute the usability decision for a single reference document.
 
-    *allow_url_fetch* controls whether a usable ``s3_key`` / ``file_url`` (with
-    no local copy) counts as fetchable. Callers that cannot download remote
-    objects (legacy worker hosts) should pass ``False`` to receive a
-    ``no_local_file_and_no_fetchable_url`` code instead of an optimistic
-    ``usable=True``.
+    *allow_url_fetch* controls whether a usable ``file_url`` (with no local
+    copy) counts as fetchable. PR C9.2 splits the "remote OK" decision into
+    two independent dimensions:
+
+    - *allow_storage_download* — the caller has an authenticated S3/R2
+      client that can pull ``s3_key`` into a temp file via materialization.
+      Defaults to ``False`` for backwards compatibility; the privacy worker
+      passes ``True`` once the materializer is wired in.
+    - *allow_url_fetch* — the caller may fetch the normalized public
+      ``file_url`` over HTTPS. Off by default; must be explicitly enabled by
+      the operator because public URL fetch is harder to allow-list and
+      throttle than authenticated storage downloads.
+
+    A reference is considered usable when at least one of:
+
+    1. local file is present, OR
+    2. ``s3_key`` is set AND ``allow_storage_download`` is True, OR
+    3. normalized ``file_url`` is set AND ``allow_url_fetch`` is True.
     """
     reference_id = reference.get("id") or reference.get("reference_id")
     failure_codes: List[str] = []
@@ -256,13 +270,25 @@ def validate_privacy_reference_usability(
     if not has_any_anchor and "reference_url_malformed" not in failure_codes:
         failure_codes.append("no_local_file_and_no_fetchable_url")
 
+    # PR C9.2: storage download and URL fetch are independent capabilities.
+    storage_path_available = bool(s3_key) and allow_storage_download
+    url_path_available = bool(fetchable_url) and allow_url_fetch
+
     usable = not failure_codes and (
         local_ok
-        or (allow_url_fetch and (bool(fetchable_url) or bool(s3_key)))
+        or storage_path_available
+        or url_path_available
     )
 
-    if not local_ok and not allow_url_fetch and (fetchable_url or s3_key):
-        if "no_local_file_and_no_fetchable_url" not in failure_codes:
+    if not local_ok and not (storage_path_available or url_path_available) and (
+        fetchable_url or s3_key
+    ):
+        # PR C9.2: prefer the most actionable code for the operator. If the
+        # only blocker is missing storage credentials, say so explicitly.
+        if bool(s3_key) and not allow_storage_download:
+            if "storage_download_unavailable" not in failure_codes:
+                failure_codes.append("storage_download_unavailable")
+        elif "no_local_file_and_no_fetchable_url" not in failure_codes:
             failure_codes.append("no_local_file_and_no_fetchable_url")
         notes.append("remote_only_but_fetch_disabled")
         usable = False
@@ -284,6 +310,7 @@ def summarize_privacy_references(
     upload_dir: Optional[Path] = None,
     now_iso: Optional[str] = None,
     allow_url_fetch: bool = True,
+    allow_storage_download: bool = False,
 ) -> PrivacyReferenceSummary:
     """Run :func:`validate_privacy_reference_usability` over a collection."""
     details: List[PrivacyReferenceUsability] = []
@@ -298,6 +325,7 @@ def summarize_privacy_references(
             upload_dir=upload_dir,
             now_iso=now_iso,
             allow_url_fetch=allow_url_fetch,
+            allow_storage_download=allow_storage_download,
         )
         details.append(decision)
         if decision.usable:
@@ -330,6 +358,7 @@ def has_usable_privacy_references(
     upload_dir: Optional[Path] = None,
     now_iso: Optional[str] = None,
     allow_url_fetch: bool = True,
+    allow_storage_download: bool = False,
     required_count: int = 1,
 ) -> bool:
     """Return ``True`` when at least *required_count* references are usable."""
@@ -338,6 +367,7 @@ def has_usable_privacy_references(
         upload_dir=upload_dir,
         now_iso=now_iso,
         allow_url_fetch=allow_url_fetch,
+        allow_storage_download=allow_storage_download,
     )
     return summary.usable_count >= max(1, required_count)
 

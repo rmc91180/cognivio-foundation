@@ -575,15 +575,20 @@ async def retry_video_privacy(video_id: str, current_user: dict) -> dict:
     retry_references = await legacy._list_teacher_reference_images(
         video.get("teacher_id"), workspace_id
     )
-    retry_summary = legacy._summarize_teacher_privacy_references(
-        retry_references, allow_url_fetch=False
-    )
+    # PR C9.2: defer to the legacy summary helper so the materialization
+    # capability (storage download + optional URL fetch) is taken into account.
+    retry_summary = legacy._summarize_teacher_privacy_references(retry_references)
     if retry_summary.usable_count < 1:
+        primary_code = retry_summary.primary_failure_code or "no_usable_references"
+        if not legacy._storage_download_available() and any(
+            ref.get("s3_key") for ref in retry_references
+        ):
+            primary_code = "storage_download_unavailable"
         raise legacy.HTTPException(
             status_code=409,
             detail={
                 "code": "PRIVACY_REFERENCES_NOT_USABLE",
-                "reason_code": retry_summary.primary_failure_code or "no_usable_references",
+                "reason_code": primary_code,
                 "message": (
                     "Teacher privacy references are not usable by the worker. "
                     "Upload at least one usable reference image, then retry."
@@ -591,6 +596,8 @@ async def retry_video_privacy(video_id: str, current_user: dict) -> dict:
                 "failure_codes": list(retry_summary.failure_codes),
                 "reference_total": retry_summary.total,
                 "reference_usable_count": retry_summary.usable_count,
+                "storage_download_available": legacy._storage_download_available(),
+                "url_fetch_enabled": legacy.PRIVACY_REFERENCE_URL_FETCH_ENABLED,
             },
         )
 
