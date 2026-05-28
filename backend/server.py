@@ -3333,8 +3333,17 @@ def _render_access_request_action_result_page(title: str, message: str, tone: st
 
 
 def _resolve_video_playback_url(video: dict) -> Optional[str]:
+    """Default playback URL resolver (admin / mixed surfaces).
+
+    PR C9.1: existing call sites preserved — the strict teacher-facing gate
+    lives in :func:`_resolve_teacher_video_playback_url`, which delegates to
+    ``select_playback_asset``. This function continues to support legacy
+    responses that may have no ``privacy_status`` field. URL values are
+    normalized through ``normalize_storage_url`` so leaked
+    ``S3_PUBLIC_BASE_URL=`` prefixes never surface to the client.
+    """
     privacy_status = _normalize_privacy_status(video.get("privacy_status"))
-    redacted_url = video.get("redacted_file_url")
+    redacted_url = normalize_storage_url(video.get("redacted_file_url"))
     if redacted_url:
         return redacted_url
     redacted_path = video.get("redacted_file_path")
@@ -3343,14 +3352,14 @@ def _resolve_video_playback_url(video: dict) -> Optional[str]:
         return _to_public_backend_url(f"/uploads/{safe_path}")
     if video.get("privacy_status") is not None and privacy_status != PrivacyProcessingStatus.COMPLETED.value:
         return None
-    processed_url = video.get("processed_file_url")
+    processed_url = normalize_storage_url(video.get("processed_file_url"))
     if processed_url:
         return processed_url
     processed_path = video.get("processed_file_path")
     if processed_path:
         safe_path = str(processed_path).replace("\\", "/").lstrip("/")
         return _to_public_backend_url(f"/uploads/{safe_path}")
-    file_url = video.get("file_url")
+    file_url = normalize_storage_url(video.get("file_url"))
     if file_url:
         return file_url
     file_path = video.get("file_path")
@@ -3358,6 +3367,22 @@ def _resolve_video_playback_url(video: dict) -> Optional[str]:
         safe_path = str(file_path).replace("\\", "/").lstrip("/")
         return _to_public_backend_url(f"/uploads/{safe_path}")
     return None
+
+
+def _resolve_teacher_video_playback_url(video: dict) -> Optional[str]:
+    """PR C9.1: strict teacher-facing playback URL.
+
+    Never returns raw or non-redacted URLs unless ``allow_unblurred_retention``
+    is enabled by institution policy. Returns ``None`` when no asset is safe to
+    serve to a teacher.
+    """
+    decision = select_playback_asset(video, "teacher", allow_raw_for_admin=False)
+    if not decision.url:
+        return None
+    url = decision.url
+    if url.startswith("/uploads/"):
+        return _to_public_backend_url(url)
+    return url
 
 
 def _resolve_video_thumbnail_url(video: dict) -> Optional[str]:
@@ -3563,14 +3588,25 @@ def _store_path_locally(file_path: Path, category: str, filename: str) -> Tuple[
 
 
 def _get_s3_public_url(key: str) -> str:
-    if S3_PUBLIC_BASE_URL:
-        return f"{S3_PUBLIC_BASE_URL.rstrip('/')}/{key}"
-    if S3_ENDPOINT:
-        endpoint = S3_ENDPOINT.replace("https://", "").replace("http://", "")
-        return f"https://{S3_BUCKET}.{endpoint}/{key}"
-    if S3_REGION:
-        return f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{key}"
-    return f"https://{S3_BUCKET}.s3.amazonaws.com/{key}"
+    """Return the canonical public URL for an S3/R2 object key.
+
+    Routes through :func:`build_public_storage_url` so the configured
+    ``S3_PUBLIC_BASE_URL`` and ``S3_ENDPOINT`` are normalized — guarding against
+    leaked ``S3_PUBLIC_BASE_URL=`` env-name prefixes that previously corrupted
+    persisted reference image URLs (PR C9.1).
+    """
+    url = build_public_storage_url(
+        key,
+        public_base_url=S3_PUBLIC_BASE_URL,
+        endpoint=S3_ENDPOINT,
+        region=S3_REGION,
+        bucket=S3_BUCKET,
+    )
+    if url:
+        return url
+    # Fall back to the legacy AWS hostname even when the bucket is unset so the
+    # error surfaces clearly at call site instead of returning ``None``.
+    return f"https://{S3_BUCKET}.s3.amazonaws.com/{key.lstrip('/')}"
 
 
 async def _upload_file_to_s3(
@@ -5009,6 +5045,9 @@ async def _save_privacy_reference_file(
         )
     except Exception as exc:
         logger.warning(f"Privacy profile reference upload failed for {teacher_id}: {exc}")
+    # PR C9.1: defensively normalize so the persisted DB row never stores a
+    # leaked ``S3_PUBLIC_BASE_URL=...`` prefix.
+    file_url = normalize_storage_url(file_url)
     return relative_path, file_url, s3_key
 
 
@@ -5806,6 +5845,10 @@ VIDEO_TRANSCODE_PROFILE = APP_SETTINGS.video.video_transcode_profile.strip() or 
 VIDEO_TRANSCODE_WORKER_COUNT = APP_SETTINGS.video.video_transcode_worker_count
 VIDEO_TRANSCODE_RAW_CLEANUP_ENABLED = APP_SETTINGS.video.video_transcode_raw_cleanup_enabled
 VIDEO_TRANSCODE_RAW_RETENTION_HOURS = APP_SETTINGS.video.video_transcode_raw_retention_hours
+# PR C9.1: independent compression-decision controls.
+VIDEO_TRANSCODE_ENABLED = APP_SETTINGS.video.video_transcode_enabled
+VIDEO_TRANSCODE_MIN_BYTES = APP_SETTINGS.video.video_transcode_min_bytes
+VIDEO_UPLOAD_TIMEOUT_MS = APP_SETTINGS.video.video_upload_timeout_ms
 CLEANUP_VIDEO_SOURCE_AFTER_ANALYSIS = APP_SETTINGS.video.cleanup_video_source_after_analysis
 ADHERENCE_WEIGHT = APP_SETTINGS.operations.adherence_weight
 PRIVACY_REQUIRE_PROFILE = APP_SETTINGS.privacy.privacy_require_profile
@@ -5859,10 +5902,42 @@ RECOGNITION_FIVE_STAR_SCORE_MIN = (
 PRIVACY_ALLOW_DEGRADED_RUNTIME = APP_SETTINGS.privacy.privacy_allow_degraded_runtime
 
 # S3 configuration (required for file uploads)
+from app.services.storage_urls import (
+    build_public_storage_url,
+    describe_storage_url_issue,
+    is_probably_http_url,
+    iter_known_storage_url_fields,
+    normalize_storage_url,
+)
+from app.services.privacy_references import (
+    PRIVACY_REFERENCE_FAILURE_CODES,
+    PrivacyReferenceSummary,
+    PrivacyReferenceUsability,
+    extract_reference_paths,
+    has_usable_privacy_references,
+    summarize_privacy_references,
+    validate_privacy_reference_usability,
+)
+from app.services.video_assets import (
+    VIDEO_ANALYSIS_FAILURE_CODES,
+    VIDEO_PLAYBACK_FAILURE_CODES,
+    VIDEO_TRANSCODE_DECISIONS,
+    AnalysisAssetDecision,
+    PlaybackAssetDecision,
+    TranscodeDecision,
+    decide_transcode_for_upload,
+    select_analysis_asset,
+    select_playback_asset,
+)
+
 S3_BUCKET = APP_SETTINGS.storage.s3_bucket
 S3_REGION = APP_SETTINGS.storage.s3_region
-S3_ENDPOINT = APP_SETTINGS.storage.s3_endpoint
-S3_PUBLIC_BASE_URL = APP_SETTINGS.storage.s3_public_base_url
+S3_ENDPOINT = normalize_storage_url(APP_SETTINGS.storage.s3_endpoint) or APP_SETTINGS.storage.s3_endpoint
+# Defensive normalization: a misconfigured deploy occasionally surfaces the
+# value as literally "S3_PUBLIC_BASE_URL=https://..." (the env-var name leaked
+# into the value). normalize_storage_url strips that prefix so downstream URL
+# builders never persist malformed reference / video URLs.
+S3_PUBLIC_BASE_URL = normalize_storage_url(APP_SETTINGS.storage.s3_public_base_url) or ""
 S3_PRESIGNED_URL_EXPIRES_SECONDS = APP_SETTINGS.storage.s3_presigned_url_expires_seconds
 AWS_ACCESS_KEY_ID = APP_SETTINGS.storage.aws_access_key_id
 AWS_SECRET_ACCESS_KEY = APP_SETTINGS.storage.aws_secret_access_key
@@ -9773,6 +9848,26 @@ async def get_teacher_reference_images_for_blur(teacher_id: str, workspace_id: O
     return [ref for ref in references if _reference_image_ready_for_upload(ref)]
 
 
+def _summarize_teacher_privacy_references(
+    references: List[dict],
+    *,
+    allow_url_fetch: bool = True,
+) -> "PrivacyReferenceSummary":
+    """PR C9.1: align readiness with the privacy worker's usability rules.
+
+    The readiness endpoint and privacy worker MUST agree on what "usable" means
+    so the teacher UI never says "ready" while the worker fails with
+    "Teacher privacy profile has no usable references".
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+    return summarize_privacy_references(
+        references,
+        upload_dir=UPLOAD_DIR,
+        now_iso=now_iso,
+        allow_url_fetch=allow_url_fetch,
+    )
+
+
 async def _teacher_consent_completion(
     teacher: Optional[dict],
     current_user: dict,
@@ -9854,7 +9949,17 @@ async def _teacher_readiness(teacher: Optional[dict], current_user: dict) -> Dic
     workspace_id = (teacher or {}).get("organization_id") or (teacher or {}).get("school_id") or _workspace_id_for_user(current_user)
     references = await get_teacher_reference_images_for_blur((teacher or {}).get("id"), workspace_id) if teacher else []
     reference_count = len(references)
-    reference_ready = reference_count >= TEACHER_UPLOAD_REFERENCE_IMAGE_REQUIRED_COUNT
+    # PR C9.1: a reference doc only counts as "ready for the privacy worker"
+    # when it is actually usable (URL present and well-formed, local copy or
+    # S3 key available, not retention-expired). This stops the teacher UI from
+    # saying "ready" while the worker fails with "no usable references".
+    privacy_reference_summary = _summarize_teacher_privacy_references(references)
+    usable_reference_count = privacy_reference_summary.usable_count
+    privacy_reference_failure_codes = list(privacy_reference_summary.failure_codes)
+    reference_ready = (
+        usable_reference_count >= TEACHER_UPLOAD_REFERENCE_IMAGE_REQUIRED_COUNT
+        and reference_count >= TEACHER_UPLOAD_REFERENCE_IMAGE_REQUIRED_COUNT
+    )
     blockers: List[Dict[str, str]] = []
     if not consent_complete:
         blockers.append({"code": "PRIVACY_CONSENT_REQUIRED", **TEACHER_READINESS_BLOCKER_DEFINITIONS["PRIVACY_CONSENT_REQUIRED"]})
@@ -9887,6 +9992,8 @@ async def _teacher_readiness(teacher: Optional[dict], current_user: dict) -> Dic
         "privacy_reference_images_ready": reference_ready,
         "privacy_reference_image_count": reference_count,
         "privacy_reference_images_required_count": TEACHER_UPLOAD_REFERENCE_IMAGE_REQUIRED_COUNT,
+        "privacy_reference_images_usable_count": usable_reference_count,
+        "privacy_reference_failure_codes": privacy_reference_failure_codes,
         "upload_ready": upload_ready,
         "setup_next_step": setup_next_step,
         "blockers": [
@@ -10735,22 +10842,57 @@ async def _run_video_privacy_job(video_id: str) -> None:
             )
             manual_override = video.get("privacy_manual_override") or {}
             reference_docs = await db.teacher_face_references.find(
-                {"teacher_id": job["teacher_id"]},
-                {"_id": 0, "file_path": 1},
+                {"teacher_id": job["teacher_id"], "status": {"$nin": ["deleted", "replaced", "expired"]}},
+                {"_id": 0},
             ).to_list(50)
-            reference_paths = [
-                str(UPLOAD_DIR / doc["file_path"])
-                for doc in reference_docs
-                if doc.get("file_path") and (UPLOAD_DIR / doc["file_path"]).exists()
-            ]
+            # PR C9.1: shared usability check + structured failure codes so the
+            # readiness UI, the worker, and the retry endpoint agree.
+            now_iso_for_worker = datetime.now(timezone.utc).isoformat()
+            reference_summary = summarize_privacy_references(
+                reference_docs,
+                upload_dir=UPLOAD_DIR,
+                now_iso=now_iso_for_worker,
+                allow_url_fetch=False,
+            )
+            reference_paths = extract_reference_paths(reference_summary)
+            privacy_reference_failure_codes = list(reference_summary.failure_codes)
+            if privacy_reference_failure_codes:
+                await db.videos.update_one(
+                    {"id": video_id},
+                    {
+                        "$set": {
+                            "privacy_reference_failure_codes": privacy_reference_failure_codes,
+                            "privacy_reference_usable_count": reference_summary.usable_count,
+                            "privacy_reference_total_count": reference_summary.total,
+                            "privacy_reference_failure_at": now_iso_for_worker,
+                        }
+                    },
+                )
+            else:
+                await db.videos.update_one(
+                    {"id": video_id},
+                    {
+                        "$set": {
+                            "privacy_reference_failure_codes": [],
+                            "privacy_reference_usable_count": reference_summary.usable_count,
+                            "privacy_reference_total_count": reference_summary.total,
+                            "privacy_reference_failure_at": None,
+                        }
+                    },
+                )
             if not reference_paths:
                 if PRIVACY_ALLOW_DEGRADED_RUNTIME:
                     logger.warning(
-                        f"Privacy reference fallback activated for {video_id}: no usable teacher references found"
+                        "Privacy reference fallback activated for video_id=%s reason=%s",
+                        video_id,
+                        reference_summary.primary_failure_code,
                     )
                     privacy_mode = "degraded"
                 else:
-                    raise RuntimeError("Teacher privacy profile has no usable references")
+                    raise RuntimeError(
+                        "Teacher privacy profile has no usable references"
+                        f" (codes: {','.join(privacy_reference_failure_codes) or 'no_usable_references'})"
+                    )
 
             await db.videos.update_one(
                 {"id": video_id},
@@ -11926,11 +12068,19 @@ async def upload_video(
         except Exception as exc:
             logger.warning(f"S3 upload failed for video {video_id}: {exc}")
 
-        transcode_status = (
-            VideoTranscodeStatus.QUEUED.value
-            if VIDEO_TRANSCODE_PIPELINE_ENABLED
-            else VideoTranscodeStatus.NOT_REQUIRED.value
+        # PR C9.1: decide transcode by size, not by the pipeline flag alone.
+        transcode_decision = decide_transcode_for_upload(
+            size,
+            transcode_enabled=VIDEO_TRANSCODE_ENABLED,
+            pipeline_enabled=VIDEO_TRANSCODE_PIPELINE_ENABLED,
+            min_bytes=VIDEO_TRANSCODE_MIN_BYTES,
         )
+        if transcode_decision.decision == "queued":
+            transcode_status = VideoTranscodeStatus.QUEUED.value
+        elif transcode_decision.decision == "pending":
+            transcode_status = VideoTranscodeStatus.QUEUED.value
+        else:
+            transcode_status = VideoTranscodeStatus.NOT_REQUIRED.value
 
         video_doc = {
             "id": video_id,
@@ -11938,8 +12088,11 @@ async def upload_video(
             "stored_filename": filename,
             "s3_key": s3_key,
             "raw_s3_key": s3_key,
-            "file_url": file_url,
-            "raw_file_url": file_url,
+            "file_url": normalize_storage_url(file_url),
+            "raw_file_url": normalize_storage_url(file_url),
+            "transcode_decision": transcode_decision.decision,
+            "transcode_decision_reason": transcode_decision.reason,
+            "transcode_min_bytes": transcode_decision.min_bytes,
             "file_path": relative_path,
             "raw_file_path": relative_path,
             "content_type": content_type,
@@ -12019,7 +12172,15 @@ async def upload_video(
             upload_source=upload_source,
         )
 
-        if VIDEO_TRANSCODE_PIPELINE_ENABLED:
+        # PR C9.1: enqueue when either the pipeline is live OR the upload was
+        # marked transcode-required by the size-based decision. ``pending``
+        # decisions are still queued so the worker (when it starts) picks them
+        # up; without this, large videos used to silently stay raw forever.
+        should_enqueue_transcode = VIDEO_TRANSCODE_PIPELINE_ENABLED or transcode_decision.decision in {
+            "queued",
+            "pending",
+        }
+        if should_enqueue_transcode:
             await _enqueue_video_transcode_job(
                 video_id=video_id,
                 teacher_id=teacher_id,
@@ -12071,7 +12232,11 @@ async def upload_video(
         except Exception:
             logger.warning("Unable to update recording compliance after upload")
 
-        if not VIDEO_TRANSCODE_PIPELINE_ENABLED:
+        # PR C9.1: skip the immediate privacy enqueue iff we actually queued a
+        # transcode (the transcode worker enqueues privacy after producing the
+        # processed asset). If transcode is only `pending` because the worker
+        # isn't live, enqueue privacy now so the upload still progresses.
+        if not should_enqueue_transcode or transcode_decision.decision == "pending":
             await _enqueue_video_privacy_job(
                 video_id=video_id,
                 teacher_id=teacher_id,
@@ -12087,6 +12252,8 @@ async def upload_video(
                 "teacher_id": teacher_id,
                 "privacy_status": PrivacyProcessingStatus.QUEUED.value,
                 "raw_retention_expires_at": video_doc["raw_retention_expires_at"],
+                "transcode_decision": transcode_decision.decision,
+                "transcode_decision_reason": transcode_decision.reason,
             },
         )
         duration_seconds = time.perf_counter() - upload_started_perf
@@ -12512,7 +12679,7 @@ async def retry_video_privacy(video_id: str, current_user: dict = Depends(get_cu
     video = await db.videos.find_one({"id": video_id}, {"_id": 0})
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    teacher = await _get_teacher_or_404(video.get("teacher_id"), current_user)
     relative_path = (
         video.get("processed_file_path")
         or video.get("raw_file_path")
@@ -12523,6 +12690,31 @@ async def retry_video_privacy(video_id: str, current_user: dict = Depends(get_cu
     full_path = UPLOAD_DIR / str(relative_path)
     if not full_path.exists():
         raise HTTPException(status_code=409, detail="Retry unavailable because the local video file is missing")
+    # PR C9.1: re-evaluate reference usability before requeueing so the retry
+    # surfaces the actionable failure code (e.g. malformed URL, missing local
+    # file) instead of silently re-running the worker and failing again.
+    workspace_id = (
+        (teacher or {}).get("organization_id")
+        or (teacher or {}).get("school_id")
+        or _workspace_id_for_user(current_user)
+    )
+    retry_references = await _list_teacher_reference_images(video.get("teacher_id"), workspace_id)
+    retry_summary = _summarize_teacher_privacy_references(retry_references, allow_url_fetch=False)
+    if retry_summary.usable_count < 1:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PRIVACY_REFERENCES_NOT_USABLE",
+                "reason_code": retry_summary.primary_failure_code or "no_usable_references",
+                "message": (
+                    "Teacher privacy references are not usable by the worker. "
+                    "Upload at least one usable reference image, then retry."
+                ),
+                "failure_codes": list(retry_summary.failure_codes),
+                "reference_total": retry_summary.total,
+                "reference_usable_count": retry_summary.usable_count,
+            },
+        )
     queued_at = datetime.now(timezone.utc).isoformat()
     await db.videos.update_one(
         {"id": video_id},

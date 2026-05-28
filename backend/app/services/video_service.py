@@ -120,11 +120,22 @@ async def upload_video(
         except Exception as exc:
             legacy.logger.warning("S3 upload failed for video %s: %s", video_id, exc)
 
-        transcode_status = (
-            legacy.VideoTranscodeStatus.QUEUED.value
-            if legacy.VIDEO_TRANSCODE_PIPELINE_ENABLED
-            else legacy.VideoTranscodeStatus.NOT_REQUIRED.value
+        # PR C9.1: size-aware compression decision (independent of
+        # VIDEO_TRANSCODE_PIPELINE_ENABLED so large uploads are never silently
+        # marked not_required).
+        transcode_decision = legacy.decide_transcode_for_upload(
+            size,
+            transcode_enabled=legacy.VIDEO_TRANSCODE_ENABLED,
+            pipeline_enabled=legacy.VIDEO_TRANSCODE_PIPELINE_ENABLED,
+            min_bytes=legacy.VIDEO_TRANSCODE_MIN_BYTES,
         )
+        if transcode_decision.decision == "queued":
+            transcode_status = legacy.VideoTranscodeStatus.QUEUED.value
+        elif transcode_decision.decision == "pending":
+            transcode_status = legacy.VideoTranscodeStatus.QUEUED.value
+        else:
+            transcode_status = legacy.VideoTranscodeStatus.NOT_REQUIRED.value
+        normalized_file_url = legacy.normalize_storage_url(file_url)
 
         video_doc = {
             "id": video_id,
@@ -132,8 +143,11 @@ async def upload_video(
             "stored_filename": filename,
             "s3_key": s3_key,
             "raw_s3_key": s3_key,
-            "file_url": file_url,
-            "raw_file_url": file_url,
+            "file_url": normalized_file_url,
+            "raw_file_url": normalized_file_url,
+            "transcode_decision": transcode_decision.decision,
+            "transcode_decision_reason": transcode_decision.reason,
+            "transcode_min_bytes": transcode_decision.min_bytes,
             "file_path": relative_path,
             "raw_file_path": relative_path,
             "content_type": content_type or "video/mp4",
@@ -219,7 +233,11 @@ async def upload_video(
             upload_source=upload_source,
         )
 
-        if legacy.VIDEO_TRANSCODE_PIPELINE_ENABLED:
+        should_enqueue_transcode = (
+            legacy.VIDEO_TRANSCODE_PIPELINE_ENABLED
+            or transcode_decision.decision in {"queued", "pending"}
+        )
+        if should_enqueue_transcode:
             await legacy._enqueue_video_transcode_job(
                 video_id=video_id,
                 teacher_id=teacher_id,
@@ -279,7 +297,7 @@ async def upload_video(
         except Exception:
             legacy.logger.warning("Unable to update recording compliance after upload", exc_info=True)
 
-        if not legacy.VIDEO_TRANSCODE_PIPELINE_ENABLED:
+        if not should_enqueue_transcode or transcode_decision.decision == "pending":
             await legacy._enqueue_video_privacy_job(
                 video_id=video_id,
                 teacher_id=teacher_id,
@@ -531,7 +549,7 @@ async def retry_video_privacy(video_id: str, current_user: dict) -> dict:
     if not video:
         raise legacy.HTTPException(status_code=404, detail="Video not found")
 
-    await teacher_repository.get_teacher_or_404(video.get("teacher_id"), current_user)
+    teacher = await teacher_repository.get_teacher_or_404(video.get("teacher_id"), current_user)
     relative_path = (
         video.get("processed_file_path")
         or video.get("raw_file_path")
@@ -545,6 +563,35 @@ async def retry_video_privacy(video_id: str, current_user: dict) -> dict:
         raise legacy.HTTPException(
             status_code=409,
             detail="Retry unavailable because the local video file is missing",
+        )
+
+    # PR C9.1: re-evaluate teacher privacy references so retries surface the
+    # actionable failure code instead of repeating the same worker failure.
+    workspace_id = (
+        (teacher or {}).get("organization_id")
+        or (teacher or {}).get("school_id")
+        or legacy._workspace_id_for_user(current_user)
+    )
+    retry_references = await legacy._list_teacher_reference_images(
+        video.get("teacher_id"), workspace_id
+    )
+    retry_summary = legacy._summarize_teacher_privacy_references(
+        retry_references, allow_url_fetch=False
+    )
+    if retry_summary.usable_count < 1:
+        raise legacy.HTTPException(
+            status_code=409,
+            detail={
+                "code": "PRIVACY_REFERENCES_NOT_USABLE",
+                "reason_code": retry_summary.primary_failure_code or "no_usable_references",
+                "message": (
+                    "Teacher privacy references are not usable by the worker. "
+                    "Upload at least one usable reference image, then retry."
+                ),
+                "failure_codes": list(retry_summary.failure_codes),
+                "reference_total": retry_summary.total,
+                "reference_usable_count": retry_summary.usable_count,
+            },
         )
 
     queued_at = datetime.now(timezone.utc).isoformat()

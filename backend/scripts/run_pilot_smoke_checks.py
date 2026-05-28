@@ -70,6 +70,18 @@ from app.services.teacher_lesson_coaching_artifact import (  # noqa: E402
     TEACHER_LESSON_COACHING_ARTIFACT_VERSION,
     build_teacher_lesson_coaching_artifact,
 )
+from app.services.storage_urls import (  # noqa: E402
+    describe_storage_url_issue,
+    iter_known_storage_url_fields,
+)
+from app.services.privacy_references import (  # noqa: E402
+    summarize_privacy_references,
+)
+from app.services.video_assets import (  # noqa: E402
+    decide_transcode_for_upload,
+    select_analysis_asset,
+    select_playback_asset,
+)
 
 
 @dataclass
@@ -493,6 +505,41 @@ async def run_smoke(
                 )
             )
 
+        # PR C9.1: video pipeline reliability checks (always run, independent
+        # of whether an artifact was buildable for the target assessment).
+        try:
+            references_for_teacher = await db.teacher_face_references.find(
+                {"teacher_id": target_teacher_id, "status": {"$nin": ["deleted", "replaced", "expired"]}},
+                {"_id": 0},
+            ).to_list(100)
+        except Exception:  # pragma: no cover
+            references_for_teacher = []
+        try:
+            import server as _server  # noqa: WPS433 — lazy
+            c91_upload_dir = _server.UPLOAD_DIR
+            c91_transcode_enabled = _server.VIDEO_TRANSCODE_ENABLED
+            c91_pipeline_enabled = _server.VIDEO_TRANSCODE_PIPELINE_ENABLED
+            c91_min_bytes = _server.VIDEO_TRANSCODE_MIN_BYTES
+        except Exception:  # pragma: no cover
+            c91_upload_dir = Path(os.getenv("UPLOAD_DIR", "uploads"))
+            c91_transcode_enabled = False
+            c91_pipeline_enabled = False
+            c91_min_bytes = 25 * 1024 * 1024
+
+        results.append(check_no_malformed_storage_urls(videos_list, references_for_teacher))
+        results.append(
+            check_reference_readiness_matches_worker(references_for_teacher, c91_upload_dir)
+        )
+        results.append(
+            check_transcode_status_consistency(
+                videos_list,
+                transcode_enabled=c91_transcode_enabled,
+                pipeline_enabled=c91_pipeline_enabled,
+                min_bytes=c91_min_bytes,
+            )
+        )
+        results.append(check_playback_safety_for_teachers(videos_list))
+
         for r in results:
             summary["checks"].append(
                 {
@@ -508,6 +555,168 @@ async def run_smoke(
 
     summary["overall"] = "fail" if summary["counts"].get("fail", 0) else "ok"
     return summary
+
+
+# ---------------------------------------------------------------------------
+# PR C9.1: video pipeline reliability checks
+# ---------------------------------------------------------------------------
+
+
+def check_no_malformed_storage_urls(
+    videos: List[Dict[str, Any]],
+    references: List[Dict[str, Any]],
+) -> CheckResult:
+    """Report any video / reference document whose persisted URL is malformed.
+
+    The most common production case is the leaked ``S3_PUBLIC_BASE_URL=`` prefix
+    described in PR C9.1.
+    """
+    fields = list(iter_known_storage_url_fields())
+    samples: List[Dict[str, Any]] = []
+    for doc, collection in ((v, "videos") for v in videos):
+        for field in fields:
+            issue = describe_storage_url_issue(doc.get(field))
+            if issue and issue not in {"url_missing"}:
+                samples.append(
+                    {
+                        "collection": collection,
+                        "id": doc.get("id"),
+                        "field": field,
+                        "issue": issue,
+                    }
+                )
+    for doc in references:
+        for field in fields:
+            issue = describe_storage_url_issue(doc.get(field))
+            if issue and issue not in {"url_missing"}:
+                samples.append(
+                    {
+                        "collection": "teacher_face_references",
+                        "id": doc.get("id"),
+                        "field": field,
+                        "issue": issue,
+                    }
+                )
+    if samples:
+        return CheckResult(
+            code="video_pipeline_storage_urls",
+            status="fail",
+            message=f"Found {len(samples)} malformed storage URL(s).",
+            samples=samples[:25],
+        )
+    return CheckResult(
+        code="video_pipeline_storage_urls",
+        status="ok",
+        message="All persisted storage URLs are well-formed.",
+    )
+
+
+def check_reference_readiness_matches_worker(
+    references: List[Dict[str, Any]],
+    upload_dir: Path,
+) -> CheckResult:
+    """Detect the production failure: UI says ready, worker says no usable refs."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    ui_summary = summarize_privacy_references(
+        references,
+        upload_dir=upload_dir,
+        now_iso=now_iso,
+        allow_url_fetch=True,
+    )
+    worker_summary = summarize_privacy_references(
+        references,
+        upload_dir=upload_dir,
+        now_iso=now_iso,
+        allow_url_fetch=False,
+    )
+    if ui_summary.usable_count >= 1 and worker_summary.usable_count == 0:
+        return CheckResult(
+            code="video_pipeline_reference_readiness",
+            status="fail",
+            message=(
+                "Teacher reference UI says ready but worker has no usable "
+                "references — pilot block."
+            ),
+            samples=[
+                {
+                    "ui_usable_count": ui_summary.usable_count,
+                    "worker_usable_count": worker_summary.usable_count,
+                    "failure_codes": list(worker_summary.failure_codes),
+                }
+            ],
+        )
+    if not references:
+        return CheckResult(
+            code="video_pipeline_reference_readiness",
+            status="warn",
+            message="No reference images for this teacher.",
+        )
+    return CheckResult(
+        code="video_pipeline_reference_readiness",
+        status="ok",
+        message=f"Reference readiness consistent (usable={worker_summary.usable_count}).",
+    )
+
+
+def check_transcode_status_consistency(
+    videos: List[Dict[str, Any]],
+    *,
+    transcode_enabled: bool,
+    pipeline_enabled: bool,
+    min_bytes: int,
+) -> CheckResult:
+    """Find large videos silently flagged ``transcode_status=not_required``."""
+    samples: List[Dict[str, Any]] = []
+    for video in videos:
+        size = video.get("file_size_bytes") or video.get("raw_file_size_bytes")
+        decision = decide_transcode_for_upload(
+            size,
+            transcode_enabled=transcode_enabled,
+            pipeline_enabled=pipeline_enabled,
+            min_bytes=min_bytes,
+        )
+        if decision.decision in {"queued", "pending"} and video.get("transcode_status") == "not_required":
+            samples.append(
+                {
+                    "video_id": video.get("id"),
+                    "file_size_bytes": size,
+                    "decision": decision.decision,
+                    "transcode_status": video.get("transcode_status"),
+                }
+            )
+    if samples:
+        return CheckResult(
+            code="video_pipeline_transcode_decisions",
+            status="fail",
+            message=f"{len(samples)} large video(s) marked transcode_status=not_required.",
+            samples=samples[:25],
+        )
+    return CheckResult(
+        code="video_pipeline_transcode_decisions",
+        status="ok",
+        message="Transcode decisions are consistent with size policy.",
+    )
+
+
+def check_playback_safety_for_teachers(videos: List[Dict[str, Any]]) -> CheckResult:
+    """Ensure no video's teacher-facing playback would resolve to a raw URL."""
+    samples: List[Dict[str, Any]] = []
+    for video in videos:
+        decision = select_playback_asset(video, "teacher", allow_raw_for_admin=False)
+        if decision.source == "raw":
+            samples.append({"video_id": video.get("id"), "source": decision.source})
+    if samples:
+        return CheckResult(
+            code="video_pipeline_teacher_playback_safety",
+            status="fail",
+            message="Teacher playback would expose a raw asset.",
+            samples=samples[:25],
+        )
+    return CheckResult(
+        code="video_pipeline_teacher_playback_safety",
+        status="ok",
+        message="Teacher playback never resolves to raw URLs.",
+    )
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
