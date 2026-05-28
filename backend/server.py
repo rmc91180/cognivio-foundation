@@ -141,7 +141,15 @@ from app.services.teacher_lesson_coaching_artifact import (
     TEACHER_LESSON_COACHING_ARTIFACT_VERSION,
     admin_view_of_artifact,
     build_teacher_lesson_coaching_artifact,
+    teacher_safe_artifact,
     teacher_visible_summary_text,
+)
+from app.services.coach_voice_generation import (
+    COACH_VOICE_COLLECTION,
+    COACH_VOICE_VERSION,
+    apply_coach_voice_to_artifact,
+    coach_voice_enabled,
+    generate_teacher_coach_voice,
 )
 from share_assets import (
     build_email_signature_html,
@@ -14087,7 +14095,7 @@ async def get_assessments(
                     "recommendations": recommendations,
                     "analyzed_at": assessment.get("analyzed_at"),
                     "teacher_feedback": artifact.get("legacy_projection") if artifact.get("teacher_feedback_allowed") else None,
-                    "coaching_artifact": artifact,
+                    "coaching_artifact": teacher_safe_artifact(artifact),
                 }
             )
         return payload
@@ -14134,7 +14142,7 @@ async def get_assessment(
             "recommendations": recommendations,
             "analyzed_at": assessment.get("analyzed_at"),
             "teacher_feedback": artifact.get("legacy_projection") if artifact.get("teacher_feedback_allowed") else None,
-            "coaching_artifact": artifact,
+            "coaching_artifact": teacher_safe_artifact(artifact),
         }
     # PR C5: admin path includes a non-mutating teacher_preview so admin
     # reviewers can see exactly what the teacher would (or would not) see
@@ -21288,7 +21296,7 @@ async def _build_teacher_lesson_coaching_artifact_for(
     # gates would otherwise allow it. admin_approved is informational only —
     # the builder does NOT use it to override C1/C2/C3.
     admin_review = await _load_teacher_feedback_review((assessment or {}).get("id"))
-    return build_teacher_lesson_coaching_artifact(
+    artifact = build_teacher_lesson_coaching_artifact(
         teacher=teacher,
         current_user=current_user,
         assessment=assessment,
@@ -21301,6 +21309,71 @@ async def _build_teacher_lesson_coaching_artifact_for(
         readiness=readiness,
         language=language,
         admin_review=admin_review,
+    )
+
+    # PR C9: layer the LLM coach voice on top when sufficiency passes AND
+    # the operator has enabled it. The generator no-ops when disabled or
+    # when evidence is insufficient — the artifact stays deterministic.
+    try:
+        coach_voice_record = await _maybe_generate_coach_voice(
+            artifact=artifact,
+            assessment=assessment,
+            teacher=teacher,
+            admin_review=admin_review,
+            language=language,
+        )
+        if coach_voice_record:
+            artifact = apply_coach_voice_to_artifact(artifact, coach_voice_record)
+    except Exception as exc:  # pragma: no cover - never let coach voice break the artifact
+        logger.warning("coach_voice generation skipped due to error: %s", exc)
+    return artifact
+
+
+async def _maybe_generate_coach_voice(
+    *,
+    artifact: Dict[str, Any],
+    assessment: Optional[dict],
+    teacher: Optional[dict],
+    admin_review: Optional[dict],
+    language: str,
+) -> Optional[Dict[str, Any]]:
+    """PR C9: load transcript + moment manifest, then call the generator.
+
+    Returns a cache record (status + output) or ``None`` when there's
+    nothing to do (no assessment, no video_id).
+    """
+
+    if not assessment:
+        return None
+    video_id = assessment.get("video_id")
+    if not video_id:
+        return None
+    transcript_doc = None
+    if hasattr(db, "video_audio_transcripts"):
+        try:
+            transcript_doc = await db.video_audio_transcripts.find_one(
+                {"video_id": video_id}, {"_id": 0}, sort=[("created_at", -1)]
+            )
+        except Exception:  # pragma: no cover - defensive
+            transcript_doc = None
+    moments: List[dict] = []
+    if hasattr(db, "video_analysis_moments"):
+        try:
+            manifest = await db.video_analysis_moments.find_one(
+                {"video_id": video_id}, {"_id": 0}, sort=[("created_at", -1)]
+            )
+            moments = list((manifest or {}).get("moments") or [])
+        except Exception:  # pragma: no cover - defensive
+            moments = []
+    return await generate_teacher_coach_voice(
+        db=db,
+        artifact=artifact,
+        assessment=assessment,
+        teacher=teacher,
+        transcript_doc=transcript_doc,
+        moments=moments,
+        admin_review=admin_review,
+        language=language,
     )
 
 
@@ -21353,7 +21426,7 @@ async def get_my_latest_lesson(current_user: dict = Depends(get_current_user)):
             "summary": teacher_visible_summary_text(artifact),
             "actions": [item.get("try_next_lesson") or item.get("body") for item in actions[:2]],
             "teacher_feedback": artifact.get("legacy_projection"),
-            "coaching_artifact": artifact,
+            "coaching_artifact": teacher_safe_artifact(artifact),
             "talk_time_summary": talk_time_summary,
         }
     }
@@ -21465,7 +21538,7 @@ async def get_my_lessons(
                 "status": lesson_status,
                 "summary": summary,
                 "teacher_feedback": projection,
-                "coaching_artifact": artifact,
+                "coaching_artifact": teacher_safe_artifact(artifact),
                 "href": f"/videos/{video.get('id')}" if video.get("id") else "/videos",
                 "recording_type": video.get("recording_type") or video.get("upload_source"),
                 "shared_moments_count": shared_counts.get(video.get("id"), 0),
@@ -21729,7 +21802,7 @@ async def get_my_teacher_coaching(current_user: dict = Depends(get_current_user)
         "teacher_feedback": projection,
         # PR C4: surface the canonical artifact so the frontend can render
         # one source of truth across dashboard / coaching / latest lesson.
-        "coaching_artifact": artifact,
+        "coaching_artifact": teacher_safe_artifact(artifact),
         "deep_dive": artifact.get("deep_dive") if artifact.get("teacher_feedback_allowed") else filter_deep_dive_moments(
             [], language=_teacher_language(current_user, teacher)
         ),

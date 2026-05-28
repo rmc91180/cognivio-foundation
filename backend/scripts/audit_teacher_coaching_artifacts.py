@@ -227,6 +227,23 @@ def audit_collections(
         if gold_star and not source_validity.get("valid_for_teacher_display"):
             _add(issues, "gold_star_with_invalid_source", sample_base)
 
+        # PR C9: coach-voice diagnostics. The artifact carries
+        # ``_coach_voice_admin`` when the LLM layer ran. Detect contradictions
+        # (generated despite block, validation failures, banned strings).
+        cv = artifact.get("_coach_voice_admin") or {}
+        cv_status = cv.get("status")
+        if cv_status == "generated":
+            if not artifact.get("teacher_feedback_allowed"):
+                _add(issues, "coach_voice_generated_despite_block", sample_base)
+            for entry in cv.get("validation_issues") or []:
+                _add(
+                    issues,
+                    "coach_voice_validation_failure",
+                    {**sample_base, **entry},
+                )
+        elif cv_status == "failed_validation":
+            _add(issues, "coach_voice_failed_validation", sample_base)
+
     # PR C6: cross-collection checks (run once, not per-assessment).
     from app.services.teacher_artifact_quarantine import (  # noqa: E402  (sys.path is set above)
         is_teacher_visible_text_safe,
