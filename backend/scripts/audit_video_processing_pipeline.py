@@ -51,6 +51,11 @@ ISSUE_CODES = (
     "privacy_failed_no_structured_code",
     "redacted_asset_missing_after_completion",
     "analysis_asset_unsafe",
+    # PR C9.2 additions
+    "materialization_possible_but_privacy_failed",
+    "storage_download_unavailable",
+    "privacy_failed_with_processed_asset_available",
+    "reference_materialization_would_succeed",
 )
 
 
@@ -237,6 +242,174 @@ async def _scan_videos(
     return issues
 
 
+async def _scan_materialization_capability(
+    db,
+    *,
+    evaluate_materialization_capability,
+    upload_dir: Path,
+    storage_download_available: bool,
+    url_fetch_enabled: bool,
+    limit: int,
+    teacher_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """PR C9.2: report which teachers' references WOULD materialize successfully."""
+    issues: List[Dict[str, Any]] = []
+    if not hasattr(db, "teachers"):
+        return issues
+    query: Dict[str, Any] = {}
+    if teacher_id:
+        query["id"] = teacher_id
+    async for teacher in db.teachers.find(query, {"_id": 0, "id": 1}).limit(limit):
+        tid = teacher.get("id")
+        if not tid:
+            continue
+        references = await db.teacher_face_references.find(
+            {"teacher_id": tid, "status": {"$nin": ["deleted", "replaced", "expired"]}},
+            {"_id": 0},
+        ).to_list(50)
+        if not references:
+            continue
+        cap = evaluate_materialization_capability(
+            references,
+            upload_dir=upload_dir,
+            storage_download_available=storage_download_available,
+            url_fetch_enabled=url_fetch_enabled,
+        )
+        if not storage_download_available and any(r.get("s3_key") for r in references):
+            issues.append(
+                {
+                    "issue_code": "storage_download_unavailable",
+                    "teacher_id": tid,
+                    "reference_total": cap["total"],
+                    "would_materialize_count": cap["would_materialize_count"],
+                }
+            )
+        if cap["would_materialize_count"] > 0:
+            issues.append(
+                {
+                    "issue_code": "reference_materialization_would_succeed",
+                    "teacher_id": tid,
+                    "reference_total": cap["total"],
+                    "would_materialize_count": cap["would_materialize_count"],
+                }
+            )
+    return issues
+
+
+async def _scan_materialization_vs_privacy_state(
+    db,
+    *,
+    evaluate_materialization_capability,
+    upload_dir: Path,
+    storage_download_available: bool,
+    url_fetch_enabled: bool,
+    limit: int,
+    teacher_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Flag failed-privacy videos whose references WOULD materialize now.
+
+    These are the production rows that should clear after retry once C9.2 is
+    deployed. Also flag failed-privacy with processed asset already present
+    (forward-looking signal that destructive blur was the only blocker).
+    """
+    issues: List[Dict[str, Any]] = []
+    if not hasattr(db, "videos"):
+        return issues
+    query: Dict[str, Any] = {"privacy_status": "failed"}
+    if teacher_id:
+        query["teacher_id"] = teacher_id
+    async for video in db.videos.find(query, {"_id": 0}).limit(limit):
+        tid = video.get("teacher_id")
+        if not tid:
+            continue
+        references = await db.teacher_face_references.find(
+            {"teacher_id": tid, "status": {"$nin": ["deleted", "replaced", "expired"]}},
+            {"_id": 0},
+        ).to_list(50)
+        cap = evaluate_materialization_capability(
+            references,
+            upload_dir=upload_dir,
+            storage_download_available=storage_download_available,
+            url_fetch_enabled=url_fetch_enabled,
+        )
+        if cap["would_materialize_count"] > 0:
+            issues.append(
+                {
+                    "issue_code": "materialization_possible_but_privacy_failed",
+                    "video_id": video.get("id"),
+                    "teacher_id": tid,
+                    "privacy_reference_failure_codes": list(
+                        video.get("privacy_reference_failure_codes") or []
+                    ),
+                    "would_materialize_count": cap["would_materialize_count"],
+                }
+            )
+        if video.get("processed_asset_state") == "stored":
+            issues.append(
+                {
+                    "issue_code": "privacy_failed_with_processed_asset_available",
+                    "video_id": video.get("id"),
+                    "teacher_id": tid,
+                }
+            )
+    return issues
+
+
+async def _dry_run_materialization(
+    db,
+    *,
+    materialize_privacy_references,
+    cleanup_materialized_privacy_references,
+    download_s3_key_to_file,
+    upload_dir: Path,
+    teacher_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """PR C9.2 --check-materialization: actually try to materialize references.
+
+    Read-only against the database; writes only to per-call temp directories
+    which are cleaned up before returning.
+    """
+    findings: List[Dict[str, Any]] = []
+    if not hasattr(db, "teachers"):
+        return findings
+    query: Dict[str, Any] = {}
+    if teacher_id:
+        query["id"] = teacher_id
+    async for teacher in db.teachers.find(query, {"_id": 0, "id": 1}).limit(50):
+        tid = teacher.get("id")
+        if not tid:
+            continue
+        references = await db.teacher_face_references.find(
+            {"teacher_id": tid, "status": {"$nin": ["deleted", "replaced", "expired"]}},
+            {"_id": 0},
+        ).to_list(50)
+        if not references:
+            continue
+        result = materialize_privacy_references(
+            references,
+            upload_dir=upload_dir,
+            storage_downloader=download_s3_key_to_file,
+            url_fetcher=None,
+            url_fetch_enabled=False,
+            allowed_hosts=(),
+            temp_dir_prefix=f"cognivio-privacy-refs-audit-{tid}-",
+        )
+        try:
+            findings.append(
+                {
+                    "teacher_id": tid,
+                    "total_references": result.total,
+                    "materialized_count": result.usable_count,
+                    "failure_codes": list(result.failure_codes),
+                    "temp_dir_was_created": bool(result.temp_dir),
+                    "temp_dir_cleaned": True,
+                }
+            )
+        finally:
+            cleanup_materialized_privacy_references(result)
+    return findings
+
+
 async def run_audit(args: argparse.Namespace) -> int:
     # Lazy import so CLI --help works without DB / FastAPI boot.
     os.environ.setdefault("MONGO_URL", os.getenv("MONGO_URL", "mongodb://localhost:27017"))
@@ -250,6 +423,11 @@ async def run_audit(args: argparse.Namespace) -> int:
     from app.services.privacy_references import (  # noqa: WPS433
         summarize_privacy_references,
     )
+    from app.services.privacy_reference_materialization import (  # noqa: WPS433
+        cleanup_materialized_privacy_references,
+        evaluate_materialization_capability,
+        materialize_privacy_references,
+    )
     from app.services.video_assets import (  # noqa: WPS433
         decide_transcode_for_upload,
         select_analysis_asset,
@@ -258,6 +436,30 @@ async def run_audit(args: argparse.Namespace) -> int:
 
     db = server.db
     upload_dir = server.UPLOAD_DIR
+    storage_download_available = server._storage_download_available()
+    url_fetch_enabled = server.PRIVACY_REFERENCE_URL_FETCH_ENABLED
+
+    if args.check_materialization:
+        findings = await _dry_run_materialization(
+            db,
+            materialize_privacy_references=materialize_privacy_references,
+            cleanup_materialized_privacy_references=cleanup_materialized_privacy_references,
+            download_s3_key_to_file=server.download_s3_key_to_file,
+            upload_dir=upload_dir,
+            teacher_id=args.teacher_id,
+        )
+        report = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "mode": "check-materialization",
+            "filters": {"teacher_id": args.teacher_id},
+            "findings": findings,
+        }
+        output = json.dumps(report, indent=2, sort_keys=True, default=str)
+        if args.json:
+            Path(args.json).write_text(output, encoding="utf-8")
+        else:
+            print(output)
+        return 0
 
     storage_url_issues = await _scan_storage_urls(
         db,
@@ -284,8 +486,32 @@ async def run_audit(args: argparse.Namespace) -> int:
         limit=args.limit,
         teacher_id=args.teacher_id,
     )
+    materialization_issues = await _scan_materialization_capability(
+        db,
+        evaluate_materialization_capability=evaluate_materialization_capability,
+        upload_dir=upload_dir,
+        storage_download_available=storage_download_available,
+        url_fetch_enabled=url_fetch_enabled,
+        limit=args.limit,
+        teacher_id=args.teacher_id,
+    )
+    materialization_vs_state = await _scan_materialization_vs_privacy_state(
+        db,
+        evaluate_materialization_capability=evaluate_materialization_capability,
+        upload_dir=upload_dir,
+        storage_download_available=storage_download_available,
+        url_fetch_enabled=url_fetch_enabled,
+        limit=args.limit,
+        teacher_id=args.teacher_id,
+    )
 
-    all_issues = storage_url_issues + readiness_issues + video_issues
+    all_issues = (
+        storage_url_issues
+        + readiness_issues
+        + video_issues
+        + materialization_issues
+        + materialization_vs_state
+    )
     summary: Dict[str, int] = {}
     for issue in all_issues:
         code = issue["issue_code"]
@@ -325,6 +551,15 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         "--json",
         default=None,
         help="Write the JSON report to this path instead of stdout.",
+    )
+    parser.add_argument(
+        "--check-materialization",
+        action="store_true",
+        help=(
+            "PR C9.2 dry-run: actually download each reference into a temp "
+            "directory to confirm materialization would succeed. Read-only "
+            "against the DB; cleans up temp files before exit."
+        ),
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
     return asyncio.run(run_audit(args))

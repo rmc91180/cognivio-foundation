@@ -77,6 +77,9 @@ from app.services.storage_urls import (  # noqa: E402
 from app.services.privacy_references import (  # noqa: E402
     summarize_privacy_references,
 )
+from app.services.privacy_reference_materialization import (  # noqa: E402
+    evaluate_materialization_capability,
+)
 from app.services.video_assets import (  # noqa: E402
     decide_transcode_for_upload,
     select_analysis_asset,
@@ -539,6 +542,23 @@ async def run_smoke(
             )
         )
         results.append(check_playback_safety_for_teachers(videos_list))
+        # PR C9.2: materialization + latest-failure visibility
+        try:
+            import server as _server92  # noqa: WPS433 — lazy
+            storage_ok = _server92._storage_download_available()
+            url_fetch_ok = _server92.PRIVACY_REFERENCE_URL_FETCH_ENABLED
+        except Exception:  # pragma: no cover
+            storage_ok = False
+            url_fetch_ok = False
+        results.append(
+            check_reference_materialization_readiness(
+                references_for_teacher,
+                upload_dir=c91_upload_dir,
+                storage_download_available=storage_ok,
+                url_fetch_enabled=url_fetch_ok,
+            )
+        )
+        results.append(check_latest_privacy_failure_codes(videos_list))
 
         for r in results:
             summary["checks"].append(
@@ -716,6 +736,83 @@ def check_playback_safety_for_teachers(videos: List[Dict[str, Any]]) -> CheckRes
         code="video_pipeline_teacher_playback_safety",
         status="ok",
         message="Teacher playback never resolves to raw URLs.",
+    )
+
+
+def check_reference_materialization_readiness(
+    references: List[Dict[str, Any]],
+    *,
+    upload_dir: Path,
+    storage_download_available: bool,
+    url_fetch_enabled: bool,
+) -> CheckResult:
+    """PR C9.2: report whether the teacher's references would materialize."""
+    if not references:
+        return CheckResult(
+            code="video_pipeline_reference_materialization",
+            status="warn",
+            message="No reference records for this teacher.",
+        )
+    cap = evaluate_materialization_capability(
+        references,
+        upload_dir=upload_dir,
+        storage_download_available=storage_download_available,
+        url_fetch_enabled=url_fetch_enabled,
+    )
+    if cap["would_materialize_count"] >= 1:
+        return CheckResult(
+            code="video_pipeline_reference_materialization",
+            status="ok",
+            message=(
+                f"{cap['would_materialize_count']}/{cap['total']} references "
+                "would materialize."
+            ),
+            samples=[cap],
+        )
+    if not storage_download_available and any(r.get("s3_key") for r in references):
+        return CheckResult(
+            code="video_pipeline_reference_materialization",
+            status="fail",
+            message=(
+                "Teacher has remote-only references but the worker cannot "
+                "download from storage (storage_download_unavailable)."
+            ),
+            samples=[cap],
+        )
+    return CheckResult(
+        code="video_pipeline_reference_materialization",
+        status="fail",
+        message="No reference would materialize.",
+        samples=[cap],
+    )
+
+
+def check_latest_privacy_failure_codes(
+    videos: List[Dict[str, Any]],
+) -> CheckResult:
+    """Surface the latest privacy_reference_failure_codes on a failed video."""
+    failed_videos = [v for v in videos if v.get("privacy_status") == "failed"]
+    if not failed_videos:
+        return CheckResult(
+            code="video_pipeline_latest_privacy_failure",
+            status="ok",
+            message="No failed-privacy videos in scope.",
+        )
+    latest = sorted(
+        failed_videos,
+        key=lambda v: v.get("privacy_failed_at") or v.get("status_updated_at") or "",
+        reverse=True,
+    )[0]
+    codes = list(latest.get("privacy_reference_failure_codes") or [])
+    return CheckResult(
+        code="video_pipeline_latest_privacy_failure",
+        status="warn" if codes else "fail",
+        message=(
+            f"Latest failed privacy video {latest.get('id')} codes={codes}"
+            if codes
+            else f"Latest failed video {latest.get('id')} has no structured codes."
+        ),
+        samples=[{"video_id": latest.get("id"), "codes": codes}],
     )
 
 

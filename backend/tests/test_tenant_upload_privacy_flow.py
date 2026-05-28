@@ -309,6 +309,8 @@ def test_teacher_video_upload_queues_transcode_inside_tenant(monkeypatch, tmp_pa
     # video also queues (production policy will set a real 25MB threshold).
     monkeypatch.setattr(server, "VIDEO_TRANSCODE_ENABLED", True)
     monkeypatch.setattr(server, "VIDEO_TRANSCODE_MIN_BYTES", 0)
+    # PR C9.2: fixture references have s3_key; assert worker would materialize.
+    monkeypatch.setattr(server, "_storage_download_available", lambda: True)
     monkeypatch.setattr(
         server,
         "_upload_path_to_s3",
@@ -354,6 +356,10 @@ def test_teacher_video_upload_queues_transcode_inside_tenant(monkeypatch, tmp_pa
 def test_teacher_readiness_progression_separates_consent_profile_and_reference_images(monkeypatch):
     fake_db = _fake_school_db()
     monkeypatch.setattr(server, "db", fake_db)
+    # PR C9.2: the fixture references include s3_key, which the worker can
+    # materialize when authenticated R2/S3 credentials are configured. In
+    # test mode we don't have real credentials; stub the capability flag.
+    monkeypatch.setattr(server, "_storage_download_available", lambda: True)
     user = {
         "id": "teacher-user-1",
         "email": "teacher1@example.com",

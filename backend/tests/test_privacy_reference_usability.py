@@ -58,12 +58,33 @@ class TestValidatePrivacyReferenceUsability:
         assert decision.s3_key == "uploads/x.jpg"
 
     def test_local_missing_and_url_fetch_disabled_is_unusable(self, upload_dir: Path) -> None:
+        # PR C9.2 contract: when s3_key is present but allow_storage_download
+        # is False, the validator surfaces the more actionable
+        # ``storage_download_unavailable`` code instead of the generic
+        # ``no_local_file_and_no_fetchable_url`` code so operators see
+        # exactly what configuration is missing.
         reference = _make_reference(file_path="missing.jpg", s3_key="uploads/x.jpg")
         decision = validate_privacy_reference_usability(
-            reference, upload_dir=upload_dir, allow_url_fetch=False
+            reference,
+            upload_dir=upload_dir,
+            allow_url_fetch=False,
+            allow_storage_download=False,
         )
         assert decision.usable is False
-        assert "no_local_file_and_no_fetchable_url" in decision.failure_codes
+        assert "storage_download_unavailable" in decision.failure_codes
+
+    def test_local_missing_with_storage_download_makes_s3_ref_usable(
+        self, upload_dir: Path
+    ) -> None:
+        reference = _make_reference(file_path="missing.jpg", s3_key="uploads/x.jpg")
+        decision = validate_privacy_reference_usability(
+            reference,
+            upload_dir=upload_dir,
+            allow_url_fetch=False,
+            allow_storage_download=True,
+        )
+        assert decision.usable is True
+        assert decision.failure_codes == ()
 
     def test_recoverable_leaked_prefix_is_usable_but_audited(self, upload_dir: Path) -> None:
         # The persisted URL is corrupt but normalize_storage_url repairs it.
