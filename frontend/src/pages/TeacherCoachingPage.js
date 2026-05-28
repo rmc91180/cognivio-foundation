@@ -8,6 +8,7 @@ import { teacherApi } from "@/lib/api";
 import {
   artifactActionItems,
   artifactDeepDive,
+  artifactMomentCtaLabel,
   artifactNextBestAction,
   artifactReflectionPrompts,
   isArtifactAllowed,
@@ -175,14 +176,40 @@ export function TeacherCoachingPage() {
               </Panel>
             ) : null}
 
-            {nextBestAction ? (
-              <Panel className="border-primary/20 bg-primary/5">
-                <div className="text-xs font-semibold uppercase tracking-wide text-primary">Next best action</div>
-                <h2 className="mt-2 text-xl font-semibold text-slate-950">{nextBestAction.title}</h2>
-                <p className="mt-2 text-sm leading-6 text-slate-700">{nextBestAction.description}</p>
-                {nextBestAction.href ? <Link to={nextBestAction.href} className="mt-3 inline-flex min-h-[44px] items-center text-sm font-semibold text-primary hover:text-primary/80">Open next step</Link> : null}
-              </Panel>
-            ) : null}
+            {/*
+              PR C8: navigator-aware top panel. When the artifact is blocked
+              the navigator carries status copy with no CTA; never render
+              "Open next step" as a default label.
+            */}
+            {(() => {
+              const navigator = artifact?.navigator || null;
+              if (!navigator && !nextBestAction) return null;
+              const isReviewStatus = navigator && (navigator.disabled || ["review_pending", "admin_hidden", "revision_requested", "no_action"].includes(navigator.type));
+              const headerLabel = navigator?.label || (isReviewStatus ? "Review status" : "Coaching focus");
+              const title = navigator?.title || nextBestAction?.title;
+              const body = navigator?.body || nextBestAction?.description;
+              const cta = navigator?.cta_label || nextBestAction?.cta_label;
+              const href = navigator && navigator.href ? navigator.href : nextBestAction?.href;
+              const clickable = Boolean(href && cta && !(navigator && navigator.disabled));
+              return (
+                <Panel className="border-primary/20 bg-primary/5" data-testid="teacher-coaching-navigator-panel">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-primary" data-testid="teacher-coaching-navigator-label">
+                    {headerLabel}
+                  </div>
+                  <h2 className="mt-2 text-xl font-semibold text-slate-950">{title}</h2>
+                  {body ? <p className="mt-2 text-sm leading-6 text-slate-700">{body}</p> : null}
+                  {clickable ? (
+                    <Link
+                      to={href}
+                      data-testid="teacher-coaching-navigator-cta"
+                      className="mt-3 inline-flex min-h-[44px] items-center text-sm font-semibold text-primary hover:text-primary/80"
+                    >
+                      {cta}
+                    </Link>
+                  ) : null}
+                </Panel>
+              );
+            })()}
 
             <div className="grid gap-6 lg:grid-cols-[1.05fr,0.95fr]">
               <Panel className="space-y-4">
@@ -202,8 +229,10 @@ export function TeacherCoachingPage() {
                         <div className="mt-3 flex flex-wrap gap-2">
                           <Button type="button" size="sm" variant="secondary" data-testid="teacher-coaching-tried-button" onClick={() => markTriedMutation.mutate(task)} disabled={markTriedMutation.isPending}>I tried this</Button>
                           <Button type="button" size="sm" variant="secondary" onClick={() => setComposer({ taskId: task.id })}>Reflect</Button>
-                          {task.video_href ? <Link to={task.video_href} className="inline-flex min-h-[36px] items-center text-sm font-semibold text-primary hover:text-primary/80">Watch the moment</Link> : null}
-                          {task.id && task.href ? <Link to={task.href} className="inline-flex min-h-[36px] items-center text-sm font-semibold text-primary hover:text-primary/80">Open goal</Link> : null}
+                          {/* PR C8: specific moment CTA labels replace the generic "Watch the moment". */}
+                          {task.video_href ? <Link to={task.video_href} className="inline-flex min-h-[36px] items-center text-sm font-semibold text-primary hover:text-primary/80">{artifactMomentCtaLabel(task)}</Link> : null}
+                          {/* PR C8: only show "Open goal" for persisted (non-artifact) tasks. */}
+                          {task.id && task.href && task.source_kind !== "artifact_action_item" ? <Link to={task.href} className="inline-flex min-h-[36px] items-center text-sm font-semibold text-primary hover:text-primary/80">Open goal</Link> : null}
                         </div>
                         {composer?.taskId === task.id ? <ReflectionComposer taskId={task.id} onCancel={() => setComposer(null)} /> : null}
                       </div>
@@ -274,7 +303,7 @@ export function TeacherCoachingPage() {
                       <p className="mt-2 text-sm leading-6 text-slate-700">{moment.what_happened}</p>
                       {moment.why_it_matters ? <p className="mt-2 text-xs leading-5 text-slate-500">{moment.why_it_matters}</p> : null}
                       {moment.video_href ? (
-                        <Link to={moment.video_href} className="mt-3 inline-flex min-h-[36px] items-center text-sm font-semibold text-primary hover:text-primary/80">Watch the moment</Link>
+                        <Link to={moment.video_href} className="mt-3 inline-flex min-h-[36px] items-center text-sm font-semibold text-primary hover:text-primary/80">{artifactMomentCtaLabel(moment)}</Link>
                       ) : null}
                     </div>
                   ))}

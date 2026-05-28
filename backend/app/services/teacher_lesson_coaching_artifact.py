@@ -622,71 +622,80 @@ def _empty_state_for_no_evidence(language: Optional[str]) -> Dict[str, Any]:
 
 
 def _empty_state_for_evidence_insufficient(language: Optional[str]) -> Dict[str, Any]:
-    is_he = (language or "en").lower().startswith("he")
-    if is_he:
-        return {
-            "code": "evidence_insufficient",
-            "title": "ההערה הזו עוד לא מוכנה.",
-            "message": "כשהבדיקה הבאה תהיה מוכנה, יופיעו כאן רגעים ספציפיים והצעדים הבאים.",
-        }
-    return {
-        "code": "evidence_insufficient",
-        "title": "This lesson’s feedback isn’t ready yet.",
-        "message": "Once a complete review is ready, you’ll see specific coaching moments and next steps here.",
-    }
+    """PR C8: review-pending teacher copy that does NOT promise next steps.
 
-
-def _empty_state_for_unsafe_content(language: Optional[str]) -> Dict[str, Any]:
-    is_he = (language or "en").lower().startswith("he")
-    if is_he:
-        return {
-            "code": "review_under_check",
-            "title": "ההערה הזו ממתינה לבדיקה.",
-            "message": "המאמן ימשיך מכאן ברגע שהבדיקה תושלם.",
-        }
-    return {
-        "code": "review_under_check",
-        "title": "This lesson’s review is being checked.",
-        "message": "A coach will continue from here as soon as the review is verified.",
-    }
-
-
-def _empty_state_for_admin_hidden(language: Optional[str]) -> Dict[str, Any]:
-    """PR C6: admin chose to hide this lesson's teacher feedback.
-
-    The teacher must not see the admin's internal note. The empty state
-    reads as "review pending" so the teacher sees an honest signal that
-    the lesson is in human review.
+    Previous copy ended with "you'll see specific coaching moments and next
+    steps here" — which read as if a teacher action was coming. The lesson
+    is in review; there is no teacher action. Match the navigator language.
     """
 
     is_he = (language or "en").lower().startswith("he")
     if is_he:
         return {
+            "code": "evidence_insufficient",
+            "title": "ההערות לשיעור הזה בבדיקה.",
+            "message": "אין מה לעשות עכשיו. הסיכום יופיע כאן אחרי שהבדיקה תהיה מוכנה.",
+        }
+    return {
+        "code": "evidence_insufficient",
+        "title": "Feedback is being reviewed.",
+        "message": "No action needed right now. Your coaching summary will appear here when the review is ready.",
+    }
+
+
+def _empty_state_for_unsafe_content(language: Optional[str]) -> Dict[str, Any]:
+    """PR C8: review-pending unsafe-text fallback.
+
+    Previous copy was "A coach will continue from here as soon as the review
+    is verified." which was reported as misleading. Replace with the same
+    "no action needed right now" framing the navigator uses.
+    """
+
+    is_he = (language or "en").lower().startswith("he")
+    if is_he:
+        return {
+            "code": "review_under_check",
+            "title": "ההערות לשיעור הזה בבדיקה.",
+            "message": "אין מה לעשות עכשיו. הסיכום יופיע כאן אחרי שהבדיקה תהיה מוכנה.",
+        }
+    return {
+        "code": "review_under_check",
+        "title": "Feedback is being reviewed.",
+        "message": "No action needed right now. Your coaching summary will appear here when the review is ready.",
+    }
+
+
+def _empty_state_for_admin_hidden(language: Optional[str]) -> Dict[str, Any]:
+    """PR C6/C8: admin chose to hide this lesson's teacher feedback."""
+
+    is_he = (language or "en").lower().startswith("he")
+    if is_he:
+        return {
             "code": "admin_review_pending",
-            "title": "המאמן ממשיך לבדוק את השיעור.",
-            "message": "תוכלו לחזור לכאן אחרי שהבדיקה תושלם.",
+            "title": "ההערות לשיעור הזה בבדיקה.",
+            "message": "אין מה לעשות עכשיו. הסיכום יופיע כאן אחרי שהבדיקה תהיה מוכנה.",
         }
     return {
         "code": "admin_review_pending",
-        "title": "A coach is still reviewing this lesson.",
-        "message": "Come back here once the review is complete.",
+        "title": "Feedback is being reviewed.",
+        "message": "No action needed right now. Your coaching summary will appear here when the review is ready.",
     }
 
 
 def _empty_state_for_revision_requested(language: Optional[str]) -> Dict[str, Any]:
-    """PR C6: admin requested a revision before showing teacher feedback."""
+    """PR C6/C8: admin requested a revision before showing teacher feedback."""
 
     is_he = (language or "en").lower().startswith("he")
     if is_he:
         return {
             "code": "admin_revision_requested",
-            "title": "המאמן ביקש עוד התאמות לפני שמציגים את ההערות.",
-            "message": "תוכלו לחזור לכאן אחרי שהמאמן יסיים את ההתאמות.",
+            "title": "ההערות לשיעור הזה בבדיקה.",
+            "message": "אין מה לעשות עכשיו. הסיכום יופיע כאן אחרי שהבדיקה תהיה מוכנה.",
         }
     return {
         "code": "admin_revision_requested",
-        "title": "A coach asked for one more adjustment before sharing feedback.",
-        "message": "Come back here once the coach has finished the adjustments.",
+        "title": "Feedback is being reviewed.",
+        "message": "No action needed right now. Your coaching summary will appear here when the review is ready.",
     }
 
 
@@ -718,6 +727,507 @@ def _next_best_action_from_artifact(
 
 
 # ---------------------------------------------------------------------------
+# PR C8: typed navigator + moment CTA labeling
+# ---------------------------------------------------------------------------
+
+
+NAVIGATOR_TYPES = (
+    "coaching_action",
+    "reflection",
+    "watch_moment",
+    "setup_required",
+    "upload_required",
+    "review_pending",
+    "admin_hidden",
+    "revision_requested",
+    "admin_message",
+    "no_action",
+)
+
+
+ACTION_CATEGORIES = (
+    "instructional_practice",
+    "reflection",
+    "operational",
+    "admin_review",
+    "recording",
+)
+
+
+ACTION_KINDS = (
+    "try_next_lesson",
+    "reflect",
+    "watch_moment",
+    "complete_setup",
+    "upload_lesson",
+    "wait_for_review",
+    "no_action",
+)
+
+
+# Specific moment CTA labels by inferred phase / category. The lookup is
+# case-insensitive on phase, title, and body. Falls back to "Watch this
+# coaching moment".
+_MOMENT_CTA_PHASE_LABELS_EN: Dict[str, str] = {
+    "check_for_understanding": "Watch the check-for-understanding moment",
+    "guided_practice": "Watch the guided practice moment",
+    "modeling": "Watch the modeling moment",
+    "student_work": "Watch the student work moment",
+    "discussion": "Watch the discussion moment",
+    "transition": "Watch the transition moment",
+    "lesson_launch": "Watch the lesson opening",
+    "closure": "Watch the lesson closure",
+}
+
+
+_MOMENT_CTA_PHASE_LABELS_HE: Dict[str, str] = {
+    "check_for_understanding": "צפו ברגע הבדיקה להבנה",
+    "guided_practice": "צפו ברגע התרגול המודרך",
+    "modeling": "צפו ברגע ההדגמה",
+    "student_work": "צפו ברגע עבודת התלמידים",
+    "discussion": "צפו ברגע הדיון",
+    "transition": "צפו במעבר",
+    "lesson_launch": "צפו בפתיחת השיעור",
+    "closure": "צפו בסיכום השיעור",
+}
+
+
+def _is_hebrew(language: Optional[str]) -> bool:
+    return (language or "en").lower().startswith(("he", "iw"))
+
+
+def _moment_keyword_label(text: str, *, language: Optional[str]) -> Optional[str]:
+    lowered = (text or "").lower()
+    if not lowered:
+        return None
+    is_he = _is_hebrew(language)
+    if any(token in lowered for token in ("question", "asked", "prompt", "שאלה", "שאל")):
+        return "צפו בחילופי השאלה" if is_he else "Watch the question exchange"
+    if any(token in lowered for token in ("student response", "student answer", "extended", "תשובה")):
+        return "צפו ברגע התגובה של התלמידים" if is_he else "Watch the student-response moment"
+    if any(token in lowered for token in ("check for understanding", "restate", "in your own words", "בדיקת הבנה")):
+        return (
+            "צפו ברגע הבדיקה להבנה"
+            if is_he
+            else "Watch the check-for-understanding moment"
+        )
+    if any(token in lowered for token in ("transition", "move to", "next activity", "מעבר")):
+        return "צפו ברגע המעבר" if is_he else "Watch the transition moment"
+    if any(token in lowered for token in ("room", "space", "setup", "circulate", "מרחב", "סידור")):
+        return "צפו ברגע סידור החלל" if is_he else "Watch the room-setup moment"
+    return None
+
+
+def specific_moment_cta_label(
+    moment_or_action: Optional[Mapping[str, Any]],
+    *,
+    language: Optional[str] = "en",
+) -> str:
+    """PR C8: derive a specific 'Watch the ...' label from moment metadata.
+
+    Tries, in order:
+
+      1. ``moment.moment_label`` if present and teacher-safe.
+      2. Keyword matches on the moment title / body / what_happened.
+      3. ``phase`` lookup against the predefined English/Hebrew table.
+      4. Fallback "Watch this coaching moment".
+    """
+
+    moment = dict(moment_or_action or {})
+    is_he = _is_hebrew(language)
+    fallback = "צפו ברגע הזה" if is_he else "Watch this coaching moment"
+    explicit = (moment.get("moment_label") or "").strip()
+    if explicit and is_teacher_visible_text_safe(explicit):
+        return explicit
+
+    text_pool = " ".join(
+        str(value or "")
+        for value in (
+            moment.get("title"),
+            moment.get("what_happened"),
+            moment.get("body"),
+            moment.get("description"),
+            moment.get("try_next_lesson"),
+            moment.get("summary"),
+        )
+        if value
+    )
+    keyword_label = _moment_keyword_label(text_pool, language=language)
+    if keyword_label and is_teacher_visible_text_safe(keyword_label):
+        return keyword_label
+
+    phase = (moment.get("phase") or "").strip().lower()
+    table = _MOMENT_CTA_PHASE_LABELS_HE if is_he else _MOMENT_CTA_PHASE_LABELS_EN
+    if phase and phase in table:
+        return table[phase]
+    return fallback
+
+
+def _navigator_labels(language: Optional[str]) -> Dict[str, str]:
+    if _is_hebrew(language):
+        return {
+            "coaching_action": "מוקד אימון",
+            "reflection": "רפלקציה",
+            "watch_moment": "רגע לחזור אליו",
+            "setup_required": "נדרשת השלמת הגדרות",
+            "upload_required": "הקלטה",
+            "review_pending": "סטטוס בדיקה",
+            "admin_hidden": "סטטוס בדיקה",
+            "revision_requested": "סטטוס בדיקה",
+            "admin_message": "הודעת מאמן",
+            "no_action": "הכול מסודר",
+        }
+    return {
+        "coaching_action": "Coaching focus",
+        "reflection": "Reflection",
+        "watch_moment": "Moment to revisit",
+        "setup_required": "Setup needed",
+        "upload_required": "Recording",
+        "review_pending": "Review status",
+        "admin_hidden": "Review status",
+        "revision_requested": "Review status",
+        "admin_message": "Coach message",
+        "no_action": "All set",
+    }
+
+
+def _build_review_pending_navigator(
+    *, navigator_type: str, language: Optional[str]
+) -> Dict[str, Any]:
+    labels = _navigator_labels(language)
+    is_he = _is_hebrew(language)
+    return {
+        "type": navigator_type,
+        "label": labels[navigator_type],
+        "title": (
+            "ההערות לשיעור הזה בבדיקה."
+            if is_he
+            else "Feedback is being reviewed."
+        ),
+        "body": (
+            "אין מה לעשות עכשיו. הסיכום יופיע כאן אחרי שהבדיקה תהיה מוכנה."
+            if is_he
+            else "No action needed right now. Your coaching summary will appear here when the review is ready."
+        ),
+        "cta_label": None,
+        "href": None,
+        "disabled": True,
+        "priority": 60,
+        "source": "admin_review" if navigator_type in {"admin_hidden", "revision_requested"} else "artifact",
+        "action_item_id": None,
+        "start_sec": None,
+        "end_sec": None,
+        "video_href": None,
+        "reason": navigator_type,
+    }
+
+
+def _build_no_lesson_navigator(language: Optional[str]) -> Dict[str, Any]:
+    """No reviewed lesson AND readiness is OK → upload_required."""
+
+    labels = _navigator_labels(language)
+    is_he = _is_hebrew(language)
+    return {
+        "type": "upload_required",
+        "label": labels["upload_required"],
+        "title": (
+            "מוכנים להקליט או להעלות שיעור."
+            if is_he
+            else "Your recording setup is ready."
+        ),
+        "body": (
+            "אחרי שיעור עם בדיקה מלאה יוצגו כאן רגעים ספציפיים."
+            if is_he
+            else "After a lesson has a complete review, you’ll see specific coaching moments here."
+        ),
+        "cta_label": "הקליטו או העלו שיעור" if is_he else "Record or upload a lesson",
+        "href": "/record",
+        "disabled": False,
+        "priority": 30,
+        "source": "recording",
+        "action_item_id": None,
+        "start_sec": None,
+        "end_sec": None,
+        "video_href": None,
+        "reason": "no_reviewed_lesson",
+    }
+
+
+def _build_no_action_navigator(language: Optional[str]) -> Dict[str, Any]:
+    labels = _navigator_labels(language)
+    is_he = _is_hebrew(language)
+    return {
+        "type": "no_action",
+        "label": labels["no_action"],
+        "title": (
+            "אין צורך בפעולה כרגע."
+            if is_he
+            else "No action needed right now."
+        ),
+        "body": (
+            "פעולות אימון חדשות יופיעו כאן אחרי השיעור הבדוק הבא."
+            if is_he
+            else "You’re all set. New coaching actions will appear here after your next reviewed lesson."
+        ),
+        "cta_label": None,
+        "href": None,
+        "disabled": True,
+        "priority": 90,
+        "source": "artifact",
+        "action_item_id": None,
+        "start_sec": None,
+        "end_sec": None,
+        "video_href": None,
+        "reason": "no_action",
+    }
+
+
+def _build_setup_navigator(readiness: Mapping[str, Any], language: Optional[str]) -> Optional[Dict[str, Any]]:
+    """If the teacher's setup is incomplete, return a setup_required navigator.
+
+    Only the *first* missing readiness item is surfaced — the workspace
+    page already lists the others separately. ``href`` comes from the
+    readiness blocker so we link to the exact setup screen (consent /
+    profile / privacy reference images) rather than a generic "next step".
+    """
+
+    if not readiness or readiness.get("setup_next_step") is None and not readiness.get("missing_items"):
+        return None
+    blocker = readiness.get("setup_next_step") or (readiness.get("missing_items") or [{}])[0]
+    if not isinstance(blocker, Mapping) or not blocker:
+        return None
+    href = blocker.get("href") or blocker.get("route") or "/my-profile"
+    labels = _navigator_labels(language)
+    is_he = _is_hebrew(language)
+    title = str(blocker.get("label") or blocker.get("title") or ("השלימו את ההגדרות" if is_he else "Finish setup")).strip()
+    body = str(blocker.get("message") or ("השלימו את ההגדרות כדי לאפשר אימון אישי." if is_he else "Finish this setup step so coaching can connect.")).strip()
+    if not _is_clean_teacher_text(title) or not _is_clean_teacher_text(body):
+        return None
+    return {
+        "type": "setup_required",
+        "label": labels["setup_required"],
+        "title": title,
+        "body": body,
+        "cta_label": "המשך הגדרות" if is_he else "Continue setup",
+        "href": href,
+        "disabled": False,
+        "priority": 10,
+        "source": "readiness",
+        "action_item_id": blocker.get("id"),
+        "start_sec": None,
+        "end_sec": None,
+        "video_href": None,
+        "reason": blocker.get("code"),
+    }
+
+
+def _build_coaching_action_navigator(
+    primary_action: Mapping[str, Any], language: Optional[str]
+) -> Dict[str, Any]:
+    labels = _navigator_labels(language)
+    is_he = _is_hebrew(language)
+    body = (
+        primary_action.get("try_next_lesson")
+        or primary_action.get("body")
+        or ""
+    )
+    return {
+        "type": "coaching_action",
+        "label": labels["coaching_action"],
+        "title": (
+            "נסו את המהלך הזה בשיעור הבא" if is_he else "Try this in your next lesson"
+        ),
+        "body": body,
+        "cta_label": "פתחו את מהלך האימון" if is_he else "Open coaching action",
+        "href": (
+            f"/my-coaching?task_id={primary_action.get('id')}"
+            if primary_action.get("id")
+            else "/my-coaching"
+        ),
+        "disabled": False,
+        "priority": 20,
+        "source": "artifact",
+        "action_item_id": primary_action.get("id"),
+        "start_sec": primary_action.get("start_sec"),
+        "end_sec": primary_action.get("end_sec"),
+        "video_href": primary_action.get("video_href"),
+        "reason": None,
+    }
+
+
+def _build_watch_moment_navigator(
+    moment: Mapping[str, Any], video_id: Optional[str], language: Optional[str]
+) -> Dict[str, Any]:
+    labels = _navigator_labels(language)
+    cta_label = specific_moment_cta_label(moment, language=language)
+    start_sec = moment.get("start_sec")
+    href = moment.get("video_href")
+    if not href and video_id and start_sec is not None:
+        try:
+            href = f"/videos/{video_id}?t={int(max(0, float(start_sec)))}"
+        except (TypeError, ValueError):
+            href = f"/videos/{video_id}"
+    title = moment.get("title") or ("רגע ששווה לחזור אליו" if _is_hebrew(language) else "A moment worth revisiting")
+    body = moment.get("what_happened") or moment.get("body") or ""
+    return {
+        "type": "watch_moment",
+        "label": labels["watch_moment"],
+        "title": title,
+        "body": body,
+        "cta_label": cta_label,
+        "href": href,
+        "disabled": not href,
+        "priority": 25,
+        "source": "artifact",
+        "action_item_id": None,
+        "start_sec": start_sec,
+        "end_sec": moment.get("end_sec"),
+        "video_href": href,
+        "reason": None,
+    }
+
+
+def _build_reflection_navigator(
+    prompt: str, language: Optional[str]
+) -> Dict[str, Any]:
+    labels = _navigator_labels(language)
+    is_he = _is_hebrew(language)
+    return {
+        "type": "reflection",
+        "label": labels["reflection"],
+        "title": "רפלקציה" if is_he else "Add a reflection",
+        "body": prompt,
+        "cta_label": "הוסיפו רפלקציה" if is_he else "Add reflection",
+        "href": "/my-coaching",
+        "disabled": False,
+        "priority": 50,
+        "source": "reflection",
+        "action_item_id": None,
+        "start_sec": None,
+        "end_sec": None,
+        "video_href": None,
+        "reason": None,
+    }
+
+
+def _build_admin_message_navigator(language: Optional[str]) -> Dict[str, Any]:
+    labels = _navigator_labels(language)
+    is_he = _is_hebrew(language)
+    return {
+        "type": "admin_message",
+        "label": labels["admin_message"],
+        "title": "המאמן השיב לכם" if is_he else "Your coach replied",
+        "body": "פתחו את שיחת האימון כדי לראות את ההודעה." if is_he else "Open the coaching thread to read it.",
+        "cta_label": "קראו את התגובה" if is_he else "Read coach reply",
+        "href": "/my-coaching",
+        "disabled": False,
+        "priority": 40,
+        "source": "thread",
+        "action_item_id": None,
+        "start_sec": None,
+        "end_sec": None,
+        "video_href": None,
+        "reason": None,
+    }
+
+
+def _attach_action_taxonomy(
+    item: Mapping[str, Any], *, language: Optional[str]
+) -> Dict[str, Any]:
+    """Annotate an artifact action item with category/action_kind/cta."""
+
+    enriched = dict(item)
+    is_he = _is_hebrew(language)
+    enriched.setdefault("category", "instructional_practice")
+    enriched.setdefault("action_kind", "try_next_lesson")
+    enriched.setdefault("disabled", False)
+    enriched.setdefault(
+        "cta_label",
+        "פתחו את מהלך האימון" if is_he else "Open coaching action",
+    )
+    href = enriched.get("href")
+    if not href:
+        href = (
+            f"/my-coaching?task_id={enriched.get('id')}"
+            if enriched.get("id")
+            else "/my-coaching"
+        )
+        enriched["href"] = href
+    if enriched.get("video_href"):
+        enriched.setdefault("moment_cta_label", specific_moment_cta_label(enriched, language=language))
+    enriched.setdefault("moment_label", None)
+    return enriched
+
+
+def build_artifact_navigator(
+    artifact: Mapping[str, Any],
+    *,
+    readiness: Optional[Mapping[str, Any]] = None,
+    language: Optional[str] = "en",
+    has_unread_admin_message: bool = False,
+) -> Dict[str, Any]:
+    """Top-level dispatcher that picks the right typed navigator state.
+
+    Order of precedence:
+
+      1. Setup incomplete → ``setup_required``.
+      2. Artifact blocked (admin_hidden / revision_requested / source_invalid
+         / evidence_insufficient / unsafe_text) → ``review_pending`` family.
+      3. Unread admin message → ``admin_message``.
+      4. Allowed artifact with a coaching action item → ``coaching_action``.
+      5. Allowed artifact with a deep-dive moment but no action → ``watch_moment``.
+      6. Allowed artifact with a reflection prompt only → ``reflection``.
+      7. No reviewed lesson but setup is OK → ``upload_required``.
+      8. Otherwise → ``no_action``.
+
+    Review-pending / no-action navigators NEVER carry an ``href`` and have
+    ``disabled: True``. Upload/setup CTAs only appear when their state
+    actually applies.
+    """
+
+    setup_navigator = _build_setup_navigator(readiness or {}, language)
+    if setup_navigator:
+        return setup_navigator
+
+    artifact = dict(artifact or {})
+    blocked_reason = (artifact.get("blocked_reason") or "").lower()
+    if not artifact.get("teacher_feedback_allowed"):
+        if blocked_reason == "admin_hidden":
+            return _build_review_pending_navigator(navigator_type="admin_hidden", language=language)
+        if blocked_reason == "revision_requested":
+            return _build_review_pending_navigator(
+                navigator_type="revision_requested", language=language
+            )
+        if blocked_reason in {"source_invalid", "evidence_insufficient", "unsafe_text", "unsafe_text_post_compose"}:
+            return _build_review_pending_navigator(
+                navigator_type="review_pending", language=language
+            )
+        if blocked_reason in {"no_reviewed_lesson", ""} and not artifact.get("lesson", {}).get("lesson_id"):
+            return _build_no_lesson_navigator(language)
+        return _build_review_pending_navigator(navigator_type="review_pending", language=language)
+
+    if has_unread_admin_message:
+        return _build_admin_message_navigator(language)
+
+    action_items = list(artifact.get("action_items") or [])
+    if action_items:
+        return _build_coaching_action_navigator(action_items[0], language)
+
+    deep_dive = artifact.get("deep_dive") or {}
+    moments = list(deep_dive.get("moments") or []) if deep_dive.get("available") else []
+    if moments:
+        return _build_watch_moment_navigator(
+            moments[0], artifact.get("lesson", {}).get("video_id"), language
+        )
+
+    reflection_prompts = list(artifact.get("reflection", {}).get("prompts") or [])
+    if reflection_prompts:
+        return _build_reflection_navigator(reflection_prompts[0], language)
+
+    return _build_no_action_navigator(language)
+
+
+# ---------------------------------------------------------------------------
 # Empty artifact factory
 # ---------------------------------------------------------------------------
 
@@ -740,6 +1250,84 @@ def _admin_review_public_block(admin_review: Optional[Mapping[str, Any]]) -> Dic
     }
 
 
+def _next_best_action_from_navigator(navigator: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """PR C8: only render ``next_best_action`` when the navigator carries a
+    real CTA. Review-pending / no-action navigators return ``None`` so the
+    frontend does not show a generic "Open next step" button."""
+
+    if not navigator:
+        return None
+    if navigator.get("disabled"):
+        return None
+    cta = navigator.get("cta_label")
+    href = navigator.get("href")
+    if not cta or not href:
+        return None
+    return {
+        "id": navigator.get("action_item_id") or navigator.get("type"),
+        "title": navigator.get("title"),
+        "description": navigator.get("body"),
+        "href": href,
+        "cta_label": cta,
+        "type": navigator.get("type"),
+        "label": navigator.get("label"),
+        "reason": navigator.get("reason"),
+    }
+
+
+def _navigator_for_empty_artifact(
+    *,
+    blocked_reason: str,
+    assessment: Optional[Mapping[str, Any]],
+    readiness: Optional[Mapping[str, Any]],
+    language: Optional[str],
+) -> Dict[str, Any]:
+    """Pick the navigator for a blocked / empty artifact.
+
+    Setup beats the artifact-block state — the teacher cannot upload until
+    setup completes, so we tell them about setup first regardless of why
+    the artifact is empty.
+    """
+
+    setup_nav = _build_setup_navigator(readiness or {}, language)
+    if setup_nav:
+        return setup_nav
+    reason = (blocked_reason or "").lower()
+    if reason == "admin_hidden":
+        return _build_review_pending_navigator(navigator_type="admin_hidden", language=language)
+    if reason == "revision_requested":
+        return _build_review_pending_navigator(navigator_type="revision_requested", language=language)
+    if reason in {"source_invalid", "unsafe_text", "unsafe_text_post_compose", "evidence_insufficient"}:
+        return _build_review_pending_navigator(navigator_type="review_pending", language=language)
+    if reason in {"no_reviewed_lesson", ""} and not (assessment or {}).get("id"):
+        return _build_no_lesson_navigator(language)
+    # Fall through: assessment exists but blocked for some other reason — still
+    # describe it as review status, never as a teacher action.
+    return _build_review_pending_navigator(navigator_type="review_pending", language=language)
+
+
+def _next_best_action_for_empty_artifact(
+    *,
+    blocked_reason: str,
+    assessment: Optional[Mapping[str, Any]],
+    readiness: Optional[Mapping[str, Any]],
+    language: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """next_best_action for empty artifacts.
+
+    Reuses ``_next_best_action_from_navigator`` so review-pending /
+    no-action states cannot accidentally surface a clickable upload CTA.
+    """
+
+    navigator = _navigator_for_empty_artifact(
+        blocked_reason=blocked_reason,
+        assessment=assessment,
+        readiness=readiness,
+        language=language,
+    )
+    return _next_best_action_from_navigator(navigator)
+
+
 def _empty_artifact(
     *,
     assessment: Optional[Mapping[str, Any]],
@@ -751,6 +1339,7 @@ def _empty_artifact(
     analysis_quality: Optional[Mapping[str, Any]],
     blocked_reason: str,
     admin_review: Optional[Mapping[str, Any]] = None,
+    readiness: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     video_id = (assessment or {}).get("video_id") or (video or {}).get("id")
     return {
@@ -801,7 +1390,18 @@ def _empty_artifact(
             "admin_response_count": 0,
         },
         "admin_review": _admin_review_public_block(admin_review),
-        "next_best_action": honest_next_best_action_for_record(language=language),
+        "navigator": _navigator_for_empty_artifact(
+            blocked_reason=blocked_reason,
+            assessment=assessment,
+            readiness=readiness,
+            language=language,
+        ),
+        "next_best_action": _next_best_action_for_empty_artifact(
+            blocked_reason=blocked_reason,
+            assessment=assessment,
+            readiness=readiness,
+            language=language,
+        ),
         "empty_state": empty_state,
         "guardrails": {
             "teacher_visible": False,
@@ -873,6 +1473,7 @@ def build_teacher_lesson_coaching_artifact(
             analysis_quality=None,
             blocked_reason="no_reviewed_lesson",
             admin_review=review,
+            readiness=readiness,
         )
 
     # 0a. PR C6: admin-side blocks (admin_hidden / revision_requested) win
@@ -889,6 +1490,7 @@ def build_teacher_lesson_coaching_artifact(
             analysis_quality=assessment.get("analysis_quality"),
             blocked_reason="admin_hidden",
             admin_review=review,
+            readiness=readiness,
         )
     if review_status == "revision_requested":
         return _empty_artifact(
@@ -901,6 +1503,7 @@ def build_teacher_lesson_coaching_artifact(
             analysis_quality=assessment.get("analysis_quality"),
             blocked_reason="revision_requested",
             admin_review=review,
+            readiness=readiness,
         )
 
     # 1. C1/C2 source-validity gate. Admin approval CANNOT override missing
@@ -922,6 +1525,7 @@ def build_teacher_lesson_coaching_artifact(
             analysis_quality=assessment.get("analysis_quality"),
             blocked_reason="source_invalid",
             admin_review=review,
+            readiness=readiness,
         )
 
     # 2. C3 evidence-quality gate. Admin approval CANNOT override
@@ -937,6 +1541,7 @@ def build_teacher_lesson_coaching_artifact(
             analysis_quality=assessment.get("analysis_quality"),
             blocked_reason="evidence_insufficient",
             admin_review=review,
+            readiness=readiness,
         )
 
     # 3. Build the legacy projection (already C2-cleaned via
@@ -978,6 +1583,7 @@ def build_teacher_lesson_coaching_artifact(
             analysis_quality=assessment.get("analysis_quality"),
             blocked_reason="unsafe_text",
             admin_review=review,
+            readiness=readiness,
         )
 
     # 4. Compose the C4 artifact sections.
@@ -1024,6 +1630,9 @@ def build_teacher_lesson_coaching_artifact(
         video=video or {},
         language=language,
     )
+    # PR C8: attach action taxonomy (category, action_kind, cta_label) so the
+    # frontend can render state-specific labels rather than generic "next step".
+    action_items = [_attach_action_taxonomy(item, language=language) for item in action_items]
 
     deep_dive_input = (cleaned_projection.get("deep_dive") or {}).get("moments") or []
     deep_dive = filter_deep_dive_moments(deep_dive_input, language=language)
@@ -1123,6 +1732,7 @@ def build_teacher_lesson_coaching_artifact(
         },
         "admin_connection": admin_connection,
         "admin_review": _admin_review_public_block(review),
+        "navigator": None,  # filled in below after action_items are taxonomy-annotated
         "next_best_action": _next_best_action_from_artifact(
             action_items=action_items,
             empty_state=None,
@@ -1139,6 +1749,20 @@ def build_teacher_lesson_coaching_artifact(
             "language": language or "en",
         },
     }
+
+    # PR C8: compute the typed navigator + override next_best_action so the
+    # frontend renders state-specific copy / CTA. Navigator wins over the
+    # legacy honest_next_best_action_for_record fallback used earlier.
+    navigator = build_artifact_navigator(
+        artifact,
+        readiness=readiness,
+        language=language,
+        has_unread_admin_message=bool(admin_connection.get("admin_response_count")),
+    )
+    artifact["navigator"] = navigator
+    derived_nba = _next_best_action_from_navigator(navigator)
+    if derived_nba is not None:
+        artifact["next_best_action"] = derived_nba
 
     # 6. Final recursive scan. If any unsafe string slipped past the
     #    component-level filters, downgrade guardrails and replace the
@@ -1166,6 +1790,7 @@ def build_teacher_lesson_coaching_artifact(
             analysis_quality=assessment.get("analysis_quality"),
             blocked_reason="unsafe_text_post_compose",
             admin_review=review,
+            readiness=readiness,
         )
 
     return artifact

@@ -12,9 +12,12 @@ import {
   artifactGoldStar,
   artifactHighlights,
   artifactLatestSummary,
+  artifactMomentCtaLabel,
+  artifactNavigator,
   artifactNextBestAction,
   isArtifactAllowed,
   isArtifactBlocked,
+  isNavigatorClickable,
   readArtifact,
 } from "@/lib/teacherCoachingArtifact";
 
@@ -177,6 +180,12 @@ export function TeacherWorkspacePage() {
       ? data.next_best_action
       : null;
   const nextBestAction = artifactNextBestAction(artifactForReading, nextBestActionLegacy);
+  // PR C8: typed navigator drives the "Your next step" panel. When the
+  // navigator is review_pending / admin_hidden / revision_requested /
+  // no_action it does not produce a CTA and the panel renders status
+  // copy instead of a clickable button.
+  const navigator = artifactNavigator(artifactForReading);
+  const navigatorClickable = isNavigatorClickable(navigator);
   const primaryArtifactAction = artifactActions[0];
   const primaryAction = artifactBlocked
     ? null
@@ -188,6 +197,8 @@ export function TeacherWorkspacePage() {
           body: primaryArtifactAction.body,
           try_next_lesson: primaryArtifactAction.try_next_lesson,
           video_href: primaryArtifactAction.video_href,
+          cta_label: primaryArtifactAction.cta_label,
+          moment_cta_label: primaryArtifactAction.moment_cta_label || artifactMomentCtaLabel(primaryArtifactAction),
           href: `/my-coaching?task_id=${primaryArtifactAction.id || ""}`,
         }
       : legacyActionItems[0] || nextBestAction;
@@ -246,11 +257,17 @@ export function TeacherWorkspacePage() {
               ) : null}
             </Panel>
 
-            <Panel className="border-primary/20 bg-primary/5">
-              <div className="text-xs font-semibold uppercase tracking-wide text-primary">Your next step</div>
+            <Panel className="border-primary/20 bg-primary/5" data-testid="teacher-workspace-navigator-panel">
+              {/* PR C8: typed navigator label replaces the generic "Your next step". */}
+              <div
+                className="text-xs font-semibold uppercase tracking-wide text-primary"
+                data-testid="teacher-navigator-label"
+              >
+                {navigator?.label || (primaryAction ? "Coaching focus" : "All set")}
+              </div>
               {primaryAction ? (
                 <>
-                  <h2 className="mt-2 text-xl font-semibold text-slate-950">{primaryAction.title}</h2>
+                  <h2 className="mt-2 text-xl font-semibold text-slate-950">{navigator?.title || primaryAction.title}</h2>
                   <p className="mt-2 text-sm leading-6 text-slate-700">{primaryAction.description || primaryAction.try_next_lesson || primaryAction.body}</p>
                   <div className="mt-4 flex flex-wrap gap-3">
                     {primaryAction.id ? (
@@ -259,17 +276,35 @@ export function TeacherWorkspacePage() {
                       </Button>
                     ) : null}
                     <Link to={`/my-coaching${primaryAction.id ? `?task_id=${primaryAction.id}` : ""}`} className="inline-flex min-h-[36px] items-center rounded-md border border-primary/30 px-3 py-2 text-sm font-semibold text-primary hover:bg-white">
-                      Reflect
+                      {primaryAction.cta_label || "Open coaching action"}
                     </Link>
-                    {(primaryAction.video_href || primaryAction.href) ? (
-                      <Link to={primaryAction.video_href || primaryAction.href} className="inline-flex min-h-[36px] items-center text-sm font-semibold text-primary hover:text-primary/80">
-                        Watch the moment
+                    {primaryAction.video_href ? (
+                      <Link to={primaryAction.video_href} className="inline-flex min-h-[36px] items-center text-sm font-semibold text-primary hover:text-primary/80">
+                        {primaryAction.moment_cta_label || "Watch this coaching moment"}
                       </Link>
                     ) : null}
                   </div>
                 </>
+              ) : navigator ? (
+                // Review-pending / no-action / setup_required / upload_required.
+                // CTA is rendered only when the navigator is clickable.
+                <>
+                  <h2 className="mt-2 text-xl font-semibold text-slate-950" data-testid="teacher-navigator-title">{navigator.title}</h2>
+                  {navigator.body ? <p className="mt-2 text-sm leading-6 text-slate-700">{navigator.body}</p> : null}
+                  {navigatorClickable ? (
+                    <div className="mt-4 flex flex-wrap gap-3">
+                      <Link
+                        to={navigator.href}
+                        data-testid="teacher-navigator-cta"
+                        className="inline-flex min-h-[36px] items-center rounded-md border border-primary/30 px-3 py-2 text-sm font-semibold text-primary hover:bg-white"
+                      >
+                        {navigator.cta_label}
+                      </Link>
+                    </div>
+                  ) : null}
+                </>
               ) : (
-                <EmptyState title="Your next step will appear after a reviewed lesson or shared coaching goal." message="For now, you can record or upload a lesson when you are ready." />
+                <EmptyState title="Your next coaching action will appear after a reviewed lesson." />
               )}
             </Panel>
 

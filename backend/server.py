@@ -22018,28 +22018,56 @@ async def get_my_teacher_dashboard(
             break
     setup_incomplete = bool((profile_payload.get("readiness") or {}).get("setup_next_step"))
     coaching_next_best = coaching_payload.get("next_best_action")
-    # Honor honest empty-state fallback when the coaching payload produced one
-    # — that's the C2 signal that no source-valid lesson exists yet.
-    honest_fallback = honest_next_best_action_for_record(language=_teacher_language(current_user, teacher))
-    next_best_action = None if setup_incomplete else coaching_next_best
-    if not setup_incomplete and not next_best_action and latest_lesson and is_teacher_visible_text_safe(latest_lesson.get("summary")):
-        next_best_action = {
-            "id": "latest-lesson",
-            "title": "Review your latest lesson",
-            "description": latest_lesson.get("summary") or "Open the newest recording and choose one next step.",
-            "href": latest_lesson.get("href") or "/my-lessons",
-            "cta_label": "Open lesson",
-        }
-    if not setup_incomplete and not next_best_action:
-        next_best_action = honest_fallback
-    elif next_best_action:
-        next_best_action = {
-            "id": next_best_action.get("id") or "next-step",
-            "title": next_best_action.get("title") or "Open your next step",
-            "description": next_best_action.get("description") or "Choose one useful move for your next lesson.",
-            "href": next_best_action.get("href") or "/my-workspace",
-            "cta_label": next_best_action.get("cta_label") or "Open next step",
-        }
+    # PR C8: the coaching endpoint's coaching_artifact carries the typed
+    # navigator. When the navigator is disabled (review_pending /
+    # admin_hidden / revision_requested / no_action) we MUST NOT promote a
+    # legacy next_best_action — and we MUST NOT swap it for a record/upload
+    # CTA. The dashboard surfaces the navigator state directly.
+    coaching_navigator = (
+        (coaching_payload.get("coaching_artifact") or {}).get("navigator")
+        if isinstance(coaching_payload, dict)
+        else None
+    )
+    navigator_disabled = bool(
+        coaching_navigator and coaching_navigator.get("disabled")
+    )
+    if navigator_disabled:
+        # Pass the navigator through verbatim so the dashboard frontend
+        # renders the status copy. Do NOT replace its cta_label/href with
+        # a generic "Open next step" — that's the bug C8 fixes.
+        next_best_action = coaching_next_best
+    else:
+        next_best_action = None if setup_incomplete else coaching_next_best
+        if not setup_incomplete and not next_best_action and latest_lesson and is_teacher_visible_text_safe(latest_lesson.get("summary")):
+            next_best_action = {
+                "id": "latest-lesson",
+                "title": "Review your latest lesson",
+                "description": latest_lesson.get("summary") or "Open the newest recording and choose one next step.",
+                "href": latest_lesson.get("href") or "/my-lessons",
+                "cta_label": "Open lesson",
+            }
+        if not setup_incomplete and not next_best_action:
+            # PR C8: only show the record/upload CTA when there is no
+            # blocked artifact in play. The coaching navigator already
+            # surfaces review_pending / no_action separately.
+            if not coaching_navigator or coaching_navigator.get("type") in {
+                "upload_required",
+                "no_action",
+                None,
+            }:
+                next_best_action = honest_next_best_action_for_record(
+                    language=_teacher_language(current_user, teacher)
+                )
+        elif next_best_action:
+            # PR C8: only wrap with explicit fallback labels when we have
+            # a real CTA. Never produce "Open next step" as a generic CTA.
+            next_best_action = {
+                "id": next_best_action.get("id") or "next-step",
+                "title": next_best_action.get("title") or "Try this in your next lesson",
+                "description": next_best_action.get("description") or "Open the coaching action below.",
+                "href": next_best_action.get("href") or "/my-workspace",
+                "cta_label": next_best_action.get("cta_label") or "Open coaching action",
+            }
     completed_reflections = len(coaching_payload.get("teacher_reflections") or [])
     trends = []
     if completed_reflections:
