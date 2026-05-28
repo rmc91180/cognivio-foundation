@@ -41,6 +41,10 @@ export const BANNED_COACH_VOICE_PHRASES = [
   "setting instructional outcomes",
   "establishing a culture for learning",
   "growing and developing professionally",
+  // PR C8: navigation-intelligence copy that previously misled teachers.
+  // "A coach will continue from here..." is the misleading review-pending
+  // line. The page-level scans assert it is absent from rendered HTML.
+  "a coach will continue from here",
 ];
 
 export const findBannedCoachVoicePhrases = (text = "") => {

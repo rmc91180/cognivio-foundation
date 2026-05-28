@@ -34,7 +34,8 @@ export function SetupAssistantPanel({ mode = "school" }) {
           </Link>
           {nextStep.href ? (
             <Link to={nextStep.href} className="inline-flex min-h-11 items-center justify-center rounded-md border border-sky-200 bg-white px-4 py-2 text-sm font-semibold text-sky-950 hover:bg-sky-100">
-              {nextStep.cta_label || "Open next step"}
+              {/* PR C8: state-specific fallback instead of generic "Open next step". */}
+              {nextStep.cta_label || "Continue setup"}
             </Link>
           ) : null}
         </div>

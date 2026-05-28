@@ -434,9 +434,16 @@ def test_artifact_returns_empty_state_when_evidence_insufficient():
     assert artifact["highlights"] == []
     assert artifact["action_items"] == []
     assert artifact["deep_dive"]["available"] is False
-    nba = artifact["next_best_action"]
-    assert nba is not None
-    assert nba["href"] == "/record"
+    # PR C8: review-pending must NOT surface a clickable next_best_action.
+    # The artifact carries a typed navigator of type review_pending with no
+    # href/cta; the legacy next_best_action is suppressed.
+    nav = artifact.get("navigator")
+    assert nav is not None
+    assert nav["type"] == "review_pending"
+    assert nav["disabled"] is True
+    assert nav["href"] is None
+    assert nav["cta_label"] is None
+    assert artifact.get("next_best_action") is None
     assert_no_known_bad_strings(artifact)
 
 

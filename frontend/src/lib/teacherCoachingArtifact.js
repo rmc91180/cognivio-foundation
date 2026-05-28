@@ -123,22 +123,139 @@ export const artifactReflectionPrompts = (artifact) => {
   return Array.isArray(prompts) ? prompts.filter(Boolean) : [];
 };
 
-/** Next-best-action (honest empty state when blocked, action when allowed). */
+/**
+ * PR C8: Next-best-action prefers the backend navigator. Review-pending /
+ * no-action navigators have ``disabled: true`` and no href — in that case
+ * we return ``null`` so pages render the status copy instead of a
+ * clickable "Open next step" button.
+ *
+ * Legacy fallback only applies when the artifact key is absent.
+ */
 export const artifactNextBestAction = (artifact, legacy) => {
   if (!artifact) return legacy || null;
   if (isArtifactBlocked(artifact)) {
-    const es = artifact.empty_state;
-    return es
-      ? {
-          id: es.code || "review_pending",
-          title: es.title,
-          description: es.message,
-          href: "/record",
-          cta_label: "Record or upload a lesson",
-        }
-      : null;
+    const nav = artifact.navigator;
+    if (nav && nav.href && nav.cta_label && !nav.disabled) {
+      return {
+        id: nav.action_item_id || nav.type,
+        title: nav.title,
+        description: nav.body,
+        href: nav.href,
+        cta_label: nav.cta_label,
+        type: nav.type,
+        label: nav.label,
+        reason: nav.reason,
+      };
+    }
+    // PR C8: blocked artifact with no navigator CTA -> no clickable
+    // action. Pages render the empty_state copy directly instead.
+    return null;
   }
-  return artifact.next_best_action || legacy || null;
+  // Allowed artifact: prefer the backend-derived next_best_action (which
+  // is now built from the navigator), fall back to the artifact's
+  // navigator, then the legacy field.
+  if (artifact.next_best_action) return artifact.next_best_action;
+  const nav = artifact.navigator;
+  if (nav && nav.href && nav.cta_label && !nav.disabled) {
+    return {
+      id: nav.action_item_id || nav.type,
+      title: nav.title,
+      description: nav.body,
+      href: nav.href,
+      cta_label: nav.cta_label,
+      type: nav.type,
+      label: nav.label,
+      reason: nav.reason,
+    };
+  }
+  return legacy || null;
+};
+
+/** PR C8: typed navigator accessor. */
+export const artifactNavigator = (artifact) => {
+  if (!artifact || typeof artifact !== "object") return null;
+  return artifact.navigator || null;
+};
+
+/** True iff the navigator currently carries a clickable CTA. */
+export const isNavigatorClickable = (navigator) => {
+  if (!navigator || typeof navigator !== "object") return false;
+  if (navigator.disabled) return false;
+  return Boolean(navigator.cta_label && navigator.href);
+};
+
+/**
+ * Derive a specific moment CTA label for a moment or action item. Mirrors
+ * the backend ``specific_moment_cta_label`` so the frontend can use it for
+ * legacy (artifact-less) moment cards that still carry phase/title.
+ */
+export const artifactMomentCtaLabel = (momentOrAction, { language } = {}) => {
+  const isHe = String(language || "en").toLowerCase().startsWith("he");
+  if (!momentOrAction || typeof momentOrAction !== "object") {
+    return isHe ? "צפו ברגע הזה" : "Watch this coaching moment";
+  }
+  if (momentOrAction.moment_cta_label) return momentOrAction.moment_cta_label;
+  if (momentOrAction.moment_label) return momentOrAction.moment_label;
+  const text = [
+    momentOrAction.title,
+    momentOrAction.what_happened,
+    momentOrAction.body,
+    momentOrAction.description,
+    momentOrAction.try_next_lesson,
+    momentOrAction.summary,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  const KEYWORDS = isHe
+    ? [
+        [/(שאלה|שאל )/, "צפו בחילופי השאלה"],
+        [/(תשובה|הסביר|extend)/, "צפו ברגע התגובה של התלמידים"],
+        [/(בדיקת הבנה|check)/, "צפו ברגע הבדיקה להבנה"],
+        [/(מעבר|transition)/, "צפו ברגע המעבר"],
+        [/(מרחב|סידור|space|room)/, "צפו ברגע סידור החלל"],
+      ]
+    : [
+        [/(question|prompt|asked)/, "Watch the question exchange"],
+        [/(student response|student answer|extended)/, "Watch the student-response moment"],
+        [/(check for understanding|restate|in your own words)/, "Watch the check-for-understanding moment"],
+        [/(transition|move to|next activity)/, "Watch the transition moment"],
+        [/(room|space|setup|circulate)/, "Watch the room-setup moment"],
+      ];
+  for (const [pattern, label] of KEYWORDS) {
+    if (pattern.test(text)) return label;
+  }
+  const PHASE = isHe
+    ? {
+        check_for_understanding: "צפו ברגע הבדיקה להבנה",
+        guided_practice: "צפו ברגע התרגול המודרך",
+        modeling: "צפו ברגע ההדגמה",
+        student_work: "צפו ברגע עבודת התלמידים",
+        discussion: "צפו ברגע הדיון",
+        transition: "צפו במעבר",
+        lesson_launch: "צפו בפתיחת השיעור",
+        closure: "צפו בסיכום השיעור",
+      }
+    : {
+        check_for_understanding: "Watch the check-for-understanding moment",
+        guided_practice: "Watch the guided practice moment",
+        modeling: "Watch the modeling moment",
+        student_work: "Watch the student work moment",
+        discussion: "Watch the discussion moment",
+        transition: "Watch the transition moment",
+        lesson_launch: "Watch the lesson opening",
+        closure: "Watch the lesson closure",
+      };
+  const phase = (momentOrAction.phase || "").toLowerCase();
+  if (phase && PHASE[phase]) return PHASE[phase];
+  return isHe ? "צפו ברגע הזה" : "Watch this coaching moment";
+};
+
+/** Primary action item with C8 taxonomy (category/action_kind/cta_label/href/disabled). */
+export const artifactPrimaryAction = (artifact) => {
+  if (!artifact || isArtifactBlocked(artifact)) return null;
+  const items = artifactActionItems(artifact);
+  return items[0] || null;
 };
 
 /** Empty-state copy when the artifact is blocked. */
