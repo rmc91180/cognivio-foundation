@@ -19,6 +19,8 @@ import pytest
 
 from app.services.privacy_reference_materialization import (
     PRIVACY_MATERIALIZATION_FAILURE_CODES,
+    STORAGE_PRIVACY_PREFIX,
+    STORAGE_PRIVACY_REFERENCE_PREFIXES,
     cleanup_materialized_privacy_references,
     evaluate_materialization_capability,
     is_allowed_reference_url,
@@ -33,12 +35,27 @@ JPEG_BYTES = b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 16
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 
 
+# Exact production-shaped object-storage key (PR C9.2.1): reference images are
+# uploaded under ``uploads/privacy-profiles/`` by ``_save_privacy_reference_file``
+# → ``_build_s3_key("privacy-profiles", …)``. The legacy prefix the original
+# C9.2 validator hardcoded (``uploads/privacy/``) was never actually produced by
+# the upload helper, which is why every production reference was rejected with
+# ``reference_policy_blocked``.
+PRODUCTION_S3_KEY = (
+    "uploads/privacy-profiles/"
+    "292ca486-4464-4468-9d25-349642326a96_"
+    "f06ee2e9-1391-48d7-91bd-ebab123a1fb6.jpeg"
+)
+
+
 def _production_shaped_reference(
     *,
     reference_id: str = "ref-prod-1",
     teacher_id: str = "d36bcacb-fb19-4d97-8753-f0944131505b",
-    s3_key: str = "uploads/privacy/profiles/d36b/prof/ref.jpg",
-    file_url: str | None = "S3_PUBLIC_BASE_URL=https://pub-abc.r2.dev/uploads/privacy/profiles/d36b/prof/ref.jpg",
+    s3_key: str = PRODUCTION_S3_KEY,
+    file_url: str | None = (
+        "S3_PUBLIC_BASE_URL=https://pub-abc.r2.dev/" + PRODUCTION_S3_KEY
+    ),
     file_path: str | None = "privacy/missing.jpg",
 ) -> Dict[str, Any]:
     """Return a reference document matching the C9.1 forensic fixture exactly."""
@@ -362,13 +379,96 @@ class TestVerifyMaterializedReferenceFile:
 
 
 class TestSafeS3Key:
-    def test_privacy_prefix_allowed(self) -> None:
+    # ---- Positive: production + legacy prefixes are accepted ----
+
+    def test_production_privacy_profiles_prefix_allowed(self) -> None:
+        # PR C9.2.1: the real production key shape must be accepted.
+        assert is_safe_privacy_s3_key(PRODUCTION_S3_KEY) is True
+
+    def test_production_privacy_profiles_prefix_generic_allowed(self) -> None:
+        assert (
+            is_safe_privacy_s3_key("uploads/privacy-profiles/anything/x.jpeg") is True
+        )
+
+    def test_legacy_privacy_prefix_still_allowed(self) -> None:
         assert is_safe_privacy_s3_key("uploads/privacy/profiles/t1/p1/x.jpg") is True
 
-    def test_outside_prefix_rejected(self) -> None:
+    # ---- Negative: non-privacy object families ----
+
+    def test_raw_video_rejected(self) -> None:
         assert is_safe_privacy_s3_key("uploads/videos/raw/t1/x.mp4") is False
+
+    def test_processed_video_rejected(self) -> None:
+        assert is_safe_privacy_s3_key("uploads/videos/processed/t1/x.mp4") is False
+
+    def test_thumbnail_rejected(self) -> None:
+        assert is_safe_privacy_s3_key("uploads/videos/thumbnails/t1/x.jpg") is False
+
+    def test_redacted_video_rejected(self) -> None:
+        assert is_safe_privacy_s3_key("redacted-videos/t1/x.mp4") is False
+        assert is_safe_privacy_s3_key("redacted-thumbnails/t1/x.jpg") is False
+
+    def test_arbitrary_upload_rejected(self) -> None:
+        assert is_safe_privacy_s3_key("uploads/something-else/x.jpg") is False
+
+    def test_bare_uploads_prefix_rejected(self) -> None:
+        # Must never broaden to ``uploads/`` generally.
+        assert is_safe_privacy_s3_key("uploads/") is False
+        assert is_safe_privacy_s3_key("uploads/x.jpg") is False
+
+    # ---- Negative: prefix-confusion attacks ----
+
+    def test_prefix_confusion_dash_suffix_rejected(self) -> None:
+        assert (
+            is_safe_privacy_s3_key("uploads/privacy-profiles-malicious/x.jpg") is False
+        )
+
+    def test_prefix_confusion_underscore_rejected(self) -> None:
+        assert is_safe_privacy_s3_key("uploads/privacy_evil/x.jpg") is False
+
+    def test_legacy_prefix_confusion_rejected(self) -> None:
+        # ``uploads/privacy`` (no trailing slash) and siblings must not match.
+        assert is_safe_privacy_s3_key("uploads/privacyx/x.jpg") is False
+        assert is_safe_privacy_s3_key("uploads/privacy") is False
+
+    # ---- Negative: absolute / drive / URL / traversal ----
+
+    def test_absolute_paths_rejected(self) -> None:
+        assert is_safe_privacy_s3_key("/uploads/privacy-profiles/x.jpg") is False
+        assert is_safe_privacy_s3_key("\\uploads\\privacy\\x.jpg") is False
+
+    def test_windows_drive_path_rejected(self) -> None:
+        assert is_safe_privacy_s3_key("C:\\uploads\\privacy\\x.jpg") is False
+        assert is_safe_privacy_s3_key("C:/uploads/privacy/x.jpg") is False
+
+    def test_urls_rejected(self) -> None:
+        assert (
+            is_safe_privacy_s3_key("https://pub.example.com/uploads/privacy/x.jpg")
+            is False
+        )
+        assert (
+            is_safe_privacy_s3_key("http://pub.example.com/uploads/privacy/x.jpg")
+            is False
+        )
+        assert (
+            is_safe_privacy_s3_key("s3://bucket/uploads/privacy-profiles/x.jpg")
+            is False
+        )
+
+    def test_path_traversal_rejected(self) -> None:
+        assert (
+            is_safe_privacy_s3_key("uploads/privacy-profiles/../videos/raw/x.mp4")
+            is False
+        )
+        assert (
+            is_safe_privacy_s3_key("uploads/privacy/..\\videos\\raw\\x.mp4") is False
+        )
+
+    def test_empty_and_none_rejected(self) -> None:
         assert is_safe_privacy_s3_key("") is False
+        assert is_safe_privacy_s3_key("   ") is False
         assert is_safe_privacy_s3_key(None) is False
+        assert is_safe_privacy_s3_key(123) is False  # type: ignore[arg-type]
 
 
 class TestAllowedReferenceUrl:
@@ -432,3 +532,61 @@ class TestFailureCodeContract:
                 "no_usable_references",
             }
         )
+
+
+# ---------------------------------------------------------------------------
+# PR C9.2.1 — production privacy-profile storage prefix regression
+# ---------------------------------------------------------------------------
+
+
+class TestProductionPrivacyProfilesPrefixRegression:
+    """Pin the exact production failure C9.2.1 fixes.
+
+    Real teacher reference rows store ``uploads/privacy-profiles/<uuid>_<file>``
+    keys, but the original C9.2 validator only accepted ``uploads/privacy/``.
+    Every production reference was therefore rejected with
+    ``reference_policy_blocked`` → ``no_usable_references`` and the destructive
+    blur worker had nothing to read.
+    """
+
+    def test_production_prefix_is_documented_in_allow_list(self) -> None:
+        assert "uploads/privacy-profiles/" in STORAGE_PRIVACY_REFERENCE_PREFIXES
+        assert "uploads/privacy/" in STORAGE_PRIVACY_REFERENCE_PREFIXES
+
+    def test_documents_old_single_prefix_would_have_blocked(self) -> None:
+        # This is the root cause: the production key never matched the legacy
+        # single-prefix constant, which is why the worker reported
+        # ``reference_policy_blocked``.
+        assert not PRODUCTION_S3_KEY.startswith(STORAGE_PRIVACY_PREFIX)
+        # ...but it is now accepted by the hardened allow-list validator.
+        assert is_safe_privacy_s3_key(PRODUCTION_S3_KEY) is True
+
+    def test_production_reference_materializes_without_policy_block(
+        self, tmp_path: Path
+    ) -> None:
+        ref = _production_shaped_reference(file_path=None)
+        materialized, unusable = materialize_privacy_reference(
+            ref,
+            temp_dir=tmp_path,
+            storage_downloader=_make_storage_downloader(),
+        )
+        assert unusable is None
+        assert materialized is not None
+        assert materialized.source == "s3_key"
+        assert Path(materialized.local_path).exists()
+
+    def test_production_batch_materializes_and_clears_policy_block(self) -> None:
+        refs = [
+            _production_shaped_reference(reference_id=f"prod-{i}", file_path=None)
+            for i in range(3)
+        ]
+        result = materialize_privacy_references(
+            refs,
+            storage_downloader=_make_storage_downloader(),
+        )
+        try:
+            assert result.usable_count == 3
+            assert "reference_policy_blocked" not in result.failure_codes
+            assert "no_usable_references" not in result.failure_codes
+        finally:
+            cleanup_materialized_privacy_references(result)
