@@ -32,8 +32,13 @@ Privacy invariants preserved:
   accepted; unexpected content types are rejected.
 - **Size-capped**: downloads stop at ``max_bytes`` to refuse pathological
   payloads.
-- **Prefix-validated**: storage downloads must come from the
-  ``uploads/privacy/`` prefix used by the reference image upload helper.
+- **Prefix-validated**: storage downloads must come from an explicit privacy
+  reference prefix allow-list (:data:`STORAGE_PRIVACY_REFERENCE_PREFIXES`).
+  Production reference images are uploaded under ``uploads/privacy-profiles/``
+  (see ``_save_privacy_reference_file`` → ``_build_s3_key("privacy-profiles", …)``);
+  ``uploads/privacy/`` is retained only for legacy/back-compat rows. No general
+  ``uploads/`` access is granted, so raw/processed/redacted videos, thumbnails,
+  and arbitrary uploads can never be pulled through this path.
 
 Failure codes are stable strings — extend :data:`PRIVACY_MATERIALIZATION_FAILURE_CODES`
 when adding new ones; do not rename existing codes.
@@ -64,6 +69,7 @@ __all__ = [
     "PRIVACY_MATERIALIZATION_FAILURE_CODES",
     "SUPPORTED_IMAGE_CONTENT_TYPES",
     "SUPPORTED_IMAGE_EXTENSIONS",
+    "STORAGE_PRIVACY_REFERENCE_PREFIXES",
     "STORAGE_PRIVACY_PREFIX",
     "PrivacyReferenceMaterializationResult",
     "MaterializedReference",
@@ -104,7 +110,26 @@ SUPPORTED_IMAGE_CONTENT_TYPES: Tuple[str, ...] = (
 
 SUPPORTED_IMAGE_EXTENSIONS: Tuple[str, ...] = (".jpg", ".jpeg", ".png", ".webp")
 
-# Storage prefix used by ``_save_privacy_reference_file``.
+# Strict allow-list of object-storage key prefixes that may be pulled into a
+# temp file for the destructive blur worker.
+#
+# - ``uploads/privacy-profiles/`` is the PRODUCTION prefix: reference images are
+#   uploaded by ``_save_privacy_reference_file`` via
+#   ``_upload_path_to_s3(file, "privacy-profiles", …)`` → ``_build_s3_key`` which
+#   yields ``uploads/privacy-profiles/<uuid>_<filename>``.
+# - ``uploads/privacy/`` is retained for legacy/back-compat rows only.
+#
+# This is defense-in-depth: even though the application sets these keys itself,
+# the worker downloads whatever value is in the document. The allow-list must
+# stay narrow — never broaden it to ``uploads/`` generally, which would expose
+# raw/processed/redacted videos, thumbnails, and arbitrary uploads.
+STORAGE_PRIVACY_REFERENCE_PREFIXES: Tuple[str, ...] = (
+    "uploads/privacy-profiles/",
+    "uploads/privacy/",
+)
+
+# Backwards-compatible alias for the legacy single-prefix constant. Prefer
+# :data:`STORAGE_PRIVACY_REFERENCE_PREFIXES` for new code.
 STORAGE_PRIVACY_PREFIX = "uploads/privacy/"
 
 # Magic byte prefixes used for a defense-in-depth check after writing the file
@@ -175,19 +200,55 @@ class PrivacyReferenceMaterializationResult:
 
 
 def is_safe_privacy_s3_key(s3_key: Optional[str]) -> bool:
-    """Return ``True`` when *s3_key* is under the privacy prefix.
+    """Return ``True`` only for keys under an explicit privacy-reference prefix.
 
     Defense-in-depth: even though the application only sets these keys
     internally, the worker downloads using whatever value is in the document.
-    A misconfigured row should not let an attacker pull arbitrary objects from
-    the bucket.
+    A misconfigured or malicious row must not let the worker pull arbitrary
+    objects from the bucket.
+
+    Accepted (production + legacy)::
+
+        uploads/privacy-profiles/<uuid>_<filename>   # production
+        uploads/privacy/<…>                          # legacy back-compat
+
+    Rejected (non-exhaustive)::
+
+        uploads/videos/raw/…        uploads/videos/processed/…
+        redacted-videos/…           redacted-thumbnails/…
+        uploads/anything-else/…     uploads/                (bare)
+        uploads/privacy-profiles-malicious/…   (prefix confusion)
+        uploads/privacy_evil/…                 (prefix confusion)
+        /uploads/privacy/…          \\uploads\\privacy\\…  (absolute)
+        C:\\uploads\\privacy\\…      (Windows drive)
+        https://…  http://…  s3://… (URLs)
+        uploads/privacy/../videos/… (path traversal)
     """
     if not s3_key or not isinstance(s3_key, str):
         return False
-    cleaned = s3_key.strip().lstrip("/")
+    cleaned = s3_key.strip()
     if not cleaned:
         return False
-    return cleaned.startswith(STORAGE_PRIVACY_PREFIX)
+    # Reject absolute paths (POSIX leading slash or UNC/Windows backslash).
+    if cleaned.startswith("/") or cleaned.startswith("\\"):
+        return False
+    # Reject Windows drive-letter paths, e.g. ``C:\\`` or ``C:/``.
+    if len(cleaned) >= 2 and cleaned[1] == ":" and cleaned[0].isalpha():
+        return False
+    lowered = cleaned.lower()
+    # Reject anything that looks like a URL scheme rather than a bucket key.
+    if "://" in lowered or lowered.startswith(("http:", "https:", "s3:")):
+        return False
+    # Normalize separators and reject any path-traversal segment.
+    normalized = cleaned.replace("\\", "/")
+    if ".." in normalized:
+        return False
+    # Accept only the explicit privacy-reference prefixes. ``startswith`` with a
+    # trailing-slash prefix also defeats prefix-confusion attacks such as
+    # ``uploads/privacy-profiles-malicious/`` and ``uploads/privacy_evil/``.
+    return any(
+        normalized.startswith(prefix) for prefix in STORAGE_PRIVACY_REFERENCE_PREFIXES
+    )
 
 
 def is_allowed_reference_url(
