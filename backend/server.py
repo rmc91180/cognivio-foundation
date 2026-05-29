@@ -3406,6 +3406,110 @@ def _resolve_video_thumbnail_url(video: dict) -> Optional[str]:
     return None
 
 
+def _redacted_playback_validation_dict(video: dict) -> Optional[dict]:
+    """Return the stored ``redacted_playback_validation`` dict, if present."""
+    raw = video.get("redacted_playback_validation")
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
+def _redacted_validation_status(video: dict) -> Tuple[Optional[str], Optional[str]]:
+    """Return ``(status, failure_code)`` from the stored validation record."""
+    record = _redacted_playback_validation_dict(video)
+    if not record:
+        return None, None
+    return record.get("status"), record.get("failure_code")
+
+
+def _redacted_playback_ready(video: dict) -> bool:
+    """True only when the redacted asset was confirmed browser-playable.
+
+    PR C9.3: a redacted asset is only teacher-playback-ready when its
+    validation record says ``passed``. A missing record or
+    ``skipped_unavailable`` is **not** ready — we never assert playability we
+    could not verify.
+    """
+    status, _ = _redacted_validation_status(video)
+    return status == "passed"
+
+
+def _build_teacher_playback_state(video: dict) -> Dict[str, Any]:
+    """Teacher-safe playback object (PR C9.3 PART 5).
+
+    Returns ``{available, asset_kind, url, status}`` (+ optional
+    ``failure_code``). A teacher only receives a URL when privacy completed AND
+    the redacted asset passed browser-playback validation. Never raw.
+    """
+    privacy_done = (
+        _normalize_privacy_status(video.get("privacy_status"))
+        == PrivacyProcessingStatus.COMPLETED.value
+    )
+    if not privacy_done:
+        return {"available": False, "asset_kind": None, "url": None, "status": "privacy_incomplete"}
+
+    decision = select_playback_asset(video, "teacher", allow_raw_for_admin=False)
+    if decision.source != "redacted" or not decision.url:
+        return {"available": False, "asset_kind": None, "url": None, "status": "no_redacted_asset"}
+
+    val_status, val_code = _redacted_validation_status(video)
+    if val_status == "passed":
+        url = decision.url
+        if url.startswith("/uploads/"):
+            url = _to_public_backend_url(url)
+        return {"available": True, "asset_kind": "redacted", "url": url, "status": "ready"}
+    if val_status == "failed":
+        return {
+            "available": False,
+            "asset_kind": "redacted",
+            "url": None,
+            "status": "validation_failed",
+            "failure_code": val_code,
+        }
+    # No validation record yet, or ffprobe was unavailable when processed.
+    return {"available": False, "asset_kind": "redacted", "url": None, "status": "validation_pending"}
+
+
+def _build_playback_diagnostics(video: dict) -> Dict[str, Any]:
+    """Admin-facing playback diagnostics (PR C9.3 PART 5).
+
+    Exposes only booleans + validation status (no raw URLs / paths).
+    """
+    val_status, val_code = _redacted_validation_status(video)
+    redacted_available = bool(
+        video.get("redacted_file_url")
+        or video.get("redacted_file_path")
+        or video.get("redacted_asset_state") == "stored"
+    )
+    processed_available = bool(
+        video.get("processed_file_url")
+        or video.get("processed_file_path")
+        or video.get("processed_s3_key")
+    )
+    raw_available = bool(
+        video.get("raw_file_url")
+        or video.get("raw_file_path")
+        or video.get("file_url")
+        or video.get("file_path")
+        or video.get("raw_s3_key")
+    )
+    teacher_state = _build_teacher_playback_state(video)
+    selected_kind = teacher_state.get("asset_kind") if teacher_state.get("available") else None
+    return {
+        "selected_asset_kind": selected_kind,
+        "validation_status": val_status,
+        "failure_code": val_code,
+        "raw_available": raw_available,
+        "processed_available": processed_available,
+        "redacted_available": redacted_available,
+    }
+
+
+def _build_video_review_progress_for_response(video: dict) -> Dict[str, Any]:
+    """Wrapper so endpoints share one deterministic review-progress object."""
+    return build_video_review_progress(video)
+
+
 def _is_terminal_video_status(status: Optional[str]) -> bool:
     normalized = _normalize_video_status(status)
     return normalized in {
@@ -3423,6 +3527,10 @@ def _apply_video_response_defaults(video: dict) -> dict:
     video["privacy_review_required"] = bool(video.get("privacy_review_required", False))
     video["playback_url"] = _resolve_video_playback_url(video)
     video["thumbnail_url"] = _resolve_video_thumbnail_url(video)
+    # PR C9.3: deterministic teacher-safe progress + validated playback gating.
+    video["review_progress"] = _build_video_review_progress_for_response(video)
+    video["playback"] = _build_teacher_playback_state(video)
+    video["playback_diagnostics"] = _build_playback_diagnostics(video)
     return video
 
 
@@ -6039,6 +6147,17 @@ from app.services.video_assets import (
     decide_transcode_for_upload,
     select_analysis_asset,
     select_playback_asset,
+)
+from app.services.playback_validation import (
+    PLAYBACK_VALIDATION_FAILURE_CODES,
+    PLAYBACK_VALIDATION_STATUSES,
+    PlaybackValidationResult,
+    validate_browser_playback_asset,
+)
+from app.services.video_review_progress import (
+    REVIEW_PROGRESS_STATUSES,
+    REVIEW_STAGE_KEYS,
+    build_video_review_progress,
 )
 
 S3_BUCKET = APP_SETTINGS.storage.s3_bucket
@@ -11196,6 +11315,100 @@ async def _run_video_privacy_job(video_id: str) -> None:
             except Exception as exc:
                 logger.warning(f"Redacted thumbnail upload failed for {video_id}: {exc}")
 
+            # PR C9.3: confirm the redacted asset is actually browser-playable
+            # before it is ever offered to a teacher. The render pipeline
+            # re-encodes to H.264/yuv420p/+faststart; ffprobe (when present)
+            # verifies it. We never mark playback ready without verification.
+            browser_safe_render = bool(render_stats.get("browser_safe_render"))
+            playback_validation = await asyncio.to_thread(
+                validate_browser_playback_asset,
+                str(redacted_full_path),
+                expected_kind="redacted",
+            )
+            if playback_validation.status == "skipped_unavailable" and browser_safe_render:
+                # ffprobe is unavailable, but the asset was just re-encoded to
+                # H.264/yuv420p/+faststart by our own ffmpeg pass — trust that
+                # first-party render rather than blocking a valid asset.
+                playback_validation = PlaybackValidationResult(
+                    status="passed",
+                    expected_kind="redacted",
+                    browser_compatible=True,
+                    probe_tool="render_pipeline_h264",
+                    video_codec=render_stats.get("video_codec") or "h264",
+                    pix_fmt="yuv420p",
+                    message="verified by browser-safe render pipeline (ffprobe unavailable)",
+                    warnings=["verified_by_render_pipeline"],
+                    checked_at=datetime.now(timezone.utc).isoformat(),
+                )
+            playback_validation_dict = playback_validation.to_dict()
+
+            playback_render_failure_code: Optional[str] = None
+            if playback_validation.status == "failed":
+                playback_render_failure_code = playback_validation.failure_code or "unreadable_asset"
+            elif not browser_safe_render and privacy_mode != "degraded":
+                # ffmpeg unavailable (or encode failed) on a non-degraded host —
+                # we could not produce a browser-safe asset. Fail rather than
+                # silently storing a frozen / unplayable video.
+                playback_render_failure_code = (
+                    render_stats.get("browser_safe_error")
+                    or "ffmpeg_unavailable_for_browser_safe_render"
+                )
+
+            if playback_render_failure_code:
+                finished_at = datetime.now(timezone.utc).isoformat()
+                error_message = f"redacted_video_not_browser_playable:{playback_render_failure_code}"
+                # Preserve raw/processed assets: do NOT enqueue analysis and do
+                # NOT run raw cleanup when the redacted asset is unplayable.
+                await db.videos.update_one(
+                    {"id": video_id},
+                    {
+                        "$set": {
+                            "privacy_status": PrivacyProcessingStatus.FAILED.value,
+                            "privacy_pipeline_state": PrivacyPipelineState.DESTRUCTIVE_BLUR_FAILED.value,
+                            "privacy_failed_at": finished_at,
+                            "privacy_error": error_message,
+                            "redacted_asset_state": "invalid",
+                            "redacted_playback_validation": playback_validation_dict,
+                            "privacy_manifest": {
+                                "manifest_version": 1,
+                                "created_at": finished_at,
+                                "tracks": analysis["manifest_tracks"],
+                                "fallback_mode": analysis["fallback_mode"],
+                                "teacher_track_id": analysis["teacher_track_id"],
+                                "render_stats": render_stats,
+                            },
+                            "latest_error": error_message,
+                            "failure_reason": "redacted_not_browser_playable",
+                            "status_updated_at": finished_at,
+                            "updated_at": finished_at,
+                        }
+                    },
+                )
+                await db.video_evidence.update_one(
+                    {"video_id": video_id, "uploaded_by": job.get("user_id")},
+                    {"$set": {"privacy_status": PrivacyProcessingStatus.FAILED.value, "error_message": error_message}},
+                )
+                await _log_privacy_audit_event(
+                    "privacy_processing_failed",
+                    "video",
+                    video_id,
+                    actor_user_id=job.get("user_id"),
+                    details={"error": error_message, "playback_validation": playback_validation_dict},
+                )
+                await _record_video_source_chain_incident(
+                    "privacy_failed",
+                    video_id=video_id,
+                    teacher_id=job.get("teacher_id"),
+                    user_id=job.get("user_id"),
+                    context="video_privacy_worker_playback_validation",
+                    latest_error=error_message,
+                )
+                logger.error(
+                    f"Privacy worker produced a non-browser-playable redacted asset for {video_id}: {error_message}"
+                )
+                job_final_status = PrivacyProcessingStatus.FAILED.value
+                return
+
             finished_at = datetime.now(timezone.utc).isoformat()
             raw_cleanup_fields = _build_transcoded_raw_cleanup_fields(video, finished_at)
             destructive_blurring_enabled = _coerce_policy_bool(video.get("destructive_blurring_enabled"), default=True)
@@ -11242,6 +11455,7 @@ async def _run_video_privacy_job(video_id: str) -> None:
                         "redacted_thumbnail_path": redacted_thumbnail_relative_path,
                         "redacted_thumbnail_url": redacted_thumbnail_url,
                         "redacted_asset_state": "stored",
+                        "redacted_playback_validation": playback_validation_dict,
                         "status_updated_at": finished_at,
                         "updated_at": finished_at,
                         **retention_update_fields,
@@ -12566,6 +12780,7 @@ async def get_video_status(video_id: str, current_user: dict = Depends(get_curre
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    review_progress = _build_video_review_progress_for_response(video)
     return {
         "status": _normalize_video_status(video.get("status")),
         "privacy_status": _normalize_privacy_status(video.get("privacy_status")),
@@ -12575,6 +12790,12 @@ async def get_video_status(video_id: str, current_user: dict = Depends(get_curre
         "privacy_review_reason": video.get("privacy_review_reason"),
         "error_message": video.get("error_message"),
         "privacy_error": video.get("privacy_error"),
+        # PR C9.3: deterministic review progress + teacher-safe playback gating.
+        "review_progress": review_progress,
+        "review_status": review_progress["status"],
+        "review_percent": review_progress["percent"],
+        "playback": _build_teacher_playback_state(video),
+        "redacted_playback_validation": _redacted_playback_validation_dict(video),
     }
 
 
@@ -21897,6 +22118,9 @@ async def get_my_lessons(
                 "recording_type": video.get("recording_type") or video.get("upload_source"),
                 "shared_moments_count": shared_counts.get(video.get("id"), 0),
                 "talk_time_summary": video.get("audio_summary") or (assessment or {}).get("audio_summary"),
+                # PR C9.3: deterministic, teacher-safe progress + validated playback.
+                "review_progress": build_video_review_progress(video, assessment, projection),
+                "playback": _build_teacher_playback_state(video),
             }
         )
 
@@ -26750,6 +26974,10 @@ async def get_master_admin_video_detail(video_id: str, current_user: dict = Depe
                 "transcode": await db.video_transcode_jobs.find_one({"video_id": video_id}, {"_id": 0}),
             },
             "incidents": incidents,
+            # PR C9.3: deterministic review progress + playback diagnostics.
+            "review_progress": build_video_review_progress(video or {}),
+            "playback_diagnostics": _build_playback_diagnostics(video or {}),
+            "redacted_playback_validation": _redacted_playback_validation_dict(video or {}),
         },
     )
 

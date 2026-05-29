@@ -56,18 +56,35 @@ def _write_placeholder_thumbnail(output_path: str, width: int = 640, height: int
     image.save(target, format="JPEG", quality=84)
 
 
+# PR C9.3: the redacted render must be browser-playable. OpenCV's VideoWriter
+# emits ``mp4v`` (MPEG-4 Part 2), which most browsers cannot decode — so the
+# final artifact would play as a frozen / black frame for teachers. The
+# finalize step therefore RE-ENCODES the rendered stream to H.264 / yuv420p
+# (the browser lingua-franca) and attaches AAC audio with ``+faststart``. This
+# is the minimal codec conversion required for playability — no resolution
+# scaling or broad compression tuning.
+BROWSER_SAFE_RENDER_ERROR_FFMPEG_MISSING = "ffmpeg_unavailable_for_browser_safe_render"
+BROWSER_SAFE_RENDER_ERROR_ENCODE_FAILED = "ffmpeg_browser_safe_render_failed"
+
+
 def _finalize_redacted_video_with_audio(
     source_video_path: str,
     rendered_video_path: Path,
     output_video_path: Path,
 ) -> Dict[str, Any]:
-    """Remux source audio into the redacted render when available.
+    """Re-encode the redacted render to a browser-playable MP4.
 
-    OpenCV writes a video-only MP4. We preserve the classroom audio by copying
-    the rendered video stream and optionally mapping the original audio stream
-    back onto the final artifact. Silent source videos still succeed.
+    OpenCV writes a video-only ``mp4v`` MP4. We re-encode the video stream to
+    H.264 / yuv420p, attach the original audio (AAC) when present, and write
+    ``+faststart`` so the asset streams in a browser. Silent source videos
+    still succeed (the audio map is optional).
+
+    When ffmpeg is unavailable (or the encode fails) we preserve the rendered
+    file as a best-effort artifact but flag ``browser_safe_render=False`` with a
+    structured ``browser_safe_error`` so the worker never marks the asset
+    playback-ready.
     """
-    mux_command = [
+    encode_command = [
         "ffmpeg",
         "-y",
         "-i",
@@ -79,7 +96,13 @@ def _finalize_redacted_video_with_audio(
         "-map",
         "1:a:0?",
         "-c:v",
-        "copy",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
         "-c:a",
         "aac",
         "-movflags",
@@ -88,14 +111,21 @@ def _finalize_redacted_video_with_audio(
     ]
     try:
         completed = subprocess.run(
-            mux_command,
+            encode_command,
             capture_output=True,
             text=True,
             check=False,
         )
     except FileNotFoundError:
         shutil.move(str(rendered_video_path), str(output_video_path))
-        return {"audio_preserved": False, "audio_muxed": False, "audio_mux_error": "ffmpeg_unavailable"}
+        return {
+            "audio_preserved": False,
+            "audio_muxed": False,
+            "audio_mux_error": "ffmpeg_unavailable",
+            "browser_safe_render": False,
+            "browser_safe_error": BROWSER_SAFE_RENDER_ERROR_FFMPEG_MISSING,
+            "video_codec": "mpeg4",
+        }
 
     if completed.returncode != 0:
         shutil.move(str(rendered_video_path), str(output_video_path))
@@ -103,11 +133,21 @@ def _finalize_redacted_video_with_audio(
         return {
             "audio_preserved": False,
             "audio_muxed": False,
-            "audio_mux_error": stderr[:500] if stderr else "ffmpeg_mux_failed",
+            "audio_mux_error": stderr[:500] if stderr else "ffmpeg_encode_failed",
+            "browser_safe_render": False,
+            "browser_safe_error": BROWSER_SAFE_RENDER_ERROR_ENCODE_FAILED,
+            "video_codec": "mpeg4",
         }
 
     rendered_video_path.unlink(missing_ok=True)
-    return {"audio_preserved": True, "audio_muxed": True, "audio_mux_error": None}
+    return {
+        "audio_preserved": True,
+        "audio_muxed": True,
+        "audio_mux_error": None,
+        "browser_safe_render": True,
+        "browser_safe_error": None,
+        "video_codec": "h264",
+    }
 
 
 def _load_face_cascade():
@@ -395,6 +435,9 @@ def render_redacted_video(
             "faces_detected_total": 0,
             "faces_blurred_total": 0,
             "runtime_fallback": "cv2_unavailable_copy_only",
+            "browser_safe_render": False,
+            "browser_safe_error": "cv2_unavailable_copy_only",
+            "video_codec": None,
         }
     cv2 = _require_cv2()
     references = load_reference_signatures(reference_paths)

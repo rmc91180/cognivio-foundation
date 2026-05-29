@@ -13,6 +13,11 @@ Reports the production failure modes the C9.1 helpers detect:
 - Videos with no playable redacted asset for teachers.
 - Videos eligible for analysis whose ``select_analysis_asset`` choice would
   fail (e.g. only raw available with destructive_blurring_enabled=True).
+- (PR C9.3) Completed redacted assets with no browser-playback validation,
+  validation failures that left privacy ``completed``, teacher playback that
+  would resolve to a non-redacted asset under destructive blur, analysis
+  marked completed while review-progress reports a needs-admin inconsistency,
+  and ``blur_all`` manifests that preserved a face.
 
 The script is strictly read-only. It does not modify the database. It is safe
 to run against production.
@@ -56,6 +61,12 @@ ISSUE_CODES = (
     "storage_download_unavailable",
     "privacy_failed_with_processed_asset_available",
     "reference_materialization_would_succeed",
+    # PR C9.3 additions — review progress + browser-playable redacted output
+    "redacted_completed_without_playback_validation",
+    "playback_validation_failed_but_privacy_completed",
+    "teacher_playback_non_redacted_with_destructive_blur",
+    "analysis_completed_without_review_progress",
+    "blur_all_invariant_violation",
 )
 
 
@@ -355,6 +366,133 @@ async def _scan_materialization_vs_privacy_state(
     return issues
 
 
+async def _scan_review_and_playback(
+    db,
+    *,
+    build_video_review_progress,
+    select_playback_asset,
+    limit: int,
+    teacher_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """PR C9.3: review-progress + browser-playable redacted output invariants.
+
+    Detects:
+
+    - ``redacted_completed_without_playback_validation`` — privacy completed
+      and a redacted asset exists, but no ``redacted_playback_validation`` was
+      ever recorded (legacy frozen assets predate the validator).
+    - ``playback_validation_failed_but_privacy_completed`` — the validator
+      flagged the redacted asset unplayable yet privacy is still ``completed``
+      (the asset must not be served to teachers).
+    - ``teacher_playback_non_redacted_with_destructive_blur`` — teacher
+      playback would resolve to a non-redacted asset while destructive blur is
+      enabled (the original production bug class).
+    - ``analysis_completed_without_review_progress`` — analysis is completed but
+      the deterministic review-progress model reports a needs-admin
+      inconsistency (e.g. assessment missing).
+    - ``blur_all_invariant_violation`` — the persisted privacy manifest claims
+      ``fallback_mode="blur_all"`` but a track was preserved, the teacher track
+      id is set, or not every detected face was blurred.
+    """
+    issues: List[Dict[str, Any]] = []
+    if not hasattr(db, "videos"):
+        return issues
+    query: Dict[str, Any] = {}
+    if teacher_id:
+        query["teacher_id"] = teacher_id
+    async for video in db.videos.find(query, {"_id": 0}).limit(limit):
+        vid = _doc_id(video)
+        tid = video.get("teacher_id")
+        privacy_completed = str(video.get("privacy_status") or "").strip().lower() == "completed"
+        redacted_present = bool(
+            video.get("redacted_asset_state") == "stored"
+            or video.get("redacted_file_path")
+            or video.get("redacted_file_url")
+        )
+        validation = video.get("redacted_playback_validation") or {}
+        validation_status = str(validation.get("status") or "").strip().lower()
+
+        if privacy_completed and redacted_present and not validation:
+            issues.append(
+                {
+                    "issue_code": "redacted_completed_without_playback_validation",
+                    "video_id": vid,
+                    "teacher_id": tid,
+                }
+            )
+
+        if privacy_completed and validation_status == "failed":
+            issues.append(
+                {
+                    "issue_code": "playback_validation_failed_but_privacy_completed",
+                    "video_id": vid,
+                    "teacher_id": tid,
+                    "failure_code": validation.get("failure_code"),
+                }
+            )
+
+        destructive_raw = video.get("destructive_blurring_enabled")
+        destructive_enabled = True if destructive_raw is None else bool(destructive_raw)
+        if privacy_completed and destructive_enabled:
+            decision = select_playback_asset(video, "teacher", allow_raw_for_admin=False)
+            if decision.url and decision.source != "redacted":
+                issues.append(
+                    {
+                        "issue_code": "teacher_playback_non_redacted_with_destructive_blur",
+                        "video_id": vid,
+                        "teacher_id": tid,
+                        "selected_source": decision.source,
+                    }
+                )
+
+        try:
+            progress = build_video_review_progress(video)
+        except Exception:  # pragma: no cover - defensive only
+            progress = {}
+        if (
+            str(video.get("analysis_status") or "").strip().lower() == "completed"
+            and progress.get("needs_admin_attention")
+            and progress.get("failure_code") == "analysis_completed_without_assessment"
+        ):
+            issues.append(
+                {
+                    "issue_code": "analysis_completed_without_review_progress",
+                    "video_id": vid,
+                    "teacher_id": tid,
+                    "failure_code": progress.get("failure_code"),
+                }
+            )
+
+        manifest = video.get("privacy_manifest") or {}
+        if str(manifest.get("fallback_mode") or "").strip().lower() == "blur_all":
+            violations: List[str] = []
+            if manifest.get("teacher_track_id") is not None:
+                violations.append("teacher_track_id_not_null")
+            for track in manifest.get("tracks") or []:
+                if isinstance(track, dict) and str(track.get("decision") or "").strip().lower() != "blur":
+                    violations.append(f"track_decision={track.get('decision')}")
+                    break
+            render_stats = manifest.get("render_stats") or {}
+            detected = render_stats.get("faces_detected_total")
+            blurred = render_stats.get("faces_blurred_total")
+            if (
+                isinstance(detected, (int, float))
+                and isinstance(blurred, (int, float))
+                and blurred < detected
+            ):
+                violations.append(f"faces_blurred={blurred}<detected={detected}")
+            if violations:
+                issues.append(
+                    {
+                        "issue_code": "blur_all_invariant_violation",
+                        "video_id": vid,
+                        "teacher_id": tid,
+                        "violations": violations,
+                    }
+                )
+    return issues
+
+
 async def _dry_run_materialization(
     db,
     *,
@@ -433,6 +571,9 @@ async def run_audit(args: argparse.Namespace) -> int:
         select_analysis_asset,
         select_playback_asset,
     )
+    from app.services.video_review_progress import (  # noqa: WPS433
+        build_video_review_progress,
+    )
 
     db = server.db
     upload_dir = server.UPLOAD_DIR
@@ -504,6 +645,13 @@ async def run_audit(args: argparse.Namespace) -> int:
         limit=args.limit,
         teacher_id=args.teacher_id,
     )
+    review_playback_issues = await _scan_review_and_playback(
+        db,
+        build_video_review_progress=build_video_review_progress,
+        select_playback_asset=select_playback_asset,
+        limit=args.limit,
+        teacher_id=args.teacher_id,
+    )
 
     all_issues = (
         storage_url_issues
@@ -511,6 +659,7 @@ async def run_audit(args: argparse.Namespace) -> int:
         + video_issues
         + materialization_issues
         + materialization_vs_state
+        + review_playback_issues
     )
     summary: Dict[str, int] = {}
     for issue in all_issues:
