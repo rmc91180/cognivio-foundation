@@ -1,13 +1,30 @@
 import React from "react";
+import { isAudioNotRun } from "@/lib/reviewProgress";
 
 const safePct = (value) => Math.max(0, Math.min(100, Number(value) || 0));
 
-export function TalkTimeChart({ analysis, isTeacherView = false }) {
+// PR C9.3 PART 2 — when audio analysis was deliberately not run (disabled or
+// skipped) or failed, the empty state must say so honestly rather than promise
+// "after audio review is complete".
+const emptyStateCopy = (audioStageStatus) => {
+  if (isAudioNotRun(audioStageStatus)) {
+    return "Audio analysis was not run for this review.";
+  }
+  if (audioStageStatus === "failed") {
+    return "Audio analysis could not be completed for this review.";
+  }
+  if (audioStageStatus === "processing" || audioStageStatus === "pending") {
+    return "Audio review is in progress.";
+  }
+  return "Talk-time details will appear here after audio review is complete.";
+};
+
+export function TalkTimeChart({ analysis, isTeacherView = false, audioStageStatus = null }) {
   const hasFeatures = Boolean(analysis?.features_available);
   if (!hasFeatures) {
     return (
       <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-500">
-        Talk-time details will appear here after audio review is complete.
+        {emptyStateCopy(audioStageStatus)}
       </div>
     );
   }

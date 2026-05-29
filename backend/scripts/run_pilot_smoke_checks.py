@@ -85,6 +85,10 @@ from app.services.video_assets import (  # noqa: E402
     select_analysis_asset,
     select_playback_asset,
 )
+from app.services.video_review_progress import (  # noqa: E402
+    REVIEW_PROGRESS_STATUSES,
+    build_video_review_progress,
+)
 
 
 @dataclass
@@ -559,6 +563,13 @@ async def run_smoke(
             )
         )
         results.append(check_latest_privacy_failure_codes(videos_list))
+        # PR C9.3: review-progress + browser-playable redacted output
+        results.append(check_review_progress_present(videos_list))
+        results.append(check_review_progress_not_stuck_when_analysis_completed(videos_list))
+        results.append(check_audio_disabled_copy_state(videos_list))
+        results.append(check_redacted_playback_validation_present(videos_list))
+        results.append(check_teacher_playback_uses_redacted(videos_list))
+        results.append(check_blur_all_fallback_enforced(videos_list))
 
         for r in results:
             summary["checks"].append(
@@ -813,6 +824,223 @@ def check_latest_privacy_failure_codes(
             else f"Latest failed video {latest.get('id')} has no structured codes."
         ),
         samples=[{"video_id": latest.get("id"), "codes": codes}],
+    )
+
+
+# ---------------------------------------------------------------------------
+# PR C9.3: review-progress + browser-playable redacted output checks
+# ---------------------------------------------------------------------------
+
+
+def _redacted_asset_present(video: Dict[str, Any]) -> bool:
+    return bool(
+        video.get("redacted_asset_state") == "stored"
+        or video.get("redacted_file_path")
+        or video.get("redacted_file_url")
+    )
+
+
+def check_review_progress_present(videos: List[Dict[str, Any]]) -> CheckResult:
+    """Every video must produce a review-progress object in the contract vocabulary."""
+    if not videos:
+        return CheckResult(
+            code="review_progress_present",
+            status="warn",
+            message="No videos in scope for this teacher.",
+        )
+    samples: List[Dict[str, Any]] = []
+    for video in videos:
+        try:
+            progress = build_video_review_progress(video)
+        except Exception as exc:  # pragma: no cover - defensive
+            samples.append({"video_id": video.get("id"), "error": str(exc)})
+            continue
+        if not progress or progress.get("status") not in REVIEW_PROGRESS_STATUSES:
+            samples.append(
+                {
+                    "video_id": video.get("id"),
+                    "status": progress.get("status") if progress else None,
+                }
+            )
+    if samples:
+        return CheckResult(
+            code="review_progress_present",
+            status="fail",
+            message=f"{len(samples)} video(s) cannot produce a valid review-progress object.",
+            samples=samples[:25],
+        )
+    return CheckResult(
+        code="review_progress_present",
+        status="ok",
+        message=f"All {len(videos)} video(s) produce a valid review-progress object.",
+    )
+
+
+def check_review_progress_not_stuck_when_analysis_completed(
+    videos: List[Dict[str, Any]],
+) -> CheckResult:
+    """Analysis-completed videos must never report a perpetual ``processing`` spinner."""
+    samples: List[Dict[str, Any]] = []
+    for video in videos:
+        if str(video.get("analysis_status") or "").strip().lower() != "completed":
+            continue
+        progress = build_video_review_progress(video)
+        if progress.get("status") == "processing":
+            samples.append({"video_id": video.get("id"), "status": progress.get("status")})
+    if samples:
+        return CheckResult(
+            code="review_progress_not_stuck_when_analysis_completed",
+            status="fail",
+            message=f"{len(samples)} analysis-completed video(s) still report a processing spinner.",
+            samples=samples[:25],
+        )
+    return CheckResult(
+        code="review_progress_not_stuck_when_analysis_completed",
+        status="ok",
+        message="No analysis-completed video is stuck on a processing spinner.",
+    )
+
+
+def check_audio_disabled_copy_state(videos: List[Dict[str, Any]]) -> CheckResult:
+    """Audio-disabled videos show a skipped audio stage and never promise audio review."""
+    samples: List[Dict[str, Any]] = []
+    for video in videos:
+        if video.get("audio_analysis_enabled"):
+            continue
+        progress = build_video_review_progress(video)
+        audio_stage = next(
+            (s for s in (progress.get("stages") or []) if s.get("key") == "audio"), None
+        )
+        audio_status = audio_stage.get("status") if audio_stage else None
+        teacher_msg = str(progress.get("teacher_message") or "").lower()
+        if audio_status not in {"skipped", "disabled"}:
+            samples.append(
+                {"video_id": video.get("id"), "audio_status": audio_status, "issue": "audio_not_skipped"}
+            )
+        elif "audio" in teacher_msg:
+            samples.append(
+                {"video_id": video.get("id"), "issue": "audio_promised_in_teacher_copy"}
+            )
+    if samples:
+        return CheckResult(
+            code="audio_disabled_copy_state",
+            status="fail",
+            message=f"{len(samples)} audio-disabled video(s) mislabel the audio stage or promise audio review.",
+            samples=samples[:25],
+        )
+    return CheckResult(
+        code="audio_disabled_copy_state",
+        status="ok",
+        message="Audio-disabled videos correctly show a skipped audio stage with no audio promise.",
+    )
+
+
+def check_redacted_playback_validation_present(
+    videos: List[Dict[str, Any]],
+) -> CheckResult:
+    """Privacy-completed videos with a redacted asset must carry a non-failed validation."""
+    missing: List[str] = []
+    failed: List[Dict[str, Any]] = []
+    for video in videos:
+        if str(video.get("privacy_status") or "").strip().lower() != "completed":
+            continue
+        if not _redacted_asset_present(video):
+            continue
+        validation = video.get("redacted_playback_validation") or {}
+        status = str(validation.get("status") or "").strip().lower()
+        if not validation:
+            missing.append(video.get("id"))
+        elif status == "failed":
+            failed.append(
+                {"video_id": video.get("id"), "failure_code": validation.get("failure_code")}
+            )
+    if failed:
+        return CheckResult(
+            code="redacted_playback_validation_present",
+            status="fail",
+            message=f"{len(failed)} redacted asset(s) failed browser-playback validation but privacy is completed.",
+            samples=failed[:25],
+        )
+    if missing:
+        return CheckResult(
+            code="redacted_playback_validation_present",
+            status="warn",
+            message=(
+                f"{len(missing)} legacy redacted asset(s) predate playback validation "
+                "and should be reprocessed before pilot."
+            ),
+            samples=[{"video_id": vid} for vid in missing[:25]],
+        )
+    return CheckResult(
+        code="redacted_playback_validation_present",
+        status="ok",
+        message="All completed redacted assets carry a passing playback validation.",
+    )
+
+
+def check_teacher_playback_uses_redacted(videos: List[Dict[str, Any]]) -> CheckResult:
+    """With destructive blur enabled, teacher playback must resolve to the redacted asset."""
+    samples: List[Dict[str, Any]] = []
+    for video in videos:
+        if str(video.get("privacy_status") or "").strip().lower() != "completed":
+            continue
+        destructive = video.get("destructive_blurring_enabled")
+        destructive_enabled = True if destructive is None else bool(destructive)
+        if not destructive_enabled:
+            continue
+        decision = select_playback_asset(video, "teacher", allow_raw_for_admin=False)
+        if decision.url and decision.source != "redacted":
+            samples.append({"video_id": video.get("id"), "source": decision.source})
+    if samples:
+        return CheckResult(
+            code="teacher_playback_uses_redacted",
+            status="fail",
+            message=f"{len(samples)} teacher playback URL(s) resolve to a non-redacted asset under destructive blur.",
+            samples=samples[:25],
+        )
+    return CheckResult(
+        code="teacher_playback_uses_redacted",
+        status="ok",
+        message="Teacher playback resolves only to redacted assets when destructive blur is enabled.",
+    )
+
+
+def check_blur_all_fallback_enforced(videos: List[Dict[str, Any]]) -> CheckResult:
+    """``blur_all`` manifests must preserve no face (the C9.3 PART 6 invariant)."""
+    samples: List[Dict[str, Any]] = []
+    for video in videos:
+        manifest = video.get("privacy_manifest") or {}
+        if str(manifest.get("fallback_mode") or "").strip().lower() != "blur_all":
+            continue
+        violations: List[str] = []
+        if manifest.get("teacher_track_id") is not None:
+            violations.append("teacher_track_id_not_null")
+        for track in manifest.get("tracks") or []:
+            if isinstance(track, dict) and str(track.get("decision") or "").strip().lower() != "blur":
+                violations.append(f"track_decision={track.get('decision')}")
+                break
+        render_stats = manifest.get("render_stats") or {}
+        detected = render_stats.get("faces_detected_total")
+        blurred = render_stats.get("faces_blurred_total")
+        if (
+            isinstance(detected, (int, float))
+            and isinstance(blurred, (int, float))
+            and blurred < detected
+        ):
+            violations.append(f"faces_blurred={blurred}<detected={detected}")
+        if violations:
+            samples.append({"video_id": video.get("id"), "violations": violations})
+    if samples:
+        return CheckResult(
+            code="blur_all_fallback_enforced",
+            status="fail",
+            message=f"{len(samples)} blur_all manifest(s) preserved a face — invariant violated.",
+            samples=samples[:25],
+        )
+    return CheckResult(
+        code="blur_all_fallback_enforced",
+        status="ok",
+        message="All blur_all manifests blurred every face (no preserved adult).",
     )
 
 

@@ -10,6 +10,13 @@ import { VideoCommentThread } from "@/components/VideoCommentThread";
 import { VideoTimelineMarkers } from "@/components/VideoTimelineMarkers";
 import { TalkTimeChart } from "@/components/TalkTimeChart";
 import { AudioTimeline } from "@/components/AudioTimeline";
+import { VideoReviewProgress } from "@/components/VideoReviewProgress";
+import {
+  extractReviewProgress,
+  getAudioStageStatus,
+  resolvePlaybackUrl,
+  reviewPollingInterval,
+} from "@/lib/reviewProgress";
 import { useAuth } from "@/hooks/useAuth";
 import { toast } from "sonner";
 import { Badge, Button, EmptyState, Field, PageContextHeader, Panel, Textarea } from "@/components/ui";
@@ -206,7 +213,11 @@ export function VideoPlayerPage() {
     queryKey: ["video-status", videoId],
     enabled: Boolean(videoId),
     queryFn: () => videoApi.status(videoId).then((r) => r.data),
-    refetchInterval: 5000,
+    // PR C9.3 PART 2: keep polling while the review is genuinely in flight, but
+    // stop once it reaches a terminal/blocked state so a completed (or
+    // vision-only degraded) review never spins forever. Live changes still
+    // arrive over the WebSocket below.
+    refetchInterval: (query) => reviewPollingInterval(query.state.data, 5000),
   });
 
   useEffect(() => {
@@ -666,12 +677,37 @@ export function VideoPlayerPage() {
         ? "warning"
         : "neutral";
 
-  const videoUrl =
-    privacyStatus === "completed" && videoRes?.playback_url
-      ? (videoRes.playback_url.startsWith("http")
-          ? videoRes.playback_url
-          : `${runtimeConfig.backendUrl}${videoRes.playback_url}`)
-      : null;
+  // PR C9.3: deterministic review progress + teacher-safe playback gating.
+  const reviewProgress = extractReviewProgress(statusRes, videoRes);
+  const audioStageStatus = getAudioStageStatus(reviewProgress);
+  // Prefer the fresher status-endpoint playback object; fall back to detail.
+  const playbackState = statusRes?.playback || videoRes?.playback || null;
+  // Admins keep the legacy resolver (can surface processed/raw with privilege);
+  // every non-admin viewer only ever gets the redacted, validation-passed URL.
+  const videoUrl = resolvePlaybackUrl({
+    isAdmin,
+    playback: playbackState,
+    privacyStatus,
+    legacyPlaybackUrl: videoRes?.playback_url,
+    backendUrl: runtimeConfig.backendUrl,
+  });
+  // Teacher-safe explanation when no playable URL is available yet (only used
+  // for non-admins, who rely on the strict playback object).
+  const playbackUnavailableMessage = (() => {
+    if (videoUrl || isAdmin) return null;
+    switch (playbackState?.status) {
+      case "privacy_incomplete":
+        return "Your video is being processed to protect privacy. It will be available to watch once that finishes.";
+      case "validation_failed":
+        return "We couldn't prepare a playable version of this video. Our team has been notified and will retry it.";
+      case "validation_pending":
+        return "We're finalizing a playable version of this video. Please check back shortly.";
+      case "no_redacted_asset":
+        return "A privacy-safe version of this video isn't ready to watch yet.";
+      default:
+        return null;
+    }
+  })();
   const thumbnailUrl =
     videoRes?.thumbnail_url &&
     (videoRes.thumbnail_url.startsWith("http")
@@ -757,6 +793,13 @@ export function VideoPlayerPage() {
             <span className="text-[11px] text-rose-600">{statusRes.error_message}</span>
           )}
         </div>
+        {reviewProgress ? (
+          <VideoReviewProgress
+            progress={reviewProgress}
+            isAdmin={isAdmin}
+            className="mb-4"
+          />
+        ) : null}
         {observationSessionRes?.focus_elements?.length || observationSessionRes?.focus_note ? (
           <div className="mb-4 rounded-md border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-950">
             {observationSessionRes?.focus_elements?.length ? (
@@ -853,9 +896,13 @@ export function VideoPlayerPage() {
                       : t("videoPlayer.videoUnavailable")
                   }
                   message={
-                    videoStatus === "queued" || videoStatus === "processing"
+                    // PR C9.3 PART 5: prefer the precise teacher-safe playback
+                    // explanation (privacy incomplete / validation pending /
+                    // validation failed) over the generic copy.
+                    playbackUnavailableMessage ||
+                    (videoStatus === "queued" || videoStatus === "processing"
                       ? t("videoPlayer.videoProcessingMessage")
-                      : t("videoPlayer.videoUnavailableMessage")
+                      : t("videoPlayer.videoUnavailableMessage"))
                   }
                 />
               )}
@@ -1381,7 +1428,11 @@ export function VideoPlayerPage() {
                 ))}
               </div>
               {audioTab === "talk" ? (
-                <TalkTimeChart analysis={audioAnalysisRes} isTeacherView={isTeacher} />
+                <TalkTimeChart
+                  analysis={audioAnalysisRes}
+                  isTeacherView={isTeacher}
+                  audioStageStatus={audioStageStatus}
+                />
               ) : null}
               {audioTab === "timeline" ? (
                 <AudioTimeline
@@ -1414,7 +1465,11 @@ export function VideoPlayerPage() {
                     ))
                   ) : (
                     <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-500">
-                      Transcript will appear here when audio review is available.
+                      {audioStageStatus === "skipped" || audioStageStatus === "disabled"
+                        ? "Audio analysis was not run for this review."
+                        : audioStageStatus === "failed"
+                          ? "Audio analysis could not be completed for this review."
+                          : "Transcript will appear here when audio review is available."}
                     </div>
                   )}
                 </div>
