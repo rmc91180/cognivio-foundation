@@ -159,6 +159,59 @@ def _load_face_cascade():
     return cascade
 
 
+def _load_profile_cascade():
+    """Load the side-profile Haar cascade, or ``None`` when unavailable.
+
+    PR C9.4 PART 2 — the frontal cascade misses faces turned to the side. For
+    the blur-all render we additionally sweep with the profile cascade (and a
+    horizontally-flipped pass) so more candidate faces are caught and blurred.
+    Returns ``None`` rather than raising so the render degrades to frontal-only
+    instead of failing outright.
+    """
+    cv2 = _require_cv2()
+    cascade_path = Path(cv2.data.haarcascades) / "haarcascade_profileface.xml"
+    cascade = cv2.CascadeClassifier(str(cascade_path))
+    if cascade.empty():
+        return None
+    return cascade
+
+
+def _detect_profile_faces(frame: np.ndarray, profile_cascade: Any) -> List[Tuple[int, int, int, int]]:
+    """Detect side-profile faces in both orientations (left- and right-facing)."""
+    if profile_cascade is None or frame is None:
+        return []
+    cv2 = _require_cv2()
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    boxes: List[Tuple[int, int, int, int]] = []
+    detected = profile_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(36, 36))
+    for box in detected:
+        boxes.append(tuple(int(v) for v in box))
+    # The profile cascade is trained on one orientation; flip to catch the other.
+    flipped = cv2.flip(gray, 1)
+    width = gray.shape[1]
+    detected_flipped = profile_cascade.detectMultiScale(flipped, scaleFactor=1.1, minNeighbors=4, minSize=(36, 36))
+    for box in detected_flipped:
+        fx, fy, fw, fh = (int(v) for v in box)
+        # Map the flipped x back to original-image coordinates.
+        boxes.append((width - fx - fw, fy, fw, fh))
+    return boxes
+
+
+def _merge_boxes(
+    boxes: List[Tuple[int, int, int, int]],
+    iou_threshold: float = 0.3,
+) -> List[Tuple[int, int, int, int]]:
+    """Deduplicate overlapping boxes so a face is counted/blurred once."""
+    merged: List[Tuple[int, int, int, int]] = []
+    for box in boxes:
+        if box[2] <= 0 or box[3] <= 0:
+            continue
+        if any(_bbox_iou(box, kept) >= iou_threshold for kept in merged):
+            continue
+        merged.append(box)
+    return merged
+
+
 def _safe_crop(frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
     x, y, w, h = bbox
     if w <= 0 or h <= 0:
@@ -252,7 +305,18 @@ def _bbox_iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> flo
     return intersection / union if union else 0.0
 
 
-def blur_region(frame: np.ndarray, bbox: Tuple[int, int, int, int], padding: float = 0.18) -> None:
+def blur_region(frame: np.ndarray, bbox: Tuple[int, int, int, int], padding: float = 0.30) -> None:
+    """Destructively redact a face region.
+
+    PR C9.4 PART 2 — the previous single GaussianBlur could leave a region with
+    enough residual high-frequency detail to remain recognizable (and detectable
+    by the post-render visual-redaction validator). We now (a) pad more
+    generously so the whole head/edges are covered, (b) PIXELATE the region by
+    down-then-up sampling — which collapses facial structure regardless of blur
+    kernel math — and (c) follow with a heavy GaussianBlur. The combination
+    drives the region's variance-of-Laplacian far below the validator's
+    sharpness threshold and makes the face non-recoverable.
+    """
     cv2 = _require_cv2()
     height, width = frame.shape[:2]
     x, y, w, h = bbox
@@ -265,10 +329,17 @@ def blur_region(frame: np.ndarray, bbox: Tuple[int, int, int, int], padding: flo
     roi = frame[y1:y2, x1:x2]
     if roi.size == 0:
         return
-    blur_size = max(21, int(max(w, h) * 0.35))
+    roi_h, roi_w = roi.shape[:2]
+    # 1) Pixelate: downsample to a tiny mosaic then nearest-neighbour upscale.
+    mosaic_w = max(1, roi_w // 12)
+    mosaic_h = max(1, roi_h // 12)
+    small = cv2.resize(roi, (mosaic_w, mosaic_h), interpolation=cv2.INTER_LINEAR)
+    pixelated = cv2.resize(small, (roi_w, roi_h), interpolation=cv2.INTER_NEAREST)
+    # 2) Heavy GaussianBlur on top to remove mosaic edges (also high-frequency).
+    blur_size = max(31, int(max(w, h) * 0.6))
     if blur_size % 2 == 0:
         blur_size += 1
-    frame[y1:y2, x1:x2] = cv2.GaussianBlur(roi, (blur_size, blur_size), 0)
+    frame[y1:y2, x1:x2] = cv2.GaussianBlur(pixelated, (blur_size, blur_size), 0)
 
 
 def analyze_video_privacy(
@@ -445,6 +516,7 @@ def render_redacted_video(
         raise RuntimeError("Teacher privacy profile has no usable face references")
 
     cascade = _load_face_cascade()
+    profile_cascade = _load_profile_cascade()
     cap = cv2.VideoCapture(source_video_path)
     if not cap or not cap.isOpened():
         raise RuntimeError("Unable to open video for redaction rendering")
@@ -467,6 +539,11 @@ def render_redacted_video(
     thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
 
     previous_teacher_bbox: Optional[Tuple[int, int, int, int]] = None
+    # PR C9.4 PART 2 — temporal blur persistence for the blur_all path: a face
+    # that flickers out of detection for a frame or two still gets blurred,
+    # closing a window where a recognizable face would otherwise flash through.
+    temporal_blur_ttl = 6
+    persisted_blur_boxes: List[Tuple[Tuple[int, int, int, int], int]] = []
     frame_index = 0
     frames_processed = 0
     frames_with_teacher_visible = 0
@@ -479,37 +556,65 @@ def render_redacted_video(
             ret, frame = cap.read()
             if not ret:
                 break
-            detections = detect_faces(frame, cascade)
-            faces_detected_total += len(detections)
-            best_face: Optional[Tuple[int, int, int, int]] = None
-            best_score = -1.0
-            scored_faces: List[Tuple[Tuple[int, int, int, int], float]] = []
-            for bbox in detections:
-                crop = _safe_crop(frame, bbox)
-                signature = build_face_signature(crop) if crop is not None else None
-                score = signature_similarity(signature, references) if signature is not None else 0.0
-                if previous_teacher_bbox is not None and _bbox_iou(previous_teacher_bbox, bbox) >= 0.2:
-                    score = max(score, ambiguous_match_threshold)
-                scored_faces.append((bbox, score))
-                if score > best_score:
-                    best_face = bbox
-                    best_score = score
+            # Combine the frontal cascade (patchable ``detect_faces``) with the
+            # side-profile sweep so faces the frontal detector misses are still
+            # caught and blurred.
+            frontal = detect_faces(frame, cascade)
+            profile = _detect_profile_faces(frame, profile_cascade)
+            detections = _merge_boxes(list(frontal) + list(profile))
 
-            teacher_visible_this_frame = False
-            if not force_blur_all and best_face is not None and best_score >= teacher_match_threshold:
-                teacher_visible_this_frame = True
-                previous_teacher_bbox = best_face
-            else:
-                previous_teacher_bbox = None
-
-            for bbox, score in scored_faces:
-                should_keep = teacher_visible_this_frame and best_face == bbox and score >= ambiguous_match_threshold
-                if not should_keep:
+            if force_blur_all:
+                # Blur the union of this frame's detections and recently-seen
+                # boxes. Count == blur so the blur_all invariant
+                # (faces_blurred_total == faces_detected_total) is preserved.
+                candidate_boxes = list(detections)
+                for box, _ttl in persisted_blur_boxes:
+                    candidate_boxes.append(box)
+                regions_to_blur = _merge_boxes(candidate_boxes)
+                for bbox in regions_to_blur:
                     blur_region(frame, bbox)
-                    faces_blurred_total += 1
+                faces_detected_total += len(regions_to_blur)
+                faces_blurred_total += len(regions_to_blur)
+                previous_teacher_bbox = None
+                # Age out old persisted boxes; refresh current detections.
+                refreshed: List[Tuple[Tuple[int, int, int, int], int]] = []
+                for box, ttl in persisted_blur_boxes:
+                    if ttl - 1 > 0 and not any(_bbox_iou(box, det) >= 0.3 for det in detections):
+                        refreshed.append((box, ttl - 1))
+                for det in detections:
+                    refreshed.append((det, temporal_blur_ttl))
+                persisted_blur_boxes = refreshed
+            else:
+                faces_detected_total += len(detections)
+                best_face: Optional[Tuple[int, int, int, int]] = None
+                best_score = -1.0
+                scored_faces: List[Tuple[Tuple[int, int, int, int], float]] = []
+                for bbox in detections:
+                    crop = _safe_crop(frame, bbox)
+                    signature = build_face_signature(crop) if crop is not None else None
+                    score = signature_similarity(signature, references) if signature is not None else 0.0
+                    if previous_teacher_bbox is not None and _bbox_iou(previous_teacher_bbox, bbox) >= 0.2:
+                        score = max(score, ambiguous_match_threshold)
+                    scored_faces.append((bbox, score))
+                    if score > best_score:
+                        best_face = bbox
+                        best_score = score
 
-            if teacher_visible_this_frame:
-                frames_with_teacher_visible += 1
+                teacher_visible_this_frame = False
+                if best_face is not None and best_score >= teacher_match_threshold:
+                    teacher_visible_this_frame = True
+                    previous_teacher_bbox = best_face
+                else:
+                    previous_teacher_bbox = None
+
+                for bbox, score in scored_faces:
+                    should_keep = teacher_visible_this_frame and best_face == bbox and score >= ambiguous_match_threshold
+                    if not should_keep:
+                        blur_region(frame, bbox)
+                        faces_blurred_total += 1
+
+                if teacher_visible_this_frame:
+                    frames_with_teacher_visible += 1
 
             if not thumbnail_written and frame_index >= max(1, int(fps)):
                 cv2.imwrite(str(thumbnail_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 80])

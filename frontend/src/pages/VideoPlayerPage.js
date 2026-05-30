@@ -12,6 +12,7 @@ import { TalkTimeChart } from "@/components/TalkTimeChart";
 import { AudioTimeline } from "@/components/AudioTimeline";
 import { VideoReviewProgress } from "@/components/VideoReviewProgress";
 import {
+  buildBackendWebSocketUrl,
   extractReviewProgress,
   getAudioStageStatus,
   resolvePlaybackUrl,
@@ -28,6 +29,7 @@ import {
   artifactActionItems,
   artifactDeepDive,
   artifactLatestSummary,
+  feedbackViewMessage,
   isArtifactAllowed,
   isArtifactBlocked,
   readArtifact,
@@ -232,9 +234,12 @@ export function VideoPlayerPage() {
   useEffect(() => {
     const token = localStorage.getItem("cognivio_token");
     if (!videoId || !token || !runtimeConfig.backendUrl) return;
-    const base = runtimeConfig.backendUrl;
-    const wsBase = base.replace("https://", "wss://").replace("http://", "ws://");
-    const ws = new WebSocket(`${wsBase}/ws/videos/${videoId}?token=${token}`);
+    const wsUrl = buildBackendWebSocketUrl({
+      backendUrl: runtimeConfig.backendUrl,
+      path: `ws/videos/${videoId}?token=${token}`,
+    });
+    if (!wsUrl) return;
+    const ws = new WebSocket(wsUrl);
     setWsConnected(true);
 
     ws.onmessage = (event) => {
@@ -636,7 +641,8 @@ export function VideoPlayerPage() {
       : teacherFeedback?.action_items || [];
   const visibleSummary = isTeacher
     ? teacherArtifactBlocked
-      ? (teacherArtifact?.empty_state?.message
+      ? (feedbackViewMessage(teacherArtifact)?.detail
+          || teacherArtifact?.empty_state?.message
           || t("videoPlayer.noSummaryAvailable"))
       : teacherArtifactAllowed
         ? [teacherSummary.opening, teacherSummary.strength, teacherSummary.growth_focus, teacherSummary.next_step].filter(Boolean).join(" ")
@@ -1641,11 +1647,16 @@ export function VideoPlayerPage() {
                   className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-xs text-amber-900"
                   data-testid="teacher-artifact-blocked-state"
                 >
-                  {teacherArtifact?.empty_state?.title ? (
-                    <div className="font-semibold">{teacherArtifact.empty_state.title}</div>
+                  {feedbackViewMessage(teacherArtifact)?.headline
+                    || teacherArtifact?.empty_state?.title ? (
+                    <div className="font-semibold">
+                      {feedbackViewMessage(teacherArtifact)?.headline
+                        || teacherArtifact?.empty_state?.title}
+                    </div>
                   ) : null}
                   <div className="mt-1">
-                    {teacherArtifact?.empty_state?.message
+                    {feedbackViewMessage(teacherArtifact)?.detail
+                      || teacherArtifact?.empty_state?.message
                       || "This lesson's feedback isn't ready yet."}
                   </div>
                 </div>

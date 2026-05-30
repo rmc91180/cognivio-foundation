@@ -69,6 +69,7 @@ from app.services.lesson_moment_quality import (  # noqa: E402
 from app.services.teacher_lesson_coaching_artifact import (  # noqa: E402
     TEACHER_LESSON_COACHING_ARTIFACT_VERSION,
     build_teacher_lesson_coaching_artifact,
+    get_teacher_visible_lesson_feedback,
 )
 from app.services.storage_urls import (  # noqa: E402
     describe_storage_url_issue,
@@ -365,6 +366,70 @@ def check_admin_review_consistency(
     )
 
 
+def check_teacher_feedback_view_consistency(
+    artifact: Dict[str, Any],
+    assessment: Dict[str, Any],
+) -> CheckResult:
+    """PR C9.4 PART 4: the canonical teacher feedback view must be coherent.
+
+    ``get_teacher_visible_lesson_feedback`` reconciles the safety gate with the
+    release gate. This check confirms:
+
+    - a blocked / withheld view always carries SPECIFIC headline + detail copy
+      (so cards never fall back to the generic "no action needed" placeholder);
+    - the safety gate wins over the release flag — if the assessment is
+      ``released`` but the artifact still blocks teacher feedback, the view must
+      report ``feedback_available=False`` (warn: teacher sees a withheld state
+      despite release);
+    - an allowed + released artifact yields ``feedback_available=True``.
+    """
+    view = get_teacher_visible_lesson_feedback(
+        artifact,
+        feedback_release_status=assessment.get("feedback_release_status"),
+        language=assessment.get("analysis_language") or "en",
+    )
+    if not view.get("feedback_available"):
+        if not (view.get("headline") and view.get("detail")):
+            return CheckResult(
+                code="teacher_feedback_view_consistency",
+                status="fail",
+                message=(
+                    "Withheld teacher feedback view is missing specific headline/detail copy"
+                    f" (status={view.get('status')}) — card would show a generic placeholder."
+                ),
+                samples=[{"status": view.get("status"), "headline": view.get("headline")}],
+            )
+        release = str(assessment.get("feedback_release_status") or "").strip().lower()
+        if release == "released" and not artifact.get("teacher_feedback_allowed"):
+            return CheckResult(
+                code="teacher_feedback_view_consistency",
+                status="warn",
+                message=(
+                    "Assessment is released but the safety gate still blocks teacher feedback;"
+                    f" view correctly withholds (status={view.get('status')})."
+                ),
+                samples=[{"status": view.get("status"), "blocked_reason": artifact.get("blocked_reason")}],
+            )
+        return CheckResult(
+            code="teacher_feedback_view_consistency",
+            status="ok",
+            message=f"Withheld feedback view carries specific copy (status={view.get('status')}).",
+        )
+    # feedback_available True — must be allowed AND not release-blocked.
+    if not artifact.get("teacher_feedback_allowed"):
+        return CheckResult(
+            code="teacher_feedback_view_consistency",
+            status="fail",
+            message="Feedback view reports feedback_available=True while the artifact blocks teacher feedback.",
+            samples=[{"status": view.get("status"), "blocked_reason": artifact.get("blocked_reason")}],
+        )
+    return CheckResult(
+        code="teacher_feedback_view_consistency",
+        status="ok",
+        message=f"Teacher feedback view is available and coherent (status={view.get('status')}).",
+    )
+
+
 async def run_smoke(
     *,
     teacher_id: Optional[str],
@@ -503,6 +568,7 @@ async def run_smoke(
             results.append(check_source_and_quality_present(artifact, target_assessment))
             results.append(check_recognition_separation(artifact))
             results.append(check_admin_review_consistency(artifact, admin_review))
+            results.append(check_teacher_feedback_view_consistency(artifact, target_assessment))
         else:
             results.append(
                 CheckResult(
@@ -570,6 +636,8 @@ async def run_smoke(
         results.append(check_redacted_playback_validation_present(videos_list))
         results.append(check_teacher_playback_uses_redacted(videos_list))
         results.append(check_blur_all_fallback_enforced(videos_list))
+        # PR C9.4: rendered redacted output confirmed blurred
+        results.append(check_visual_redaction_validation_present(videos_list))
 
         for r in results:
             summary["checks"].append(
@@ -1002,6 +1070,65 @@ def check_teacher_playback_uses_redacted(videos: List[Dict[str, Any]]) -> CheckR
         code="teacher_playback_uses_redacted",
         status="ok",
         message="Teacher playback resolves only to redacted assets when destructive blur is enabled.",
+    )
+
+
+def check_visual_redaction_validation_present(
+    videos: List[Dict[str, Any]],
+) -> CheckResult:
+    """PR C9.4: privacy-completed redacted assets must be confirmed blurred.
+
+    The rendered output's pixels are re-scanned by the visual-redaction
+    validator. ``status == "passed"`` is the only safe state. A ``failed``
+    re-scan that left privacy ``completed`` is a hard block; a missing or
+    ``skipped_unavailable`` record means redaction was never confirmed
+    (fail-closed) and the asset should be reprocessed before pilot.
+    """
+    failed: List[Dict[str, Any]] = []
+    inconclusive: List[Dict[str, Any]] = []
+    missing: List[str] = []
+    for video in videos:
+        if str(video.get("privacy_status") or "").strip().lower() != "completed":
+            continue
+        if not _redacted_asset_present(video):
+            continue
+        record = video.get("visual_redaction_validation")
+        record = record if isinstance(record, dict) else None
+        status = str((record or {}).get("status") or "").strip().lower()
+        if not record:
+            missing.append(video.get("id"))
+        elif status == "failed":
+            failed.append(
+                {"video_id": video.get("id"), "failure_code": record.get("failure_code")}
+            )
+        elif status == "skipped_unavailable":
+            inconclusive.append(
+                {"video_id": video.get("id"), "failure_code": record.get("failure_code")}
+            )
+    if failed:
+        return CheckResult(
+            code="visual_redaction_validation_present",
+            status="fail",
+            message=(
+                f"{len(failed)} redacted asset(s) failed visual-redaction validation "
+                "but privacy is completed — a face may be visible."
+            ),
+            samples=failed[:25],
+        )
+    if missing or inconclusive:
+        return CheckResult(
+            code="visual_redaction_validation_present",
+            status="warn",
+            message=(
+                f"{len(missing)} redacted asset(s) predate visual-redaction validation and "
+                f"{len(inconclusive)} could not be verified — reprocess before pilot."
+            ),
+            samples=([{"video_id": vid} for vid in missing[:15]] + inconclusive[:10]),
+        )
+    return CheckResult(
+        code="visual_redaction_validation_present",
+        status="ok",
+        message="All completed redacted assets passed visual-redaction validation.",
     )
 
 

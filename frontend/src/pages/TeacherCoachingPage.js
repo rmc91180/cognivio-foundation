@@ -11,6 +11,7 @@ import {
   artifactMomentCtaLabel,
   artifactNextBestAction,
   artifactReflectionPrompts,
+  feedbackViewMessage,
   isArtifactAllowed,
   isArtifactBlocked,
   readArtifact,
@@ -75,6 +76,10 @@ export function TeacherCoachingPage() {
   const artifact = readArtifact(data);
   const artifactAllowed = isArtifactAllowed(artifact);
   const artifactBlocked = isArtifactBlocked(artifact);
+  // PR C9.4 PART 4: prefer the specific teacher-safe feedback-view copy over the
+  // generic "isn't ready yet" placeholder so a withheld/awaiting-release review
+  // explains itself.
+  const feedbackView = feedbackViewMessage(artifact);
   const legacyTasks = data.active_tasks || [];
   const legacyRecommendations = data.recommendations || [];
   const legacyImprovements = data.suggested_improvements || [];
@@ -216,8 +221,9 @@ export function TeacherCoachingPage() {
                 <SectionHeader title="What you’re working on" description="Choose one goal and keep the next step small enough to try in your next lesson." />
                 {artifactBlocked ? (
                   <EmptyState
-                    title={artifact?.empty_state?.title || "This lesson’s feedback isn’t ready yet."}
-                    message={artifact?.empty_state?.message || "Once a complete review is ready, you’ll see specific coaching moments and next steps here."}
+                    data-testid="teacher-coaching-feedback-blocked"
+                    title={feedbackView?.headline || artifact?.empty_state?.title || "This lesson’s feedback isn’t ready yet."}
+                    message={feedbackView?.detail || artifact?.empty_state?.message || "Once a complete review is ready, you’ll see specific coaching moments and next steps here."}
                   />
                 ) : tasks.length ? (
                   <div className="space-y-3">

@@ -20,6 +20,7 @@ import {
   resolveTeacherPlaybackUrl,
   resolveAdminPlaybackUrl,
   resolvePlaybackUrl,
+  buildBackendWebSocketUrl,
 } from "@/lib/reviewProgress";
 
 describe("isReviewTerminal / reviewPollingInterval", () => {
@@ -192,5 +193,50 @@ describe("resolvePlaybackUrl (single decision point)", () => {
         backendUrl,
       })
     ).toBe("https://api/uploads/redacted/x.mp4");
+  });
+});
+
+describe("buildBackendWebSocketUrl (PR C9.4 PART 5 — double-slash fix)", () => {
+  it("collapses the seam when the origin ends with a trailing slash", () => {
+    const url = buildBackendWebSocketUrl({
+      backendUrl: "https://cognivio.up.railway.app/",
+      path: "/ws/videos/123",
+    });
+    expect(url).toBe("wss://cognivio.up.railway.app/ws/videos/123");
+    expect(url).not.toContain("//ws");
+  });
+
+  it("works when the origin has no trailing slash", () => {
+    expect(
+      buildBackendWebSocketUrl({ backendUrl: "https://cognivio.up.railway.app", path: "/ws/videos/123" })
+    ).toBe("wss://cognivio.up.railway.app/ws/videos/123");
+  });
+
+  it("tolerates a path with no leading slash", () => {
+    expect(
+      buildBackendWebSocketUrl({ backendUrl: "https://cognivio.up.railway.app", path: "ws/videos/123" })
+    ).toBe("wss://cognivio.up.railway.app/ws/videos/123");
+  });
+
+  it("downgrades http origins to the ws scheme", () => {
+    expect(
+      buildBackendWebSocketUrl({ backendUrl: "http://localhost:8000/", path: "/ws/videos/abc" })
+    ).toBe("ws://localhost:8000/ws/videos/abc");
+  });
+
+  it("collapses multiple trailing slashes to a single seam", () => {
+    const url = buildBackendWebSocketUrl({
+      backendUrl: "https://cognivio.up.railway.app///",
+      path: "/ws/videos/9",
+    });
+    expect(url).toBe("wss://cognivio.up.railway.app/ws/videos/9");
+    // Only the scheme keeps a double slash; the host->path seam must be single.
+    expect(url.match(/\/\//g)).toHaveLength(1);
+  });
+
+  it("returns null for a missing or invalid base", () => {
+    expect(buildBackendWebSocketUrl({ backendUrl: "", path: "/ws" })).toBeNull();
+    expect(buildBackendWebSocketUrl({})).toBeNull();
+    expect(buildBackendWebSocketUrl()).toBeNull();
   });
 });

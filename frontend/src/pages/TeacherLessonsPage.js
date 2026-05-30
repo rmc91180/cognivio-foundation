@@ -7,6 +7,7 @@ import { teacherApi } from "@/lib/api";
 import {
   artifactLessonStatus,
   artifactSummaryText,
+  feedbackViewMessage,
   isArtifactBlocked,
   readArtifact,
 } from "@/lib/teacherCoachingArtifact";
@@ -134,7 +135,8 @@ export function TeacherLessonsPage() {
                         <p className="mt-4 text-sm leading-6 text-slate-700">{displaySummary}</p>
                       ) : blocked ? (
                         <p className="mt-4 text-sm leading-6 text-slate-600">
-                          {artifact?.empty_state?.message
+                          {feedbackViewMessage(artifact)?.detail
+                            || artifact?.empty_state?.message
                             || "Feedback will appear after a complete review is ready."}
                         </p>
                       ) : (

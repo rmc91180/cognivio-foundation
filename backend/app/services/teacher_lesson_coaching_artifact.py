@@ -43,7 +43,7 @@ Design notes
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from app.analysis.teacher_feedback_projection import (
     build_teacher_coaching_intelligence,
@@ -1794,6 +1794,220 @@ def build_teacher_lesson_coaching_artifact(
         )
 
     return artifact
+
+
+# ---------------------------------------------------------------------------
+# PR C9.4 PART 4 — canonical teacher-visible feedback selector
+# ---------------------------------------------------------------------------
+
+# The single decision point teachers' lesson / dashboard cards consume. It
+# reconciles TWO signals that previously disagreed:
+#   1. the artifact safety gates (``teacher_feedback_allowed`` / ``blocked_reason``)
+#   2. the assessment's ``feedback_release_status`` (released / blocked)
+# and maps the combination to a SPECIFIC, teacher-safe reason — never the
+# generic "No action needed right now." copy that left teachers unsure whether a
+# completed review had actually produced (or withheld) feedback.
+
+TEACHER_FEEDBACK_VIEW_STATUSES: Tuple[str, ...] = (
+    "ready",
+    "awaiting_admin_release",
+    "admin_hidden",
+    "revision_requested",
+    "evidence_insufficient",
+    "source_unavailable",
+    "safety_withheld",
+    "not_yet_reviewed",
+    "processing",
+)
+
+# Map an artifact ``blocked_reason`` to a feedback-view status.
+_BLOCKED_REASON_TO_VIEW_STATUS: Dict[str, str] = {
+    "no_reviewed_lesson": "not_yet_reviewed",
+    "admin_hidden": "admin_hidden",
+    "revision_requested": "revision_requested",
+    "source_invalid": "source_unavailable",
+    "evidence_insufficient": "evidence_insufficient",
+    "unsafe_text": "safety_withheld",
+    "unsafe_text_post_compose": "safety_withheld",
+}
+
+
+def _teacher_feedback_view_copy(status: str, language: Optional[str]) -> Dict[str, str]:
+    """Specific, teacher-safe headline + detail for each feedback-view status."""
+    is_he = (language or "en").lower().startswith("he")
+    en = {
+        "ready": {
+            "headline": "Your coaching feedback is ready.",
+            "detail": "Open your lesson to see what worked and your next coaching move.",
+        },
+        "awaiting_admin_release": {
+            "headline": "Your feedback is ready and awaiting release.",
+            "detail": "An administrator is doing a final check before sharing this lesson's coaching with you.",
+        },
+        "admin_hidden": {
+            "headline": "An administrator paused this lesson's feedback.",
+            "detail": "Your reviewer chose to hold this lesson's coaching for now. You'll be notified if it's shared.",
+        },
+        "revision_requested": {
+            "headline": "Your reviewer is refining this feedback.",
+            "detail": "An administrator asked for a revision before this lesson's coaching is shared with you.",
+        },
+        "evidence_insufficient": {
+            "headline": "This recording didn't capture enough to coach on.",
+            "detail": "We couldn't see enough clear classroom activity in this lesson to give reliable coaching feedback.",
+        },
+        "source_unavailable": {
+            "headline": "We couldn't match feedback to this recording.",
+            "detail": "This lesson's feedback couldn't be tied to its recording, so it isn't being shown.",
+        },
+        "safety_withheld": {
+            "headline": "This feedback is getting a final quality check.",
+            "detail": "Your coaching summary is being re-checked for quality before it's shared with you.",
+        },
+        "not_yet_reviewed": {
+            "headline": "This lesson hasn't been reviewed yet.",
+            "detail": "Once a complete review finishes, your coaching summary and next steps will appear here.",
+        },
+        "processing": {
+            "headline": "This lesson's review is still in progress.",
+            "detail": "Your coaching summary will appear here as soon as the review finishes.",
+        },
+    }
+    he = {
+        "ready": {
+            "headline": "המשוב שלך מוכן.",
+            "detail": "פתחו את השיעור כדי לראות מה עבד ומה הצעד הבא שלכם.",
+        },
+        "awaiting_admin_release": {
+            "headline": "המשוב שלך מוכן וממתין לשחרור.",
+            "detail": "מנהל עורך בדיקה אחרונה לפני שיתוף ההערות לשיעור הזה.",
+        },
+        "admin_hidden": {
+            "headline": "מנהל השהה את ההערות לשיעור הזה.",
+            "detail": "המנהל בחר להחזיק את ההערות לעת עתה. תקבלו עדכון אם הן ישותפו.",
+        },
+        "revision_requested": {
+            "headline": "המנהל משפר את המשוב הזה.",
+            "detail": "מנהל ביקש עדכון לפני שההערות לשיעור הזה ישותפו איתך.",
+        },
+        "evidence_insufficient": {
+            "headline": "ההקלטה לא תיעדה מספיק כדי לתת משוב.",
+            "detail": "לא ראינו מספיק פעילות כיתתית ברורה בשיעור הזה כדי לתת משוב אמין.",
+        },
+        "source_unavailable": {
+            "headline": "לא הצלחנו לקשר את המשוב להקלטה.",
+            "detail": "לא ניתן היה לקשר את ההערות לשיעור הזה להקלטה שלו, ולכן הן לא מוצגות.",
+        },
+        "safety_withheld": {
+            "headline": "המשוב עובר בדיקת איכות אחרונה.",
+            "detail": "הסיכום נבדק שוב לאיכות לפני שיתוף איתך.",
+        },
+        "not_yet_reviewed": {
+            "headline": "השיעור הזה עדיין לא נבדק.",
+            "detail": "כשבדיקה מלאה תסתיים, הסיכום והצעדים הבאים יופיעו כאן.",
+        },
+        "processing": {
+            "headline": "הבדיקה של השיעור הזה עדיין מתבצעת.",
+            "detail": "הסיכום יופיע כאן ברגע שהבדיקה תסתיים.",
+        },
+    }
+    table = he if is_he else en
+    return dict(table.get(status, table["processing"]))
+
+
+def _normalize_feedback_release_status(value: Any) -> Optional[str]:
+    text = str(value or "").strip().lower()
+    if text in {"released", "blocked"}:
+        return text
+    return None
+
+
+def get_teacher_visible_lesson_feedback(
+    artifact: Optional[Mapping[str, Any]],
+    *,
+    feedback_release_status: Any = None,
+    language: Optional[str] = "en",
+) -> Dict[str, Any]:
+    """Resolve what a teacher may actually see for one reviewed lesson.
+
+    This is the canonical projection that lesson/dashboard cards render. It
+    returns ``feedback_available`` (whether populated coaching is shown) plus a
+    SPECIFIC ``status`` / ``headline`` / ``detail`` for every blocked state, so a
+    completed-but-withheld review never shows generic "no action needed" copy.
+
+    Decision order:
+
+    1. Artifact safety gate. If ``teacher_feedback_allowed`` is False, the
+       ``blocked_reason`` maps to a specific withheld status (source / evidence /
+       safety / admin-hold / not-yet-reviewed). Safety always wins — a released
+       flag can never surface unsafe / unverified feedback.
+    2. Release gate. If the artifact is allowed but ``feedback_release_status``
+       is ``"blocked"``, the feedback is ready but awaiting an administrator's
+       release → ``awaiting_admin_release`` (NOT shown yet, specific copy).
+    3. Otherwise (allowed and released, or allowed with no release record) the
+       feedback is shown (``ready``).
+    """
+    artifact = dict(artifact or {})
+    language = (language or artifact.get("language") or "en")
+    allowed = bool(artifact.get("teacher_feedback_allowed"))
+    blocked_reason = artifact.get("blocked_reason")
+    release = _normalize_feedback_release_status(feedback_release_status)
+
+    if not allowed:
+        status = _BLOCKED_REASON_TO_VIEW_STATUS.get(str(blocked_reason or ""), "processing")
+        copy = _teacher_feedback_view_copy(status, language)
+        return {
+            "status": status,
+            "feedback_available": False,
+            "teacher_feedback_allowed": False,
+            "blocked_reason": blocked_reason or status,
+            "feedback_release_status": release,
+            "headline": copy["headline"],
+            "detail": copy["detail"],
+            "summary": None,
+            "action_items": [],
+            "next_best_action": artifact.get("next_best_action"),
+            "navigator": artifact.get("navigator"),
+            "lesson": artifact.get("lesson"),
+            "language": language,
+        }
+
+    if release == "blocked":
+        copy = _teacher_feedback_view_copy("awaiting_admin_release", language)
+        return {
+            "status": "awaiting_admin_release",
+            "feedback_available": False,
+            "teacher_feedback_allowed": True,
+            "blocked_reason": "awaiting_admin_release",
+            "feedback_release_status": release,
+            "headline": copy["headline"],
+            "detail": copy["detail"],
+            "summary": None,
+            "action_items": [],
+            "next_best_action": artifact.get("next_best_action"),
+            "navigator": artifact.get("navigator"),
+            "lesson": artifact.get("lesson"),
+            "language": language,
+        }
+
+    copy = _teacher_feedback_view_copy("ready", language)
+    return {
+        "status": "ready",
+        "feedback_available": True,
+        "teacher_feedback_allowed": True,
+        "blocked_reason": None,
+        "feedback_release_status": release or "released",
+        "headline": copy["headline"],
+        "detail": copy["detail"],
+        "summary": artifact.get("summary"),
+        "action_items": list(artifact.get("action_items") or []),
+        "highlights": list(artifact.get("highlights") or []),
+        "deep_dive": artifact.get("deep_dive"),
+        "next_best_action": artifact.get("next_best_action"),
+        "navigator": artifact.get("navigator"),
+        "lesson": artifact.get("lesson"),
+        "language": language,
+    }
 
 
 # ---------------------------------------------------------------------------

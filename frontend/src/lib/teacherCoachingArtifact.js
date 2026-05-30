@@ -264,6 +264,55 @@ export const artifactEmptyState = (artifact) => {
   return artifact.empty_state || null;
 };
 
+/**
+ * PR C9.4 PART 4 — canonical teacher-visible feedback view.
+ *
+ * The backend attaches `teacher_feedback_view` to the artifact: one object that
+ * reconciles the release gate (`feedback_release_status`) with the safety gates
+ * and resolves them to a SPECIFIC, teacher-safe status + copy. Cards render
+ * `headline`/`detail` directly and only show populated coaching when
+ * `feedback_available === true` — they never show the generic "no action needed"
+ * placeholder for a completed-but-withheld review.
+ */
+export const artifactFeedbackView = (artifact) => {
+  if (!artifact || typeof artifact !== "object") return null;
+  const view = artifact.teacher_feedback_view;
+  return view && typeof view === "object" ? view : null;
+};
+
+/** True only when the teacher may actually read populated coaching feedback. */
+export const isFeedbackAvailable = (artifactOrView) => {
+  if (!artifactOrView || typeof artifactOrView !== "object") return false;
+  const view = artifactOrView.teacher_feedback_view || artifactOrView;
+  return Boolean(view) && view.feedback_available === true;
+};
+
+/**
+ * Specific teacher-safe status copy ({ status, headline, detail }) for a card's
+ * empty/withheld state. Prefers the backend feedback view; falls back to the
+ * artifact's empty_state copy when the view is absent (older responses).
+ */
+export const feedbackViewMessage = (artifactOrView) => {
+  if (!artifactOrView || typeof artifactOrView !== "object") return null;
+  const view = artifactOrView.teacher_feedback_view || artifactOrView;
+  if (view && typeof view === "object" && (view.headline || view.detail || view.status)) {
+    return {
+      status: view.status || null,
+      headline: view.headline || "",
+      detail: view.detail || "",
+    };
+  }
+  const empty = artifactOrView.empty_state;
+  if (empty && typeof empty === "object") {
+    return {
+      status: empty.code || null,
+      headline: empty.title || "",
+      detail: empty.message || "",
+    };
+  }
+  return null;
+};
+
 /** Status string for lesson cards / status pills. */
 export const artifactLessonStatus = (artifact, legacyStatus) => {
   if (!artifact) return legacyStatus;
