@@ -89,6 +89,26 @@ export function absolutizeBackendUrl(url, backendUrl) {
 }
 
 /**
+ * PR C9.4 PART 5 — build a WebSocket URL from the backend origin and a path,
+ * collapsing the seam to exactly one slash. The backend origin frequently ends
+ * with a trailing slash (e.g. ``https://app.example.com/``), which naively
+ * concatenated with a leading-slash path produced ``wss://app.example.com//ws/...``
+ * — a double slash that breaks the live-update socket. This helper strips any
+ * trailing slashes from the origin, swaps the scheme to ``ws``/``wss``, and joins
+ * a single-slash path so the WebSocket route always resolves.
+ */
+export function buildBackendWebSocketUrl({ backendUrl, path } = {}) {
+  if (!backendUrl || typeof backendUrl !== "string") return null;
+  const trimmedOrigin = backendUrl.trim().replace(/\/+$/, "");
+  if (!trimmedOrigin) return null;
+  const wsOrigin = trimmedOrigin
+    .replace(/^https:\/\//i, "wss://")
+    .replace(/^http:\/\//i, "ws://");
+  const safePath = path ? `/${String(path).replace(/^\/+/, "")}` : "";
+  return `${wsOrigin}${safePath}`;
+}
+
+/**
  * PART 5 — resolve the URL a TEACHER (or any non-admin) may play. Teachers only
  * ever receive the redacted, validation-passed asset surfaced by the backend
  * ``playback`` object. We never synthesize a URL from raw/processed fields and

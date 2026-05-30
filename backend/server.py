@@ -141,6 +141,7 @@ from app.services.teacher_lesson_coaching_artifact import (
     TEACHER_LESSON_COACHING_ARTIFACT_VERSION,
     admin_view_of_artifact,
     build_teacher_lesson_coaching_artifact,
+    get_teacher_visible_lesson_feedback,
     teacher_safe_artifact,
     teacher_visible_summary_text,
 )
@@ -3422,16 +3423,46 @@ def _redacted_validation_status(video: dict) -> Tuple[Optional[str], Optional[st
     return record.get("status"), record.get("failure_code")
 
 
-def _redacted_playback_ready(video: dict) -> bool:
-    """True only when the redacted asset was confirmed browser-playable.
+def _visual_redaction_validation_dict(video: dict) -> Optional[dict]:
+    """Return the stored ``visual_redaction_validation`` dict, if present."""
+    raw = video.get("visual_redaction_validation")
+    if isinstance(raw, dict):
+        return raw
+    return None
 
-    PR C9.3: a redacted asset is only teacher-playback-ready when its
-    validation record says ``passed``. A missing record or
-    ``skipped_unavailable`` is **not** ready — we never assert playability we
-    could not verify.
+
+def _visual_redaction_status(video: dict) -> Tuple[Optional[str], Optional[str]]:
+    """Return ``(status, failure_code)`` from the visual-redaction record."""
+    record = _visual_redaction_validation_dict(video)
+    if not record:
+        return None, None
+    return record.get("status"), record.get("failure_code")
+
+
+def _visual_redaction_verified(video: dict) -> bool:
+    """True only when the rendered output was confirmed privacy-transformed.
+
+    PR C9.4: codec/browser playability is necessary but NOT sufficient — the
+    output pixels must also be confirmed blurred. A missing record,
+    ``skipped_unavailable``, or ``failed`` is **not** verified (fail-closed).
+    """
+    status, _ = _visual_redaction_status(video)
+    return status == "passed"
+
+
+def _redacted_playback_ready(video: dict) -> bool:
+    """True only when the redacted asset is both browser-playable AND blurred.
+
+    PR C9.3: a redacted asset must pass browser-playback validation
+    (``redacted_playback_validation.status == "passed"``).
+    PR C9.4: it must ALSO pass visual-redaction validation
+    (``visual_redaction_validation.status == "passed"``) so a frozen-codec fix
+    can never re-expose an unblurred face. A missing record or
+    ``skipped_unavailable`` on either gate is **not** ready — we never assert a
+    safety property we could not verify.
     """
     status, _ = _redacted_validation_status(video)
-    return status == "passed"
+    return status == "passed" and _visual_redaction_verified(video)
 
 
 def _build_teacher_playback_state(video: dict) -> Dict[str, Any]:
@@ -3453,11 +3484,6 @@ def _build_teacher_playback_state(video: dict) -> Dict[str, Any]:
         return {"available": False, "asset_kind": None, "url": None, "status": "no_redacted_asset"}
 
     val_status, val_code = _redacted_validation_status(video)
-    if val_status == "passed":
-        url = decision.url
-        if url.startswith("/uploads/"):
-            url = _to_public_backend_url(url)
-        return {"available": True, "asset_kind": "redacted", "url": url, "status": "ready"}
     if val_status == "failed":
         return {
             "available": False,
@@ -3466,8 +3492,34 @@ def _build_teacher_playback_state(video: dict) -> Dict[str, Any]:
             "status": "validation_failed",
             "failure_code": val_code,
         }
-    # No validation record yet, or ffprobe was unavailable when processed.
-    return {"available": False, "asset_kind": "redacted", "url": None, "status": "validation_pending"}
+    if val_status != "passed":
+        # No validation record yet, or ffprobe was unavailable when processed.
+        return {"available": False, "asset_kind": "redacted", "url": None, "status": "validation_pending"}
+
+    # PR C9.4: browser-playable is necessary but not sufficient — confirm the
+    # output pixels are actually blurred before handing a URL to a teacher.
+    vis_status, vis_code = _visual_redaction_status(video)
+    if vis_status == "failed":
+        return {
+            "available": False,
+            "asset_kind": "redacted",
+            "url": None,
+            "status": "redaction_unverified",
+            "failure_code": vis_code,
+        }
+    if vis_status != "passed":
+        return {
+            "available": False,
+            "asset_kind": "redacted",
+            "url": None,
+            "status": "redaction_pending",
+            "failure_code": vis_code,
+        }
+
+    url = decision.url
+    if url.startswith("/uploads/"):
+        url = _to_public_backend_url(url)
+    return {"available": True, "asset_kind": "redacted", "url": url, "status": "ready"}
 
 
 def _build_playback_diagnostics(video: dict) -> Dict[str, Any]:
@@ -3493,12 +3545,15 @@ def _build_playback_diagnostics(video: dict) -> Dict[str, Any]:
         or video.get("file_path")
         or video.get("raw_s3_key")
     )
+    vis_status, vis_code = _visual_redaction_status(video)
     teacher_state = _build_teacher_playback_state(video)
     selected_kind = teacher_state.get("asset_kind") if teacher_state.get("available") else None
     return {
         "selected_asset_kind": selected_kind,
         "validation_status": val_status,
         "failure_code": val_code,
+        "visual_redaction_status": vis_status,
+        "visual_redaction_failure_code": vis_code,
         "raw_available": raw_available,
         "processed_available": processed_available,
         "redacted_available": redacted_available,
@@ -6153,6 +6208,12 @@ from app.services.playback_validation import (
     PLAYBACK_VALIDATION_STATUSES,
     PlaybackValidationResult,
     validate_browser_playback_asset,
+)
+from app.services.visual_redaction_validation import (
+    VISUAL_REDACTION_VALIDATION_FAILURE_CODES,
+    VISUAL_REDACTION_VALIDATION_STATUSES,
+    VisualRedactionValidationResult,
+    validate_visual_redaction,
 )
 from app.services.video_review_progress import (
     REVIEW_PROGRESS_STATUSES,
@@ -11342,6 +11403,29 @@ async def _run_video_privacy_job(video_id: str) -> None:
                 )
             playback_validation_dict = playback_validation.to_dict()
 
+            # PR C9.4 PART 3: codec validation alone does NOT prove the output
+            # pixels are privacy-transformed. Re-inspect the rendered redacted
+            # asset and confirm faces are actually blurred. In the blur_all
+            # fallback NO face may remain sharp; when a teacher is preserved at
+            # most one sharp region (the teacher) is tolerated. This closes the
+            # privacy false-positive where a "100%-blurred" manifest still left a
+            # recognizable face visible.
+            blur_all_render = (
+                manual_override.get("decision") == "blur_all_and_continue"
+                or analysis["fallback_mode"] == "blur_all"
+                or not analysis.get("teacher_track_id")
+            )
+            visual_mode = "blur_all" if blur_all_render else "selective"
+            visual_max_visible = 0 if blur_all_render else 1
+            visual_validation = await asyncio.to_thread(
+                validate_visual_redaction,
+                str(redacted_full_path),
+                mode=visual_mode,
+                max_visible_faces=visual_max_visible,
+                expected_kind="redacted",
+            )
+            visual_validation_dict = visual_validation.to_dict()
+
             playback_render_failure_code: Optional[str] = None
             if playback_validation.status == "failed":
                 playback_render_failure_code = playback_validation.failure_code or "unreadable_asset"
@@ -11353,6 +11437,23 @@ async def _run_video_privacy_job(video_id: str) -> None:
                     render_stats.get("browser_safe_error")
                     or "ffmpeg_unavailable_for_browser_safe_render"
                 )
+
+            # Fail-closed on visual redaction. A confirmed unblurred face always
+            # fails; an inconclusive result fails on a real host (we must be able
+            # to verify), but is tolerated in the degraded runtime (no OpenCV),
+            # where the teacher-playback gate still requires a passed record.
+            visual_redaction_failure_code: Optional[str] = None
+            if visual_validation.status == "failed":
+                visual_redaction_failure_code = (
+                    visual_validation.failure_code or "unblurred_face_detected"
+                )
+            elif visual_validation.status == "skipped_unavailable" and privacy_mode != "degraded":
+                visual_redaction_failure_code = (
+                    visual_validation.failure_code or "cv2_unavailable"
+                )
+
+            if not playback_render_failure_code and visual_redaction_failure_code:
+                playback_render_failure_code = f"visual_redaction:{visual_redaction_failure_code}"
 
             if playback_render_failure_code:
                 finished_at = datetime.now(timezone.utc).isoformat()
@@ -11369,6 +11470,7 @@ async def _run_video_privacy_job(video_id: str) -> None:
                             "privacy_error": error_message,
                             "redacted_asset_state": "invalid",
                             "redacted_playback_validation": playback_validation_dict,
+                            "visual_redaction_validation": visual_validation_dict,
                             "privacy_manifest": {
                                 "manifest_version": 1,
                                 "created_at": finished_at,
@@ -11393,7 +11495,11 @@ async def _run_video_privacy_job(video_id: str) -> None:
                     "video",
                     video_id,
                     actor_user_id=job.get("user_id"),
-                    details={"error": error_message, "playback_validation": playback_validation_dict},
+                    details={
+                        "error": error_message,
+                        "playback_validation": playback_validation_dict,
+                        "visual_redaction_validation": visual_validation_dict,
+                    },
                 )
                 await _record_video_source_chain_incident(
                     "privacy_failed",
@@ -11456,6 +11562,7 @@ async def _run_video_privacy_job(video_id: str) -> None:
                         "redacted_thumbnail_url": redacted_thumbnail_url,
                         "redacted_asset_state": "stored",
                         "redacted_playback_validation": playback_validation_dict,
+                        "visual_redaction_validation": visual_validation_dict,
                         "status_updated_at": finished_at,
                         "updated_at": finished_at,
                         **retention_update_fields,
@@ -21901,6 +22008,18 @@ async def _build_teacher_lesson_coaching_artifact_for(
             artifact = apply_coach_voice_to_artifact(artifact, coach_voice_record)
     except Exception as exc:  # pragma: no cover - never let coach voice break the artifact
         logger.warning("coach_voice generation skipped due to error: %s", exc)
+
+    # PR C9.4 PART 4: attach the canonical teacher-visible feedback view so every
+    # teacher surface renders the SAME release/safety decision with specific copy
+    # — never the generic "no action needed" placeholder for a withheld review.
+    try:
+        artifact["teacher_feedback_view"] = get_teacher_visible_lesson_feedback(
+            artifact,
+            feedback_release_status=(assessment or {}).get("feedback_release_status"),
+            language=language,
+        )
+    except Exception as exc:  # pragma: no cover - never let projection break the artifact
+        logger.warning("teacher feedback view projection skipped due to error: %s", exc)
     return artifact
 
 

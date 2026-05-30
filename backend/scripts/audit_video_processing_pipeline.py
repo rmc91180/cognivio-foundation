@@ -18,6 +18,12 @@ Reports the production failure modes the C9.1 helpers detect:
   would resolve to a non-redacted asset under destructive blur, analysis
   marked completed while review-progress reports a needs-admin inconsistency,
   and ``blur_all`` manifests that preserved a face.
+- (PR C9.4) Privacy-completed redacted assets with a missing / failed /
+  inconclusive ``visual_redaction_validation`` record (the rendered pixels were
+  never confirmed blurred — fail-closed), and assessments whose
+  ``feedback_release_status == "released"`` while the stored
+  ``analysis_quality`` still blocks teacher feedback (the teacher would see a
+  withheld state despite the release flag).
 
 The script is strictly read-only. It does not modify the database. It is safe
 to run against production.
@@ -67,6 +73,11 @@ ISSUE_CODES = (
     "teacher_playback_non_redacted_with_destructive_blur",
     "analysis_completed_without_review_progress",
     "blur_all_invariant_violation",
+    # PR C9.4 additions — visual redaction validation + feedback projection
+    "visual_redaction_validation_missing",
+    "visual_redaction_failed_but_privacy_completed",
+    "visual_redaction_inconclusive_but_privacy_completed",
+    "feedback_released_but_safety_blocked",
 )
 
 
@@ -493,6 +504,112 @@ async def _scan_review_and_playback(
     return issues
 
 
+async def _scan_visual_redaction(
+    db,
+    *,
+    limit: int,
+    teacher_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """PR C9.4: confirm the rendered redacted pixels were verified blurred.
+
+    For every privacy-completed video that has a redacted asset, the privacy
+    worker must have recorded a ``visual_redaction_validation`` result whose
+    ``status == "passed"``. Anything else is fail-closed and must not be served
+    to teachers:
+
+    - ``visual_redaction_validation_missing`` — no record at all (legacy asset
+      frozen before the C9.4 validator shipped).
+    - ``visual_redaction_failed_but_privacy_completed`` — the re-scan found a
+      sharp/unblurred face yet privacy stayed ``completed``.
+    - ``visual_redaction_inconclusive_but_privacy_completed`` — the validator
+      could not run (``skipped_unavailable``), so redaction was never confirmed.
+    """
+    issues: List[Dict[str, Any]] = []
+    if not hasattr(db, "videos"):
+        return issues
+    query: Dict[str, Any] = {}
+    if teacher_id:
+        query["teacher_id"] = teacher_id
+    async for video in db.videos.find(query, {"_id": 0}).limit(limit):
+        vid = _doc_id(video)
+        tid = video.get("teacher_id")
+        if str(video.get("privacy_status") or "").strip().lower() != "completed":
+            continue
+        redacted_present = bool(
+            video.get("redacted_asset_state") == "stored"
+            or video.get("redacted_file_path")
+            or video.get("redacted_file_url")
+        )
+        if not redacted_present:
+            continue
+        record = video.get("visual_redaction_validation")
+        record = record if isinstance(record, dict) else None
+        status = str((record or {}).get("status") or "").strip().lower()
+        if not record:
+            issues.append(
+                {
+                    "issue_code": "visual_redaction_validation_missing",
+                    "video_id": vid,
+                    "teacher_id": tid,
+                }
+            )
+        elif status == "failed":
+            issues.append(
+                {
+                    "issue_code": "visual_redaction_failed_but_privacy_completed",
+                    "video_id": vid,
+                    "teacher_id": tid,
+                    "failure_code": record.get("failure_code"),
+                }
+            )
+        elif status == "skipped_unavailable":
+            issues.append(
+                {
+                    "issue_code": "visual_redaction_inconclusive_but_privacy_completed",
+                    "video_id": vid,
+                    "teacher_id": tid,
+                    "failure_code": record.get("failure_code"),
+                }
+            )
+    return issues
+
+
+async def _scan_feedback_release_consistency(
+    db,
+    *,
+    limit: int,
+    teacher_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """PR C9.4: released feedback must actually be safe to project to a teacher.
+
+    The teacher feedback view (``get_teacher_visible_lesson_feedback``) lets the
+    artifact safety gate win over the release flag. If an assessment is marked
+    ``feedback_release_status == "released"`` while its stored
+    ``analysis_quality`` still blocks teacher feedback, the teacher sees a
+    withheld state despite the admin release — an inconsistency worth surfacing.
+    """
+    issues: List[Dict[str, Any]] = []
+    if not hasattr(db, "assessments"):
+        return issues
+    query: Dict[str, Any] = {"feedback_release_status": "released"}
+    if teacher_id:
+        query["teacher_id"] = teacher_id
+    async for assessment in db.assessments.find(query, {"_id": 0}).limit(limit):
+        analysis_quality = assessment.get("analysis_quality") or {}
+        if analysis_quality.get("teacher_feedback_allowed") is False:
+            issues.append(
+                {
+                    "issue_code": "feedback_released_but_safety_blocked",
+                    "assessment_id": assessment.get("id"),
+                    "teacher_id": assessment.get("teacher_id"),
+                    "video_id": assessment.get("video_id"),
+                    "quality_block_reason": analysis_quality.get("block_reason")
+                    or analysis_quality.get("reason"),
+                }
+            )
+    return issues
+
+
 async def _dry_run_materialization(
     db,
     *,
@@ -652,6 +769,16 @@ async def run_audit(args: argparse.Namespace) -> int:
         limit=args.limit,
         teacher_id=args.teacher_id,
     )
+    visual_redaction_issues = await _scan_visual_redaction(
+        db,
+        limit=args.limit,
+        teacher_id=args.teacher_id,
+    )
+    feedback_release_issues = await _scan_feedback_release_consistency(
+        db,
+        limit=args.limit,
+        teacher_id=args.teacher_id,
+    )
 
     all_issues = (
         storage_url_issues
@@ -660,6 +787,8 @@ async def run_audit(args: argparse.Namespace) -> int:
         + materialization_issues
         + materialization_vs_state
         + review_playback_issues
+        + visual_redaction_issues
+        + feedback_release_issues
     )
     summary: Dict[str, int] = {}
     for issue in all_issues:

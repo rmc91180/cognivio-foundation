@@ -15,6 +15,7 @@ import {
   artifactMomentCtaLabel,
   artifactNavigator,
   artifactNextBestAction,
+  feedbackViewMessage,
   isArtifactAllowed,
   isArtifactBlocked,
   isNavigatorClickable,
@@ -313,8 +314,8 @@ export function TeacherWorkspacePage() {
                 <SectionHeader title="Your latest coaching summary" description="A warm, plain-language look at what to carry into the next lesson." />
                 {artifactBlocked ? (
                   <EmptyState
-                    title={artifactForReading?.empty_state?.title || "This lesson’s feedback isn’t ready yet."}
-                    message={artifactForReading?.empty_state?.message || "Once a complete review is ready, you’ll see specific coaching moments and next steps here."}
+                    title={feedbackViewMessage(artifactForReading)?.headline || artifactForReading?.empty_state?.title || "This lesson’s feedback isn’t ready yet."}
+                    message={feedbackViewMessage(artifactForReading)?.detail || artifactForReading?.empty_state?.message || "Once a complete review is ready, you’ll see specific coaching moments and next steps here."}
                   />
                 ) : latestLesson && latestSummary ? (
                   <Link to={latestLesson.href || "/my-lessons"} className="block rounded-lg border border-slate-200 bg-slate-50 p-4 hover:bg-white">
