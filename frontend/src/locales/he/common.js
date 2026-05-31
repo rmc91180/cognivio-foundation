@@ -73,6 +73,7 @@ const he = {
     teachers: "מורים",
     trainingParticipants: "משתתפים",
     videos: "וידאו והערכות",
+    lessons: "שיעורים",
     accessManagement: "אישורי גישה",
     myWorkspace: "המרחב שלי",
     myVideos: "הסרטונים שלי",
@@ -2339,6 +2340,7 @@ const he = {
     uploadQueue: "העלאה ושליחה לתור",
     uploadProgress: "התקדמות העלאה: {{progress}}%",
     queuedMessage: "ההקלטה נוספה לתור. אפשר לעקוב אחר הסטטוס במסך סרטונים והערכות.",
+    queuedMessageTeacher: "ההקלטה נוספה לתור. אפשר לעקוב אחר הסטטוס במסך שיעורים.",
   },
   frameworksPage: {
     frameworkLabels: {

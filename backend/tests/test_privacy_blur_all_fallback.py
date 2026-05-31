@@ -19,10 +19,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from app.services.visual_redaction_validation import measure_region_sharpness
 from privacy_pipeline import (
     BROWSER_SAFE_RENDER_ERROR_FFMPEG_MISSING,
     _finalize_redacted_video_with_audio,
     analyze_video_privacy,
+    blur_full_frame,
     render_redacted_video,
 )
 
@@ -173,3 +175,58 @@ class TestBrowserSafeFinalize:
         assert stats["browser_safe_render"] is False
         assert stats["browser_safe_error"] == "ffmpeg_browser_safe_render_failed"
         assert output.exists()
+
+
+class TestFullFrameFallback:
+    """PR C9.5 PART 2 — provably-safe full-frame redaction."""
+
+    def test_blur_full_frame_collapses_sharpness(self):
+        # A sharp checkerboard frame has high variance-of-Laplacian; after a
+        # full-frame blur the whole-frame sharpness collapses far below the
+        # validator's frame-blur threshold.
+        frame = np.zeros((120, 160, 3), dtype=np.uint8)
+        frame[::4, :] = 255  # high-frequency stripes
+        frame[:, ::4] = 255
+        before = measure_region_sharpness(frame)
+        blur_full_frame(frame)
+        after = measure_region_sharpness(frame)
+        assert after < before
+        assert after < 80.0  # below DEFAULT_FRAME_BLUR_THRESHOLD
+
+    def test_render_records_full_frame_strategy(self, monkeypatch, tmp_path):
+        video_path = tmp_path / "src.mp4"
+        output_path = tmp_path / "redacted.mp4"
+        thumbnail_path = tmp_path / "thumb.jpg"
+        _write_test_video(video_path)
+        _patch_detection(monkeypatch, faces=[(40, 20, 70, 75)], score=0.05)
+
+        stats = render_redacted_video(
+            str(video_path),
+            str(output_path),
+            str(thumbnail_path),
+            [str(video_path)],
+            teacher_match_threshold=0.9,
+            ambiguous_match_threshold=0.8,
+            force_blur_all=True,
+            full_frame_fallback=True,
+        )
+        assert stats["redaction_strategy"] == "full_frame"
+        assert stats["frames_processed"] > 0
+
+    def test_render_defaults_to_regions_strategy(self, monkeypatch, tmp_path):
+        video_path = tmp_path / "src.mp4"
+        output_path = tmp_path / "redacted.mp4"
+        thumbnail_path = tmp_path / "thumb.jpg"
+        _write_test_video(video_path)
+        _patch_detection(monkeypatch, faces=[(40, 20, 70, 75)], score=0.05)
+
+        stats = render_redacted_video(
+            str(video_path),
+            str(output_path),
+            str(thumbnail_path),
+            [str(video_path)],
+            teacher_match_threshold=0.9,
+            ambiguous_match_threshold=0.8,
+            force_blur_all=True,
+        )
+        assert stats["redaction_strategy"] == "regions"

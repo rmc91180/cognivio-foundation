@@ -260,6 +260,31 @@ describe("PR C9.3 review progress + playback gating (teacher)", () => {
   });
 });
 
+describe("PR C9.5 PART 7 navigation vocabulary (contract F)", () => {
+  it("teacher breadcrumb roots at Lessons -> /my-lessons, never the admin recordings library", async () => {
+    mockUser = { id: "user-1", teacher_id: "teacher-1", tenant_role: "teacher" };
+    setVideo(baseVideo());
+    renderPage();
+
+    await screen.findByTestId("review-progress");
+    // t() is mocked to echo the key, so "Lessons" surfaces as the nav.lessons key.
+    const crumb = screen.getByRole("link", { name: "nav.lessons" });
+    expect(crumb).toHaveAttribute("href", "/my-lessons");
+    // The teacher must NOT see the admin "Videos & Assessments" (nav.videos) crumb.
+    expect(screen.queryByRole("link", { name: "nav.videos" })).toBeNull();
+  });
+
+  it("admin breadcrumb keeps the Videos & Assessments recordings library", async () => {
+    mockUser = { id: "admin-1", tenant_role: "admin" };
+    setVideo(baseVideo());
+    renderPage();
+
+    await screen.findByTestId("review-progress");
+    const crumb = screen.getByRole("link", { name: "nav.videos" });
+    expect(crumb).toHaveAttribute("href", "/videos");
+  });
+});
+
 describe("PR C9.3 admin playback", () => {
   it("admins keep the legacy resolver and can play once privacy completes", async () => {
     mockUser = { id: "admin-1", tenant_role: "admin" };

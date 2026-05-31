@@ -56,7 +56,9 @@ __all__ = [
     "VISUAL_REDACTION_VALIDATION_STATUSES",
     "VISUAL_REDACTION_VALIDATION_FAILURE_CODES",
     "VISUAL_REDACTION_MODES",
+    "VISUAL_REDACTION_STRATEGIES",
     "DEFAULT_SHARPNESS_THRESHOLD",
+    "DEFAULT_FRAME_BLUR_THRESHOLD",
     "VisualRedactionValidationResult",
     "FrameSampler",
     "FaceDetector",
@@ -78,6 +80,9 @@ VISUAL_REDACTION_VALIDATION_FAILURE_CODES: Tuple[str, ...] = (
     "unreadable_asset",
     "no_frames_sampled",
     "cv2_unavailable",
+    # PR C9.5 PART 2 — fail-closed repair of the zero-detections fail-open.
+    "redaction_unconfirmed",
+    "frame_not_blurred",
 )
 
 VISUAL_REDACTION_MODES: Tuple[str, ...] = (
@@ -85,11 +90,28 @@ VISUAL_REDACTION_MODES: Tuple[str, ...] = (
     "selective",
 )
 
+# PR C9.5 PART 2 — which rendering strategy produced the asset under test.
+# ``full_frame`` blurs the ENTIRE frame (provably safe; validated by whole-frame
+# sharpness). ``regions`` blurs only detected face boxes (validated by
+# per-region sharpness + the zero-detections blur-evidence guard).
+VISUAL_REDACTION_STRATEGIES: Tuple[str, ...] = (
+    "regions",
+    "full_frame",
+)
+
 # Variance-of-Laplacian threshold. A face region below this is considered
 # sufficiently blurred; at or above it is treated as sharp/unblurred. Chosen
 # conservatively: a GaussianBlur with the pipeline's kernel collapses face
 # high-frequency energy well below this, while an untouched face sits far above.
 DEFAULT_SHARPNESS_THRESHOLD: float = 80.0
+
+# Whole-frame variance-of-Laplacian threshold. A FULL frame that has been
+# destructively blurred (full-frame fallback) collapses well below this; an
+# untouched/sharp scene sits far above. Used to (a) positively confirm a
+# full-frame blur, and (b) fail-closed the dangerous "no faces detected at all"
+# case — where the render-time AND validation-time cascades were equally blind —
+# unless the whole output is demonstrably blurred.
+DEFAULT_FRAME_BLUR_THRESHOLD: float = 80.0
 
 # A Haar/LBP detection in a *redacted* output is itself suspicious — a properly
 # blurred face is usually no longer detectable. We still gate on sharpness so the
@@ -107,6 +129,7 @@ class VisualRedactionValidationResult:
 
     status: str  # one of VISUAL_REDACTION_VALIDATION_STATUSES
     mode: str = "blur_all"
+    strategy: str = "regions"  # one of VISUAL_REDACTION_STRATEGIES
     expected_kind: str = "redacted"
     redaction_verified: bool = False
     failure_code: Optional[str] = None
@@ -119,8 +142,11 @@ class VisualRedactionValidationResult:
     max_sharp_faces_in_frame: int = 0
     max_visible_faces_allowed: int = 0
     sharpness_threshold: float = DEFAULT_SHARPNESS_THRESHOLD
+    frame_blur_threshold: float = DEFAULT_FRAME_BLUR_THRESHOLD
     max_region_sharpness: Optional[float] = None
     mean_face_sharpness: Optional[float] = None
+    max_frame_sharpness: Optional[float] = None
+    mean_frame_sharpness: Optional[float] = None
     warnings: List[str] = field(default_factory=list)
     checked_at: Optional[str] = None
 
@@ -141,6 +167,7 @@ class VisualRedactionValidationResult:
         return {
             "status": self.status,
             "mode": self.mode,
+            "strategy": self.strategy,
             "expected_kind": self.expected_kind,
             "redaction_verified": self.redaction_verified,
             "failure_code": self.failure_code,
@@ -152,8 +179,11 @@ class VisualRedactionValidationResult:
             "max_sharp_faces_in_frame": self.max_sharp_faces_in_frame,
             "max_visible_faces_allowed": self.max_visible_faces_allowed,
             "sharpness_threshold": self.sharpness_threshold,
+            "frame_blur_threshold": self.frame_blur_threshold,
             "max_region_sharpness": self.max_region_sharpness,
             "mean_face_sharpness": self.mean_face_sharpness,
+            "max_frame_sharpness": self.max_frame_sharpness,
+            "mean_frame_sharpness": self.mean_frame_sharpness,
             "warnings": list(self.warnings),
             "checked_at": self.checked_at,
         }
@@ -287,9 +317,12 @@ def validate_visual_redaction(
     rendered_path: Optional[str],
     *,
     mode: str = "blur_all",
+    strategy: str = "regions",
     max_visible_faces: int = 0,
     expected_kind: str = "redacted",
     sharpness_threshold: float = DEFAULT_SHARPNESS_THRESHOLD,
+    frame_blur_threshold: float = DEFAULT_FRAME_BLUR_THRESHOLD,
+    require_blur_evidence: bool = True,
     max_frames: int = 60,
     sample_stride: int = 15,
     frame_sampler: Optional[FrameSampler] = None,
@@ -306,29 +339,47 @@ def validate_visual_redaction(
         ``"blur_all"`` — no face may remain sharp (full-redaction fallback).
         ``"selective"`` — up to ``max_visible_faces`` sharp regions (the
         preserved teacher) are tolerated.
+    strategy:
+        ``"regions"`` — only detected face boxes were blurred. ``"full_frame"``
+        — the entire frame was destructively blurred; validation additionally
+        requires every sampled frame to be confirmed blurred.
     max_visible_faces:
         In ``selective`` mode, the maximum number of sharp faces allowed in any
         single frame. Ignored in ``blur_all`` mode (forced to 0).
     sharpness_threshold:
         Variance-of-Laplacian above which a detected face region is treated as
         sharp/unblurred.
+    frame_blur_threshold:
+        Whole-frame variance-of-Laplacian at/below which the entire frame is
+        considered destructively blurred. Drives full-frame verification and the
+        fail-closed zero-detections guard.
+    require_blur_evidence:
+        When ``True`` (default, fail-closed) a video with **zero** face
+        detections anywhere is only ``passed`` when the whole output is
+        demonstrably blurred; otherwise it is ``redaction_unconfirmed``. Setting
+        this ``False`` restores the legacy auto-pass and should only be used by
+        callers that have independent redaction evidence.
     frame_sampler / face_detector / sharpness_fn:
         Injectable seams. When omitted, OpenCV-backed defaults are used.
 
     Returns a :class:`VisualRedactionValidationResult`. Fail-closed: when OpenCV
-    is unavailable, the asset is unreadable, or no frames can be sampled, the
-    result is **not** verified.
+    is unavailable, the asset is unreadable, no frames can be sampled, or a
+    zero-detection output cannot be confirmed blurred, the result is **not**
+    verified.
     """
     checked_at = _now_iso()
     normalized_mode = mode if mode in VISUAL_REDACTION_MODES else "blur_all"
+    normalized_strategy = strategy if strategy in VISUAL_REDACTION_STRATEGIES else "regions"
     allowed_visible = 0 if normalized_mode == "blur_all" else max(0, int(max_visible_faces))
 
     base = VisualRedactionValidationResult(
         status="failed",
         mode=normalized_mode,
+        strategy=normalized_strategy,
         expected_kind=expected_kind,
         max_visible_faces_allowed=allowed_visible,
         sharpness_threshold=float(sharpness_threshold),
+        frame_blur_threshold=float(frame_blur_threshold),
         checked_at=checked_at,
     )
 
@@ -372,7 +423,8 @@ def validate_visual_redaction(
     max_sharp_in_frame = 0
     max_region_sharpness: Optional[float] = None
     face_sharpness_values: List[float] = []
-    offending_frame_sharp_count = 0
+    frame_sharpness_values: List[float] = []
+    max_frame_sharpness: Optional[float] = None
 
     try:
         frame_iter = sampler(rendered_path)
@@ -391,6 +443,16 @@ def validate_visual_redaction(
             if frame is None:
                 continue
             frames_sampled += 1
+            # Whole-frame sharpness — positive evidence of (or against) a
+            # full-frame blur. Cheap relative to detection; tolerated to fail
+            # silently per-frame so one bad frame never crashes validation.
+            try:
+                frame_sharpness = float(sharp_fn(frame))
+                frame_sharpness_values.append(frame_sharpness)
+                if max_frame_sharpness is None or frame_sharpness > max_frame_sharpness:
+                    max_frame_sharpness = frame_sharpness
+            except Exception:  # noqa: BLE001 - never let a metric crash validation
+                pass
             try:
                 boxes = detector(frame)
             except Exception:  # noqa: BLE001 - detector hiccup on a frame
@@ -425,6 +487,12 @@ def validate_visual_redaction(
         if face_sharpness_values
         else None
     )
+    base.max_frame_sharpness = max_frame_sharpness
+    base.mean_frame_sharpness = (
+        float(sum(frame_sharpness_values) / len(frame_sharpness_values))
+        if frame_sharpness_values
+        else None
+    )
 
     if frames_sampled == 0:
         base.status = "failed"
@@ -432,7 +500,12 @@ def validate_visual_redaction(
         base.message = "no frames could be sampled from the rendered asset"
         return base
 
+    whole_frame_blurred = (
+        max_frame_sharpness is not None and max_frame_sharpness <= float(frame_blur_threshold)
+    )
+
     # --- Decision (fail-closed) -------------------------------------------
+    # 1) Any sharp detected face beyond the mode's allowance fails immediately.
     if max_sharp_in_frame > allowed_visible:
         base.status = "failed"
         if normalized_mode == "blur_all":
@@ -449,10 +522,49 @@ def validate_visual_redaction(
             )
         return base
 
+    # 2) A full-frame strategy must show the WHOLE frame blurred. Any sharp
+    #    frame means the full-frame blur did not actually apply — fail-closed.
+    if normalized_strategy == "full_frame" and not whole_frame_blurred:
+        base.status = "failed"
+        base.failure_code = "frame_not_blurred"
+        base.message = (
+            "full_frame strategy claimed but a sampled frame is not blurred "
+            f"(max whole-frame sharpness {max_frame_sharpness} > "
+            f"{float(frame_blur_threshold)})"
+        )
+        return base
+
+    # 3) Zero faces detected across the ENTIRE output is the dangerous
+    #    fail-open: the render-time and validation-time cascades were equally
+    #    blind, so "no sharp faces" proves nothing. Only assert verified when
+    #    the whole output is demonstrably blurred (full-frame evidence). This is
+    #    PR C9.5 PART 2's repair of C9.4's auto-pass-on-zero-detections.
+    if faces_detected == 0 and require_blur_evidence:
+        if whole_frame_blurred:
+            base.status = "passed"
+            base.redaction_verified = True
+            base.failure_code = None
+            base.message = (
+                "no faces detected, but the whole output is confirmed blurred "
+                "(full-frame redaction evidence)"
+            )
+            base.warnings.append("full_frame_blur_confirmed")
+            return base
+        base.status = "failed"
+        base.redaction_verified = False
+        base.failure_code = "redaction_unconfirmed"
+        base.message = (
+            "no faces detected anywhere in the output and the frames are not "
+            "confirmed blurred — redaction cannot be verified (fail-closed)"
+        )
+        base.warnings.append("no_faces_detected_in_output")
+        return base
+
     base.status = "passed"
     base.redaction_verified = True
     base.failure_code = None
     base.message = "rendered asset shows no unblurred faces beyond allowance"
     if faces_detected == 0:
+        # Only reachable when require_blur_evidence is explicitly disabled.
         base.warnings.append("no_faces_detected_in_output")
     return base

@@ -11,6 +11,7 @@ import { VideoTimelineMarkers } from "@/components/VideoTimelineMarkers";
 import { TalkTimeChart } from "@/components/TalkTimeChart";
 import { AudioTimeline } from "@/components/AudioTimeline";
 import { VideoReviewProgress } from "@/components/VideoReviewProgress";
+import { VideoCorrectiveActions } from "@/components/VideoCorrectiveActions";
 import {
   buildBackendWebSocketUrl,
   extractReviewProgress,
@@ -351,6 +352,46 @@ export function VideoPlayerPage() {
       toast.error(typeof detail === "string" ? detail : detail?.message || t("videoPlayer.privacyRetryFailed"));
     },
   });
+  // PR C9.5 PART 4 — run/retry audio analysis from the corrective-action map.
+  const runAudioMutation = useMutation({
+    mutationFn: () => videoApi.runAudioAnalysis(videoId),
+    onSuccess: () => {
+      toast.success(t("videoPlayer.audioRequeued", { defaultValue: "Audio analysis queued." }));
+      queryClient.invalidateQueries({ queryKey: ["video", videoId] });
+      queryClient.invalidateQueries({ queryKey: ["video-status", videoId] });
+      queryClient.invalidateQueries({ queryKey: ["video-audio", videoId] });
+    },
+    onError: (error) => {
+      const detail = error?.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : detail?.message || t("videoPlayer.audioRetryFailed", { defaultValue: "Could not start audio analysis." }));
+    },
+  });
+  // PR C9.5 PART 6 — re-project the canonical teacher feedback view.
+  const reprojectFeedbackMutation = useMutation({
+    mutationFn: () => videoApi.reprojectFeedback(videoId),
+    onSuccess: () => {
+      toast.success(t("videoPlayer.feedbackReprojected", { defaultValue: "Feedback refreshed." }));
+      queryClient.invalidateQueries({ queryKey: ["video", videoId] });
+      queryClient.invalidateQueries({ queryKey: ["video-status", videoId] });
+    },
+    onError: (error) => {
+      const detail = error?.response?.data?.detail;
+      const message = typeof detail === "string" ? detail : detail?.message;
+      toast.error(message || t("videoPlayer.feedbackReprojectFailed", { defaultValue: "Could not refresh feedback." }));
+    },
+  });
+  const correctiveActionPending =
+    (retryPrivacyMutation.isPending && "retry_privacy") ||
+    (retryMutation.isPending && "retry_analysis") ||
+    (runAudioMutation.isPending && "run_audio_analysis") ||
+    (reprojectFeedbackMutation.isPending && "retry_feedback_projection") ||
+    null;
+  const handleCorrectiveAction = (key) => {
+    if (key === "retry_privacy") retryPrivacyMutation.mutate();
+    else if (key === "retry_analysis") retryMutation.mutate();
+    else if (key === "run_audio_analysis") runAudioMutation.mutate();
+    else if (key === "retry_feedback_projection") reprojectFeedbackMutation.mutate();
+  };
   const createCommentMutation = useMutation({
     mutationFn: (payload) => videoApi.createComment(videoId, payload),
     onSuccess: (response) => {
@@ -733,7 +774,11 @@ export function VideoPlayerPage() {
       <div className="mx-auto max-w-6xl px-4 py-5 sm:px-6 sm:py-6">
         <PageContextHeader
           breadcrumbs={[
-            { label: t("nav.videos"), to: "/videos" },
+            // PR C9.5 PART 7 (contract F): teachers navigate "Lessons", not the
+            // admin "Videos & Assessments" recordings library.
+            isAdmin
+              ? { label: t("nav.videos"), to: "/videos" }
+              : { label: t("nav.lessons"), to: "/my-lessons" },
             { label: videoRes?.filename || t("videoPlayer.lessonRecording") },
           ]}
           title={videoRes?.filename || t("videoPlayer.lessonRecording")}
@@ -803,6 +848,14 @@ export function VideoPlayerPage() {
           <VideoReviewProgress
             progress={reviewProgress}
             isAdmin={isAdmin}
+            className="mb-4"
+          />
+        ) : null}
+        {isAdmin ? (
+          <VideoCorrectiveActions
+            video={videoRes}
+            onAction={handleCorrectiveAction}
+            pendingKey={correctiveActionPending}
             className="mb-4"
           />
         ) : null}

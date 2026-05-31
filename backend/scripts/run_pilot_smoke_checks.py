@@ -90,6 +90,15 @@ from app.services.video_review_progress import (  # noqa: E402
     REVIEW_PROGRESS_STATUSES,
     build_video_review_progress,
 )
+from app.services.privacy_policy import (  # noqa: E402
+    build_effective_privacy_policy,
+    evaluate_privacy_readiness,
+    override_is_active,
+    teacher_playback_policy_allows,
+)
+from app.services.video_actions import (  # noqa: E402
+    build_video_action_states,
+)
 
 
 @dataclass
@@ -638,6 +647,16 @@ async def run_smoke(
         results.append(check_blur_all_fallback_enforced(videos_list))
         # PR C9.4: rendered redacted output confirmed blurred
         results.append(check_visual_redaction_validation_present(videos_list))
+        # PR C9.5: privacy-policy truth + override audit + corrective actions
+        try:
+            active_overrides = await db.privacy_policy_overrides.find(
+                {"is_active": True}, {"_id": 0}
+            ).to_list(500)
+        except Exception:  # pragma: no cover - collection may not exist yet
+            active_overrides = []
+        results.append(check_privacy_policy_truth(videos_list, active_overrides))
+        results.append(check_privacy_override_audit_complete(active_overrides))
+        results.append(check_corrective_actions_available(videos_list))
 
         for r in results:
             summary["checks"].append(
@@ -1129,6 +1148,169 @@ def check_visual_redaction_validation_present(
         code="visual_redaction_validation_present",
         status="ok",
         message="All completed redacted assets passed visual-redaction validation.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# PR C9.5: privacy-policy truth, playback clearance, override audit, actions
+# ---------------------------------------------------------------------------
+
+
+def check_privacy_policy_truth(
+    videos: List[Dict[str, Any]],
+    overrides: List[Dict[str, Any]],
+) -> CheckResult:
+    """PR C9.5 contracts A/B/E — the effective-policy truth gates per video.
+
+    Resolves each video's effective privacy policy from the active override
+    records and asserts three fail-closed invariants (hard fails):
+
+    - blur is never disabled on a video doc without an audited active override;
+    - a privacy-``completed`` video that still requires blur passes
+      :func:`evaluate_privacy_readiness` before "Privacy ready" can be claimed;
+    - the teacher playback gate never denies while ``select_playback_asset``
+      would still resolve a URL (an unvalidated asset must not be served).
+    """
+    blur_off: List[Dict[str, Any]] = []
+    not_ready: List[Dict[str, Any]] = []
+    served_without_clearance: List[Dict[str, Any]] = []
+    for video in videos:
+        policy = build_effective_privacy_policy(video, admin_overrides=overrides)
+        required = bool(policy.get("face_blurring_required", True))
+        if video.get("destructive_blurring_enabled") is False and required:
+            blur_off.append(
+                {"video_id": video.get("id"), "policy_source": policy.get("source")}
+            )
+        privacy_status = str(video.get("privacy_status") or "").strip().lower()
+        if required and privacy_status == "completed":
+            readiness = evaluate_privacy_readiness(video, policy)
+            if not readiness.get("privacy_ready"):
+                not_ready.append(
+                    {
+                        "video_id": video.get("id"),
+                        "badge_status": readiness.get("badge_status"),
+                        "reason_code": readiness.get("reason_code"),
+                    }
+                )
+        allowed, _mode, reason = teacher_playback_policy_allows(video, policy)
+        if not allowed:
+            decision = select_playback_asset(video, "teacher", allow_raw_for_admin=False)
+            if getattr(decision, "url", None):
+                served_without_clearance.append(
+                    {
+                        "video_id": video.get("id"),
+                        "source": getattr(decision, "source", None),
+                        "policy_reason": reason,
+                    }
+                )
+    if blur_off or served_without_clearance:
+        return CheckResult(
+            code="privacy_policy_truth",
+            status="fail",
+            message=(
+                f"{len(blur_off)} video(s) disable blur with no audited override and "
+                f"{len(served_without_clearance)} would serve teacher playback the policy "
+                "gate forbids."
+            ),
+            samples=(blur_off[:15] + served_without_clearance[:10]),
+        )
+    if not_ready:
+        return CheckResult(
+            code="privacy_policy_truth",
+            status="warn",
+            message=(
+                f"{len(not_ready)} privacy-completed video(s) cannot truthfully claim "
+                "'Privacy ready' (validation missing/failed/inconclusive)."
+            ),
+            samples=not_ready[:25],
+        )
+    return CheckResult(
+        code="privacy_policy_truth",
+        status="ok",
+        message="Privacy policy, readiness, and playback clearance are coherent for all videos.",
+    )
+
+
+def check_privacy_override_audit_complete(
+    overrides: List[Dict[str, Any]],
+) -> CheckResult:
+    """PR C9.5 contract E — every active override carries a complete audit.
+
+    An override may disable destructive blur, so it must record reason, actor,
+    scope, scope_id, and created_at. An active record missing any of these — or
+    one that is expired yet still flagged active — is a hard fail.
+    """
+    if not overrides:
+        return CheckResult(
+            code="privacy_override_audit_complete",
+            status="ok",
+            message="No active privacy overrides in scope.",
+        )
+    required_fields = ("reason", "scope", "scope_id", "created_at")
+    incomplete: List[Dict[str, Any]] = []
+    stale: List[Dict[str, Any]] = []
+    for override in overrides:
+        missing = [f for f in required_fields if not str(override.get(f) or "").strip()]
+        if not (override.get("created_by") or override.get("actor_id")):
+            missing.append("actor")
+        if missing:
+            incomplete.append({"override_id": override.get("id"), "missing": missing})
+        if override.get("is_active") and not override_is_active(override):
+            stale.append(
+                {"override_id": override.get("id"), "expires_at": override.get("expires_at")}
+            )
+    if incomplete or stale:
+        return CheckResult(
+            code="privacy_override_audit_complete",
+            status="fail",
+            message=(
+                f"{len(incomplete)} active override(s) missing audit fields and "
+                f"{len(stale)} expired-but-active."
+            ),
+            samples=(incomplete[:15] + stale[:10]),
+        )
+    return CheckResult(
+        code="privacy_override_audit_complete",
+        status="ok",
+        message=f"All {len(overrides)} active override(s) carry a complete audit trail.",
+    )
+
+
+def check_corrective_actions_available(videos: List[Dict[str, Any]]) -> CheckResult:
+    """PR C9.5 contract D — a failed video must offer at least one eligible action."""
+    dead_ends: List[Dict[str, Any]] = []
+    failed_states = {"failed"}
+    for video in videos:
+        status = str(video.get("status") or "").strip().lower()
+        privacy_status = str(video.get("privacy_status") or "").strip().lower()
+        analysis_status = str(video.get("analysis_status") or "").strip().lower()
+        if not (
+            status in failed_states
+            or privacy_status in failed_states
+            or analysis_status in failed_states
+        ):
+            continue
+        states = build_video_action_states(video)
+        if not any(v.get("eligible") for v in states.values()):
+            dead_ends.append(
+                {
+                    "video_id": video.get("id"),
+                    "disabled_reasons": {
+                        k: v.get("disabled_reason") for k, v in states.items()
+                    },
+                }
+            )
+    if dead_ends:
+        return CheckResult(
+            code="corrective_actions_available",
+            status="fail",
+            message=f"{len(dead_ends)} failed video(s) expose no eligible corrective action (dead end).",
+            samples=dead_ends[:25],
+        )
+    return CheckResult(
+        code="corrective_actions_available",
+        status="ok",
+        message="Every failed video exposes at least one eligible corrective action.",
     )
 
 

@@ -12,7 +12,7 @@ import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, EmailStr
-from typing import Iterable, List, Optional, Dict, Any, Tuple
+from typing import Iterable, List, Optional, Dict, Any, Tuple, Mapping
 import uuid
 from datetime import datetime, timezone, timedelta
 import jwt
@@ -3465,23 +3465,90 @@ def _redacted_playback_ready(video: dict) -> bool:
     return status == "passed" and _visual_redaction_verified(video)
 
 
+def _resolve_unblurred_playback_url(video: dict) -> Optional[str]:
+    """Best available *unblurred* asset (processed first, then raw).
+
+    Only ever used on the policy-disabled path, where an audited active override
+    has explicitly authorized unblurred playback. Never call this when blur is
+    required.
+    """
+    processed_url = normalize_storage_url(video.get("processed_file_url"))
+    if processed_url:
+        return processed_url
+    processed_path = video.get("processed_file_path")
+    if processed_path:
+        safe_path = str(processed_path).replace("\\", "/").lstrip("/")
+        return _to_public_backend_url(f"/uploads/{safe_path}")
+    raw_url = normalize_storage_url(video.get("raw_file_url") or video.get("file_url"))
+    if raw_url:
+        return raw_url
+    raw_path = video.get("raw_file_path") or video.get("file_path")
+    if raw_path:
+        safe_path = str(raw_path).replace("\\", "/").lstrip("/")
+        return _to_public_backend_url(f"/uploads/{safe_path}")
+    return None
+
+
 def _build_teacher_playback_state(video: dict) -> Dict[str, Any]:
-    """Teacher-safe playback object (PR C9.3 PART 5).
+    """Teacher-safe playback object (PR C9.3 PART 5 / C9.5 PART 1).
 
     Returns ``{available, asset_kind, url, status}`` (+ optional
-    ``failure_code``). A teacher only receives a URL when privacy completed AND
-    the redacted asset passed browser-playback validation. Never raw.
+    ``failure_code`` / ``privacy_policy``). A teacher only receives a URL when:
+
+    1. the redacted asset passed browser-playback AND visual-redaction
+       validation (default fail-closed path, never raw), OR
+    2. an active audited privacy policy override disables face blurring, in
+       which case the unblurred processed/raw asset may be served.
     """
+    policy = video.get("effective_privacy_policy") or default_privacy_policy()
+    blur_required = bool(policy.get("face_blurring_required", True))
+    policy_view = privacy_policy_public_view(policy)
+
+    # Contract B(2): an audited active override authorizes unblurred playback.
+    if not blur_required:
+        url = _resolve_unblurred_playback_url(video)
+        if not url:
+            return {
+                "available": False,
+                "asset_kind": None,
+                "url": None,
+                "status": "asset_unavailable",
+                "failure_code": "no_playable_asset",
+                "privacy_policy": policy_view,
+            }
+        asset_kind = "processed" if (
+            video.get("processed_file_url") or video.get("processed_file_path")
+        ) else "raw"
+        return {
+            "available": True,
+            "asset_kind": asset_kind,
+            "url": url,
+            "status": "ready",
+            "privacy_policy": policy_view,
+        }
+
     privacy_done = (
         _normalize_privacy_status(video.get("privacy_status"))
         == PrivacyProcessingStatus.COMPLETED.value
     )
     if not privacy_done:
-        return {"available": False, "asset_kind": None, "url": None, "status": "privacy_incomplete"}
+        return {
+            "available": False,
+            "asset_kind": None,
+            "url": None,
+            "status": "privacy_incomplete",
+            "privacy_policy": policy_view,
+        }
 
     decision = select_playback_asset(video, "teacher", allow_raw_for_admin=False)
     if decision.source != "redacted" or not decision.url:
-        return {"available": False, "asset_kind": None, "url": None, "status": "no_redacted_asset"}
+        return {
+            "available": False,
+            "asset_kind": None,
+            "url": None,
+            "status": "no_redacted_asset",
+            "privacy_policy": policy_view,
+        }
 
     val_status, val_code = _redacted_validation_status(video)
     if val_status == "failed":
@@ -3491,10 +3558,17 @@ def _build_teacher_playback_state(video: dict) -> Dict[str, Any]:
             "url": None,
             "status": "validation_failed",
             "failure_code": val_code,
+            "privacy_policy": policy_view,
         }
     if val_status != "passed":
         # No validation record yet, or ffprobe was unavailable when processed.
-        return {"available": False, "asset_kind": "redacted", "url": None, "status": "validation_pending"}
+        return {
+            "available": False,
+            "asset_kind": "redacted",
+            "url": None,
+            "status": "validation_pending",
+            "privacy_policy": policy_view,
+        }
 
     # PR C9.4: browser-playable is necessary but not sufficient — confirm the
     # output pixels are actually blurred before handing a URL to a teacher.
@@ -3506,6 +3580,7 @@ def _build_teacher_playback_state(video: dict) -> Dict[str, Any]:
             "url": None,
             "status": "redaction_unverified",
             "failure_code": vis_code,
+            "privacy_policy": policy_view,
         }
     if vis_status != "passed":
         return {
@@ -3514,12 +3589,19 @@ def _build_teacher_playback_state(video: dict) -> Dict[str, Any]:
             "url": None,
             "status": "redaction_pending",
             "failure_code": vis_code,
+            "privacy_policy": policy_view,
         }
 
     url = decision.url
     if url.startswith("/uploads/"):
         url = _to_public_backend_url(url)
-    return {"available": True, "asset_kind": "redacted", "url": url, "status": "ready"}
+    return {
+        "available": True,
+        "asset_kind": "redacted",
+        "url": url,
+        "status": "ready",
+        "privacy_policy": policy_view,
+    }
 
 
 def _build_playback_diagnostics(video: dict) -> Dict[str, Any]:
@@ -3583,9 +3665,17 @@ def _apply_video_response_defaults(video: dict) -> dict:
     video["playback_url"] = _resolve_video_playback_url(video)
     video["thumbnail_url"] = _resolve_video_thumbnail_url(video)
     # PR C9.3: deterministic teacher-safe progress + validated playback gating.
+    # PR C9.5: privacy truth/badge + teacher-safe effective-policy projection.
+    policy = video.get("effective_privacy_policy") or default_privacy_policy()
+    video["privacy_policy"] = privacy_policy_public_view(policy)
+    video["privacy_truth"] = evaluate_privacy_readiness(video, policy)
     video["review_progress"] = _build_video_review_progress_for_response(video)
     video["playback"] = _build_teacher_playback_state(video)
     video["playback_diagnostics"] = _build_playback_diagnostics(video)
+    # PR C9.5 PART 3 (contract D): corrective controls with explicit disabled
+    # reasons. Computed before _sanitize_video_response strips source paths so
+    # the local-source eligibility check still sees them.
+    video["actions"] = build_video_action_states(video)
     return video
 
 
@@ -3607,6 +3697,7 @@ def _sanitize_video_response(video: dict) -> dict:
         "redacted_file_path",
         "redacted_thumbnail_path",
         "privacy_manual_override",
+        "effective_privacy_policy",
     }:
         sanitized.pop(field, None)
     return sanitized
@@ -6158,6 +6249,13 @@ RECOGNITION_FIVE_STAR_SCORE_MIN = (
     else DEFAULT_FIVE_STAR_SCORE_MIN
 )
 PRIVACY_ALLOW_DEGRADED_RUNTIME = APP_SETTINGS.privacy.privacy_allow_degraded_runtime
+# PR C9.5 PART 2: when enabled, blur_all renders collapse the ENTIRE frame
+# (provably safe, validated by whole-frame sharpness) rather than only detected
+# face boxes. Region blur remains the default; operators opt in per-deploy and
+# the retry-privacy action can request full-frame redaction explicitly.
+PRIVACY_BLUR_ALL_FULL_FRAME = (
+    os.getenv("PRIVACY_BLUR_ALL_FULL_FRAME", "false").strip().lower() == "true"
+)
 # PR C9.2: reference materialization controls.
 PRIVACY_REFERENCE_URL_FETCH_ENABLED = APP_SETTINGS.privacy.privacy_reference_url_fetch_enabled
 PRIVACY_REFERENCE_URL_FETCH_TIMEOUT_SECONDS = APP_SETTINGS.privacy.privacy_reference_url_fetch_timeout_seconds
@@ -6220,6 +6318,98 @@ from app.services.video_review_progress import (
     REVIEW_STAGE_KEYS,
     build_video_review_progress,
 )
+from app.services.video_actions import build_video_action_states
+from app.services.privacy_policy import (
+    PRIVACY_OVERRIDE_SCOPES,
+    PrivacyOverrideError,
+    build_effective_privacy_policy,
+    build_privacy_override_record,
+    default_privacy_policy,
+    evaluate_privacy_readiness,
+    privacy_policy_public_view,
+    select_active_override,
+    teacher_playback_policy_allows,
+)
+
+
+async def _load_active_privacy_overrides(
+    *,
+    video_id: Optional[str] = None,
+    teacher_id: Optional[str] = None,
+    school_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Load active privacy-policy override records that could match a video.
+
+    PR C9.5 PART 5: overrides live in ``db.privacy_policy_overrides``. We query
+    only active records whose ``(scope, scope_id)`` could apply to this video so
+    the pure resolver can pick the highest-precedence one. Returns ``[]`` when
+    the collection is absent (back-compat: default fail-closed policy applies).
+    """
+    collection = getattr(db, "privacy_policy_overrides", None)
+    if collection is None:
+        return []
+    scope_clauses: List[Dict[str, Any]] = []
+    if video_id:
+        scope_clauses.append({"scope": "video", "scope_id": str(video_id)})
+    if teacher_id:
+        scope_clauses.append({"scope": "teacher", "scope_id": str(teacher_id)})
+    if school_id:
+        scope_clauses.append({"scope": "school", "scope_id": str(school_id)})
+    if not scope_clauses:
+        return []
+    query: Dict[str, Any] = {"is_active": True, "$or": scope_clauses}
+    try:
+        cursor = collection.find(query, {"_id": 0})
+        return await cursor.to_list(length=200)
+    except Exception:  # pragma: no cover - defensive; never block playback truth
+        logger.exception("Failed to load privacy policy overrides")
+        return []
+
+
+async def _resolve_effective_privacy_policy(video: Mapping[str, Any]) -> Dict[str, Any]:
+    """Resolve the effective privacy policy for a single video document.
+
+    Loads the video's teacher (for ``school_id``) and any active overrides, then
+    delegates to the pure :func:`build_effective_privacy_policy`. Fail-closed:
+    any lookup failure yields the default (face blurring required) policy.
+    """
+    if not isinstance(video, Mapping):
+        return default_privacy_policy()
+    video_id = video.get("id") or video.get("video_id")
+    teacher_id = video.get("teacher_id")
+    teacher_doc: Optional[Dict[str, Any]] = None
+    school_id = video.get("school_id")
+    if teacher_id:
+        try:
+            teacher_doc = await db.teachers.find_one(
+                {"id": teacher_id}, {"_id": 0, "id": 1, "school_id": 1}
+            )
+        except Exception:  # pragma: no cover - defensive
+            teacher_doc = None
+        if teacher_doc and teacher_doc.get("school_id"):
+            school_id = teacher_doc.get("school_id")
+    overrides = await _load_active_privacy_overrides(
+        video_id=video_id, teacher_id=teacher_id, school_id=school_id
+    )
+    return build_effective_privacy_policy(
+        video,
+        teacher=teacher_doc,
+        school={"id": school_id} if school_id else None,
+        admin_overrides=overrides,
+    )
+
+
+async def _attach_effective_privacy_policy(video: dict) -> dict:
+    """Attach the resolved effective privacy policy onto a video document.
+
+    The attached ``effective_privacy_policy`` is consumed by
+    ``_build_teacher_playback_state`` / ``_apply_video_response_defaults`` and is
+    stripped from the client payload by ``_sanitize_video_response``.
+    """
+    if isinstance(video, dict):
+        video["effective_privacy_policy"] = await _resolve_effective_privacy_policy(video)
+    return video
+
 
 S3_BUCKET = APP_SETTINGS.storage.s3_bucket
 S3_REGION = APP_SETTINGS.storage.s3_region
@@ -8434,6 +8624,17 @@ class PrivacyProcessingStatus(str, Enum):
     FAILED = "failed"
 
 
+class PrivacyRetryOptions(BaseModel):
+    """Options for the teacher/admin retry-privacy action (PR C9.5 PART 3).
+
+    ``force_full_frame`` requests the provably-safe full-frame redaction strategy
+    on the re-render (the worker reads ``privacy_force_full_frame`` off the video
+    doc). Defaults keep the standard region-based redaction.
+    """
+
+    force_full_frame: bool = False
+
+
 class TeacherPrivacyProfileResponse(BaseModel):
     teacher_id: str
     status: str
@@ -8600,6 +8801,57 @@ class VideoAudioAnalysisResponse(BaseModel):
     segments: List[AudioAnalysisTimelineSegment] = []
     transcript_segments: List[AudioAnalysisTranscriptSegment] = []
     key_moments: List[AudioAnalysisKeyMoment] = []
+
+
+class VideoAudioAnalysisRunResponse(BaseModel):
+    """Outcome of the run/retry audio-analysis action (PR C9.5 PART 4)."""
+
+    video_id: str
+    audio_analysis_status: str
+    transcript_status: Optional[str] = None
+    features_available: bool = False
+    reason_code: Optional[str] = None
+
+
+class PrivacyOverrideCreateRequest(BaseModel):
+    """Admin request to set a privacy (face-blurring) policy override (PART 5).
+
+    ``face_blurring_required=False`` is the dangerous direction (it disables
+    destructive blur), so a non-empty audited ``reason`` is mandatory and the
+    actor/timestamp/scope are recorded server-side. The default everywhere else
+    remains ``face_blurring_required=True`` (fail-closed).
+    """
+
+    scope: str
+    scope_id: str
+    face_blurring_required: bool
+    reason: str
+    expires_at: Optional[str] = None
+
+
+class PrivacyOverrideResponse(BaseModel):
+    """A single persisted privacy-policy override record (PART 5)."""
+
+    id: str
+    scope: str
+    scope_id: str
+    face_blurring_required: bool
+    reason: str
+    created_by: Optional[str] = None
+    actor_role: Optional[str] = None
+    created_at: Optional[str] = None
+    expires_at: Optional[str] = None
+    is_active: bool = True
+    policy_version: int = 1
+    revoked_at: Optional[str] = None
+    revoked_by: Optional[str] = None
+    revoked_reason: Optional[str] = None
+
+
+class PrivacyOverrideListResponse(BaseModel):
+    """Listing of privacy-policy overrides for an admin surface (PART 5)."""
+
+    overrides: List[PrivacyOverrideResponse] = []
 
 
 class RecognitionBadgeResponse(BaseModel):
@@ -11327,6 +11579,13 @@ async def _run_video_privacy_job(video_id: str) -> None:
             redacted_thumbnail_relative_path = f"thumbnails/redacted/{job['teacher_id']}/{video_id}.jpg"
             redacted_thumbnail_full_path = UPLOAD_DIR / redacted_thumbnail_relative_path
             try:
+                # PR C9.5 PART 2: full-frame redaction is requested either by the
+                # deploy-wide flag or per-video (the retry-privacy action sets
+                # ``privacy_force_full_frame`` when a region render failed visual
+                # validation). It only applies on the blur_all path.
+                full_frame_fallback = bool(
+                    PRIVACY_BLUR_ALL_FULL_FRAME or video.get("privacy_force_full_frame")
+                )
                 render_stats = await asyncio.to_thread(
                     render_redacted_video,
                     job["file_path"],
@@ -11337,6 +11596,7 @@ async def _run_video_privacy_job(video_id: str) -> None:
                     PRIVACY_AMBIGUOUS_MATCH_THRESHOLD,
                     analysis["teacher_track_id"],
                     manual_override.get("decision") == "blur_all_and_continue" or analysis["fallback_mode"] == "blur_all",
+                    full_frame_fallback,
                 )
             except RuntimeError as exc:
                 if _should_use_degraded_privacy_runtime(exc):
@@ -11417,10 +11677,15 @@ async def _run_video_privacy_job(video_id: str) -> None:
             )
             visual_mode = "blur_all" if blur_all_render else "selective"
             visual_max_visible = 0 if blur_all_render else 1
+            # PR C9.5 PART 2: validate against the strategy actually rendered. A
+            # full_frame render is verified by whole-frame blur; a region render
+            # by per-face sharpness + the zero-detection blur-evidence guard.
+            visual_strategy = render_stats.get("redaction_strategy") or "regions"
             visual_validation = await asyncio.to_thread(
                 validate_visual_redaction,
                 str(redacted_full_path),
                 mode=visual_mode,
+                strategy=visual_strategy,
                 max_visible_faces=visual_max_visible,
                 expected_kind="redacted",
             )
@@ -12786,6 +13051,7 @@ async def get_videos(teacher_id: Optional[str] = None, current_user: dict = Depe
         query = _build_video_visibility_query(current_user, teacher_ids_for_user)
     videos = await db.videos.find(query, {"_id": 0, "uploaded_by": 0, "stored_filename": 0}).to_list(1000)
     for video in videos:
+        await _attach_effective_privacy_policy(video)
         _apply_video_response_defaults(video)
     return [_sanitize_video_response(video) for video in videos]
 
@@ -12803,6 +13069,7 @@ async def get_video_detail(video_id: str, current_user: dict = Depends(get_curre
         actor_user_id=current_user.get("id"),
         details={"asset_type": "redacted_or_sanitized"},
     )
+    await _attach_effective_privacy_policy(video)
     return _sanitize_video_response(_apply_video_response_defaults(video))
 
 
@@ -12887,6 +13154,11 @@ async def get_video_status(video_id: str, current_user: dict = Depends(get_curre
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    await _attach_effective_privacy_policy(video)
+    # Normalize before evaluating privacy truth so badge statuses match the
+    # canonical privacy_status vocabulary (e.g. "error" -> "failed").
+    video["privacy_status"] = _normalize_privacy_status(video.get("privacy_status"))
+    policy = video.get("effective_privacy_policy") or default_privacy_policy()
     review_progress = _build_video_review_progress_for_response(video)
     return {
         "status": _normalize_video_status(video.get("status")),
@@ -12903,6 +13175,9 @@ async def get_video_status(video_id: str, current_user: dict = Depends(get_curre
         "review_percent": review_progress["percent"],
         "playback": _build_teacher_playback_state(video),
         "redacted_playback_validation": _redacted_playback_validation_dict(video),
+        # PR C9.5: privacy truth/badge + teacher-safe effective-policy projection.
+        "privacy_policy": privacy_policy_public_view(policy),
+        "privacy_truth": evaluate_privacy_readiness(video, policy),
     }
 
 
@@ -13155,7 +13430,31 @@ async def retry_video_processing(video_id: str, current_user: dict = Depends(get
     return {"video_id": video_id, "status": VideoProcessingStatus.QUEUED.value}
 
 
-async def retry_video_privacy(video_id: str, current_user: dict = Depends(get_current_user)):
+def _privacy_retry_invalidation_fields(*, force_full_frame: bool = False) -> Dict[str, Any]:
+    """Fields that invalidate a stale redaction before a privacy re-render.
+
+    PR C9.5 PART 3 (fail-closed): a previous "passed" visual-redaction or
+    browser-playback validation must NEVER survive a re-render. Clearing both
+    validation records and resetting the redacted-asset state forces the
+    teacher-playback gate back to "pending" until the new render is re-validated,
+    so a teacher can never receive a URL backed by stale validation. When
+    ``force_full_frame`` is set, the worker (PR C9.5 PART 2) renders the
+    provably-safe full-frame strategy on this retry.
+    """
+    return {
+        "visual_redaction_validation": None,
+        "redacted_playback_validation": None,
+        "redacted_asset_state": "not_created",
+        "privacy_force_full_frame": bool(force_full_frame),
+    }
+
+
+async def retry_video_privacy(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+    *,
+    force_full_frame: bool = False,
+):
     video = await db.videos.find_one({"id": video_id}, {"_id": 0})
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -13206,23 +13505,22 @@ async def retry_video_privacy(video_id: str, current_user: dict = Depends(get_cu
             },
         )
     queued_at = datetime.now(timezone.utc).isoformat()
-    await db.videos.update_one(
-        {"id": video_id},
-        {
-            "$set": {
-                "status": VideoProcessingStatus.QUEUED.value,
-                "privacy_status": PrivacyProcessingStatus.QUEUED.value,
-                "analysis_status": VideoProcessingStatus.QUEUED.value,
-                "privacy_review_required": False,
-                "privacy_review_reason": None,
-                "privacy_error": None,
-                "privacy_started_at": None,
-                "privacy_completed_at": None,
-                "privacy_failed_at": None,
-                "status_updated_at": queued_at,
-            }
-        },
-    )
+    update_fields = {
+        "status": VideoProcessingStatus.QUEUED.value,
+        "privacy_status": PrivacyProcessingStatus.QUEUED.value,
+        "analysis_status": VideoProcessingStatus.QUEUED.value,
+        "privacy_review_required": False,
+        "privacy_review_reason": None,
+        "privacy_error": None,
+        "privacy_started_at": None,
+        "privacy_completed_at": None,
+        "privacy_failed_at": None,
+        "status_updated_at": queued_at,
+    }
+    # PR C9.5 PART 3: clear stale validations so a prior "passed" result can
+    # never survive the re-render and re-expose an unblurred face.
+    update_fields.update(_privacy_retry_invalidation_fields(force_full_frame=force_full_frame))
+    await db.videos.update_one({"id": video_id}, {"$set": update_fields})
     await _enqueue_video_privacy_job(
         video_id=video_id,
         teacher_id=video.get("teacher_id"),
@@ -13234,13 +13532,14 @@ async def retry_video_privacy(video_id: str, current_user: dict = Depends(get_cu
         "video",
         video_id,
         actor_user_id=current_user["id"],
-        details={"requeued_at": queued_at},
+        details={"requeued_at": queued_at, "force_full_frame": bool(force_full_frame)},
     )
     return {
         "video_id": video_id,
         "privacy_status": PrivacyProcessingStatus.QUEUED.value,
         "analysis_status": VideoProcessingStatus.QUEUED.value,
         "requeued_at": queued_at,
+        "force_full_frame": bool(force_full_frame),
     }
 
 
@@ -13512,6 +13811,537 @@ async def get_video_audio_analysis(
         },
     )
     return _build_video_audio_analysis_response(transcript_doc, feature_doc, video_id=video_id)
+
+
+def _resolve_audio_analysis_source_path(video: dict) -> Optional[Path]:
+    """Resolve the local file the audio pass should read (PR C9.5 PART 4).
+
+    Audio carries no facial biometric, so any source is privacy-equivalent, but
+    we still prefer the redacted asset, then processed, then raw, and only return
+    a path that actually exists on disk.
+    """
+    for relative in (
+        video.get("redacted_file_path"),
+        video.get("processed_file_path"),
+        video.get("raw_file_path"),
+        video.get("file_path"),
+    ):
+        if not relative:
+            continue
+        candidate = UPLOAD_DIR / str(relative)
+        if candidate.exists():
+            return candidate
+    return None
+
+
+@api_router.post(
+    "/videos/{video_id}/audio/run",
+    response_model=VideoAudioAnalysisRunResponse,
+)
+async def run_video_audio_analysis(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Run (or retry) audio analysis on an existing video (PR C9.5 PART 4).
+
+    Contract D: gives existing videos an explicit "Run/retry audio analysis"
+    action. Operates only on the privacy-completed asset, never silently no-ops
+    (a disabled workspace or unconfigured transcription returns a structured
+    reason), and upserts the transcript/feature docs the audio surfaces read.
+    """
+    video = await _get_visible_video_or_404(video_id, current_user)
+
+    # Audio must run on the redacted asset: privacy has to be complete first.
+    if _normalize_privacy_status(video.get("privacy_status")) != PrivacyProcessingStatus.COMPLETED.value:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "AUDIO_RUN_BLOCKED",
+                "reason_code": "privacy_not_complete",
+                "message": "Audio analysis is available once privacy processing completes.",
+            },
+        )
+
+    source_path = _resolve_audio_analysis_source_path(video)
+    if source_path is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "AUDIO_RUN_BLOCKED",
+                "reason_code": "no_local_source",
+                "message": "Audio analysis is unavailable because the local video file is missing.",
+            },
+        )
+
+    # Honor the workspace audio preference — disabled is an explicit, audited
+    # outcome, not a silent skip (contract C: never claim work that did not run).
+    audio_enabled = await _is_workspace_audio_analysis_enabled_for_user(current_user)
+    if not audio_enabled or not _should_run_audio_analysis(current_user):
+        await db.videos.update_one(
+            {"id": video_id},
+            {"$set": {"audio_analysis_status": "disabled"}},
+        )
+        await _log_privacy_audit_event(
+            "audio_analysis_run",
+            "video",
+            video_id,
+            actor_user_id=current_user.get("id"),
+            details={"audio_analysis_status": "disabled", "reason_code": "audio_analysis_disabled"},
+        )
+        return VideoAudioAnalysisRunResponse(
+            video_id=video_id,
+            audio_analysis_status="disabled",
+            reason_code="audio_analysis_disabled",
+        )
+
+    started_at = datetime.now(timezone.utc).isoformat()
+    await db.videos.update_one(
+        {"id": video_id},
+        {"$set": {"audio_analysis_status": "processing", "audio_analysis_started_at": started_at, "audio_analysis_error": None}},
+    )
+
+    try:
+        transcript_doc, feature_doc = await build_audio_artifacts(
+            video_id,
+            str(source_path),
+            current_user,
+            analysis_language=video.get("analysis_language"),
+        )
+    except Exception as exc:  # noqa: BLE001 - record failure, surface to caller
+        logger.warning("Audio analysis run failed for %s: %s", video_id, exc)
+        await db.videos.update_one(
+            {"id": video_id},
+            {"$set": {"audio_analysis_status": "failed", "audio_analysis_error": str(exc)}},
+        )
+        await _log_privacy_audit_event(
+            "audio_analysis_run",
+            "video",
+            video_id,
+            actor_user_id=current_user.get("id"),
+            details={"audio_analysis_status": "failed"},
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "AUDIO_RUN_FAILED",
+                "reason_code": "audio_pipeline_error",
+                "message": "Audio analysis could not be completed. Please retry.",
+            },
+        )
+
+    if transcript_doc:
+        await db.video_audio_transcripts.update_one(
+            {"video_id": video_id},
+            {"$set": transcript_doc},
+            upsert=True,
+        )
+    if feature_doc:
+        await db.video_analysis_features.update_one(
+            {"video_id": video_id},
+            {"$set": feature_doc},
+            upsert=True,
+        )
+
+    transcript_status = (transcript_doc or {}).get("transcript_status")
+    if transcript_status == "completed":
+        final_status = "completed"
+    elif transcript_status:
+        final_status = transcript_status  # e.g. "unconfigured" / "disabled"
+    else:
+        final_status = "no_audio"
+    completed_at = datetime.now(timezone.utc).isoformat()
+    await db.videos.update_one(
+        {"id": video_id},
+        {"$set": {"audio_analysis_status": final_status, "audio_analysis_completed_at": completed_at}},
+    )
+    await _log_privacy_audit_event(
+        "audio_analysis_run",
+        "video",
+        video_id,
+        actor_user_id=current_user.get("id"),
+        details={
+            "audio_analysis_status": final_status,
+            "transcript_status": transcript_status,
+            "features_available": bool(feature_doc),
+        },
+    )
+    return VideoAudioAnalysisRunResponse(
+        video_id=video_id,
+        audio_analysis_status=final_status,
+        transcript_status=transcript_status,
+        features_available=bool(feature_doc),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# PR C9.5 PART 5 — privacy (face-blurring) policy override admin controls.
+#
+# Contract E: an admin may disable destructive face blurring at video / teacher
+# / school scope, but only via an audited override carrying a non-empty reason,
+# the acting admin, a timestamp, the scope, and the resulting effective policy.
+# The default everywhere remains face_blurring_required=True (fail-closed); this
+# is the *only* sanctioned path to a face_blurring_required=False policy.
+# --------------------------------------------------------------------------- #
+def _norm_lower(value: Any) -> str:
+    """Trimmed, lower-cased string projection (``None`` -> ``""``)."""
+    return str(value or "").strip().lower()
+
+
+def _serialize_privacy_override(record: Mapping[str, Any]) -> Dict[str, Any]:
+    """Project a stored override record into the API response shape."""
+    record = dict(record or {})
+    return {
+        "id": record.get("id"),
+        "scope": record.get("scope"),
+        "scope_id": record.get("scope_id"),
+        "face_blurring_required": bool(record.get("face_blurring_required", True)),
+        "reason": record.get("reason") or "",
+        "created_by": record.get("created_by") or record.get("actor_id"),
+        "actor_role": record.get("actor_role"),
+        "created_at": record.get("created_at"),
+        "expires_at": record.get("expires_at"),
+        "is_active": bool(record.get("is_active", True)),
+        "policy_version": int(record.get("policy_version") or 1),
+        "revoked_at": record.get("revoked_at"),
+        "revoked_by": record.get("revoked_by"),
+        "revoked_reason": record.get("revoked_reason"),
+    }
+
+
+def _effective_policy_for_override(record: Mapping[str, Any]) -> Dict[str, Any]:
+    """Resolve the effective policy this single override implies (for auditing)."""
+    scope = _norm_lower(record.get("scope"))
+    scope_id = record.get("scope_id")
+    video_ctx: Dict[str, Any] = {}
+    if scope == "video":
+        video_ctx["id"] = scope_id
+    elif scope == "teacher":
+        video_ctx["teacher_id"] = scope_id
+    elif scope == "school":
+        video_ctx["school_id"] = scope_id
+    return build_effective_privacy_policy(video_ctx, admin_overrides=[record])
+
+
+async def _verify_privacy_override_scope_access(
+    scope: str, scope_id: str, current_user: dict
+) -> None:
+    """Ensure the admin actually governs the ``(scope, scope_id)`` being changed.
+
+    Reuses the existing tenant-visibility gates so an admin cannot disable face
+    blurring on a video / teacher / school outside their own Cognivio workspace.
+    Raises ``HTTPException`` on any failure (fail-closed).
+    """
+    scope = _norm_lower(scope)
+    scope_id = str(scope_id or "").strip()
+    if scope == "video":
+        # Enforces admin role + teacher-tenant visibility for the video.
+        await _get_admin_owned_video_or_404(scope_id, current_user)
+        return
+    if _get_user_role(current_user) != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    if scope == "teacher":
+        await _get_teacher_or_404(scope_id, current_user)
+        return
+    if scope == "school":
+        if _get_user_tenant_role(current_user) == "super_admin":
+            return
+        school = (
+            await db.schools.find_one({"id": scope_id}, {"_id": 0}) if scope_id else None
+        )
+        if not school:
+            raise HTTPException(status_code=404, detail="School not found")
+        organization_id = current_user.get("organization_id")
+        if (
+            (organization_id and school.get("organization_id") == organization_id)
+            or school.get("user_id") == current_user.get("id")
+            or school.get("created_by") == current_user.get("id")
+        ):
+            return
+        await _log_cross_tenant_access_denied(
+            target_type="school",
+            target_id=scope_id,
+            current_user=current_user,
+            details={"scope": "privacy_override"},
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "reason_code": "forbidden_tenant_access",
+                "message": "You do not have access to that Cognivio workspace.",
+            },
+        )
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "reason_code": "invalid_override_scope",
+            "message": f"scope must be one of {', '.join(PRIVACY_OVERRIDE_SCOPES)}.",
+        },
+    )
+
+
+@api_router.post("/admin/privacy-overrides", response_model=PrivacyOverrideResponse)
+async def create_privacy_override(
+    payload: PrivacyOverrideCreateRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Create an audited privacy (face-blurring) policy override (PR C9.5 PART 5).
+
+    Disabling destructive blur is only ever possible through this path, and only
+    with a non-empty audited reason + actor + timestamp + scope. A single active
+    override is kept per ``(scope, scope_id)``: any prior active record at the
+    same target is deactivated (not deleted) so the audit trail survives.
+    """
+    scope_norm = _norm_lower(payload.scope)
+    scope_id = str(payload.scope_id or "").strip()
+    if scope_norm not in PRIVACY_OVERRIDE_SCOPES:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "reason_code": "invalid_override_scope",
+                "message": f"scope must be one of {', '.join(PRIVACY_OVERRIDE_SCOPES)}.",
+            },
+        )
+    # Authority: the admin must actually govern this scope target.
+    await _verify_privacy_override_scope_access(scope_norm, scope_id, current_user)
+
+    try:
+        record = build_privacy_override_record(
+            scope=scope_norm,
+            scope_id=scope_id,
+            face_blurring_required=bool(payload.face_blurring_required),
+            reason=payload.reason,
+            actor_id=str(current_user.get("id") or ""),
+            actor_role=_get_user_tenant_role(current_user),
+            expires_at=_clean_optional_string(payload.expires_at),
+        )
+    except PrivacyOverrideError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"reason_code": "invalid_privacy_override", "message": str(exc)},
+        )
+
+    collection = db.privacy_policy_overrides
+    # Single active override per target: supersede prior active records so the
+    # resolver is unambiguous, but keep them (is_active=False) for the audit log.
+    superseded_at = datetime.now(timezone.utc).isoformat()
+    await collection.update_many(
+        {"scope": scope_norm, "scope_id": scope_id, "is_active": True},
+        {
+            "$set": {
+                "is_active": False,
+                "revoked_at": superseded_at,
+                "revoked_by": current_user.get("id"),
+                "revoked_reason": "superseded_by_new_override",
+            }
+        },
+    )
+    await collection.insert_one(dict(record))
+
+    effective_policy = privacy_policy_public_view(_effective_policy_for_override(record))
+    await _log_privacy_audit_event(
+        "privacy_override_set",
+        scope_norm,
+        scope_id,
+        actor_user_id=current_user.get("id"),
+        details={
+            "override_id": record["id"],
+            "scope": scope_norm,
+            "scope_id": scope_id,
+            "face_blurring_required": record["face_blurring_required"],
+            "reason": record["reason"],
+            "expires_at": record["expires_at"],
+            "effective_policy": effective_policy,
+        },
+    )
+    return PrivacyOverrideResponse(**_serialize_privacy_override(record))
+
+
+@api_router.get("/admin/privacy-overrides", response_model=PrivacyOverrideListResponse)
+async def list_privacy_overrides(
+    scope: Optional[str] = None,
+    scope_id: Optional[str] = None,
+    include_inactive: bool = False,
+    current_user: dict = Depends(get_current_user),
+):
+    """List privacy-policy overrides for an admin surface (PR C9.5 PART 5).
+
+    A super admin may list workspace-wide; a regular admin must scope the query
+    to a specific ``(scope, scope_id)`` they govern so the listing can never be
+    used to enumerate other tenants' override decisions.
+    """
+    if _get_user_role(current_user) != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    scope_norm = _norm_lower(scope) if scope else ""
+    scope_id_clean = str(scope_id or "").strip()
+    if scope_id_clean or scope_norm:
+        if scope_norm not in PRIVACY_OVERRIDE_SCOPES or not scope_id_clean:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "reason_code": "scope_filter_invalid",
+                    "message": "Provide both a valid scope and scope_id to filter overrides.",
+                },
+            )
+        await _verify_privacy_override_scope_access(scope_norm, scope_id_clean, current_user)
+    elif _get_user_tenant_role(current_user) != "super_admin":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "reason_code": "scope_filter_required",
+                "message": "Provide scope and scope_id to list overrides for a target.",
+            },
+        )
+
+    query: Dict[str, Any] = {}
+    if not include_inactive:
+        query["is_active"] = True
+    if scope_norm:
+        query["scope"] = scope_norm
+    if scope_id_clean:
+        query["scope_id"] = scope_id_clean
+
+    collection = getattr(db, "privacy_policy_overrides", None)
+    records: List[Dict[str, Any]] = []
+    if collection is not None:
+        records = await collection.find(query, {"_id": 0}).to_list(length=500)
+    return PrivacyOverrideListResponse(
+        overrides=[
+            PrivacyOverrideResponse(**_serialize_privacy_override(record))
+            for record in records
+        ]
+    )
+
+
+@api_router.delete(
+    "/admin/privacy-overrides/{override_id}", response_model=PrivacyOverrideResponse
+)
+async def revoke_privacy_override(
+    override_id: str,
+    reason: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """Revoke an active privacy override (PR C9.5 PART 5).
+
+    Revocation deactivates the record (it is never deleted, preserving the audit
+    trail) and restores the fail-closed default for that target — re-enabling
+    destructive face blurring. Safe by construction.
+    """
+    if _get_user_role(current_user) != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    collection = getattr(db, "privacy_policy_overrides", None)
+    record = (
+        await collection.find_one({"id": override_id}, {"_id": 0})
+        if collection is not None
+        else None
+    )
+    if not record:
+        raise HTTPException(status_code=404, detail="Privacy override not found")
+
+    await _verify_privacy_override_scope_access(
+        _norm_lower(record.get("scope")), str(record.get("scope_id") or ""), current_user
+    )
+
+    revoked_at = datetime.now(timezone.utc).isoformat()
+    cleaned_reason = _clean_optional_string(reason) or "revoked_by_admin"
+    await collection.update_one(
+        {"id": override_id},
+        {
+            "$set": {
+                "is_active": False,
+                "revoked_at": revoked_at,
+                "revoked_by": current_user.get("id"),
+                "revoked_reason": cleaned_reason,
+            }
+        },
+    )
+    record.update(
+        {
+            "is_active": False,
+            "revoked_at": revoked_at,
+            "revoked_by": current_user.get("id"),
+            "revoked_reason": cleaned_reason,
+        }
+    )
+    await _log_privacy_audit_event(
+        "privacy_override_revoked",
+        _norm_lower(record.get("scope")),
+        str(record.get("scope_id") or ""),
+        actor_user_id=current_user.get("id"),
+        details={
+            "override_id": override_id,
+            "reason": cleaned_reason,
+            "restored_policy": privacy_policy_public_view(default_privacy_policy()),
+        },
+    )
+    return PrivacyOverrideResponse(**_serialize_privacy_override(record))
+
+
+@api_router.post("/videos/{video_id}/feedback/reproject")
+async def reproject_video_feedback(
+    video_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Re-project the canonical teacher feedback view for a video (PR C9.5 PART 6).
+
+    Contract C/D: gives existing reviewed lessons an explicit "Retry feedback
+    projection" action. It recomputes the teacher-visible coaching view from the
+    stored assessment (re-applying the release + safety gates) so a corrected
+    assessment or a cleared admin hold refreshes exactly what the teacher sees —
+    never fabricating feedback, only re-deriving it. The same canonical
+    :func:`get_teacher_visible_lesson_feedback` projection drives every surface.
+    """
+    video = await _get_visible_video_or_404(video_id, current_user)
+    teacher = await _get_teacher_or_404(video.get("teacher_id"), current_user)
+    assessment = await db.assessments.find_one(
+        {"video_id": video_id}, {"_id": 0}, sort=[("analyzed_at", -1)]
+    )
+    analysis_done = (
+        _normalize_video_status(video.get("analysis_status"))
+        == VideoProcessingStatus.COMPLETED.value
+        or _normalize_video_status(video.get("status"))
+        == VideoProcessingStatus.COMPLETED.value
+    )
+    if not assessment or not analysis_done:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "FEEDBACK_PROJECTION_BLOCKED",
+                "reason_code": "analysis_not_complete",
+                "message": "Feedback can be projected once analysis produces an assessment.",
+            },
+        )
+
+    artifact = await _build_teacher_lesson_coaching_artifact_for(
+        teacher=teacher,
+        current_user=current_user,
+        assessment=assessment,
+        video=video,
+    )
+    view = (artifact or {}).get("teacher_feedback_view") or get_teacher_visible_lesson_feedback(
+        artifact,
+        feedback_release_status=assessment.get("feedback_release_status"),
+        language=_teacher_language(current_user, teacher, assessment),
+    )
+    await _log_privacy_audit_event(
+        "feedback_projection_reprojected",
+        "video",
+        video_id,
+        actor_user_id=current_user.get("id"),
+        details={
+            "status": view.get("status"),
+            "feedback_available": bool(view.get("feedback_available")),
+            "blocked_reason": view.get("blocked_reason"),
+        },
+    )
+    return {
+        "video_id": video_id,
+        "feedback_available": bool(view.get("feedback_available")),
+        "status": view.get("status"),
+        "reason_code": view.get("blocked_reason"),
+        "teacher_feedback_view": view,
+    }
 
 
 async def resolve_video_privacy_review(
@@ -22238,7 +23068,15 @@ async def get_my_lessons(
                 "shared_moments_count": shared_counts.get(video.get("id"), 0),
                 "talk_time_summary": video.get("audio_summary") or (assessment or {}).get("audio_summary"),
                 # PR C9.3: deterministic, teacher-safe progress + validated playback.
-                "review_progress": build_video_review_progress(video, assessment, projection),
+                # PR C9.5 PART 6: the feedback stage consumes the SAME canonical
+                # teacher_feedback_view, so "Feedback Done" can never out-claim
+                # what the teacher actually sees.
+                "review_progress": build_video_review_progress(
+                    video,
+                    assessment,
+                    projection,
+                    teacher_feedback_view=(artifact or {}).get("teacher_feedback_view"),
+                ),
                 "playback": _build_teacher_playback_state(video),
             }
         )

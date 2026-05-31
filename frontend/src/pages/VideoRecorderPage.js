@@ -503,7 +503,7 @@ export function VideoRecorderPage() {
 
                 {queued && (
                   <div className="mt-3 rounded-md bg-emerald-50 px-3 py-2 text-[11px] text-emerald-700">
-                    <div>{t("videoRecorderPage.queuedMessage")}</div>
+                    <div>{t(isTeacher ? "videoRecorderPage.queuedMessageTeacher" : "videoRecorderPage.queuedMessage")}</div>
 
                     <div className="mt-3 flex flex-col gap-2 sm:flex-row">
                       {uploadedVideoId ? (

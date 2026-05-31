@@ -134,7 +134,11 @@ class TestBlurAllMode:
         assert result.is_redaction_verified is False
         assert result.max_sharp_faces_in_frame == 1
 
-    def test_no_faces_detected_passes_with_warning(self) -> None:
+    def test_no_faces_detected_but_sharp_frames_is_unconfirmed(self) -> None:
+        # PR C9.5 PART 2 fail-closed repair: zero detections + sharp frames means
+        # the render-time AND validation-time cascades were equally blind. We can
+        # NOT assert the output is blurred, so it is redaction_unconfirmed (NOT
+        # verified) — never the old auto-pass.
         result = validate_visual_redaction(
             "render.mp4",
             mode="blur_all",
@@ -142,10 +146,84 @@ class TestBlurAllMode:
             face_detector=_detector([]),
             sharpness_fn=_constant_sharpness(999.0),
         )
+        assert result.status == "failed"
+        assert result.failure_code == "redaction_unconfirmed"
+        assert result.is_redaction_verified is False
+        assert result.faces_detected == 0
+        assert "no_faces_detected_in_output" in result.warnings
+
+    def test_no_faces_detected_with_blurred_frames_passes(self) -> None:
+        # When the WHOLE output is demonstrably blurred (low whole-frame
+        # sharpness) zero detections is consistent with a full-frame redaction —
+        # this is positive evidence, so it may pass.
+        result = validate_visual_redaction(
+            "render.mp4",
+            mode="blur_all",
+            frame_sampler=_sampler([_frame(), _frame()]),
+            face_detector=_detector([]),
+            sharpness_fn=_constant_sharpness(10.0),
+        )
         assert result.status == "passed"
         assert result.is_redaction_verified is True
         assert result.faces_detected == 0
+        assert "full_frame_blur_confirmed" in result.warnings
+
+    def test_require_blur_evidence_false_restores_legacy_pass(self) -> None:
+        # The escape hatch (callers with independent evidence) may opt out of the
+        # zero-detections guard and accept the legacy auto-pass.
+        result = validate_visual_redaction(
+            "render.mp4",
+            mode="blur_all",
+            require_blur_evidence=False,
+            frame_sampler=_sampler([_frame()]),
+            face_detector=_detector([]),
+            sharpness_fn=_constant_sharpness(999.0),
+        )
+        assert result.status == "passed"
+        assert result.is_redaction_verified is True
         assert "no_faces_detected_in_output" in result.warnings
+
+
+class TestFullFrameStrategy:
+    def test_full_frame_blurred_passes(self) -> None:
+        result = validate_visual_redaction(
+            "render.mp4",
+            mode="blur_all",
+            strategy="full_frame",
+            frame_sampler=_sampler([_frame(), _frame()]),
+            face_detector=_detector([]),
+            sharpness_fn=_constant_sharpness(5.0),
+        )
+        assert result.status == "passed"
+        assert result.strategy == "full_frame"
+        assert result.is_redaction_verified is True
+
+    def test_full_frame_with_sharp_frame_fails(self) -> None:
+        # A full_frame render must show EVERY frame blurred. A sharp frame means
+        # the full-frame blur did not actually apply — fail-closed.
+        result = validate_visual_redaction(
+            "render.mp4",
+            mode="blur_all",
+            strategy="full_frame",
+            frame_sampler=_sampler([_frame()]),
+            face_detector=_detector([]),
+            sharpness_fn=_constant_sharpness(500.0),
+        )
+        assert result.status == "failed"
+        assert result.failure_code == "frame_not_blurred"
+        assert result.is_redaction_verified is False
+
+    def test_unknown_strategy_normalizes_to_regions(self) -> None:
+        result = validate_visual_redaction(
+            "render.mp4",
+            mode="blur_all",
+            strategy="bogus",
+            frame_sampler=_sampler([_frame()]),
+            face_detector=_detector([(0, 0, 40, 40)]),
+            sharpness_fn=_constant_sharpness(DEFAULT_SHARPNESS_THRESHOLD - 1.0),
+        )
+        assert result.strategy == "regions"
+        assert result.status == "passed"
 
 
 class TestSelectiveMode:

@@ -179,13 +179,21 @@ def build_video_review_progress(
     teacher_feedback: Optional[Mapping[str, Any]] = None,
     *,
     language: str = "en",
+    teacher_feedback_view: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build a deterministic, teacher-safe progress object for a video.
 
     Returns a dict with: ``status``, ``percent``, ``current_stage``,
     ``teacher_message``, ``admin_message``, ``stages`` (list of
     {key,label,status}), ``retry`` ({eligible, action}),
-    ``needs_admin_attention``, ``failure_code``, and ``degradation_reasons``.
+    ``needs_admin_attention``, ``failure_code``, ``feedback_reason_code`` and
+    ``degradation_reasons``.
+
+    PR C9.5 PART 6 (contract C): when ``teacher_feedback_view`` (the resolved
+    :func:`get_teacher_visible_lesson_feedback` projection) is supplied, the
+    feedback stage is derived from it so the stage only reads ``completed`` when
+    the teacher can actually SEE feedback, and every withheld / awaiting-release
+    state carries its specific ``reason_code`` instead of a generic "done".
     """
     if not isinstance(video, Mapping):
         video = {}
@@ -305,22 +313,59 @@ def build_video_review_progress(
         audio_detail = None
     stages.append(_stage("audio", "Audio analysis", audio_stage, audio_detail))
 
-    # 6. Feedback — gated on analysis completion.
-    feedback_done = _feedback_completed(video, teacher_feedback)
-    feedback_blocked = _feedback_blocked(video, teacher_feedback)
-    if not analysis_done:
-        feedback_stage = "blocked"
-        feedback_detail = None
-    elif feedback_done:
-        feedback_stage = "completed"
-        feedback_detail = None
-    elif feedback_blocked:
-        feedback_stage = "blocked"
-        feedback_detail = "Feedback is pending human quality review before release"
+    # 6. Feedback — gated on analysis completion. When the canonical teacher
+    #    feedback view is supplied (PART 6), it is the SOURCE OF TRUTH: the stage
+    #    is "completed" only when the teacher can actually see feedback, and any
+    #    withheld / awaiting-release state carries its specific reason code so the
+    #    UI never shows a generic "done" for a still-hidden review.
+    feedback_reason_code: Optional[str] = None
+    if isinstance(teacher_feedback_view, Mapping) and teacher_feedback_view.get("status"):
+        view_status = _norm(teacher_feedback_view.get("status"))
+        view_available = bool(teacher_feedback_view.get("feedback_available"))
+        view_detail = teacher_feedback_view.get("detail")
+        if not analysis_done:
+            feedback_stage = "blocked"
+            feedback_detail = None
+        elif view_available and view_status == "ready":
+            feedback_stage = "completed"
+            feedback_detail = None
+        elif view_status in {"processing", "not_yet_reviewed"}:
+            feedback_stage = "pending"
+            feedback_detail = view_detail
+            feedback_reason_code = view_status
+        else:
+            # awaiting_admin_release / admin_hidden / revision_requested /
+            # safety_withheld / evidence_insufficient / source_unavailable —
+            # ready-but-hidden or content-withheld. NEVER "completed".
+            feedback_stage = "blocked"
+            feedback_detail = view_detail
+            feedback_reason_code = (
+                "feedback_awaiting_release"
+                if view_status == "awaiting_admin_release"
+                else view_status
+            )
+        feedback_done = feedback_stage == "completed"
+        feedback_blocked = feedback_stage == "blocked"
     else:
-        feedback_stage = "pending"
-        feedback_detail = None
-    stages.append(_stage("feedback", "Feedback", feedback_stage, feedback_detail))
+        feedback_done = _feedback_completed(video, teacher_feedback)
+        feedback_blocked = _feedback_blocked(video, teacher_feedback)
+        if not analysis_done:
+            feedback_stage = "blocked"
+            feedback_detail = None
+        elif feedback_done:
+            feedback_stage = "completed"
+            feedback_detail = None
+        elif feedback_blocked:
+            feedback_stage = "blocked"
+            feedback_detail = "Feedback is pending human quality review before release"
+            feedback_reason_code = "feedback_pending_review"
+        else:
+            feedback_stage = "pending"
+            feedback_detail = None
+    feedback_entry = _stage("feedback", "Feedback", feedback_stage, feedback_detail)
+    if feedback_reason_code:
+        feedback_entry["reason_code"] = feedback_reason_code
+    stages.append(feedback_entry)
 
     # ------------------------------------------------------------------ #
     # Overall status + failure code
@@ -349,7 +394,7 @@ def build_video_review_progress(
         failure_code = "privacy_review_required"
     elif feedback_stage == "blocked" and analysis_done:
         status = "blocked"
-        failure_code = "feedback_pending_review"
+        failure_code = feedback_reason_code or "feedback_pending_review"
     elif analysis_done and (feedback_done or feedback_stage in {"pending"}):
         # Review is effectively complete once analysis + assessment exist and
         # feedback is released. A "pending" feedback (released by default
@@ -442,6 +487,7 @@ def build_video_review_progress(
         "retry": {"eligible": retry_eligible, "action": retry_action},
         "needs_admin_attention": needs_admin_attention,
         "failure_code": failure_code,
+        "feedback_reason_code": feedback_reason_code,
         "degraded": degraded,
         "degradation_reasons": degradation_reasons,
     }

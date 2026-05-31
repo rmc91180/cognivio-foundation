@@ -21,6 +21,9 @@ import {
   resolveAdminPlaybackUrl,
   resolvePlaybackUrl,
   buildBackendWebSocketUrl,
+  getFeedbackStage,
+  getFeedbackReasonCode,
+  describeFeedbackReason,
 } from "@/lib/reviewProgress";
 
 describe("isReviewTerminal / reviewPollingInterval", () => {
@@ -91,6 +94,46 @@ describe("getAudioStageStatus / isAudioNotRun", () => {
     expect(isAudioNotRun("pending")).toBe(false);
     expect(isAudioNotRun("processing")).toBe(false);
     expect(isAudioNotRun("completed")).toBe(false);
+  });
+});
+
+describe("feedback reason helpers (PR C9.5 PART 6 — contract C)", () => {
+  const withheldProgress = {
+    status: "blocked",
+    feedback_reason_code: "safety_withheld",
+    stages: [
+      { key: "analysis", status: "completed" },
+      { key: "feedback", status: "blocked", reason_code: "safety_withheld" },
+    ],
+  };
+
+  it("reads the feedback stage off the progress object", () => {
+    expect(getFeedbackStage(withheldProgress).key).toBe("feedback");
+    expect(getFeedbackStage({ stages: [] })).toBeNull();
+    expect(getFeedbackStage(null)).toBeNull();
+  });
+
+  it("prefers the progress-level feedback_reason_code, then the stage reason_code", () => {
+    expect(getFeedbackReasonCode(withheldProgress)).toBe("safety_withheld");
+    expect(
+      getFeedbackReasonCode({
+        stages: [{ key: "feedback", status: "blocked", reason_code: "admin_hidden" }],
+      })
+    ).toBe("admin_hidden");
+    expect(getFeedbackReasonCode({ stages: [] })).toBeNull();
+  });
+
+  it("maps every known reason code to honest copy that never implies feedback exists", () => {
+    expect(describeFeedbackReason("feedback_awaiting_release")).toMatch(/administrator review/i);
+    expect(describeFeedbackReason("safety_withheld")).toMatch(/safety check/i);
+    expect(describeFeedbackReason("evidence_insufficient")).toMatch(/evidence/i);
+    // A withheld reason must never use wording that claims feedback is ready/done.
+    expect(describeFeedbackReason("safety_withheld")).not.toMatch(/\bdone\b/i);
+  });
+
+  it("returns null for an unknown or missing reason code", () => {
+    expect(describeFeedbackReason(null)).toBeNull();
+    expect(describeFeedbackReason("totally_unknown_code")).toBeNull();
   });
 });
 

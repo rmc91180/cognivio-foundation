@@ -82,6 +82,53 @@ export function isAudioNotRun(audioStageStatus) {
   return AUDIO_NOT_RUN_STATUSES.includes(audioStageStatus);
 }
 
+/**
+ * PR C9.5 PART 6 (contract C) — machine-readable feedback reason codes mapped to
+ * teacher-safe copy. The backend feedback stage now carries a specific
+ * ``reason_code`` (and the progress object a ``feedback_reason_code``) for every
+ * withheld / awaiting-release state, so the UI can explain *why* feedback is not
+ * shown instead of printing a generic "Waiting". The copy is honest and never
+ * implies feedback exists when it is withheld.
+ */
+export const FEEDBACK_REASON_COPY = Object.freeze({
+  feedback_awaiting_release:
+    "Your feedback is ready and waiting for a final administrator review before it’s shared.",
+  admin_hidden: "An administrator has paused sharing this feedback for now.",
+  revision_requested: "Your observer is revising this feedback before it’s shared.",
+  safety_withheld:
+    "We’re holding this feedback for a quality and safety check before it’s shared.",
+  evidence_insufficient:
+    "This lesson didn’t capture enough clear evidence to generate reliable feedback.",
+  source_unavailable:
+    "We couldn’t access the lesson recording needed to prepare this feedback.",
+  not_yet_reviewed: "This lesson hasn’t been reviewed yet.",
+  processing: "We’re preparing your feedback now.",
+  feedback_pending_review:
+    "Feedback is pending a human quality review before it’s released.",
+});
+
+/** Return the feedback stage object from a review-progress object, or null. */
+export function getFeedbackStage(progress) {
+  const stages = progress?.stages;
+  if (!Array.isArray(stages)) return null;
+  return stages.find((stage) => stage && stage.key === "feedback") || null;
+}
+
+/**
+ * Resolve the most specific feedback reason code available: the progress-level
+ * ``feedback_reason_code`` first, then the feedback stage's ``reason_code``.
+ */
+export function getFeedbackReasonCode(progress) {
+  if (!progress || typeof progress !== "object") return null;
+  return progress.feedback_reason_code || getFeedbackStage(progress)?.reason_code || null;
+}
+
+/** Map a feedback reason code to teacher-safe copy (or null when unknown). */
+export function describeFeedbackReason(code) {
+  if (!code) return null;
+  return FEEDBACK_REASON_COPY[code] || null;
+}
+
 /** Prefix a relative backend path with the backend origin; pass through absolutes. */
 export function absolutizeBackendUrl(url, backendUrl) {
   if (!url) return null;
