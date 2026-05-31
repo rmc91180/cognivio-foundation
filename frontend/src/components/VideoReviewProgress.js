@@ -1,5 +1,5 @@
 import React from "react";
-import { getAudioStageStatus, isAudioNotRun } from "@/lib/reviewProgress";
+import { getAudioStageStatus, isAudioNotRun, describeFeedbackReason } from "@/lib/reviewProgress";
 
 /**
  * PR C9.3 PART 2 — teacher-safe review-progress checklist + barometer.
@@ -103,9 +103,13 @@ export function VideoReviewProgress({ progress, isAdmin = false, className = "" 
           const dotClass = STATUS_DOT_CLASS[stage.status] || "bg-slate-300";
           // Audio that was deliberately not run gets explicit, honest copy.
           const audioNotRun = stage.key === "audio" && isAudioNotRun(stage.status);
+          // PR C9.5 PART 6: a withheld/awaiting feedback stage explains WHY via
+          // its specific reason code rather than a generic "Waiting".
+          const feedbackReasonCopy =
+            stage.key === "feedback" ? describeFeedbackReason(stage.reason_code) : null;
           const detail = audioNotRun
             ? "Audio analysis was not run for this review."
-            : stage.detail;
+            : stage.detail || feedbackReasonCopy;
           return (
             <li
               key={stage.key}

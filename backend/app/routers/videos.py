@@ -91,6 +91,10 @@ async def retry_video_processing_route(
 @router.post("/videos/{video_id}/privacy/retry")
 async def retry_video_privacy_route(
     video_id: str,
+    payload: Optional[legacy.PrivacyRetryOptions] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    return await retry_video_privacy(video_id, current_user)
+    force_full_frame = bool(payload.force_full_frame) if payload else False
+    return await retry_video_privacy(
+        video_id, current_user, force_full_frame=force_full_frame
+    )

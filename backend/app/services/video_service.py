@@ -544,7 +544,12 @@ async def retry_video_processing(video_id: str, current_user: dict) -> dict:
     return {"video_id": video_id, "status": legacy.VideoProcessingStatus.QUEUED.value}
 
 
-async def retry_video_privacy(video_id: str, current_user: dict) -> dict:
+async def retry_video_privacy(
+    video_id: str,
+    current_user: dict,
+    *,
+    force_full_frame: bool = False,
+) -> dict:
     video = await video_repository.find_video_by_id(video_id)
     if not video:
         raise legacy.HTTPException(status_code=404, detail="Video not found")
@@ -602,21 +607,25 @@ async def retry_video_privacy(video_id: str, current_user: dict) -> dict:
         )
 
     queued_at = datetime.now(timezone.utc).isoformat()
-    await video_repository.update_video_fields(
-        video_id,
-        {
-            "status": legacy.VideoProcessingStatus.QUEUED.value,
-            "privacy_status": legacy.PrivacyProcessingStatus.QUEUED.value,
-            "analysis_status": legacy.VideoProcessingStatus.QUEUED.value,
-            "privacy_review_required": False,
-            "privacy_review_reason": None,
-            "privacy_error": None,
-            "privacy_started_at": None,
-            "privacy_completed_at": None,
-            "privacy_failed_at": None,
-            "status_updated_at": queued_at,
-        },
+    update_fields = {
+        "status": legacy.VideoProcessingStatus.QUEUED.value,
+        "privacy_status": legacy.PrivacyProcessingStatus.QUEUED.value,
+        "analysis_status": legacy.VideoProcessingStatus.QUEUED.value,
+        "privacy_review_required": False,
+        "privacy_review_reason": None,
+        "privacy_error": None,
+        "privacy_started_at": None,
+        "privacy_completed_at": None,
+        "privacy_failed_at": None,
+        "status_updated_at": queued_at,
+    }
+    # PR C9.5 PART 3: invalidate any stale "passed" redaction validation so the
+    # teacher-playback gate fails closed until the re-render is re-validated. A
+    # full-frame retry sets ``privacy_force_full_frame`` for the worker.
+    update_fields.update(
+        legacy._privacy_retry_invalidation_fields(force_full_frame=force_full_frame)
     )
+    await video_repository.update_video_fields(video_id, update_fields)
     await legacy._enqueue_video_privacy_job(
         video_id=video_id,
         teacher_id=video.get("teacher_id"),
@@ -628,11 +637,12 @@ async def retry_video_privacy(video_id: str, current_user: dict) -> dict:
         "video",
         video_id,
         actor_user_id=current_user["id"],
-        details={"requeued_at": queued_at},
+        details={"requeued_at": queued_at, "force_full_frame": bool(force_full_frame)},
     )
     return {
         "video_id": video_id,
         "privacy_status": legacy.PrivacyProcessingStatus.QUEUED.value,
         "analysis_status": legacy.VideoProcessingStatus.QUEUED.value,
         "requeued_at": queued_at,
+        "force_full_frame": bool(force_full_frame),
     }

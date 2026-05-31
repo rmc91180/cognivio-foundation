@@ -17,6 +17,9 @@ export const videoApi = {
     api.patch(`/api/videos/${videoId}/comments/${commentId}`, payload),
   deleteComment: (videoId, commentId) => api.delete(`/api/videos/${videoId}/comments/${commentId}`),
   audioAnalysis: (videoId) => api.get(`/api/videos/${videoId}/audio-analysis`),
+  // PR C9.5 PART 4 / PART 6 — corrective-action endpoints behind the eligibility map.
+  runAudioAnalysis: (videoId) => api.post(`/api/videos/${videoId}/audio/run`),
+  reprojectFeedback: (videoId) => api.post(`/api/videos/${videoId}/feedback/reproject`),
 };
 
 export const evidenceApi = {

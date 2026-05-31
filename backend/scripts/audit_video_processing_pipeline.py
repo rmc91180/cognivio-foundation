@@ -78,6 +78,14 @@ ISSUE_CODES = (
     "visual_redaction_failed_but_privacy_completed",
     "visual_redaction_inconclusive_but_privacy_completed",
     "feedback_released_but_safety_blocked",
+    # PR C9.5 additions — privacy-policy truth, playback clearance, override
+    # audit completeness, and corrective-action availability (contracts A/B/D/E)
+    "privacy_blur_disabled_without_audited_override",
+    "privacy_completed_but_readiness_unverified",
+    "teacher_playback_served_without_policy_clearance",
+    "privacy_override_missing_audit_fields",
+    "privacy_override_expired_but_active",
+    "blocked_video_without_eligible_action",
 )
 
 
@@ -610,6 +618,210 @@ async def _scan_feedback_release_consistency(
     return issues
 
 
+async def _load_active_privacy_overrides(db, *, limit: int) -> List[Dict[str, Any]]:
+    """Load the active privacy-policy override records (PR C9.5 PART 5).
+
+    Read-only; returns ``[]`` when the ``privacy_policy_overrides`` collection is
+    absent (back-compat: the default fail-closed policy then applies everywhere).
+    The pure resolver does its own in-scope precedence matching, so we just hand
+    it every active record.
+    """
+    collection = getattr(db, "privacy_policy_overrides", None)
+    if collection is None:
+        return []
+    out: List[Dict[str, Any]] = []
+    async for override in collection.find({"is_active": True}, {"_id": 0}).limit(limit):
+        out.append(override)
+    return out
+
+
+async def _scan_privacy_policy_truth(
+    db,
+    *,
+    build_effective_privacy_policy,
+    evaluate_privacy_readiness,
+    teacher_playback_policy_allows,
+    select_playback_asset,
+    active_overrides: List[Dict[str, Any]],
+    limit: int,
+    teacher_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """PR C9.5 contracts A/B/E — the effective-policy truth gates.
+
+    For every video the effective privacy policy is resolved from the active
+    override records (video > teacher > school > default). Three fail-closed
+    invariants are checked:
+
+    - ``privacy_blur_disabled_without_audited_override`` (E) — the video doc
+      carries ``destructive_blurring_enabled == False`` (blur turned off) yet the
+      resolved policy still *requires* blur, i.e. no audited active override
+      backs the disable. Blur must never be off except via an audited override.
+    - ``privacy_completed_but_readiness_unverified`` (A) — privacy is marked
+      ``completed`` and blur is required, but :func:`evaluate_privacy_readiness`
+      refuses to assert "Privacy ready" (missing / failed / inconclusive
+      validation). The legacy status disagrees with the truth gate.
+    - ``teacher_playback_served_without_policy_clearance`` (B) — the policy gate
+      forbids serving a teacher playback URL, yet ``select_playback_asset`` would
+      still resolve one (e.g. a redacted asset whose visual/playback validation
+      never passed).
+    """
+    issues: List[Dict[str, Any]] = []
+    if not hasattr(db, "videos"):
+        return issues
+    query: Dict[str, Any] = {}
+    if teacher_id:
+        query["teacher_id"] = teacher_id
+    async for video in db.videos.find(query, {"_id": 0}).limit(limit):
+        vid = _doc_id(video)
+        tid = video.get("teacher_id")
+        policy = build_effective_privacy_policy(video, admin_overrides=active_overrides)
+        required = bool(policy.get("face_blurring_required", True))
+        source = policy.get("source", "default")
+
+        if video.get("destructive_blurring_enabled") is False and required:
+            issues.append(
+                {
+                    "issue_code": "privacy_blur_disabled_without_audited_override",
+                    "video_id": vid,
+                    "teacher_id": tid,
+                    "policy_source": source,
+                }
+            )
+
+        privacy_status = str(video.get("privacy_status") or "").strip().lower()
+        if required and privacy_status == "completed":
+            readiness = evaluate_privacy_readiness(video, policy)
+            if not readiness.get("privacy_ready"):
+                issues.append(
+                    {
+                        "issue_code": "privacy_completed_but_readiness_unverified",
+                        "video_id": vid,
+                        "teacher_id": tid,
+                        "badge_status": readiness.get("badge_status"),
+                        "reason_code": readiness.get("reason_code"),
+                    }
+                )
+
+        allowed, _mode, _reason = teacher_playback_policy_allows(video, policy)
+        if not allowed:
+            decision = select_playback_asset(video, "teacher", allow_raw_for_admin=False)
+            if getattr(decision, "url", None):
+                issues.append(
+                    {
+                        "issue_code": "teacher_playback_served_without_policy_clearance",
+                        "video_id": vid,
+                        "teacher_id": tid,
+                        "selected_source": getattr(decision, "source", None),
+                        "policy_reason": _reason,
+                    }
+                )
+    return issues
+
+
+async def _scan_privacy_overrides_audit(
+    db,
+    *,
+    override_is_active,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    """PR C9.5 contract E — every active override must carry a complete audit.
+
+    A privacy override may disable destructive blur, so it must record a
+    non-empty ``reason``, an ``actor`` (``created_by``), a ``scope`` +
+    ``scope_id``, and a ``created_at`` timestamp. An active record missing any of
+    these is untrustworthy and is flagged. An override whose ``expires_at`` is in
+    the past but is still ``is_active`` is a stale grant that should have been
+    deactivated.
+    """
+    issues: List[Dict[str, Any]] = []
+    collection = getattr(db, "privacy_policy_overrides", None)
+    if collection is None:
+        return issues
+    required_fields = ("reason", "scope", "scope_id", "created_at")
+    async for override in collection.find({"is_active": True}, {"_id": 0}).limit(limit):
+        oid = override.get("id")
+        missing: List[str] = [f for f in required_fields if not str(override.get(f) or "").strip()]
+        if not (override.get("created_by") or override.get("actor_id")):
+            missing.append("actor")
+        if missing:
+            issues.append(
+                {
+                    "issue_code": "privacy_override_missing_audit_fields",
+                    "override_id": oid,
+                    "scope": override.get("scope"),
+                    "scope_id": override.get("scope_id"),
+                    "missing_fields": missing,
+                }
+            )
+        # Stale grant: marked active but already expired.
+        if override.get("is_active") and not override_is_active(override):
+            issues.append(
+                {
+                    "issue_code": "privacy_override_expired_but_active",
+                    "override_id": oid,
+                    "scope": override.get("scope"),
+                    "scope_id": override.get("scope_id"),
+                    "expires_at": override.get("expires_at"),
+                }
+            )
+    return issues
+
+
+async def _scan_corrective_actions(
+    db,
+    *,
+    build_video_action_states,
+    limit: int,
+    teacher_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """PR C9.5 contract D — a stuck video must never be a dead end.
+
+    A video whose privacy / analysis / overall status is ``failed`` must expose
+    at least one *eligible* corrective control (retry privacy, retry analysis,
+    run audio, reproject feedback). When the eligibility map produces zero
+    eligible actions the teacher/admin has no way forward — surfaced as
+    ``blocked_video_without_eligible_action`` with the per-action disabled
+    reasons so an operator can see exactly why every control is inert.
+    """
+    issues: List[Dict[str, Any]] = []
+    if not hasattr(db, "videos"):
+        return issues
+    query: Dict[str, Any] = {}
+    if teacher_id:
+        query["teacher_id"] = teacher_id
+    failed_states = {"failed"}
+    async for video in db.videos.find(query, {"_id": 0}).limit(limit):
+        vid = _doc_id(video)
+        tid = video.get("teacher_id")
+        status = str(video.get("status") or "").strip().lower()
+        privacy_status = str(video.get("privacy_status") or "").strip().lower()
+        analysis_status = str(video.get("analysis_status") or "").strip().lower()
+        is_blocked = (
+            status in failed_states
+            or privacy_status in failed_states
+            or analysis_status in failed_states
+        )
+        if not is_blocked:
+            continue
+        states = build_video_action_states(video)
+        eligible = [k for k, v in states.items() if v.get("eligible")]
+        if not eligible:
+            issues.append(
+                {
+                    "issue_code": "blocked_video_without_eligible_action",
+                    "video_id": vid,
+                    "teacher_id": tid,
+                    "status": status,
+                    "privacy_status": privacy_status,
+                    "analysis_status": analysis_status,
+                    "disabled_reasons": {
+                        k: v.get("disabled_reason") for k, v in states.items()
+                    },
+                }
+            )
+    return issues
+
+
 async def _dry_run_materialization(
     db,
     *,
@@ -690,6 +902,15 @@ async def run_audit(args: argparse.Namespace) -> int:
     )
     from app.services.video_review_progress import (  # noqa: WPS433
         build_video_review_progress,
+    )
+    from app.services.privacy_policy import (  # noqa: WPS433
+        build_effective_privacy_policy,
+        evaluate_privacy_readiness,
+        override_is_active,
+        teacher_playback_policy_allows,
+    )
+    from app.services.video_actions import (  # noqa: WPS433
+        build_video_action_states,
     )
 
     db = server.db
@@ -779,6 +1000,28 @@ async def run_audit(args: argparse.Namespace) -> int:
         limit=args.limit,
         teacher_id=args.teacher_id,
     )
+    active_overrides = await _load_active_privacy_overrides(db, limit=args.limit)
+    privacy_policy_issues = await _scan_privacy_policy_truth(
+        db,
+        build_effective_privacy_policy=build_effective_privacy_policy,
+        evaluate_privacy_readiness=evaluate_privacy_readiness,
+        teacher_playback_policy_allows=teacher_playback_policy_allows,
+        select_playback_asset=select_playback_asset,
+        active_overrides=active_overrides,
+        limit=args.limit,
+        teacher_id=args.teacher_id,
+    )
+    override_audit_issues = await _scan_privacy_overrides_audit(
+        db,
+        override_is_active=override_is_active,
+        limit=args.limit,
+    )
+    corrective_action_issues = await _scan_corrective_actions(
+        db,
+        build_video_action_states=build_video_action_states,
+        limit=args.limit,
+        teacher_id=args.teacher_id,
+    )
 
     all_issues = (
         storage_url_issues
@@ -789,6 +1032,9 @@ async def run_audit(args: argparse.Namespace) -> int:
         + review_playback_issues
         + visual_redaction_issues
         + feedback_release_issues
+        + privacy_policy_issues
+        + override_audit_issues
+        + corrective_action_issues
     )
     summary: Dict[str, int] = {}
     for issue in all_issues:

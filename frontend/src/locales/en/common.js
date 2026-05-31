@@ -73,6 +73,7 @@ const en = {
     teachers: "Teachers",
     trainingParticipants: "Participants",
     videos: "Videos & Assessments",
+    lessons: "Lessons",
     accessManagement: "Access Approvals",
     myWorkspace: "My Workspace",
     myVideos: "My Videos",
@@ -2346,6 +2347,7 @@ const en = {
     uploadQueue: "Upload & queue",
     uploadProgress: "Upload progress: {{progress}}%",
     queuedMessage: "Queued for analysis. Check Videos & Assessments for status.",
+    queuedMessageTeacher: "Queued for analysis. Check Lessons for status.",
   },
   frameworksPage: {
     frameworkLabels: {

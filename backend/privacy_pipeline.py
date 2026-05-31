@@ -342,6 +342,35 @@ def blur_region(frame: np.ndarray, bbox: Tuple[int, int, int, int], padding: flo
     frame[y1:y2, x1:x2] = cv2.GaussianBlur(pixelated, (blur_size, blur_size), 0)
 
 
+def blur_full_frame(frame: np.ndarray) -> None:
+    """Destructively blur the ENTIRE frame in place (PR C9.5 PART 2).
+
+    The region-based blur_all path can only redact faces the Haar cascades
+    actually find — the exact gap that lets a recognizable face survive a
+    "100% blurred" render. When face tracking cannot be trusted, the safest
+    provable redaction is to collapse the whole frame: pixelate by
+    down-then-up sampling, then a heavy GaussianBlur. This drives the *whole
+    frame's* variance-of-Laplacian far below the validator's frame-blur
+    threshold, so the output is verifiably privacy-safe regardless of detection.
+    """
+    cv2 = _require_cv2()
+    if frame is None or frame.size == 0:
+        return
+    height, width = frame.shape[:2]
+    if height <= 0 or width <= 0:
+        return
+    # 1) Mosaic the whole frame (coarse — ~3% of each dimension).
+    mosaic_w = max(1, width // 32)
+    mosaic_h = max(1, height // 32)
+    small = cv2.resize(frame, (mosaic_w, mosaic_h), interpolation=cv2.INTER_LINEAR)
+    pixelated = cv2.resize(small, (width, height), interpolation=cv2.INTER_NEAREST)
+    # 2) Heavy GaussianBlur scaled to the frame size to erase mosaic edges.
+    blur_size = max(51, int(min(width, height) * 0.12))
+    if blur_size % 2 == 0:
+        blur_size += 1
+    frame[:, :] = cv2.GaussianBlur(pixelated, (blur_size, blur_size), 0)
+
+
 def analyze_video_privacy(
     video_path: str,
     reference_paths: List[str],
@@ -492,7 +521,15 @@ def render_redacted_video(
     ambiguous_match_threshold: float,
     teacher_track_id: Optional[str] = None,
     force_blur_all: bool = False,
+    full_frame_fallback: bool = False,
 ) -> Dict[str, Any]:
+    # PR C9.5 PART 2 — when the redaction cannot trust per-face detection, the
+    # operator may render a provably-safe full-frame blur. This only applies to
+    # the blur_all path (no preserved teacher) and is recorded as
+    # ``redaction_strategy="full_frame"`` so the visual-redaction validator
+    # verifies whole-frame blur instead of per-face sharpness.
+    use_full_frame = bool(force_blur_all and full_frame_fallback)
+    redaction_strategy = "full_frame" if use_full_frame else "regions"
     if _cv2 is None:
         if not ALLOW_DEGRADED_PRIVACY_RUNTIME:
             raise RuntimeError(_cv2_unavailable_message())
@@ -505,6 +542,7 @@ def render_redacted_video(
             "frames_with_teacher_visible": 0,
             "faces_detected_total": 0,
             "faces_blurred_total": 0,
+            "redaction_strategy": redaction_strategy,
             "runtime_fallback": "cv2_unavailable_copy_only",
             "browser_safe_render": False,
             "browser_safe_error": "cv2_unavailable_copy_only",
@@ -563,7 +601,15 @@ def render_redacted_video(
             profile = _detect_profile_faces(frame, profile_cascade)
             detections = _merge_boxes(list(frontal) + list(profile))
 
-            if force_blur_all:
+            if use_full_frame:
+                # Provably-safe redaction: collapse the entire frame. Detection
+                # is best-effort here (for diagnostics only) — privacy does not
+                # depend on it.
+                blur_full_frame(frame)
+                faces_detected_total += len(detections)
+                faces_blurred_total += len(detections)
+                previous_teacher_bbox = None
+            elif force_blur_all:
                 # Blur the union of this frame's detections and recently-seen
                 # boxes. Count == blur so the blur_all invariant
                 # (faces_blurred_total == faces_detected_total) is preserved.
@@ -641,5 +687,6 @@ def render_redacted_video(
         "frames_with_teacher_visible": frames_with_teacher_visible,
         "faces_detected_total": faces_detected_total,
         "faces_blurred_total": faces_blurred_total,
+        "redaction_strategy": redaction_strategy,
         **audio_stats,
     }
