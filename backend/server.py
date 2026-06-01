@@ -29481,11 +29481,18 @@ async def analyze_video(
                 {"$set": sampling_manifest},
                 upsert=True,
             )
-            # TODO(WS1 Phase 2): for the Gemini provider, bypass this OpenCV
-            # score_windows moment build and feed Gemini-derived moments into
-            # compute_moment_quality. Phase 1 leaves the moment path unchanged;
-            # the Gemini branch is dormant in production.
-            moment_manifest = build_moment_manifest(video_id, file_path, frames)
+            # WS1 Phase 2: Option A (analysis-first) for the Gemini provider.
+            # Bypass the OpenCV score_windows moment build and derive grounded
+            # moments from Gemini's own evidence AFTER analysis (below). For the
+            # default OpenAI provider this path is byte-for-byte unchanged.
+            phase2_provider_is_gemini = (
+                APP_SETTINGS.ai.analysis_provider == "gemini"
+                and bool(APP_SETTINGS.ai.gemini_api_key)
+            )
+            if phase2_provider_is_gemini:
+                moment_manifest = _empty_gemini_pending_manifest(video_id)
+            else:
+                moment_manifest = build_moment_manifest(video_id, file_path, frames)
             await db.video_analysis_moments.update_one(
                 {"video_id": video_id, "strategy_version": moment_manifest["strategy_version"]},
                 {"$set": moment_manifest},
@@ -29537,6 +29544,34 @@ async def analyze_video(
                 # WS1 Phase 1: source video for the dormant Gemini native-video
                 # branch. Ignored by the OpenAI/heuristic path (default flag).
                 video_source_path=file_path,
+                # WS1 Phase 2: video_id lets the gemini branch build a grounded
+                # moment manifest and attach it for the outer pipeline to use.
+                video_id=video_id,
+            )
+        # WS1 Phase 2: when the Gemini provider produced grounded moments, adopt
+        # that manifest for the assessment-quality gate + persistence (Option A).
+        # On gemini fall-through (it raised and OpenAI/heuristic ran instead),
+        # rebuild the OpenCV manifest so the fallback assessment still has real
+        # moments. For the default OpenAI provider, neither branch runs and the
+        # OpenCV manifest from above is used unchanged.
+        _gemini_moment_manifest = (
+            analysis_payload.pop("_gemini_moment_manifest", None)
+            if isinstance(analysis_payload, dict)
+            else None
+        )
+        if _gemini_moment_manifest is not None:
+            moment_manifest = _gemini_moment_manifest
+            await db.video_analysis_moments.update_one(
+                {"video_id": video_id, "strategy_version": moment_manifest["strategy_version"]},
+                {"$set": moment_manifest},
+                upsert=True,
+            )
+        elif phase2_provider_is_gemini and not (moment_manifest.get("moments")):
+            moment_manifest = build_moment_manifest(video_id, file_path, frames)
+            await db.video_analysis_moments.update_one(
+                {"video_id": video_id, "strategy_version": moment_manifest["strategy_version"]},
+                {"$set": moment_manifest},
+                upsert=True,
             )
         usage_estimate = estimate_analysis_usage(
             frames=frames,
@@ -30087,6 +30122,27 @@ def build_moment_manifest(video_id: str, video_path: str, frames: List[dict]) ->
         "duration_sec": duration_sec,
         "moments": kept,
         "deduped_moments": dropped,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _empty_gemini_pending_manifest(video_id: str) -> Dict[str, Any]:
+    """WS1 Phase 2: placeholder manifest used while the Gemini provider defers
+    moment derivation until AFTER analysis (Option A, analysis-first). Empty
+    moments keep attach_moment_metadata_to_frames / build_multimodal_analysis_payload
+    no-ops; the real ``gemini_grounded_v1`` manifest is built post-analysis."""
+
+    return {
+        "id": f"moments_{video_id}_gemini_grounded_pending",
+        "video_id": video_id,
+        "strategy_version": "gemini_grounded_pending",
+        "window_sec": None,
+        "max_moments": VIDEO_ANALYSIS_MAX_MOMENTS,
+        "candidate_target": 0,
+        "candidate_pool_size": 0,
+        "duration_sec": None,
+        "moments": [],
+        "deduped_moments": [],
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -30835,13 +30891,19 @@ async def analyze_frames_with_ai(
     current_user: Optional[dict] = None,
     multimodal_payload: Optional[dict] = None,
     video_source_path: Optional[str] = None,
+    video_id: Optional[str] = None,
 ) -> dict:
     """Analyze extracted video frames and return normalized assessment output.
 
     ``video_source_path`` is the local source-video path. It is consumed ONLY by
-    the dormant WS1 Phase 1 Gemini provider branch (native-video analysis); the
-    OpenAI/heuristic path ignores it, so passing it is a no-op at the default
+    the Gemini provider branch (native-video analysis); the OpenAI/heuristic path
+    ignores it, so passing it is a no-op at the default
     ``analysis_provider == "openai"`` flag.
+
+    ``video_id`` (WS1 Phase 2) lets the Gemini branch build a grounded moment
+    manifest and attach it under ``_gemini_moment_manifest`` for the outer
+    pipeline to persist and feed to the UNCHANGED assessment-quality gate. It is
+    likewise unused by the OpenAI/heuristic path.
     """
     from app.analysis.specialist_orchestrator import orchestrate_specialists
 
@@ -30887,18 +30949,17 @@ async def analyze_frames_with_ai(
                 },
             )
 
-    # WS1 Phase 1: DORMANT Gemini provider branch. Gated on analysis_provider
-    # (default "openai"), so with the default flag NONE of this executes and the
-    # OpenAI path below runs identically to before — zero behavior change. On any
-    # typed AnalysisError we log LOUDLY and fall through to the existing OpenAI /
-    # heuristic path; a fallback is never disguised as success.
-    # TODO(Phase 2): moment-path integration. With this branch active, moments
-    # are still produced by the OpenCV score_windows path upstream (the moment
-    # gate is not yet Gemini-fed). Documented limitation; safe because the flag
-    # is OFF in production this phase.
+    # WS1 Phase 2: Gemini provider branch (analysis-first moment derivation).
+    # Gated on analysis_provider (default "openai"), so with the default flag
+    # NONE of this executes and the OpenAI path below runs identically to before
+    # — zero behavior change. On any typed AnalysisError (engine failure OR no
+    # usable grounded moments) we log LOUDLY and fall through to the existing
+    # OpenAI / heuristic path; a fallback is never disguised as success, and
+    # OpenCV moments are never attached to a Gemini-labeled assessment.
     gemini_fallback_mode: Optional[str] = None
     if APP_SETTINGS.ai.analysis_provider == "gemini" and APP_SETTINGS.ai.gemini_api_key:
         from app.analysis.gemini_engine import analyze_video_with_gemini
+        from app.analysis.gemini_moments import build_gemini_moment_manifest
         from app.analysis.failures import (
             AnalysisError,
             ANALYSIS_MODE_GEMINI_MULTIMODAL,
@@ -30912,6 +30973,18 @@ async def analyze_frames_with_ai(
                 language=language,
                 settings=APP_SETTINGS,
             )
+            # Derive grounded moments from the RAW payload (faithful, pre-tone).
+            # Raises a typed AnalysisError if there is no usable evidence, which
+            # falls through to OpenAI exactly like an engine failure.
+            gemini_moment_manifest = build_gemini_moment_manifest(
+                video_id or "unknown",
+                gemini_payload,
+                duration_sec=None,
+                available_frames=frames,
+                elements_to_analyze=elements_to_analyze,
+                max_moments=VIDEO_ANALYSIS_MAX_MOMENTS,
+                has_transcript_globally=None,
+            )
             normalized = _normalize_model_analysis(
                 gemini_payload,
                 elements_to_analyze,
@@ -30920,13 +30993,17 @@ async def analyze_frames_with_ai(
                 language=language,
             )
             normalized["analysis_context"] = analysis_context
-            return orchestrate_specialists(
+            result = orchestrate_specialists(
                 normalized,
                 language=language,
                 priority_element_ids=priority_elements,
                 focus_note=focus_note,
                 analysis_context=analysis_context,
             )
+            # Hand the grounded manifest up to the outer pipeline, which persists
+            # it and feeds it to the UNCHANGED compute_assessment_quality gate.
+            result["_gemini_moment_manifest"] = gemini_moment_manifest
+            return result
         except AnalysisError as exc:
             gemini_fallback_mode = exc.analysis_mode
             logger.error(
