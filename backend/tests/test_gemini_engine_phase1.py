@@ -268,7 +268,12 @@ def test_unconfigured_api_key_with_real_client_path_raises_no_sdk_build():
 # =========================================================================== #
 # STEP 5e — file_api stub
 # =========================================================================== #
-def test_file_api_mode_raises_not_implemented():
+def test_file_api_mode_without_file_support_raises_typed_upload_error():
+    # WS1 Phase 3 implemented the File API path. With a client that lacks file
+    # support (this Phase-1 fake has only .aio.models), config "file_api" now
+    # attempts an upload and fails with a typed, distinct fallback mode — never
+    # silent, and the generate step is never reached. (The real File API path is
+    # covered by test_gemini_robustness_phase3.py.)
     client = FakeGeminiClient(text=GOOD_PAYLOAD_JSON)
     with pytest.raises(AnalysisProviderError) as ei:
         _run(client=client, settings=_settings(input_mode="file_api"))

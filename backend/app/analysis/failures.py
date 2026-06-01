@@ -84,6 +84,9 @@ ANALYSIS_MODE_FALLBACK_GEMINI_RATE_LIMITED = "fallback_gemini_rate_limited"
 # WS1 Phase 2: Gemini produced a parseable analysis but no usable grounded
 # evidence to derive lesson moments from (all candidate moments empty/invalid).
 ANALYSIS_MODE_FALLBACK_GEMINI_NO_MOMENTS = "fallback_gemini_no_moments"
+# WS1 Phase 3: Gemini File API upload failed or the uploaded file never became
+# ACTIVE (state FAILED, or a transport error during upload).
+ANALYSIS_MODE_FALLBACK_GEMINI_UPLOAD_ERROR = "fallback_gemini_upload_error"
 
 FALLBACK_MODES: FrozenSet[str] = frozenset(
     {
@@ -99,6 +102,7 @@ FALLBACK_MODES: FrozenSet[str] = frozenset(
         ANALYSIS_MODE_FALLBACK_GEMINI_TIMEOUT,
         ANALYSIS_MODE_FALLBACK_GEMINI_RATE_LIMITED,
         ANALYSIS_MODE_FALLBACK_GEMINI_NO_MOMENTS,
+        ANALYSIS_MODE_FALLBACK_GEMINI_UPLOAD_ERROR,
     }
 )
 
@@ -154,6 +158,7 @@ ANALYSIS_MODE_MEANINGS = {
     ANALYSIS_MODE_FALLBACK_GEMINI_TIMEOUT: "Gemini call timed out (reserved).",
     ANALYSIS_MODE_FALLBACK_GEMINI_RATE_LIMITED: "Gemini call was rate-limited (reserved).",
     ANALYSIS_MODE_FALLBACK_GEMINI_NO_MOMENTS: "Gemini analysis had no usable grounded evidence for moments.",
+    ANALYSIS_MODE_FALLBACK_GEMINI_UPLOAD_ERROR: "Gemini File API upload failed or never became ACTIVE.",
     ANALYSIS_MODE_UNKNOWN: "Default placeholder before a run resolves.",
     ANALYSIS_MODE_EMPTY_SELECTION: "No rubric elements were selected to analyze.",
     ANALYSIS_MODE_FAILED_BEFORE_COMPLETION: "Pipeline aborted before producing output.",
@@ -248,6 +253,7 @@ __all__ = [
     "ANALYSIS_MODE_FALLBACK_GEMINI_TIMEOUT",
     "ANALYSIS_MODE_FALLBACK_GEMINI_RATE_LIMITED",
     "ANALYSIS_MODE_FALLBACK_GEMINI_NO_MOMENTS",
+    "ANALYSIS_MODE_FALLBACK_GEMINI_UPLOAD_ERROR",
     "FALLBACK_MODES",
     # terminal
     "ANALYSIS_MODE_UNKNOWN",
