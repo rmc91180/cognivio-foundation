@@ -263,6 +263,14 @@ class AISettings:
     voice_gate_human_escalation_enabled: bool
     voice_gate_regen_max_attempts: int
 
+    # WS1 Phase 0: analysis-provider selection surface. Defaults keep today's
+    # behavior exactly (analysis_provider="openai"). These are config-only in
+    # Phase 0 — nothing in the live analysis dispatch reads them yet.
+    analysis_provider: str = "openai"
+    gemini_api_key: str = ""
+    gemini_model: str = ""
+    gemini_video_input_mode: str = "inline"
+
 
 @dataclass(frozen=True)
 class StorageSettings:
@@ -450,6 +458,11 @@ class Settings:
                     True,
                 ),
                 voice_gate_regen_max_attempts=_env_int("VOICE_GATE_REGEN_MAX_ATTEMPTS", 1),
+                # WS1 Phase 0: provider selection (default keeps the OpenAI path).
+                analysis_provider=os.getenv("ANALYSIS_PROVIDER", "openai"),
+                gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
+                gemini_model=os.getenv("GEMINI_MODEL", ""),
+                gemini_video_input_mode=os.getenv("GEMINI_VIDEO_INPUT_MODE", "inline"),
             ),
             storage=StorageSettings(
                 upload_dir=upload_dir,

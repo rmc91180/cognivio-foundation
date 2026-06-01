@@ -1,0 +1,54 @@
+{
+  "analysis_mode": "openai",
+  "element_scores": [
+    {
+      "confidence": 82.0,
+      "domain": "Instruction",
+      "element_id": "2b",
+      "element_name": "Questioning and Discussion Techniques",
+      "evidence_segments": [
+        {
+          "end_sec": 120.0,
+          "rationale": "This shows you are opening space for student-led discussion.",
+          "start_sec": 90.0,
+          "summary": "You asked an open question and gave students room to respond."
+        }
+      ],
+      "level": "needs_improvement",
+      "observations": [
+        "When you asked the class to explain their thinking, three students built on each other's ideas."
+      ],
+      "priority": true,
+      "score": 6.8
+    },
+    {
+      "confidence": 25.0,
+      "domain": "Instruction",
+      "element_id": "3c",
+      "element_name": "Engaging Students in Learning",
+      "evidence_segments": [
+        {
+          "end_sec": 110.0,
+          "rationale": "fallback",
+          "start_sec": 90.0,
+          "summary": "The clip gave us a brief window into this lesson — here is what stood out."
+        }
+      ],
+      "level": "needs_improvement",
+      "observations": [
+        "The clip gave us a brief window into your lesson — here is what stood out."
+      ],
+      "priority": false,
+      "score": 5.0
+    }
+  ],
+  "recommendations": [
+    {
+      "end_sec": 120.0,
+      "linked_element_id": "2b",
+      "start_sec": 90.0,
+      "text": "Next lesson, pause after your big question and count to five before taking an answer."
+    }
+  ],
+  "summary": "You opened with a clear hook and your students were ready to think. Let's build on the discussion you started early in the lesson."
+}
