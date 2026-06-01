@@ -143,6 +143,41 @@ ANALYSIS_PAYLOAD_CONTRACT: Mapping[str, Any] = {
 }
 
 
+#: Canonical JSON-shape example for the analysis payload, kept here as the single
+#: source of truth so any provider prompt (OpenAI, Gemini) can lift the exact
+#: shape instead of re-typing it. ``{allowed_ids}`` is a format placeholder the
+#: caller fills with the concrete allowed element-id list.
+ANALYSIS_PAYLOAD_JSON_SHAPE = """{
+  "summary": "2-3 sentences in a warm coaching voice, addressed to 'you'.",
+  "recommendations": [
+    {
+      "start_sec": 90,
+      "end_sec": 120,
+      "text": "One specific thing to try next lesson. Actionable immediately.",
+      "linked_element_id": "<one of the allowed element ids>"
+    }
+  ],
+  "element_scores": [
+    {
+      "element_id": "<one of the allowed element ids: {allowed_ids}>",
+      "score": 6.8,
+      "confidence": 82,
+      "observations": [
+        "What you noticed, addressed to the teacher, grounded in a specific moment."
+      ],
+      "evidence_segments": [
+        {
+          "start_sec": 90,
+          "end_sec": 120,
+          "summary": "What happened in this moment, described as a colleague would.",
+          "rationale": "Why this moment matters for this area of their practice."
+        }
+      ]
+    }
+  ]
+}"""
+
+
 MOMENT_CONTRACT: Mapping[str, Any] = {
     "description": (
         "A single lesson-moment object as compute_moment_quality reads it. "
@@ -389,6 +424,7 @@ def validate_moment(moment: Any) -> ValidationResult:
 
 __all__ = [
     "ANALYSIS_PAYLOAD_CONTRACT",
+    "ANALYSIS_PAYLOAD_JSON_SHAPE",
     "MOMENT_CONTRACT",
     "MOMENT_GATE_FEATURE_KEYS",
     "MOMENT_SUPPORTING_FEATURE_KEYS",
