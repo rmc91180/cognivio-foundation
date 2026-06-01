@@ -29481,6 +29481,10 @@ async def analyze_video(
                 {"$set": sampling_manifest},
                 upsert=True,
             )
+            # TODO(WS1 Phase 2): for the Gemini provider, bypass this OpenCV
+            # score_windows moment build and feed Gemini-derived moments into
+            # compute_moment_quality. Phase 1 leaves the moment path unchanged;
+            # the Gemini branch is dormant in production.
             moment_manifest = build_moment_manifest(video_id, file_path, frames)
             await db.video_analysis_moments.update_one(
                 {"video_id": video_id, "strategy_version": moment_manifest["strategy_version"]},
@@ -29530,6 +29534,9 @@ async def analyze_video(
                 framework_type=framework_type,
                 current_user=analysis_user,
                 multimodal_payload=multimodal_payload,
+                # WS1 Phase 1: source video for the dormant Gemini native-video
+                # branch. Ignored by the OpenAI/heuristic path (default flag).
+                video_source_path=file_path,
             )
         usage_estimate = estimate_analysis_usage(
             frames=frames,
@@ -30827,8 +30834,15 @@ async def analyze_frames_with_ai(
     framework_type: str = "danielson",
     current_user: Optional[dict] = None,
     multimodal_payload: Optional[dict] = None,
+    video_source_path: Optional[str] = None,
 ) -> dict:
-    """Analyze extracted video frames and return normalized assessment output."""
+    """Analyze extracted video frames and return normalized assessment output.
+
+    ``video_source_path`` is the local source-video path. It is consumed ONLY by
+    the dormant WS1 Phase 1 Gemini provider branch (native-video analysis); the
+    OpenAI/heuristic path ignores it, so passing it is a no-op at the default
+    ``analysis_provider == "openai"`` flag.
+    """
     from app.analysis.specialist_orchestrator import orchestrate_specialists
 
     elements_to_analyze = _build_elements_to_analyze(
@@ -30871,6 +30885,54 @@ async def analyze_frames_with_ai(
                     "question_count": audio_features.get("question_count"),
                     "open_question_count": audio_features.get("open_question_count"),
                 },
+            )
+
+    # WS1 Phase 1: DORMANT Gemini provider branch. Gated on analysis_provider
+    # (default "openai"), so with the default flag NONE of this executes and the
+    # OpenAI path below runs identically to before — zero behavior change. On any
+    # typed AnalysisError we log LOUDLY and fall through to the existing OpenAI /
+    # heuristic path; a fallback is never disguised as success.
+    # TODO(Phase 2): moment-path integration. With this branch active, moments
+    # are still produced by the OpenCV score_windows path upstream (the moment
+    # gate is not yet Gemini-fed). Documented limitation; safe because the flag
+    # is OFF in production this phase.
+    gemini_fallback_mode: Optional[str] = None
+    if APP_SETTINGS.ai.analysis_provider == "gemini" and APP_SETTINGS.ai.gemini_api_key:
+        from app.analysis.gemini_engine import analyze_video_with_gemini
+        from app.analysis.failures import (
+            AnalysisError,
+            ANALYSIS_MODE_GEMINI_MULTIMODAL,
+        )
+
+        try:
+            gemini_payload = await analyze_video_with_gemini(
+                video_path_or_bytes=video_source_path,
+                elements_to_analyze=elements_to_analyze,
+                focus_instruction=combined_instruction,
+                language=language,
+                settings=APP_SETTINGS,
+            )
+            normalized = _normalize_model_analysis(
+                gemini_payload,
+                elements_to_analyze,
+                frames,
+                analysis_mode=ANALYSIS_MODE_GEMINI_MULTIMODAL,
+                language=language,
+            )
+            normalized["analysis_context"] = analysis_context
+            return orchestrate_specialists(
+                normalized,
+                language=language,
+                priority_element_ids=priority_elements,
+                focus_note=focus_note,
+                analysis_context=analysis_context,
+            )
+        except AnalysisError as exc:
+            gemini_fallback_mode = exc.analysis_mode
+            logger.error(
+                "Gemini video analysis failed (mode=%s); falling through to OpenAI/heuristic path: %s",
+                exc.analysis_mode,
+                exc,
             )
 
     if OPENAI_API_KEY and AsyncOpenAI is not None and paid_analysis_allowed:
@@ -30921,6 +30983,13 @@ async def analyze_frames_with_ai(
         fallback_mode = "fallback_model_unconfigured"
     else:
         fallback_mode = "fallback"
+
+    # WS1 Phase 1: if the Gemini provider was selected and raised, prefer its
+    # typed fallback mode over the generic OpenAI-derived one. This is only set
+    # when analysis_provider=="gemini", so the default OpenAI path keeps its
+    # exact fallback_mode (zero behavior change at the default flag).
+    if gemini_fallback_mode:
+        fallback_mode = gemini_fallback_mode
 
     logger.warning(
         f"Real analysis model path unavailable ({fallback_mode}); using fallback analysis output"
