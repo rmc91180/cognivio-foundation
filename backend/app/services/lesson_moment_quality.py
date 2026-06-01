@@ -391,7 +391,18 @@ def dedupe_lesson_moments(
             text_a = str(candidate.get("text") or candidate.get("summary") or candidate.get("what_happened") or "").strip().lower()
             text_b = str(existing.get("text") or existing.get("summary") or existing.get("what_happened") or "").strip().lower()
             same_text = bool(text_a) and text_a == text_b
-            if same_pair or overlap_ratio >= HIGH_OVERLAP_RATIO or same_rep or same_text:
+            # Element-aware dedupe (WS1): the product's unit of value is the
+            # (element, evidence) pair, not the timestamp. Two DIFFERENT rubric
+            # elements observed in the same window are two distinct takeaways and
+            # must both survive. Only collapse when the elements are the same.
+            # Legacy OpenCV moments carry no element_id; both-absent compares
+            # equal, so this preserves the legacy path's behavior exactly.
+            cand_el = str(candidate.get("element_id") or "").strip()
+            exist_el = str(existing.get("element_id") or "").strip()
+            same_element = cand_el == exist_el
+            if same_element and (
+                same_pair or overlap_ratio >= HIGH_OVERLAP_RATIO or same_rep or same_text
+            ):
                 matched_index = index
                 break
 

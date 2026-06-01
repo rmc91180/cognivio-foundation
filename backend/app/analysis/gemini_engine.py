@@ -233,6 +233,14 @@ Rubric areas to address (use ONLY these element ids — no others):
 
 Allowed element ids: {allowed_list}
 
+Assess EVERY rubric area above for which you observed specific, timestamped
+evidence in the recording. Provide a balanced mix of STRENGTHS and GROWTH AREAS —
+a teacher learns from both. Produce a distinct takeaway for each area you
+genuinely observed; a typical rich lesson yields four to five. Do NOT invent,
+stretch, or pad evidence: every observation must cite a real moment you actually
+saw, with timestamps. If you genuinely observed evidence for only two areas,
+return two — fewer honest takeaways are better than manufactured ones.
+
 {focus_text}
 
 Return ONLY valid JSON with EXACTLY this shape (no prose, no markdown fences):
