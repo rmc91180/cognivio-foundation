@@ -87,6 +87,9 @@ ANALYSIS_MODE_FALLBACK_GEMINI_NO_MOMENTS = "fallback_gemini_no_moments"
 # WS1 Phase 3: Gemini File API upload failed or the uploaded file never became
 # ACTIVE (state FAILED, or a transport error during upload).
 ANALYSIS_MODE_FALLBACK_GEMINI_UPLOAD_ERROR = "fallback_gemini_upload_error"
+# WS1 Phase 4: Gemini stopped before finishing (non-STOP finish_reason such as
+# MAX_TOKENS or SAFETY) — visible JSON may be truncated; never patch, fail loud.
+ANALYSIS_MODE_FALLBACK_GEMINI_TRUNCATED = "fallback_gemini_truncated"
 
 FALLBACK_MODES: FrozenSet[str] = frozenset(
     {
@@ -103,6 +106,7 @@ FALLBACK_MODES: FrozenSet[str] = frozenset(
         ANALYSIS_MODE_FALLBACK_GEMINI_RATE_LIMITED,
         ANALYSIS_MODE_FALLBACK_GEMINI_NO_MOMENTS,
         ANALYSIS_MODE_FALLBACK_GEMINI_UPLOAD_ERROR,
+        ANALYSIS_MODE_FALLBACK_GEMINI_TRUNCATED,
     }
 )
 
@@ -159,6 +163,7 @@ ANALYSIS_MODE_MEANINGS = {
     ANALYSIS_MODE_FALLBACK_GEMINI_RATE_LIMITED: "Gemini call was rate-limited (reserved).",
     ANALYSIS_MODE_FALLBACK_GEMINI_NO_MOMENTS: "Gemini analysis had no usable grounded evidence for moments.",
     ANALYSIS_MODE_FALLBACK_GEMINI_UPLOAD_ERROR: "Gemini File API upload failed or never became ACTIVE.",
+    ANALYSIS_MODE_FALLBACK_GEMINI_TRUNCATED: "Gemini stopped before finishing (non-STOP finish_reason, e.g. MAX_TOKENS or SAFETY).",
     ANALYSIS_MODE_UNKNOWN: "Default placeholder before a run resolves.",
     ANALYSIS_MODE_EMPTY_SELECTION: "No rubric elements were selected to analyze.",
     ANALYSIS_MODE_FAILED_BEFORE_COMPLETION: "Pipeline aborted before producing output.",
@@ -254,6 +259,7 @@ __all__ = [
     "ANALYSIS_MODE_FALLBACK_GEMINI_RATE_LIMITED",
     "ANALYSIS_MODE_FALLBACK_GEMINI_NO_MOMENTS",
     "ANALYSIS_MODE_FALLBACK_GEMINI_UPLOAD_ERROR",
+    "ANALYSIS_MODE_FALLBACK_GEMINI_TRUNCATED",
     "FALLBACK_MODES",
     # terminal
     "ANALYSIS_MODE_UNKNOWN",

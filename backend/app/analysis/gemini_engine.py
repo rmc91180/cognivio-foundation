@@ -45,6 +45,7 @@ from app.analysis.failures import (
     ANALYSIS_MODE_FALLBACK_GEMINI_PARSE_ERROR,
     ANALYSIS_MODE_FALLBACK_GEMINI_RATE_LIMITED,
     ANALYSIS_MODE_FALLBACK_GEMINI_TIMEOUT,
+    ANALYSIS_MODE_FALLBACK_GEMINI_TRUNCATED,
     ANALYSIS_MODE_FALLBACK_GEMINI_UPLOAD_ERROR,
     ANALYSIS_MODE_FALLBACK_MODEL_UNCONFIGURED,
     AnalysisContractError,
@@ -90,11 +91,18 @@ GEMINI_RETRY_MAX_DELAY_S = 8.0
 # json-mime + `_enforce_contract` path already rejects malformed/contract-
 # violating output with distinct typed modes. Revisit once the Flash model's
 # adherence to a nested per-call schema is confirmed against a live call.
+# TODO(thinking-budget): the installed SDK exposes types.ThinkingConfig with a
+# `thinking_budget` field, which could bound reasoning tokens to cut truncation
+# pressure + cost. SKIPPED for now because this engine passes config as a PLAIN
+# DICT (not a typed types.GenerateContentConfig object); wiring a thinking budget
+# safely would mean either coupling to the SDK types or guessing the nested-dict
+# coercion shape. Raising max_output_tokens to 16000 (below) already resolves the
+# observed MAX_TOKENS truncation. Revisit if/when the config is constructed typed.
 GEMINI_GENERATION_CONFIG: Dict[str, Any] = {
     "temperature": 0.0,
     "top_p": 1.0,
     "response_mime_type": "application/json",
-    "max_output_tokens": 4000,
+    "max_output_tokens": 16000,
 }
 
 _TRANSIENT_MODES = frozenset(
@@ -557,6 +565,36 @@ def _build_real_client(settings: Any) -> Any:
     return genai.Client(api_key=api_key)
 
 
+def _raise_if_unfinished(response: Any, *, model: str) -> None:
+    """Raise a typed truncation error unless the model finished cleanly (STOP).
+
+    Reads finish_reason defensively (enum or str). Anything other than STOP — most
+    commonly MAX_TOKENS, also SAFETY/RECITATION — means the visible JSON may be
+    incomplete; we must fail loud and typed rather than parse a half-written payload.
+    A missing/None finish_reason is treated as OK (older transports omit it).
+    """
+    candidates = getattr(response, "candidates", None)
+    if not candidates:
+        return
+    finish = getattr(candidates[0], "finish_reason", None)
+    if finish is None:
+        return
+    name = getattr(finish, "name", finish)
+    name = str(name).upper()
+    if name in ("STOP", "FINISH_REASON_STOP", "FINISH_REASON_UNSPECIFIED", ""):
+        return
+    finish_message = getattr(candidates[0], "finish_message", None)
+    detail = f" detail={finish_message}" if finish_message else ""
+    logger.error(
+        "Gemini generation did not finish cleanly: finish_reason=%s model=%s%s",
+        name, model, detail,
+    )
+    raise AnalysisProviderError(
+        f"Gemini stopped before finishing (finish_reason={name}); output likely truncated.",
+        analysis_mode=ANALYSIS_MODE_FALLBACK_GEMINI_TRUNCATED,
+    )
+
+
 async def analyze_video_with_gemini(
     *,
     video_path_or_bytes: Union[str, bytes, "os.PathLike[str]", None],
@@ -634,6 +672,11 @@ async def analyze_video_with_gemini(
 
     # Measurement only — never alters the return contract.
     _log_usage(response, model=model, input_mode=effective_mode, video_bytes=size_bytes)
+
+    # Detect a non-STOP finish (e.g. MAX_TOKENS, SAFETY) BEFORE attempting to parse.
+    # Truncated output is NOT malformed JSON; surfacing it as a parse error hides the
+    # real cause and (for SAFETY) would mask a content block on classroom footage.
+    _raise_if_unfinished(response, model=model)
 
     text = getattr(response, "text", None)
     payload = _extract_json_object(text)
