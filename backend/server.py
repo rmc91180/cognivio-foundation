@@ -33893,6 +33893,10 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
 # Include the router in the main app
 from app.routers.auth import router as auth_router
 from app.routers.videos import router as videos_router
+# Build-identity diagnostic endpoint (GET /__build). Mounted here because the
+# deployed entrypoint is `uvicorn server:app`, so this module IS the live app;
+# this is the same mechanism used for the app/routers/* below.
+from app.routers.build import router as build_router
 
 def _prioritize_static_routes(router: APIRouter) -> None:
     router.routes.sort(
@@ -33907,6 +33911,7 @@ def _prioritize_static_routes(router: APIRouter) -> None:
 _prioritize_static_routes(api_router)
 app.include_router(auth_router, prefix="/api")
 app.include_router(videos_router, prefix="/api")
+app.include_router(build_router)
 app.include_router(api_router)
 app.add_api_route(
     "/api/admin/access-request-actions/{action}",

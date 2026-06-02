@@ -33,4 +33,10 @@ RUN python -m pip install --upgrade pip && \
 
 COPY . .
 
+# Build-truth: stamp the git SHA into the image so GET /__build can report
+# exactly which build is running. Overridable at runtime by a GIT_SHA service
+# variable (e.g. set GIT_SHA=${{ RAILWAY_GIT_COMMIT_SHA }} in Railway).
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
+
 CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port ${PORT:-8080}"]
