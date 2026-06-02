@@ -196,6 +196,9 @@ def _fake_school_db():
         consent_records=_Collection([]),
         videos=_Collection([]),
         video_evidence=_Collection([]),
+        # Analysis is now dispatched at upload (decoupled from privacy), so the
+        # upload flow enqueues a video_processing_jobs row.
+        video_processing_jobs=_Collection([]),
     )
 
 

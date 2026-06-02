@@ -11853,12 +11853,6 @@ async def _run_video_privacy_job(video_id: str) -> None:
                 {"video_id": video_id, "uploaded_by": job["user_id"]},
                 {"$set": {"privacy_status": PrivacyProcessingStatus.COMPLETED.value, "error_message": None}},
             )
-            await _enqueue_video_processing_job(
-                video_id=video_id,
-                teacher_id=job["teacher_id"],
-                user_id=job["user_id"],
-                file_path=str(redacted_full_path),
-            )
             success = True
             job_final_status = PrivacyProcessingStatus.COMPLETED.value
         except Exception as exc:
@@ -11868,7 +11862,6 @@ async def _run_video_privacy_job(video_id: str) -> None:
                 {"id": video_id},
                 {
                     "$set": {
-                        "status": VideoProcessingStatus.FAILED.value,
                         "privacy_status": PrivacyProcessingStatus.FAILED.value,
                         "privacy_pipeline_state": PrivacyPipelineState.DESTRUCTIVE_BLUR_FAILED.value,
                         "privacy_failed_at": finished_at,
@@ -12981,6 +12974,16 @@ async def upload_video(
                 user_id=current_user["id"],
                 file_path=str(file_path),
             )
+        # Analysis is dispatched here as an INDEPENDENT job, parallel to
+        # transcode/privacy, on the RAW asset. It is no longer the tail of the
+        # privacy chain — privacy failing must not prevent feedback. Playback
+        # of the durable asset remains privacy-gated separately.
+        await _enqueue_video_processing_job(
+            video_id=video_id,
+            teacher_id=teacher_id,
+            user_id=current_user["id"],
+            file_path=str(file_path),
+        )
         await _log_privacy_audit_event(
             "privacy_video_uploaded",
             "video",
@@ -29412,9 +29415,12 @@ async def analyze_video(
             teacher_id=teacher_id,
             user_id=user_id,
         )
-        if _normalize_privacy_status(video.get("privacy_status")) != PrivacyProcessingStatus.COMPLETED.value:
-            raise RuntimeError("Privacy processing must complete before analysis starts")
-        file_path = video.get("redacted_file_path") or file_path
+        # Analysis is decoupled from privacy: it runs on the RAW asset and is
+        # never gated by privacy state. Privacy governs durable playback only
+        # (see _resolve_video_playback_url / _resolve_teacher_video_playback_url),
+        # which independently withholds non-redacted URLs. Do NOT reintroduce a
+        # privacy gate here.
+        file_path = video.get("raw_file_path") or video.get("file_path") or file_path
         if file_path and not os.path.isabs(str(file_path)):
             file_path = str(UPLOAD_DIR / str(file_path))
         started_at = datetime.now(timezone.utc).isoformat()
