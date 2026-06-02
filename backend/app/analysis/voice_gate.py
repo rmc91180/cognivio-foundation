@@ -6,6 +6,87 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional,
 import re
 
 
+# --------------------------------------------------------------------------- #
+# Second-person verb agreement helpers (tone-coach deconjugation).
+#
+# Converting teacher-voice ("The teacher defines...") to second person ("You ...")
+# must also fix subject-verb agreement, or we ship "You defines" / "You asks".
+# Two reachable shapes (see PR description):
+#   Case A — text arrives "The teacher <verb-s>" and the swap creates the error.
+#   Case B — model already emitted second-person "You <verb-s>" (wrong conjugation).
+# --------------------------------------------------------------------------- #
+_THIRD_PERSON_IRREGULARS = {
+    "does": "do", "goes": "go", "has": "have", "is": "are",
+    "tries": "try", "says": "say",
+}
+
+
+def _deconjugate_third_person(verb: str) -> str:
+    """Map a 3rd-person-singular present verb to base form (for 'You <verb>')."""
+    low = verb.lower()
+    if low in _THIRD_PERSON_IRREGULARS:
+        base = _THIRD_PERSON_IRREGULARS[low]
+    elif low.endswith("ies") and len(low) > 3:
+        base = low[:-3] + "y"
+    elif low.endswith(("ches", "shes", "sses", "xes", "zes", "oes")):
+        base = low[:-2]
+    elif low.endswith("s") and not low.endswith("ss"):
+        base = low[:-1]
+    else:
+        base = low
+    return base[:1].upper() + base[1:] if verb[:1].isupper() else base
+
+
+def _the_teacher_to_you(text: str) -> str:
+    """Case A: swap 'The teacher <verb>' -> 'You <base-verb>' (deconjugating the
+    following verb so we never produce 'You defines')."""
+    return re.sub(
+        r"\bThe teacher\b(\s+)([A-Za-z]+)",
+        lambda m: "You" + m.group(1) + _deconjugate_third_person(m.group(2)),
+        text,
+        flags=re.IGNORECASE,
+    )
+
+
+# Case B: plural nouns that can directly follow "You" and must NOT be treated as
+# verbs (bias toward NOT changing when ambiguous — e.g. "You students" stays).
+_YOU_FOLLOWING_PLURAL_NOUNS = {
+    "students", "kids", "learners", "pupils", "children",
+    "questions", "answers", "responses", "ideas", "examples",
+    "materials", "resources", "strategies", "routines", "transitions",
+    "expectations", "directions", "instructions", "groups", "pairs",
+    "partners", "tasks", "activities", "prompts", "visuals", "gestures",
+    "cues", "norms", "standards", "objectives", "goals", "skills",
+    "concepts", "terms", "words", "notes", "slides", "lessons", "classes",
+}
+
+# "You" + optional single -ly adverb + a token ending in -s. Tightly scoped so it
+# only touches the verb token (the optional adverb is a single \w+ly word).
+_YOU_VERB_AGREEMENT_RE = re.compile(
+    r"(?P<you>\byou\b)(?P<mid>\s+(?:[A-Za-z]+ly\s+)?)(?P<verb>[A-Za-z]+s)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _fix_you_verb_agreement(text: str) -> str:
+    """Case B: fix 'You [adverb] <3rd-person-verb-s>' -> base form. Conservative:
+    leaves known plural nouns ('You students') and non-3sg endings (e.g. '-ss')
+    untouched, preserving the original 'You'/'you' casing."""
+
+    def repl(match: "re.Match[str]") -> str:
+        verb = match.group("verb")
+        low = verb.lower()
+        if low in _YOU_FOLLOWING_PLURAL_NOUNS:
+            return match.group(0)
+        base = _deconjugate_third_person(verb)
+        if base.lower() == low:
+            # No 3rd-person-singular ending to drop (e.g. "discuss", "address").
+            return match.group(0)
+        return match.group("you") + match.group("mid") + base
+
+    return _YOU_VERB_AGREEMENT_RE.sub(repl, text)
+
+
 BANNED_PHRASES: Tuple[str, ...] = (
     "evidence was limited",
     "in the sampled frames",
@@ -477,8 +558,9 @@ def _deterministic_rewrite(text: str, *, language: Optional[str] = "en", path: s
     cleaned = SCORE_TEXT_RE.sub("", cleaned)
 
     if not hebrew:
-        cleaned = re.sub(r"\bThe teacher\b", "You", cleaned, flags=re.IGNORECASE)
+        cleaned = _the_teacher_to_you(cleaned)
         cleaned = re.sub(r"\bteacher\b", "you", cleaned, flags=re.IGNORECASE)
+        cleaned = _fix_you_verb_agreement(cleaned)
 
         if _is_observation_path(path) and not _contains_direct_address(cleaned):
             cleaned = f"You can see this moment clearly: {cleaned[0].lower() + cleaned[1:] if cleaned else cleaned}"
