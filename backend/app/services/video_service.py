@@ -233,6 +233,21 @@ async def upload_video(
             upload_source=upload_source,
         )
 
+        # Analysis dispatched as an INDEPENDENT job at upload, on the RAW asset.
+        # Decoupled from privacy (privacy failure must not block feedback). Ported from server.py #56.
+        legacy.log_structured(legacy.logger, "info", "analysis_enqueue_attempt", video_id=video_id)
+        try:
+            await legacy._enqueue_video_processing_job(
+                video_id=video_id,
+                teacher_id=teacher_id,
+                user_id=current_user["id"],
+                file_path=str(file_path),
+            )
+            legacy.log_structured(legacy.logger, "info", "analysis_enqueue_ok", video_id=video_id)
+        except Exception as exc:
+            legacy.log_structured(legacy.logger, "error", "analysis_enqueue_failed", video_id=video_id, error=repr(exc))
+            raise
+
         should_enqueue_transcode = (
             legacy.VIDEO_TRANSCODE_PIPELINE_ENABLED
             or transcode_decision.decision in {"queued", "pending"}

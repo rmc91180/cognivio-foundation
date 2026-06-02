@@ -1,6 +1,12 @@
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
+# Build-truth (GET /__build): Railway's railway.toml [build] does NOT support
+# passing Docker --build-arg values, so GIT_SHA cannot be injected at image
+# build time from here. Instead set GIT_SHA as a SERVICE VARIABLE on each
+# service (api + worker), value: ${{ RAILWAY_GIT_COMMIT_SHA }}. At runtime that
+# overrides the Dockerfile's ENV GIT_SHA default ("unknown"), so /__build
+# reports the real deployed commit.
 
 [deploy]
 healthcheckPath = "/health"
