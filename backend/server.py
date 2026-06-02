@@ -12902,6 +12902,7 @@ async def upload_video(
             raw_asset_state=video_doc.get("raw_asset_state"),
             upload_source=upload_source,
         )
+        log_structured(logger, "info", "upload_build_marker", video_id=video_id, marker="decouple_instr_v1")
 
         # PR C9.1: enqueue when either the pipeline is live OR the upload was
         # marked transcode-required by the size-based decision. ``pending``
@@ -12978,12 +12979,18 @@ async def upload_video(
         # transcode/privacy, on the RAW asset. It is no longer the tail of the
         # privacy chain — privacy failing must not prevent feedback. Playback
         # of the durable asset remains privacy-gated separately.
-        await _enqueue_video_processing_job(
-            video_id=video_id,
-            teacher_id=teacher_id,
-            user_id=current_user["id"],
-            file_path=str(file_path),
-        )
+        log_structured(logger, "info", "analysis_enqueue_attempt", video_id=video_id)
+        try:
+            await _enqueue_video_processing_job(
+                video_id=video_id,
+                teacher_id=teacher_id,
+                user_id=current_user["id"],
+                file_path=str(file_path),
+            )
+            log_structured(logger, "info", "analysis_enqueue_ok", video_id=video_id)
+        except Exception as exc:
+            log_structured(logger, "error", "analysis_enqueue_failed", video_id=video_id, error=repr(exc))
+            raise
         await _log_privacy_audit_event(
             "privacy_video_uploaded",
             "video",
