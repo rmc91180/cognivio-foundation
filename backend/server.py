@@ -29497,7 +29497,7 @@ async def analyze_video(
             # Bypass the OpenCV score_windows moment build and derive grounded
             # moments from Gemini's own evidence AFTER analysis (below). For the
             # default OpenAI provider this path is byte-for-byte unchanged.
-            _effective_provider = provider_override or APP_SETTINGS.ai.analysis_provider
+            _effective_provider = (video.get("analysis_provider_override") or None) or APP_SETTINGS.ai.analysis_provider
             phase2_provider_is_gemini = (
                 _effective_provider == "gemini"
                 and bool(APP_SETTINGS.ai.gemini_api_key)
