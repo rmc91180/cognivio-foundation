@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, Depends, Response, WebSocket, WebSocketDisconnect, Query, Request
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, Depends, Response, WebSocket, WebSocketDisconnect, Query, Request, Body
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -27940,8 +27940,15 @@ async def get_master_admin_video_detail(video_id: str, current_user: dict = Depe
 
 
 @api_router.post("/master-admin/videos/{video_id}/retry-analysis", response_model=Dict[str, Any])
-async def master_admin_retry_video_analysis(video_id: str, current_user: dict = Depends(get_current_user)):
+async def master_admin_retry_video_analysis(
+    video_id: str,
+    body: Optional[Dict[str, Any]] = Body(default=None),
+    current_user: dict = Depends(get_current_user),
+):
     _require_master_admin_user(current_user)
+    override = (body or {}).get("analysis_provider_override")
+    if override is not None and override not in ("gemini", "openai"):
+        raise HTTPException(status_code=400, detail="analysis_provider_override must be 'gemini' or 'openai'")
     video = await db.videos.find_one({"id": video_id}, {"_id": 0})
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -27954,10 +27961,15 @@ async def master_admin_retry_video_analysis(video_id: str, current_user: dict = 
         ],
     )
     queued_at = datetime.now(timezone.utc).isoformat()
-    await db.videos.update_one(
-        {"id": video_id},
-        {"$set": {"status": VideoProcessingStatus.QUEUED.value, "analysis_status": VideoProcessingStatus.QUEUED.value, "status_updated_at": queued_at, "error_message": None}},
-    )
+    set_fields = {
+        "status": VideoProcessingStatus.QUEUED.value,
+        "analysis_status": VideoProcessingStatus.QUEUED.value,
+        "status_updated_at": queued_at,
+        "error_message": None,
+    }
+    if override is not None:
+        set_fields["analysis_provider_override"] = override
+    await db.videos.update_one({"id": video_id}, {"$set": set_fields})
     await _enqueue_video_processing_job(
         video_id=video_id,
         teacher_id=video.get("teacher_id"),
@@ -27969,9 +27981,9 @@ async def master_admin_retry_video_analysis(video_id: str, current_user: dict = 
         action="retry_video_analysis",
         target_type="video",
         target_id=video_id,
-        metadata={"requeued_at": queued_at},
+        metadata={"requeued_at": queued_at, "analysis_provider_override": override},
     )
-    return {"video_id": video_id, "analysis_status": VideoProcessingStatus.QUEUED.value, "requeued_at": queued_at}
+    return {"video_id": video_id, "analysis_status": VideoProcessingStatus.QUEUED.value, "requeued_at": queued_at, "analysis_provider_override": override}
 
 
 @api_router.post("/master-admin/videos/{video_id}/retry-privacy", response_model=Dict[str, Any])
@@ -29485,8 +29497,9 @@ async def analyze_video(
             # Bypass the OpenCV score_windows moment build and derive grounded
             # moments from Gemini's own evidence AFTER analysis (below). For the
             # default OpenAI provider this path is byte-for-byte unchanged.
+            _effective_provider = provider_override or APP_SETTINGS.ai.analysis_provider
             phase2_provider_is_gemini = (
-                APP_SETTINGS.ai.analysis_provider == "gemini"
+                _effective_provider == "gemini"
                 and bool(APP_SETTINGS.ai.gemini_api_key)
             )
             if phase2_provider_is_gemini:
@@ -29547,6 +29560,9 @@ async def analyze_video(
                 # WS1 Phase 2: video_id lets the gemini branch build a grounded
                 # moment manifest and attach it for the outer pipeline to use.
                 video_id=video_id,
+                # WS1 canary: per-video provider override (admin-set on the doc);
+                # `or None` normalizes empty/missing to the global default.
+                provider_override=(video.get("analysis_provider_override") or None),
             )
         # WS1 Phase 2: when the Gemini provider produced grounded moments, adopt
         # that manifest for the assessment-quality gate + persistence (Option A).
@@ -30892,6 +30908,7 @@ async def analyze_frames_with_ai(
     multimodal_payload: Optional[dict] = None,
     video_source_path: Optional[str] = None,
     video_id: Optional[str] = None,
+    provider_override: Optional[str] = None,
 ) -> dict:
     """Analyze extracted video frames and return normalized assessment output.
 
@@ -30904,6 +30921,9 @@ async def analyze_frames_with_ai(
     manifest and attach it under ``_gemini_moment_manifest`` for the outer
     pipeline to persist and feed to the UNCHANGED assessment-quality gate. It is
     likewise unused by the OpenAI/heuristic path.
+
+    ``provider_override`` (WS1 canary) — when set, overrides the global
+    analysis_provider for THIS call only; None preserves the global default exactly.
     """
     from app.analysis.specialist_orchestrator import orchestrate_specialists
 
@@ -30957,7 +30977,8 @@ async def analyze_frames_with_ai(
     # OpenAI / heuristic path; a fallback is never disguised as success, and
     # OpenCV moments are never attached to a Gemini-labeled assessment.
     gemini_fallback_mode: Optional[str] = None
-    if APP_SETTINGS.ai.analysis_provider == "gemini" and APP_SETTINGS.ai.gemini_api_key:
+    _effective_provider = provider_override or APP_SETTINGS.ai.analysis_provider
+    if _effective_provider == "gemini" and APP_SETTINGS.ai.gemini_api_key:
         from app.analysis.gemini_engine import analyze_video_with_gemini
         from app.analysis.gemini_moments import build_gemini_moment_manifest
         from app.analysis.failures import (
