@@ -3,6 +3,12 @@ import api from "@/lib/apiClient";
 export const videoApi = {
   upload: (formData, config = {}) =>
     api.post("/api/videos/upload", formData, {
+      // Large lesson videos must not be aborted by the shared 30s client
+      // default while bytes are still streaming. Disable the timeout for the
+      // upload request ONLY (per-request; the shared apiClient default is
+      // unchanged for every other call). Callers pass onUploadProgress, so the
+      // UI keeps showing progress — no silent infinite hang.
+      timeout: 0,
       ...config,
     }),
   list: (params) => api.get("/api/videos", { params }),
