@@ -9,8 +9,10 @@ admin) tells the same story.
 
 Key rules encoded here (from the C9.3 brief):
 
-- Analysis cannot start until privacy is ``completed`` → analysis stage is
-  ``blocked`` while privacy is in flight / failed.
+- Analysis is DECOUPLED from privacy (WS1 #56): it runs on the RAW asset, so the
+  analysis stage reflects ``analysis_status`` + assessment presence and is NEVER
+  blocked by privacy. Privacy is its own non-fatal stage and a playback-only gate;
+  a privacy failure does not fail the overall analysis/feedback review.
 - Analysis ``completed`` **with** an ``assessment_id`` → review ``completed``.
 - Degraded analysis (``vision_only_mode`` /
   ``fallback_paid_analysis_not_allowed``) is reported as ``completed_degraded``
@@ -264,13 +266,11 @@ def build_video_review_progress(
         privacy_detail = str(video.get("privacy_error") or "Privacy blur failed")
     stages.append(_stage("privacy", "Privacy blur", privacy_stage, privacy_detail))
 
-    privacy_done = privacy_stage == "completed"
-
-    # 4. Analysis — gated on privacy completion.
+    # 4. Analysis — reflects the analysis worker's own state ONLY. DECOUPLED
+    #    from privacy (WS1 #56): analysis runs on the RAW asset and is never
+    #    blocked by privacy state. Privacy is surfaced as its own stage below.
     analysis_inconsistent = False
-    if not privacy_done:
-        analysis_stage = "blocked"
-    elif analysis_status == "completed":
+    if analysis_status == "completed":
         if has_assessment:
             analysis_stage = "completed"
         else:
@@ -373,8 +373,11 @@ def build_video_review_progress(
     failure_code: Optional[str] = None
     needs_admin_attention = False
 
+    # Privacy failure is NOT a review failure (decoupled): it surfaces as its own
+    # "failed / needs attention" stage + a retry_privacy action + the playback
+    # gate, but never fails the overall analysis/feedback review.
     required_failed = (
-        prep_status == "failed" or privacy_stage == "failed" or analysis_stage == "failed"
+        prep_status == "failed" or analysis_stage == "failed"
     )
 
     if analysis_inconsistent:
