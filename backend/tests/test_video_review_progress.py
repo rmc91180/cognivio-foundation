@@ -142,7 +142,9 @@ class TestAudioStage:
 
 
 class TestPrivacyGating:
-    def test_analysis_blocked_until_privacy_completes(self) -> None:
+    def test_analysis_not_blocked_by_privacy(self) -> None:
+        # WS1 decouple: analysis reflects its OWN state; privacy in flight must
+        # NOT block it (in-flight analysis is never reported as "blocked").
         video = _completed_video(
             status="processing",
             privacy_status="processing",
@@ -152,9 +154,24 @@ class TestPrivacyGating:
         )
         progress = build_video_review_progress(video)
         assert _stage_status(progress, "privacy") == "processing"
-        assert _stage_status(progress, "analysis") == "blocked"
+        assert _stage_status(progress, "analysis") != "blocked"
         assert progress["status"] == "processing"
-        assert progress["current_stage"] == "privacy"
+
+        # A COMPLETED analysis is reported complete even while privacy is still
+        # in flight / failed (the live 5def541d case): analysis + feedback done,
+        # overall not failed.
+        completed = _completed_video(
+            status="completed",
+            privacy_status="failed",
+            analysis_status="completed",
+            assessment_id="assess-1",
+            feedback_release_status="released",
+            privacy_error="visual_redaction:unblurred_face_detected",
+        )
+        done = build_video_review_progress(completed)
+        assert _stage_status(done, "analysis") == "completed"
+        assert _stage_status(done, "feedback") == "completed"
+        assert done["status"] in {"completed", "completed_degraded"}
 
     def test_privacy_review_required_is_blocked(self) -> None:
         video = _completed_video(
@@ -170,20 +187,25 @@ class TestPrivacyGating:
         assert progress["failure_code"] == "privacy_review_required"
         assert _stage_status(progress, "privacy") == "blocked"
 
-    def test_privacy_failed_is_failed_and_retryable(self) -> None:
+    def test_privacy_failure_is_non_fatal_but_surfaced(self) -> None:
+        # WS1 decouple: a privacy failure no longer fails the overall review.
+        # It surfaces as its OWN "failed" stage (error in the stage detail) plus
+        # a retry_privacy action, while analysis/feedback proceed on their own.
         video = _completed_video(
-            status="failed",
+            status="completed",
             privacy_status="failed",
-            analysis_status="queued",
-            assessment_id=None,
-            feedback_release_status=None,
+            analysis_status="completed",
+            assessment_id="assess-1",
+            feedback_release_status="released",
             privacy_error="redacted_video_not_browser_playable:unsupported_video_codec",
         )
         progress = build_video_review_progress(video)
-        assert progress["status"] == "failed"
+        assert progress["status"] != "failed"
+        assert _stage_status(progress, "privacy") == "failed"
+        privacy_stage = next(s for s in progress["stages"] if s["key"] == "privacy")
+        assert "unsupported_video_codec" in str(privacy_stage.get("detail"))
         assert progress["retry"]["eligible"] is True
         assert progress["retry"]["action"] == "retry_privacy"
-        assert "unsupported_video_codec" in progress["failure_code"]
 
 
 class TestInconsistency:

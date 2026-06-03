@@ -1625,6 +1625,7 @@ const en = {
     observationSummaryDescription: "A concise classroom observation aligned to the selected rubric priorities.",
     scoreSummary: "Score {{score}}/10",
     noSummaryAvailable: "No summary available yet.",
+    feedbackPendingForTeacher: "Available after observer review.",
     adminFocus: "Admin focus",
     recommendedMoments: "Recommended lesson moments",
     recommendedMomentsDescription:
