@@ -686,10 +686,12 @@ export function VideoPlayerPage() {
           || teacherArtifact?.empty_state?.message
           || t("videoPlayer.noSummaryAvailable"))
       : teacherArtifactAllowed
-        ? [teacherSummary.opening, teacherSummary.strength, teacherSummary.growth_focus, teacherSummary.next_step].filter(Boolean).join(" ")
+        ? ([teacherSummary.opening, teacherSummary.strength, teacherSummary.growth_focus, teacherSummary.next_step].filter(Boolean).join(" ")
+            || t("videoPlayer.feedbackPendingForTeacher"))
         : teacherFeedback
-          ? [teacherSummary.opening, teacherSummary.strength, teacherSummary.growth_focus, teacherSummary.next_step].filter(Boolean).join(" ")
-          : observationSummary?.executive_summary || assessmentRes?.summary || t("videoPlayer.noSummaryAvailable")
+          ? ([teacherSummary.opening, teacherSummary.strength, teacherSummary.growth_focus, teacherSummary.next_step].filter(Boolean).join(" ")
+              || t("videoPlayer.feedbackPendingForTeacher"))
+          : observationSummary?.executive_summary || assessmentRes?.summary || t("videoPlayer.feedbackPendingForTeacher")
     : observationSummary?.executive_summary || assessmentRes?.summary || t("videoPlayer.noSummaryAvailable");
   const recommendedMoments = analysisMomentsRes?.moments || [];
   const recommendedMomentNoteLines = recommendedMoments.slice(0, 3).map((moment) => {
@@ -1021,37 +1023,45 @@ export function VideoPlayerPage() {
                           <li key={item.id}>{item.body}</li>
                         ))}
                       </ul>
-                    ) : observationSummary?.top_strengths?.length ? (
+                    ) : (observationSummary?.top_strengths || []).filter(Boolean).length ? (
                       <ul className="mt-2 list-disc space-y-1 ps-4 text-xs text-slate-700">
-                        {observationSummary.top_strengths.map((item, idx) => (
+                        {observationSummary.top_strengths.filter(Boolean).map((item, idx) => (
                           <li key={idx}>{item}</li>
                         ))}
                       </ul>
                     ) : (
-                      <div className="mt-2 text-xs text-slate-500">{t("videoPlayer.noStrengthsAvailable")}</div>
+                      <div className="mt-2 text-xs text-slate-500">
+                        {isTeacher
+                          ? t("videoPlayer.feedbackPendingForTeacher")
+                          : t("videoPlayer.noStrengthsAvailable")}
+                      </div>
                     )}
                   </div>
                   <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       {t("videoPlayer.growthAreas")}
                     </div>
-                    {observationSummary?.growth_areas?.length ? (
+                    {(observationSummary?.growth_areas || []).filter(Boolean).length ? (
                       <ul className="mt-2 list-disc space-y-1 ps-4 text-xs text-slate-700">
-                        {observationSummary.growth_areas.map((item, idx) => (
+                        {observationSummary.growth_areas.filter(Boolean).map((item, idx) => (
                           <li key={idx}>{item}</li>
                         ))}
                       </ul>
                     ) : (
-                      <div className="mt-2 text-xs text-slate-500">{t("videoPlayer.noGrowthAreasAvailable")}</div>
+                      <div className="mt-2 text-xs text-slate-500">
+                        {isTeacher
+                          ? t("videoPlayer.feedbackPendingForTeacher")
+                          : t("videoPlayer.noGrowthAreasAvailable")}
+                      </div>
                     )}
                   </div>
                   <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       {t("videoPlayer.coachingMoves")}
                     </div>
-                    {observationSummary?.coaching_actions?.length ? (
+                    {(observationSummary?.coaching_actions || []).filter(Boolean).length ? (
                       <ul className="mt-2 space-y-2 text-xs text-slate-700">
-                        {observationSummary.coaching_actions.map((item, idx) => (
+                        {observationSummary.coaching_actions.filter(Boolean).map((item, idx) => (
                           <li
                             key={idx}
                             className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3"
@@ -1079,21 +1089,29 @@ export function VideoPlayerPage() {
                         ))}
                       </ul>
                     ) : (
-                      <div className="mt-2 text-xs text-slate-500">{t("videoPlayer.noCoachingMovesAvailable")}</div>
+                      <div className="mt-2 text-xs text-slate-500">
+                        {isTeacher
+                          ? t("videoPlayer.feedbackPendingForTeacher")
+                          : t("videoPlayer.noCoachingMovesAvailable")}
+                      </div>
                     )}
                   </div>
                   <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       {t("videoPlayer.priorityAlignment")}
                     </div>
-                    {observationSummary?.priority_alignment?.length ? (
+                    {(observationSummary?.priority_alignment || []).filter(Boolean).length ? (
                       <ul className="mt-2 list-disc space-y-1 ps-4 text-xs text-slate-700">
-                        {observationSummary.priority_alignment.map((item, idx) => (
+                        {observationSummary.priority_alignment.filter(Boolean).map((item, idx) => (
                           <li key={idx}>{item}</li>
                         ))}
                       </ul>
                     ) : (
-                      <div className="mt-2 text-xs text-slate-500">{t("videoPlayer.noPriorityAlignment")}</div>
+                      <div className="mt-2 text-xs text-slate-500">
+                        {isTeacher
+                          ? t("videoPlayer.feedbackPendingForTeacher")
+                          : t("videoPlayer.noPriorityAlignment")}
+                      </div>
                     )}
                   </div>
                 </div>

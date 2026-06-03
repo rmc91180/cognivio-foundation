@@ -306,3 +306,46 @@ describe("PR C9.3 admin playback", () => {
     expect(video.getAttribute("src")).toBe(ADMIN_PROCESSED_URL);
   });
 });
+
+describe("PR3 teacher empty-state placeholders (admin/teacher fork)", () => {
+  it("teacher sees a clear 'available after observer review' placeholder, not blank/No-X panels", async () => {
+    mockUser = { id: "user-1", teacher_id: "teacher-1", tenant_role: "teacher" };
+    // Same assessment document, but it carries no teacher-projected summary /
+    // strengths / growth / coaching / priority fields yet.
+    setVideo(baseVideo({ assessment_id: "assess-1" }));
+    assessmentApi.get.mockResolvedValue({ data: { id: "assess-1" } });
+    renderPage();
+
+    await screen.findByTestId("review-progress");
+    // The observation-summary boxes (strengths/growth/coaching/priority) render
+    // the teacher pending label instead of a blank box, a literal null, or the
+    // admin "No X yet" copy. (t() is mocked to echo the i18n key.)
+    await waitFor(() => {
+      expect(
+        screen.getAllByText("videoPlayer.feedbackPendingForTeacher").length
+      ).toBeGreaterThanOrEqual(4);
+    });
+    // Admin-only empty-state copy must NOT leak to the teacher.
+    expect(screen.queryByText("videoPlayer.noStrengthsAvailable")).toBeNull();
+    expect(screen.queryByText("videoPlayer.noGrowthAreasAvailable")).toBeNull();
+    expect(screen.queryByText("videoPlayer.noCoachingMovesAvailable")).toBeNull();
+    expect(screen.queryByText("videoPlayer.noPriorityAlignment")).toBeNull();
+  });
+
+  it("admin keeps the existing 'No X yet' empty-state and never the teacher pending label", async () => {
+    mockUser = { id: "admin-1", tenant_role: "admin" };
+    setVideo(baseVideo({ assessment_id: "assess-1" }));
+    assessmentApi.get.mockResolvedValue({ data: { id: "assess-1" } });
+    renderPage();
+
+    await screen.findByTestId("review-progress");
+    // The admin fork is unchanged: an empty observation summary shows the admin
+    // copy, never the teacher-facing pending label.
+    await waitFor(() => {
+      expect(
+        screen.getAllByText("videoPlayer.noStrengthsAvailable").length
+      ).toBeGreaterThanOrEqual(1);
+    });
+    expect(screen.queryByText("videoPlayer.feedbackPendingForTeacher")).toBeNull();
+  });
+});

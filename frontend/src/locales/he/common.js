@@ -1626,6 +1626,7 @@ const he = {
     observationSummaryDescription: "סיכום תמציתי של תצפית ההוראה, המיושר למוקדי ההתבוננות שנבחרו.",
     scoreSummary: "ציון {{score}}/10",
     noSummaryAvailable: "עדיין אין סיכום זמין.",
+    feedbackPendingForTeacher: "יהיה זמין לאחר סקירת המנהל/ה.",
     adminFocus: "מוקדי ההתבוננות שנקבעו",
     recommendedMoments: "רגעי שיעור מומלצים",
     recommendedMomentsDescription:
