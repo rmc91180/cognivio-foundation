@@ -108,10 +108,15 @@ async def _remove_reusable_user_record(email: str) -> None:
     except Exception:
         pass
 
-    if hasattr(users, "docs"):
+    # Test-double fallback only: a real Mongo Collection's ``.docs`` attribute is
+    # a CHILD collection (iterating/bool() on it raises), so guard on the concrete
+    # list type. On real Mongo the case-insensitive purge above (delete_many regex)
+    # already did the work; here ``docs`` is not a list, so this is skipped.
+    docs = getattr(users, "docs", None)
+    if isinstance(docs, list):
         users.docs = [
             doc
-            for doc in getattr(users, "docs", [])
+            for doc in docs
             if _normalize_email(doc.get("email")) != email or _blocks_new_access_request(doc)
         ]
 
@@ -135,18 +140,26 @@ async def _find_user_by_email_case_insensitive(email: str, projection: Optional[
     except Exception:
         pass
 
-    for doc in getattr(users, "docs", []) or []:
-        if _normalize_email(doc.get("email")) == normalized_email:
-            if projection is None:
-                return dict(doc)
-            payload = dict(doc)
-            include_keys = {key for key, value in projection.items() if value}
-            exclude_keys = {key for key, value in projection.items() if not value}
-            if include_keys:
-                payload = {key: value for key, value in payload.items() if key in include_keys}
-            for key in exclude_keys:
-                payload.pop(key, None)
-            return payload
+    # In-memory test doubles expose a real ``.docs`` list. On a real Mongo
+    # Collection, attribute access returns a CHILD collection, and bool()/
+    # iteration on a Collection raises (NotImplementedError/TypeError) — so guard
+    # on the concrete list type, never on truthiness. The real case-insensitive
+    # lookup is the ``$regex`` query above; this block is the test-double
+    # fallback only.
+    docs = getattr(users, "docs", None)
+    if isinstance(docs, list):
+        for doc in docs:
+            if _normalize_email(doc.get("email")) == normalized_email:
+                if projection is None:
+                    return dict(doc)
+                payload = dict(doc)
+                include_keys = {key for key, value in projection.items() if value}
+                exclude_keys = {key for key, value in projection.items() if not value}
+                if include_keys:
+                    payload = {key: value for key, value in payload.items() if key in include_keys}
+                for key in exclude_keys:
+                    payload.pop(key, None)
+                return payload
 
     return None
 
