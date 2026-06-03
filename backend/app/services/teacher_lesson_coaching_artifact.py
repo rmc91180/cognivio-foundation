@@ -1777,7 +1777,16 @@ def build_teacher_lesson_coaching_artifact(
         "reflection": artifact["reflection"],
         "next_best_action": artifact["next_best_action"],
     }
-    issues = find_teacher_visible_text_issues(teacher_visible_paths_to_scan)
+    # ``lesson.title`` (often the raw upload filename), ``lesson.recorded_at``
+    # and ``lesson.reviewed_at`` are metadata, not teacher coaching prose; their
+    # dotted numbers false-positive the bare-decimal score_token rule. Skip ONLY
+    # those scalar metadata paths — every coaching PROSE field (summary,
+    # highlights, action_items, deep_dive, recognition, reflection,
+    # next_best_action) is still scanned exactly as strictly as before.
+    issues = find_teacher_visible_text_issues(
+        teacher_visible_paths_to_scan,
+        skip_paths=("lesson.title", "lesson.recorded_at", "lesson.reviewed_at"),
+    )
     if issues:
         # Refuse to claim teacher_visible. Collapse to safe empty.
         return _empty_artifact(
