@@ -818,8 +818,21 @@ def reject_unsafe_teacher_payload(
 
     # Final recursive scan to confirm the projection is teacher-safe. Skip
     # internal metadata + to_dos (mirror of action_items) to avoid double
-    # flagging.
-    skip_paths = ("_internal_metadata", "to_dos")
+    # flagging. Also skip pure metadata fields: the lesson title (often a raw
+    # upload filename), ``recorded_at`` and ``reviewed_at`` are NOT teacher
+    # coaching prose. Their dotted numbers — filename fragments like
+    # "10.38.08", ISO-8601 fractional seconds like "31.159000" — otherwise
+    # false-positive the bare-decimal score_token rule and wrongly block a
+    # clean, released review. The score_token / rubric rules stay exactly as
+    # strict on every teacher PROSE field (latest_summary, highlights,
+    # action_items, deep_dive, recognition, ...), which are scanned as before.
+    skip_paths = (
+        "_internal_metadata",
+        "to_dos",
+        "lesson_title",
+        "recorded_at",
+        "reviewed_at",
+    )
     issues = find_teacher_visible_text_issues(cleaned, skip_paths=skip_paths)
     guardrails = dict(cleaned.get("guardrails") or {})
     if issues:

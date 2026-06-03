@@ -524,6 +524,112 @@ def test_reject_unsafe_teacher_payload_refuses_residual_bad_summary():
     assert_no_known_bad_strings(cleaned)
 
 
+def test_reject_allows_clean_prose_when_metadata_has_dotted_numbers():
+    """Regression for assessment 5849a3b9: a CLEAN, released review was wrongly
+    blocked because pure metadata (the upload filename + ISO timestamps) tripped
+    the bare-decimal score_token rule in the final recursive scan. Metadata is
+    now in skip_paths, so a clean payload re-derives teacher-visible — i.e.
+    ``reject_unsafe_teacher_payload`` returns a payload (not None) and
+    ``teacher_feedback_allowed`` re-derives True downstream.
+    """
+    payload = {
+        # Metadata fields with dotted numbers that previously false-positived
+        # score_token: filename fragment "10.38.08"; ISO fractional seconds.
+        "lesson_title": "WhatsApp Video 2026-05-28 at 10.38.08 (2).mp4",
+        "recorded_at": "2026-06-03T14:20:31.159000+00:00",
+        "reviewed_at": "2026-06-03T14:24:53.530801+00:00",
+        "subject": "Mathematics",
+        # CLEAN coaching prose — no scores, rubric codes, or admin language.
+        "latest_summary": {
+            "opening": "You created an active, collaborative learning environment for your sixth graders.",
+            "strength": "You gave students room to build on each other's ideas.",
+            "growth_focus": "Keep the practice focus to one move so you can notice what changes.",
+            "next_step": "Carry that move into your next lesson and notice who joins the conversation.",
+        },
+        "highlights": [
+            {"title": "Moment worth keeping", "body": "You created room for a second student voice."},
+        ],
+        "action_items": [
+            {
+                "id": "a-1",
+                "title": "Try one follow-up",
+                "body": "Ask a student to extend a peer's answer.",
+                "try_next_lesson": "Ask a student to extend a peer's answer.",
+                "video_id": "v-1",
+            },
+        ],
+        "recognition": [],
+        "deep_dive": {"available": False, "moments": []},
+        "reflection_prompts": ["What visible student signal would tell you the move worked?"],
+        "guardrails": {},
+    }
+    cleaned = reject_unsafe_teacher_payload(payload, source_validity={"valid_for_teacher_display": True})
+    # Was None BEFORE the metadata skip_paths fix (filename/timestamps tripped score_token).
+    assert cleaned is not None
+    assert cleaned["guardrails"]["teacher_visible"] is True
+    # Clean prose survived untouched.
+    assert cleaned["latest_summary"]["opening"].startswith("You created an active")
+    assert len(cleaned["highlights"]) == 1
+    assert len(cleaned["action_items"]) == 1
+    # No leak in the coaching PROSE. (The metadata fields are intentionally
+    # retained and legitimately contain dotted numbers — they are not teacher
+    # coaching content, so they are excluded from this leak assertion exactly
+    # as the production scan now excludes them.)
+    prose_only = {
+        "latest_summary": cleaned.get("latest_summary"),
+        "highlights": cleaned.get("highlights"),
+        "action_items": cleaned.get("action_items"),
+        "recognition": cleaned.get("recognition"),
+        "deep_dive": cleaned.get("deep_dive"),
+        "reflection_prompts": cleaned.get("reflection_prompts"),
+    }
+    assert find_teacher_visible_text_issues(prose_only) == []
+
+
+def test_reject_still_blocks_genuine_score_token_in_prose():
+    """Safety net intact: the metadata skip must NOT rescue a genuine score leak
+    in teacher PROSE. A real score token in a teacher-visible prose field (here
+    ``reflection_prompts``, which reject does not pre-sanitize) still makes the
+    final recursive scan return None. The score rule stays exactly as strict.
+    """
+    payload = {
+        # Same metadata that is now (correctly) skipped.
+        "lesson_title": "WhatsApp Video 2026-05-28 at 10.38.08 (2).mp4",
+        "recorded_at": "2026-06-03T14:20:31.159000+00:00",
+        "reviewed_at": "2026-06-03T14:24:53.530801+00:00",
+        "latest_summary": {"opening": "You gave students room to think."},
+        "highlights": [],
+        "action_items": [],
+        "recognition": [],
+        "deep_dive": {"available": False, "moments": []},
+        # Genuine score token in teacher-visible prose — must still block.
+        "reflection_prompts": ["Reflect on how the teacher scored 6.5 on questioning."],
+        "guardrails": {},
+    }
+    cleaned = reject_unsafe_teacher_payload(payload, source_validity={"valid_for_teacher_display": True})
+    assert cleaned is None
+
+
+def test_final_scan_skips_metadata_but_still_flags_prose_score():
+    """Unit test of the exact change: with the production skip_paths the three
+    metadata fields are skipped, yet a genuine score token in coaching PROSE
+    (summary) is STILL flagged. The score_token rule strictness is unchanged.
+    """
+    skip = ("_internal_metadata", "to_dos", "lesson_title", "recorded_at", "reviewed_at")
+    metadata_only = {
+        "lesson_title": "WhatsApp Video 2026-05-28 at 10.38.08 (2).mp4",
+        "recorded_at": "2026-06-03T14:20:31.159000+00:00",
+        "reviewed_at": "2026-06-03T14:24:53.530801+00:00",
+    }
+    assert find_teacher_visible_text_issues(metadata_only, skip_paths=skip) == []
+    # Prose score is STILL flagged even with the metadata skip in place.
+    prose = {"summary": {"opening": "the teacher scored 6.5 on questioning"}}
+    issues = find_teacher_visible_text_issues(prose, skip_paths=skip)
+    assert issues, "score token in coaching prose must still be flagged"
+    assert issues[0]["path"] == "summary.opening"
+    assert "score_token" in issues[0]["issues"]
+
+
 def test_action_item_eligibility_rejects_teacher_name_prefix():
     bad = {"title": "Rafi:", "body": "anything"}
     assert not is_action_item_teacher_eligible(bad)
