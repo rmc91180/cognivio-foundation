@@ -349,3 +349,29 @@ def test_private_reflection_hidden_and_shared_reflection_visible_to_admin(monkey
     serialized = str(response.json())
     assert "Please discuss this" in serialized
     assert "Do not show" not in serialized
+
+
+def test_teacher_voice_preserves_hyphenated_co_teacher():
+    """Regression: the render-time `_teacher_voice` pass must NOT corrupt the
+    hyphenated compound 'co-teacher' into 'co-You'. The old unguarded
+    case-insensitive substring replace matched the 'teacher' inside 'co-teacher';
+    the guarded word-boundary subs (mirroring voice_gate) leave it intact while
+    still rewriting a bare 'The teacher ...' -> 'You ...'.
+    """
+    from app.analysis.teacher_feedback_projection import _teacher_voice
+
+    # The exact production shape (assessment 5849a3b9 executive_summary opening).
+    corrupted_input = "You and your co-teacher created a highly active, collaborative lesson."
+    out = _teacher_voice(corrupted_input, language="en", path="summary")
+    assert "co-teacher" in out
+    assert "co-You" not in out
+    assert "co-you" not in out
+
+    # Other hyphenated compound must also survive.
+    out_st = _teacher_voice("She is a student-teacher this year.", language="en", path="summary")
+    assert "student-teacher" in out_st
+
+    # The legitimate bare 'The teacher <verb>' -> 'You <verb>' rewrite still works.
+    out_legit = _teacher_voice("The teacher asked students to explain.", language="en", path="summary")
+    assert out_legit.startswith("You asked")
+    assert "teacher" not in out_legit.lower()
