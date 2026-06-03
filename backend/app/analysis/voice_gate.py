@@ -87,6 +87,41 @@ def _fix_you_verb_agreement(text: str) -> str:
     return _YOU_VERB_AGREEMENT_RE.sub(repl, text)
 
 
+# Compound predicate: "You <verb1> ... and [later|then] <verb2-s>" leaves verb2
+# third-person ("...and guides them", "...and later transitions"). Deconjugate
+# verb2 too. Scoped to the same clause as the "You" subject ([^.;!?]* admits no
+# sentence break) and the verb must sit immediately after "and"/"and later"/
+# "and then" (a determiner like "and the timer beeps" is NOT matched). An
+# explicit later/then adverb is a strong verb signal that overrides the
+# plural-noun guard; a bare "and" keeps the guard so "You explain rules and
+# groups" (groups = conjoined noun) is left untouched.
+_YOU_COMPOUND_VERB_RE = re.compile(
+    r"(?P<pre>\byou\b[^.;!?]*?\band\s+)(?P<adv>(?:later|then)\s+)?(?P<verb>[A-Za-z]+s)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _fix_you_compound_and_verb(text: str) -> str:
+    """Deconjugate the verb after 'and'/'and later'/'and then' when it shares a
+    'You' subject. Conservative: skips non-3sg endings, and skips bare-'and'
+    plural nouns; the later/then adverb overrides the plural-noun guard."""
+
+    def repl(match: "re.Match[str]") -> str:
+        verb = match.group("verb")
+        low = verb.lower()
+        adv = match.group("adv")
+        base = _deconjugate_third_person(verb)
+        if base.lower() == low:
+            # No 3rd-person-singular ending to drop (e.g. "discuss", "address").
+            return match.group(0)
+        if low in _YOU_FOLLOWING_PLURAL_NOUNS and not adv:
+            # Bare "and <plural-noun-s>" is an ambiguous conjoined noun; leave it.
+            return match.group(0)
+        return match.group("pre") + (adv or "") + base
+
+    return _YOU_COMPOUND_VERB_RE.sub(repl, text)
+
+
 BANNED_PHRASES: Tuple[str, ...] = (
     "evidence was limited",
     "in the sampled frames",
@@ -559,8 +594,12 @@ def _deterministic_rewrite(text: str, *, language: Optional[str] = "en", path: s
 
     if not hebrew:
         cleaned = _the_teacher_to_you(cleaned)
-        cleaned = re.sub(r"\bteacher\b", "you", cleaned, flags=re.IGNORECASE)
+        # Standalone "teacher" only — never inside a hyphenated compound like
+        # "co-teacher"/"student-teacher" (the negative lookbehind for a hyphen or
+        # word char stops the old "co-teacher" -> "co-you" mangling).
+        cleaned = re.sub(r"(?<![\w-])teacher\b", "you", cleaned, flags=re.IGNORECASE)
         cleaned = _fix_you_verb_agreement(cleaned)
+        cleaned = _fix_you_compound_and_verb(cleaned)
 
         if _is_observation_path(path) and not _contains_direct_address(cleaned):
             cleaned = f"You can see this moment clearly: {cleaned[0].lower() + cleaned[1:] if cleaned else cleaned}"
