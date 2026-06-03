@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -284,8 +285,16 @@ def _teacher_voice(text: str, *, language: Optional[str] = "en", path: str = "su
 
     hebrew = _is_hebrew(language)
     if not hebrew:
-        text = _replace_ci(text, "Teacher", "You")
-        text = _replace_ci(text, "teacher", "you")
+        # Bare "teacher"/"Teacher" -> you/You, but NEVER inside a hyphenated
+        # compound like "co-teacher"/"student-teacher". The previous _replace_ci
+        # pass was a case-insensitive *substring* replace, so it matched the
+        # "teacher" inside "co-teacher" and corrupted it to "co-You". These
+        # word-boundary + hyphen-guarded subs mirror voice_gate:600's guard
+        # ((?<![\w-]) + \b), which already ran first via
+        # rewrite_payload_deterministically above. Case-sensitive split keeps
+        # sentence-initial "Teacher" -> "You" and mid-sentence "teacher" -> "you".
+        text = re.sub(r"(?<![\w-])Teacher\b", "You", text)
+        text = re.sub(r"(?<![\w-])teacher\b", "you", text)
         lowered = text.lower()
         if path in {"summary", "highlight", "moment"} and not any(token in f" {lowered} " for token in (" you ", " your ")):
             text = f"You can revisit this moment: {text[0].lower() + text[1:] if text else text}"
