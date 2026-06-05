@@ -9,7 +9,6 @@ dockerfilePath = "Dockerfile"
 # reports the real deployed commit.
 
 [deploy]
-healthcheckPath = "/health"
 restartPolicyType = "ON_FAILURE"
 
 [[services]]
