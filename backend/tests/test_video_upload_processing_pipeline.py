@@ -115,10 +115,17 @@ def test_resolve_teacher_video_playback_url_refuses_raw():
 
 
 def test_resolve_teacher_video_playback_url_returns_redacted():
+    # A1 (Edit 7b): teacher playback is readiness-gated through the gateway — a
+    # completed redacted asset must ALSO have passed playback + visual-redaction
+    # validation before it is vended. Seed those records so it legitimately
+    # vends (this preserves the stricter gate; it does not loosen it).
     url = server._resolve_teacher_video_playback_url(
         {
             "privacy_status": "completed",
             "redacted_file_url": "https://cdn.example.com/redacted.mp4",
+            "redacted_asset_state": "stored",
+            "redacted_playback_validation": {"status": "passed"},
+            "visual_redaction_validation": {"status": "passed"},
         }
     )
     assert url == "https://cdn.example.com/redacted.mp4"

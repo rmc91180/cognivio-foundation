@@ -146,8 +146,9 @@ def test_resolve_video_playback_url_prefers_file_url_then_local_path():
         server._resolve_video_playback_url({"file_url": "https://cdn.example.com/video.mp4"})
         == "https://cdn.example.com/video.mp4"
     )
-    local = server._resolve_video_playback_url({"file_path": "videos/t1/abc.mp4"})
-    assert local.endswith("/uploads/videos/t1/abc.mp4")
+    # A1 (Edit 7a): the /uploads disk fallback is removed — a disk-only video no
+    # longer resolves to a serve URL (fail-closed; the bytes are not in R2).
+    assert server._resolve_video_playback_url({"file_path": "videos/t1/abc.mp4"}) is None
 
 
 def test_resolve_video_playback_url_prefers_processed_asset_before_raw():
@@ -189,8 +190,12 @@ def test_apply_video_response_defaults_adds_playback_and_thumbnail_urls():
     assert normalized["privacy_status"] == "completed"
     assert normalized["analysis_status"] == "processing"
     assert normalized["transcode_status"] == "processing"
-    assert normalized["playback_url"].endswith("/uploads/videos/t1/v1.mp4")
-    assert normalized["thumbnail_url"].endswith("/uploads/thumbnails/t1/v1.jpg")
+    # A1 (Edits 7a/7c): disk-only assets no longer resolve to a serve URL. This
+    # is a LIVE response path (list_videos / get_video_detail), so disk-only
+    # legacy videos now return playback_url/thumbnail_url = None to clients
+    # (intended fail-closed — those bytes are not in shared storage).
+    assert normalized["playback_url"] is None
+    assert normalized["thumbnail_url"] is None
 
 
 def test_normalize_privacy_status_maps_unknown_and_errors():
@@ -328,6 +333,7 @@ async def test_rehydrate_video_privacy_queue_waits_for_transcode_and_prefers_pro
                 "teacher_id": "teacher_1",
                 "uploaded_by": "user_1",
                 "processed_file_path": "processed/teacher_1/video_1.mp4",
+                "processed_s3_key": "uploads/videos/processed/teacher_1/video_1.mp4",
                 "raw_file_path": "videos/teacher_1/video_1.mov",
                 "file_path": "videos/teacher_1/video_1.mov",
             }
@@ -349,6 +355,16 @@ async def test_rehydrate_video_privacy_queue_waits_for_transcode_and_prefers_pro
     queue = server.asyncio.Queue()
     monkeypatch.setattr(server, "VIDEO_PRIVACY_JOB_QUEUE", queue)
 
+    # A1: post-Edit-10c rehydration resolves the asset location through the
+    # gateway. Use a mock backend (no disk, no network) with the processed
+    # object seeded by key so localize() fetches it into the scratch _gw_cache,
+    # exercising the R2 cross-replica resolve A1 exists to enforce.
+    from app.services.storage_gateway import build_gateway
+
+    mock_gateway = build_gateway(types.SimpleNamespace(storage_backend="mock", s3_bucket=""))
+    mock_gateway.backend.objects["uploads/videos/processed/teacher_1/video_1.mp4"] = b"video-bytes"
+    monkeypatch.setattr(server, "STORAGE_GATEWAY", mock_gateway)
+
     await server._rehydrate_video_privacy_queue()
 
     assert len(videos.find_calls) == 1
@@ -365,6 +381,10 @@ async def test_rehydrate_video_privacy_queue_waits_for_transcode_and_prefers_pro
             "video_id": "video_1",
             "teacher_id": "teacher_1",
             "user_id": "user_1",
-            "file_path": str(Path("/tmp/cognivio-test-uploads") / "processed/teacher_1/video_1.mp4"),
+            "file_path": str(
+                Path("/tmp/cognivio-test-uploads")
+                / "_gw_cache"
+                / "uploads/videos/processed/teacher_1/video_1.mp4"
+            ),
         }
     ]

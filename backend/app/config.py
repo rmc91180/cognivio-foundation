@@ -284,6 +284,7 @@ class StorageSettings:
     s3_presigned_url_expires_seconds: int
     aws_access_key_id: str
     aws_secret_access_key: str
+    storage_backend: str = "auto"   # A1: "auto" | "local" | "r2" | "mock"
 
 
 @dataclass(frozen=True)
@@ -475,6 +476,7 @@ class Settings:
                 s3_presigned_url_expires_seconds=_env_int("S3_PRESIGNED_URL_EXPIRES_SECONDS", 3600),
                 aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID", ""),
                 aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY", ""),
+                storage_backend=os.getenv("STORAGE_BACKEND", "auto"),
             ),
             cors_origins=cors_origins,
             environment=environment,

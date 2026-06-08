@@ -3347,63 +3347,39 @@ def _resolve_video_playback_url(video: dict) -> Optional[str]:
     redacted_url = normalize_storage_url(video.get("redacted_file_url"))
     if redacted_url:
         return redacted_url
-    redacted_path = video.get("redacted_file_path")
-    if redacted_path:
-        safe_path = str(redacted_path).replace("\\", "/").lstrip("/")
-        return _to_public_backend_url(f"/uploads/{safe_path}")
     if video.get("privacy_status") is not None and privacy_status != PrivacyProcessingStatus.COMPLETED.value:
         return None
     processed_url = normalize_storage_url(video.get("processed_file_url"))
     if processed_url:
         return processed_url
-    processed_path = video.get("processed_file_path")
-    if processed_path:
-        safe_path = str(processed_path).replace("\\", "/").lstrip("/")
-        return _to_public_backend_url(f"/uploads/{safe_path}")
     file_url = normalize_storage_url(video.get("file_url"))
     if file_url:
         return file_url
-    file_path = video.get("file_path")
-    if file_path:
-        safe_path = str(file_path).replace("\\", "/").lstrip("/")
-        return _to_public_backend_url(f"/uploads/{safe_path}")
     return None
 
 
 def _resolve_teacher_video_playback_url(video: dict) -> Optional[str]:
-    """PR C9.1: strict teacher-facing playback URL.
-
-    Never returns raw or non-redacted URLs unless ``allow_unblurred_retention``
-    is enabled by institution policy. Returns ``None`` when no asset is safe to
-    serve to a teacher.
-    """
-    decision = select_playback_asset(video, "teacher", allow_raw_for_admin=False)
-    if not decision.url:
-        return None
-    url = decision.url
-    if url.startswith("/uploads/"):
-        return _to_public_backend_url(url)
-    return url
+    """A1: strict teacher-facing playback URL — vended ONLY through the gateway
+    (quarantine refusal + delegation + redacted readiness + object-store
+    resolution). Never a raw/disk URL."""
+    vend = STORAGE_GATEWAY.vend_playback_url(
+        video, "teacher", allow_raw_for_admin=False, require_redacted_ready=True
+    )
+    return vend.url
 
 
 def _resolve_video_thumbnail_url(video: dict) -> Optional[str]:
+    # A1: never emit a /uploads disk URL for video-derived thumbnails — the
+    # gateway owns these bytes (R2). Returns the stored http URL or None.
     privacy_status = _normalize_privacy_status(video.get("privacy_status"))
     redacted_thumb_url = video.get("redacted_thumbnail_url")
     if redacted_thumb_url:
         return redacted_thumb_url
-    redacted_thumb_path = video.get("redacted_thumbnail_path")
-    if redacted_thumb_path:
-        safe_path = str(redacted_thumb_path).replace("\\", "/").lstrip("/")
-        return _to_public_backend_url(f"/uploads/{safe_path}")
     if video.get("privacy_status") is not None and privacy_status != PrivacyProcessingStatus.COMPLETED.value:
         return None
     thumb_url = video.get("thumbnail_url")
     if thumb_url:
         return thumb_url
-    thumb_path = video.get("thumbnail_path")
-    if thumb_path:
-        safe_path = str(thumb_path).replace("\\", "/").lstrip("/")
-        return _to_public_backend_url(f"/uploads/{safe_path}")
     return None
 
 
@@ -3472,20 +3448,13 @@ def _resolve_unblurred_playback_url(video: dict) -> Optional[str]:
     has explicitly authorized unblurred playback. Never call this when blur is
     required.
     """
+    # A1: never emit a /uploads disk URL — gateway-owned bytes resolve via R2.
     processed_url = normalize_storage_url(video.get("processed_file_url"))
     if processed_url:
         return processed_url
-    processed_path = video.get("processed_file_path")
-    if processed_path:
-        safe_path = str(processed_path).replace("\\", "/").lstrip("/")
-        return _to_public_backend_url(f"/uploads/{safe_path}")
     raw_url = normalize_storage_url(video.get("raw_file_url") or video.get("file_url"))
     if raw_url:
         return raw_url
-    raw_path = video.get("raw_file_path") or video.get("file_path")
-    if raw_path:
-        safe_path = str(raw_path).replace("\\", "/").lstrip("/")
-        return _to_public_backend_url(f"/uploads/{safe_path}")
     return None
 
 
@@ -3592,9 +3561,15 @@ def _build_teacher_playback_state(video: dict) -> Dict[str, Any]:
             "privacy_policy": policy_view,
         }
 
-    url = decision.url
-    if url.startswith("/uploads/"):
-        url = _to_public_backend_url(url)
+    vend = STORAGE_GATEWAY.vend_playback_url(
+        video, "teacher", allow_raw_for_admin=False, require_redacted_ready=True
+    )
+    if not vend.ok:
+        return {
+            "available": False, "asset_kind": "redacted", "url": None,
+            "status": "asset_location_unresolved", "privacy_policy": policy_view,
+        }
+    url = vend.url
     return {
         "available": True,
         "asset_kind": "redacted",
@@ -3818,6 +3793,8 @@ def _build_video_asset_s3_key(asset_kind: str, teacher_id: str, filename: str) -
         return f"uploads/videos/processed/{safe_teacher_id}/{safe_name}"
     if asset_kind == "thumbnail":
         return f"uploads/videos/thumbnails/{safe_teacher_id}/{safe_name}"
+    if asset_kind == "redacted":
+        return f"uploads/videos/redacted/{safe_teacher_id}/{safe_name}"
     return _build_s3_key(f"videos/{asset_kind}", safe_name)
 
 
@@ -6301,6 +6278,7 @@ from app.services.video_assets import (
     select_analysis_asset,
     select_playback_asset,
 )
+from app.services.storage_gateway import build_gateway, StorageWriteError
 from app.services.playback_validation import (
     PLAYBACK_VALIDATION_FAILURE_CODES,
     PLAYBACK_VALIDATION_STATUSES,
@@ -6424,6 +6402,12 @@ AWS_ACCESS_KEY_ID = APP_SETTINGS.storage.aws_access_key_id
 AWS_SECRET_ACCESS_KEY = APP_SETTINGS.storage.aws_secret_access_key
 FRONTEND_URL = APP_SETTINGS.storage.frontend_url
 BACKEND_PUBLIC_BASE_URL = APP_SETTINGS.storage.backend_public_base_url
+
+# A1: the StorageGateway is the single fail-closed chokepoint for every video
+# asset write / serve-vend / processing-resolve. R2 is the source of truth; the
+# privacy serve decision is DELEGATED (consume, don't compute) and quarantine
+# states (REVIEW_REQUIRED / DESTRUCTIVE_BLUR_FAILED) are refused unconditionally.
+STORAGE_GATEWAY = build_gateway(APP_SETTINGS.storage, redacted_ready=_redacted_playback_ready)
 LEADERSHIP_INSIGHTS_CACHE_TTL_SECONDS = APP_SETTINGS.operations.leadership_insights_cache_ttl_seconds
 DASHBOARD_INTELLIGENCE_CACHE_TTL_SECONDS = 30 * 60
 
@@ -11613,28 +11597,24 @@ async def _run_video_privacy_job(video_id: str) -> None:
                 else:
                     raise
 
-            redacted_file_url = _to_public_backend_url(f"/uploads/{redacted_relative_path}")
-            redacted_thumbnail_url = _to_public_backend_url(f"/uploads/{redacted_thumbnail_relative_path}")
+            # A1: write the redacted asset + thumbnail through the gateway (R2 =
+            # source of truth) and PERSIST the object keys so serve resolves
+            # cross-replica. The /uploads disk-URL fallback is ELIMINATED — a
+            # redacted asset that cannot be durably persisted is a privacy
+            # FAILURE (routed to the worker's existing failure handling), never a
+            # disk-served asset.
+            redacted_s3_key = _build_video_asset_s3_key("redacted", job["teacher_id"], f"{video_id}.mp4")
+            redacted_thumbnail_s3_key = _build_video_asset_s3_key("thumbnail", job["teacher_id"], f"{video_id}.jpg")
             try:
-                _, uploaded_video_url = _upload_path_to_s3(
-                    redacted_full_path,
-                    "redacted-videos",
-                    f"{video_id}.mp4",
-                    "video/mp4",
+                redacted_s3_key, redacted_file_url = STORAGE_GATEWAY.write_asset(
+                    key=redacted_s3_key, local_path=redacted_full_path, content_type="video/mp4",
                 )
-                redacted_file_url = uploaded_video_url or redacted_file_url
-            except Exception as exc:
-                logger.warning(f"Redacted video upload failed for {video_id}: {exc}")
-            try:
-                _, uploaded_thumb_url = _upload_path_to_s3(
-                    redacted_thumbnail_full_path,
-                    "redacted-thumbnails",
-                    f"{video_id}.jpg",
-                    "image/jpeg",
+                redacted_thumbnail_s3_key, redacted_thumbnail_url = STORAGE_GATEWAY.write_asset(
+                    key=redacted_thumbnail_s3_key, local_path=redacted_thumbnail_full_path, content_type="image/jpeg",
                 )
-                redacted_thumbnail_url = uploaded_thumb_url or redacted_thumbnail_url
-            except Exception as exc:
-                logger.warning(f"Redacted thumbnail upload failed for {video_id}: {exc}")
+            except StorageWriteError as exc:
+                logger.error(f"Gateway redacted write failed for {video_id}: {exc}")
+                raise RuntimeError(f"redacted_storage_write_failed:{exc}") from exc
 
             # PR C9.3: confirm the redacted asset is actually browser-playable
             # before it is ever offered to a teacher. The render pipeline
@@ -11823,8 +11803,10 @@ async def _run_video_privacy_job(video_id: str) -> None:
                         },
                         "redacted_file_path": redacted_relative_path,
                         "redacted_file_url": redacted_file_url,
+                        "redacted_s3_key": redacted_s3_key,
                         "redacted_thumbnail_path": redacted_thumbnail_relative_path,
                         "redacted_thumbnail_url": redacted_thumbnail_url,
+                        "redacted_thumbnail_s3_key": redacted_thumbnail_s3_key,
                         "redacted_asset_state": "stored",
                         "redacted_playback_validation": playback_validation_dict,
                         "visual_redaction_validation": visual_validation_dict,
@@ -12080,13 +12062,14 @@ async def _run_video_transcode_job(video_id: str) -> None:
             source_path,
             str(output_full_path),
         )
-        processed_s3_key_override = _build_video_asset_s3_key("processed", teacher_id, f"{video_id}.mp4")
-        processed_s3_key, processed_file_url = _upload_path_to_s3(
-            output_full_path,
-            "processed-videos",
-            f"{video_id}.mp4",
-            transcode_result.get("content_type") or "video/mp4",
-            key_override=processed_s3_key_override,
+        # A1: processed output written through the gateway (R2 source of truth);
+        # fail-closed — StorageWriteError propagates to the transcode worker's
+        # existing failure handling, never a disk-URL fallback.
+        processed_s3_key = _build_video_asset_s3_key("processed", teacher_id, f"{video_id}.mp4")
+        processed_s3_key, processed_file_url = STORAGE_GATEWAY.write_asset(
+            key=processed_s3_key,
+            local_path=output_full_path,
+            content_type=transcode_result.get("content_type") or "video/mp4",
         )
         finished_at = datetime.now(timezone.utc).isoformat()
         await db.videos.update_one(
@@ -12458,7 +12441,8 @@ async def _rehydrate_video_processing_queue() -> None:
             "analysis_status": {"$in": [VideoProcessingStatus.QUEUED.value, VideoProcessingStatus.PROCESSING.value]},
             "privacy_status": PrivacyProcessingStatus.COMPLETED.value,
         },
-        {"_id": 0, "id": 1, "teacher_id": 1, "uploaded_by": 1, "redacted_file_path": 1, "file_path": 1},
+        {"_id": 0, "id": 1, "teacher_id": 1, "uploaded_by": 1, "redacted_file_path": 1, "file_path": 1,
+         "redacted_s3_key": 1, "raw_s3_key": 1, "s3_key": 1},
     ).to_list(2000)
     for video in pending_videos:
         video_id = video.get("id")
@@ -12469,7 +12453,13 @@ async def _rehydrate_video_processing_queue() -> None:
             continue
         if video_id in queued_ids:
             continue
-        full_path = str(UPLOAD_DIR / str(file_path))
+        # A1: resolve the asset location through the gateway (download from R2 to
+        # local scratch if needed) instead of assuming it sits on this replica's
+        # disk. Fail-closed: skip videos whose bytes cannot be made available.
+        s3_key = video.get("redacted_s3_key") or video.get("raw_s3_key") or video.get("s3_key")
+        full_path = STORAGE_GATEWAY.localize(s3_key=s3_key, relative_path=file_path, scratch_dir=UPLOAD_DIR)
+        if not full_path:
+            continue
         await _enqueue_video_processing_job(
             video_id=video_id,
             teacher_id=teacher_id,
@@ -12517,6 +12507,9 @@ async def _rehydrate_video_transcode_queue() -> None:
             "processed_file_path": 1,
             "raw_file_path": 1,
             "file_path": 1,
+            "processed_s3_key": 1,
+            "raw_s3_key": 1,
+            "s3_key": 1,
         },
     ).to_list(2000)
     for video in pending_videos:
@@ -12532,7 +12525,13 @@ async def _rehydrate_video_transcode_queue() -> None:
             continue
         if video_id in queued_ids:
             continue
-        full_path = str(UPLOAD_DIR / str(file_path))
+        # A1: resolve the asset location through the gateway (download from R2 to
+        # local scratch if needed) instead of assuming on-disk presence.
+        # Fail-closed: skip videos whose bytes cannot be made available.
+        s3_key = video.get("processed_s3_key") or video.get("raw_s3_key") or video.get("s3_key")
+        full_path = STORAGE_GATEWAY.localize(s3_key=s3_key, relative_path=file_path, scratch_dir=UPLOAD_DIR)
+        if not full_path:
+            continue
         await _enqueue_video_transcode_job(
             video_id=video_id,
             teacher_id=teacher_id,
@@ -12587,6 +12586,9 @@ async def _rehydrate_video_privacy_queue() -> None:
             "processed_file_path": 1,
             "raw_file_path": 1,
             "file_path": 1,
+            "processed_s3_key": 1,
+            "raw_s3_key": 1,
+            "s3_key": 1,
         },
     ).to_list(2000)
     for video in pending_videos:
@@ -12602,7 +12604,13 @@ async def _rehydrate_video_privacy_queue() -> None:
             continue
         if video_id in queued_ids:
             continue
-        full_path = str(UPLOAD_DIR / str(file_path))
+        # A1: resolve the asset location through the gateway (download from R2 to
+        # local scratch if needed) instead of assuming on-disk presence.
+        # Fail-closed: skip videos whose bytes cannot be made available.
+        s3_key = video.get("processed_s3_key") or video.get("raw_s3_key") or video.get("s3_key")
+        full_path = STORAGE_GATEWAY.localize(s3_key=s3_key, relative_path=file_path, scratch_dir=UPLOAD_DIR)
+        if not full_path:
+            continue
         await _enqueue_video_privacy_job(
             video_id=video_id,
             teacher_id=teacher_id,
@@ -13123,21 +13131,25 @@ async def get_video_raw_access(
             details={"reason": cleaned_reason, "reason_code": "unblurred_source_deleted"},
         )
         raise HTTPException(status_code=404, detail="Raw asset is no longer available")
-    raw_url = video.get("raw_file_url")
-    raw_path = video.get("raw_file_path")
-    access_url = raw_url
-    if not access_url and raw_path:
-        safe_path = str(raw_path).replace("\\", "/").lstrip("/")
-        access_url = _to_public_backend_url(f"/uploads/{safe_path}")
-    if not access_url:
+    # A1: the unblurred-source URL is vended ONLY through the gateway, which
+    # adds the unconditional quarantine refusal (review_required /
+    # destructive_blur_failed) and guarantees a real object-store URL — never a
+    # /uploads disk path. Caller-side auth (admin, reason, UNBLURRED_DELETED)
+    # is enforced above and remains in force.
+    vend = STORAGE_GATEWAY.vend_raw_url(video)
+    if not vend.ok:
         await _log_privacy_audit_event(
             "support_unblurred_access_denied",
             "video",
             video_id,
             actor_user_id=current_user.get("id"),
-            details={"reason": cleaned_reason, "reason_code": "unblurred_source_missing"},
+            details={
+                "reason": cleaned_reason,
+                "reason_code": vend.reason or "unblurred_source_unavailable",
+            },
         )
         raise HTTPException(status_code=404, detail="Raw asset is no longer available")
+    access_url = vend.url
     await _log_privacy_audit_event(
         "unblurred_video_viewed",
         "video",
@@ -33918,7 +33930,27 @@ app.add_api_route(
     process_access_request_action,
     methods=["GET"],
 )
+# A1: StaticFiles remains ONLY for out-of-scope document assets (curricula /
+# lesson_plans / syllabi / privacy reference images) and the dev LocalBackend.
+# NO video asset is vended through this mount post-A1 — every video serve-URL is
+# gateway-vended (R2).
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+
+
+# A1 (belt-and-suspenders): hard-refuse direct GETs to every gateway-owned video
+# prefix (/uploads/videos/**, /uploads/redacted/**, /uploads/processed/**,
+# /uploads/thumbnails/redacted/**) under a non-local backend, so a stale or
+# guessed disk path can never bypass the gateway's privacy chokepoint. Returns
+# 404 (no existence leak). Local/dev is unaffected. Prefix-match logic and the
+# exact prefix list live in app.services.storage_gateway and are unit-tested.
+from app.services.storage_gateway import is_blocked_static_video_path  # local import; STORAGE_GATEWAY defined above
+
+
+@app.middleware("http")
+async def _guard_static_video_assets(request: Request, call_next):
+    if is_blocked_static_video_path(request.url.path, backend_name=STORAGE_GATEWAY.backend_name):
+        return JSONResponse(status_code=404, content={"detail": "Not found"})
+    return await call_next(request)
 
 PRODUCTION_FRONTEND_ORIGINS = {
     "https://app.cognivio.live",

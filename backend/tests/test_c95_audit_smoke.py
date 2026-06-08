@@ -146,14 +146,20 @@ class TestScanPrivacyPolicyTruth:
         assert "privacy_blur_disabled_without_audited_override" not in codes
 
     def test_completed_without_validation_is_not_ready_and_unclear_playback(self) -> None:
-        # privacy completed + redacted asset present but NO validation records →
-        # readiness denies AND the selector would still serve the redacted url.
+        # privacy completed + redacted asset present (http URL) but NO validation
+        # records → readiness denies AND select_playback_asset still serves the
+        # redacted url, so the audit must flag the unverified-but-served hole.
+        # NOTE: post-A1 Edit 6 a /uploads path-only redacted is no longer served;
+        # the hole remains real for http-URL assets, which this fixture exercises
+        # (the gateway closes it at serve time, but this audits the raw selector).
         issues = self._run(
             [
                 {
                     "id": "v3",
                     "teacher_id": "t1",
                     "privacy_status": "completed",
+                    "redacted_file_url": "https://cdn.example.com/redacted-v3.mp4",
+                    "redacted_asset_state": "stored",
                     "redacted_file_path": "redacted-videos/v3.mp4",
                 }
             ]

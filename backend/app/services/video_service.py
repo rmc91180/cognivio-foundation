@@ -106,19 +106,26 @@ async def upload_video(
                     )
                 await handle.write(chunk)
 
+        # A1: the StorageGateway is the ONE write path; R2 is the source of
+        # truth. The local file above is ephemeral same-replica scratch that
+        # serve / rehydration never depend on. FAIL-CLOSED: if the gateway
+        # cannot durably persist the asset we do NOT keep a disk URL — we refuse
+        # the upload rather than create a one-replica-only artifact.
         s3_key = None
         file_url = None
+        raw_key = legacy._build_video_asset_s3_key("raw", teacher_id, filename)
         try:
-            raw_s3_key_override = legacy._build_video_asset_s3_key("raw", teacher_id, filename)
-            s3_key, file_url = legacy._upload_path_to_s3(
-                file_path,
-                "videos",
-                filename,
-                content_type or "video/mp4",
-                key_override=raw_s3_key_override,
+            s3_key, file_url = legacy.STORAGE_GATEWAY.write_asset(
+                key=raw_key,
+                local_path=file_path,
+                content_type=content_type or "video/mp4",
             )
-        except Exception as exc:
-            legacy.logger.warning("S3 upload failed for video %s: %s", video_id, exc)
+        except legacy.StorageWriteError as exc:
+            legacy.logger.error("Gateway raw write failed for video %s: %s", video_id, exc)
+            raise legacy.HTTPException(
+                status_code=502,
+                detail="Video storage is unavailable; upload was not persisted.",
+            ) from exc
 
         # PR C9.1: size-aware compression decision (independent of
         # VIDEO_TRANSCODE_PIPELINE_ENABLED so large uploads are never silently
@@ -444,21 +451,19 @@ async def get_video_raw_access(
             details={"reason": cleaned_reason, "reason_code": "unblurred_source_deleted"},
         )
         raise legacy.HTTPException(status_code=404, detail="Raw asset is no longer available")
-    raw_url = video.get("raw_file_url")
-    raw_path = video.get("raw_file_path")
-    access_url = raw_url
-
-    if not access_url and raw_path:
-        safe_path = str(raw_path).replace("\\", "/").lstrip("/")
-        access_url = legacy._to_public_backend_url(f"/uploads/{safe_path}")
-
+    # A1: vend the unblurred source through the gateway. This path historically
+    # bypassed select_playback_asset; routing it through the gateway means the
+    # quarantine refusal (REVIEW_REQUIRED / DESTRUCTIVE_BLUR_FAILED) applies to
+    # admin-raw too, and a /uploads disk URL is never returned.
+    vend = legacy.STORAGE_GATEWAY.vend_raw_url(video)
+    access_url = vend.url
     if not access_url:
         await legacy._log_privacy_audit_event(
             "support_unblurred_access_denied",
             "video",
             video_id,
             actor_user_id=current_user.get("id"),
-            details={"reason": cleaned_reason, "reason_code": "unblurred_source_missing"},
+            details={"reason": cleaned_reason, "reason_code": vend.reason or "unblurred_source_missing"},
         )
         raise legacy.HTTPException(status_code=404, detail="Raw asset is no longer available")
 
