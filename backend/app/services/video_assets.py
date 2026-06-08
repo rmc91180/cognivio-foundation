@@ -164,34 +164,29 @@ def _privacy_completed(video: Mapping[str, Any]) -> bool:
 
 
 def _redacted_url(video: Mapping[str, Any]) -> Optional[str]:
+    # A1: never emit a /uploads disk URL (cross-replica unsafe). The gateway
+    # re-resolves from the persisted object key when the URL is absent.
     url = normalize_storage_url(video.get("redacted_file_url"))
     if url and is_probably_http_url(url):
         return url
-    # fall back to backend-relative URL if a redacted file path is present and
-    # the caller has not yet promoted it to a public URL
-    relative = video.get("redacted_file_path")
-    if relative:
-        return f"/uploads/{str(relative).lstrip('/')}"
     return None
 
 
 def _processed_url(video: Mapping[str, Any]) -> Optional[str]:
+    # A1: never emit a /uploads disk URL (cross-replica unsafe). The gateway
+    # re-resolves from the persisted object key when the URL is absent.
     url = normalize_storage_url(video.get("processed_file_url"))
     if url and is_probably_http_url(url):
         return url
-    relative = video.get("processed_file_path")
-    if relative:
-        return f"/uploads/{str(relative).lstrip('/')}"
     return None
 
 
 def _raw_url(video: Mapping[str, Any]) -> Optional[str]:
+    # A1: never emit a /uploads disk URL (cross-replica unsafe). The gateway
+    # re-resolves from the persisted object key when the URL is absent.
     url = normalize_storage_url(video.get("raw_file_url") or video.get("file_url"))
     if url and is_probably_http_url(url):
         return url
-    relative = video.get("raw_file_path") or video.get("file_path")
-    if relative:
-        return f"/uploads/{str(relative).lstrip('/')}"
     return None
 
 
