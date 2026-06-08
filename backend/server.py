@@ -11389,6 +11389,32 @@ async def _run_video_privacy_job(video_id: str) -> None:
                 teacher_id=job.get("teacher_id"),
                 user_id=job.get("user_id"),
             )
+            # A2: replica-safe input resolution. The job's file_path is a
+            # per-replica absolute path written by whichever replica enqueued —
+            # unusable when a DIFFERENT replica claims the job (2/2+). Resolve
+            # the input for THIS replica from the canonical video doc: reuse a
+            # local copy if present, else download from R2 by key. Fail-closed.
+            privacy_input_relative = (
+                video.get("processed_file_path")
+                or video.get("raw_file_path")
+                or video.get("file_path")
+            )
+            privacy_input_s3_key = (
+                video.get("processed_s3_key")
+                or video.get("raw_s3_key")
+                or video.get("s3_key")
+            )
+            local_input_path = STORAGE_GATEWAY.localize(
+                s3_key=privacy_input_s3_key,
+                relative_path=privacy_input_relative,
+                scratch_dir=UPLOAD_DIR,
+            )
+            if not local_input_path:
+                raise RuntimeError(
+                    "privacy_input_unavailable:"
+                    f"s3_key={privacy_input_s3_key or 'none'}"
+                    f":rel={privacy_input_relative or 'none'}"
+                )
             manual_override = video.get("privacy_manual_override") or {}
             reference_docs = await db.teacher_face_references.find(
                 {"teacher_id": job["teacher_id"], "status": {"$nin": ["deleted", "replaced", "expired"]}},
@@ -11476,7 +11502,7 @@ async def _run_video_privacy_job(video_id: str) -> None:
             try:
                 analysis = await asyncio.to_thread(
                     analyze_video_privacy,
-                    job["file_path"],
+                    local_input_path,
                     reference_paths,
                     PRIVACY_TEACHER_MATCH_THRESHOLD,
                     PRIVACY_AMBIGUOUS_MATCH_THRESHOLD,
@@ -11572,7 +11598,7 @@ async def _run_video_privacy_job(video_id: str) -> None:
                 )
                 render_stats = await asyncio.to_thread(
                     render_redacted_video,
-                    job["file_path"],
+                    local_input_path,
                     str(redacted_full_path),
                     str(redacted_thumbnail_full_path),
                     reference_paths,
@@ -11590,7 +11616,7 @@ async def _run_video_privacy_job(video_id: str) -> None:
                     privacy_mode = "degraded"
                     render_stats = await asyncio.to_thread(
                         _render_degraded_privacy_assets,
-                        job["file_path"],
+                        local_input_path,
                         str(redacted_full_path),
                         str(redacted_thumbnail_full_path),
                     )
@@ -12705,6 +12731,14 @@ async def _privacy_maintenance_worker() -> None:
                 await _purge_expired_privacy_artifacts()
             except Exception as exc:
                 logger.error(f"Privacy maintenance worker failed: {exc}")
+            # A2: periodic rehydrate recovers jobs whose in-process queue wakeup
+            # was lost (replica crash between Mongo-enqueue and Queue.put, or a
+            # job left QUEUED by a crashed claimant). Mongo remains the claim
+            # source of truth; this only re-signals the asyncio.Queue.
+            try:
+                await _rehydrate_video_privacy_queue()
+            except Exception as exc:
+                logger.error(f"Privacy periodic rehydrate failed: {exc}")
             await asyncio.sleep(PRIVACY_PURGE_INTERVAL_MINUTES * 60)
     except asyncio.CancelledError:
         logger.info("Privacy maintenance worker stopped")
