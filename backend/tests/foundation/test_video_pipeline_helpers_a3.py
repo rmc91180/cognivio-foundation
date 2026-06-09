@@ -102,7 +102,7 @@ async def test_run_video_job_localizes_from_object_store_cross_replica(monkeypat
     analyze_calls = []
     heartbeat_starts = []
 
-    async def _fake_analyze(*, video_id, file_path, teacher_id, user_id):
+    async def _fake_analyze(*, video_id, file_path, teacher_id, user_id, analysis_run_id=None):
         analyze_calls.append(file_path)
         return True, None
 
@@ -187,7 +187,7 @@ async def test_run_video_job_fails_closed_when_input_unavailable(monkeypatch, tm
     analyze_calls = []
     heartbeat_starts = []
 
-    async def _must_not_run(*, video_id, file_path, teacher_id, user_id):
+    async def _must_not_run(*, video_id, file_path, teacher_id, user_id, analysis_run_id=None):
         analyze_calls.append(file_path)
         raise AssertionError("analyze_video reached with unavailable input")
 

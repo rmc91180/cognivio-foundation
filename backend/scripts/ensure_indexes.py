@@ -21,6 +21,11 @@ class IndexSpec:
     unique: bool = False
     sparse: bool = False
     expire_after_seconds: int | None = None
+    # A2: partialFilterExpression support. Required for a UNIQUE COMPOUND index
+    # that must skip legacy docs missing one of the keys — `sparse` is wrong for
+    # a compound key (it only skips when ALL keyed fields are absent), so a
+    # partial filter on field existence is the correct tool.
+    partial_filter: dict[str, Any] | None = None
 
     def create_kwargs(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {"name": self.name}
@@ -30,6 +35,8 @@ class IndexSpec:
             kwargs["sparse"] = True
         if self.expire_after_seconds is not None:
             kwargs["expireAfterSeconds"] = self.expire_after_seconds
+        if self.partial_filter is not None:
+            kwargs["partialFilterExpression"] = dict(self.partial_filter)
         return kwargs
 
 
@@ -41,6 +48,7 @@ def _spec(
     unique: bool = False,
     sparse: bool = False,
     expire_after_seconds: int | None = None,
+    partial_filter: dict[str, Any] | None = None,
 ) -> IndexSpec:
     return IndexSpec(
         collection=collection,
@@ -49,6 +57,7 @@ def _spec(
         unique=unique,
         sparse=sparse,
         expire_after_seconds=expire_after_seconds,
+        partial_filter=partial_filter,
     )
 
 
@@ -79,6 +88,16 @@ INDEX_SPECS: Tuple[IndexSpec, ...] = (
     _spec("videos", [("privacy_status", 1), ("upload_date", -1)], "videos_privacy_upload"),
     _spec("videos", [("raw_retention_expires_at", 1)], "videos_raw_retention_expires"),
     _spec("assessments", [("video_id", 1)], "assessments_video"),
+    # A2 GAP 3c: structural idempotency for analysis completion. UNIQUE on
+    # (video_id, analysis_run_id) so the same analysis run can never produce two
+    # assessments; partial filter excludes legacy docs without analysis_run_id.
+    _spec(
+        "assessments",
+        [("video_id", 1), ("analysis_run_id", 1)],
+        "assessments_video_run_idempotent",
+        unique=True,
+        partial_filter={"analysis_run_id": {"$exists": True}},
+    ),
     _spec("assessments", [("teacher_id", 1), ("analyzed_at", -1)], "assessments_teacher_analyzed"),
     _spec("assessments", [("organization_id", 1), ("school_id", 1), ("analyzed_at", -1)], "assessments_tenant_analyzed"),
     _spec("assessments", [("user_id", 1), ("feedback_release_status", 1), ("analyzed_at", -1)], "assessments_user_release_analyzed"),

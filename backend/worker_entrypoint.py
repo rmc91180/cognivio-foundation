@@ -29,6 +29,7 @@ async def main() -> None:
     await server._start_video_transcode_workers()
     await server._start_privacy_workers()
     await server._start_video_workers()
+    await server._start_video_reclaimer()  # A2 GAP 2: live stale-job reclaimer loop
     await stop_event.wait()
     logger.info("Stopping Cognivio video worker service")
     await server._stop_video_workers()
