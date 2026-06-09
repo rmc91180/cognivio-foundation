@@ -87,6 +87,9 @@ INDEX_SPECS: Tuple[IndexSpec, ...] = (
     _spec("videos", [("status", 1), ("upload_date", -1)], "videos_status_upload"),
     _spec("videos", [("privacy_status", 1), ("upload_date", -1)], "videos_privacy_upload"),
     _spec("videos", [("raw_retention_expires_at", 1)], "videos_raw_retention_expires"),
+    # A3: tenancy-first grouping index (workspace + subject) for the headline
+    # "videos by subject within a workspace" query on write-time-stamped rows.
+    _spec("videos", [("workspace_id", 1), ("subject", 1), ("upload_date", -1)], "videos_workspace_subject_upload"),
     _spec("assessments", [("video_id", 1)], "assessments_video"),
     # A2 GAP 3c: structural idempotency for analysis completion. UNIQUE on
     # (video_id, analysis_run_id) so the same analysis run can never produce two
@@ -101,6 +104,11 @@ INDEX_SPECS: Tuple[IndexSpec, ...] = (
     _spec("assessments", [("teacher_id", 1), ("analyzed_at", -1)], "assessments_teacher_analyzed"),
     _spec("assessments", [("organization_id", 1), ("school_id", 1), ("analyzed_at", -1)], "assessments_tenant_analyzed"),
     _spec("assessments", [("user_id", 1), ("feedback_release_status", 1), ("analyzed_at", -1)], "assessments_user_release_analyzed"),
+    # A3: tenancy-first grouping indexes on write-time-stamped assessment rows.
+    # The first serves "high-scoring classes by subject within a workspace"
+    # (single-collection indexed read, no cross-collection join). Non-unique.
+    _spec("assessments", [("workspace_id", 1), ("subject", 1), ("overall_score", -1), ("analyzed_at", -1)], "assessments_workspace_subject_score"),
+    _spec("assessments", [("workspace_id", 1), ("teacher_id", 1), ("analyzed_at", -1)], "assessments_workspace_teacher_analyzed"),
     _spec("assessment_report_feedback", [("assessment_id", 1), ("user_id", 1), ("target_type", 1), ("target_id", 1)], "assessment_feedback_unique_target", unique=True),
     _spec("assessment_report_feedback", [("assessment_id", 1), ("updated_at", -1)], "assessment_feedback_assessment_updated"),
     _spec("action_plans", [("teacher_id", 1), ("user_id", 1)], "action_plans_teacher_user", unique=True),

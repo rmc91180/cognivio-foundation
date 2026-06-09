@@ -5530,6 +5530,9 @@ async def _get_visible_video_or_404(video_id: str, current_user: dict) -> dict:
 
 
 def _resolve_video_workspace_id(video: dict, teacher: Optional[dict], current_user: dict) -> Optional[str]:
+    """Legacy-row fallback. New rows persist workspace_id at write time (A3); this
+    resolver remains to resolve rows written before A3 and is the foundation seam a
+    later strangle will replace. Behavior and signature are intentionally unchanged."""
     teacher = teacher or {}
     return (
         video.get("workspace_id")
@@ -13153,6 +13156,13 @@ async def upload_video(
             "subject": subject,
             "lesson_title": lesson_title,
             "class_section": class_section,
+            # A3: persist tenancy + grouping at WRITE time (caller-independent /
+            # deterministic — never falls back to current_user.id). Read off the
+            # in-scope teacher doc; legacy reads use _resolve_video_workspace_id.
+            "workspace_id": teacher.get("organization_id") or teacher.get("school_id"),
+            "organization_id": teacher.get("organization_id"),
+            "school_id": teacher.get("school_id"),
+            "department": teacher.get("department"),
             "recorded_at": normalized_recorded_at,
             "upload_date": upload_time,
             "analysis_language": preferred_language,
@@ -29922,6 +29932,14 @@ async def analyze_video(
             "analysis_run_id": analysis_run_id,
             "teacher_id": teacher_id,
             "user_id": user_id,
+            # A3: denormalize tenancy + grouping from the canonical video doc so
+            # the workspace/subject analytic query is a single-collection indexed
+            # read. OR-fallback so re-analysis of a legacy (pre-A3) video writes
+            # the best available value instead of a spurious null.
+            "workspace_id": video.get("workspace_id") or video.get("organization_id") or video.get("school_id"),
+            "organization_id": video.get("organization_id"),
+            "school_id": video.get("school_id"),
+            "subject": video.get("subject"),
             "framework_type": framework_type,
             "element_scores": element_scores,
             "overall_score": overall_score,
