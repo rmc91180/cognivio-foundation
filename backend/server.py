@@ -88,6 +88,14 @@ if "server" not in sys.modules:
 if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
 from app.config import Settings
+# A3.5: tenancy resolvers relocated to app/tenancy.py. Imported under their
+# original underscore names so every existing call-site resolves unchanged
+# (zero call-site moves; pure relocation, no behavior change).
+from app.tenancy import (
+    resolve_video_workspace_id as _resolve_video_workspace_id,
+    workspace_id_for_user as _workspace_id_for_user,
+    training_workspace_id as _training_workspace_id,
+)
 from privacy_pipeline import analyze_video_privacy, render_redacted_video, get_privacy_runtime_status
 from frame_selection import scan_video_candidates, score_frame_candidates, select_diverse_frames
 from moment_sampler import segment_video_windows, score_windows, select_lesson_moments
@@ -5527,21 +5535,6 @@ async def _get_visible_video_or_404(video_id: str, current_user: dict) -> dict:
         raise HTTPException(status_code=404, detail="Video not found")
     await _get_teacher_or_404(video.get("teacher_id"), current_user)
     return video
-
-
-def _resolve_video_workspace_id(video: dict, teacher: Optional[dict], current_user: dict) -> Optional[str]:
-    """Legacy-row fallback. New rows persist workspace_id at write time (A3); this
-    resolver remains to resolve rows written before A3 and is the foundation seam a
-    later strangle will replace. Behavior and signature are intentionally unchanged."""
-    teacher = teacher or {}
-    return (
-        video.get("workspace_id")
-        or teacher.get("organization_id")
-        or teacher.get("school_id")
-        or teacher.get("created_by")
-        or video.get("uploaded_by")
-        or current_user.get("id")
-    )
 
 
 def _sanitize_video_comment_doc(doc: dict) -> dict:
@@ -21534,10 +21527,6 @@ async def _training_required_per_trainee(current_user: dict) -> int:
         return 2
 
 
-def _training_workspace_id(current_user: dict) -> str:
-    return str(current_user.get("organization_id") or current_user.get("id"))
-
-
 async def _list_training_trainees(current_user: dict) -> List[dict]:
     teacher_ids = await _list_teacher_ids_for_user(current_user)
     return await db.teachers.find(
@@ -26440,10 +26429,6 @@ ONBOARDING_STEP_ORDER = [
     "first_analysis_complete",
 ]
 CONSENT_TYPES = ["video_recording", "data_processing", "ai_analysis"]
-
-
-def _workspace_id_for_user(current_user: dict) -> str:
-    return str(current_user.get("organization_id") or current_user.get("school_id") or current_user.get("id"))
 
 
 async def _workspace_doc_for_user(current_user: dict) -> Tuple[str, dict, str]:
