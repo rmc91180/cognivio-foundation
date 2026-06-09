@@ -11348,6 +11348,40 @@ async def _enqueue_video_privacy_job(
     await VIDEO_PRIVACY_JOB_QUEUE.put(video_id)
 
 
+def _resolve_replica_local_input(video: dict) -> str:
+    """Replica-safe input resolution shared by the analysis and privacy workers.
+
+    A job's stored file_path is a per-replica absolute path written by whichever
+    replica enqueued it — unusable when a DIFFERENT replica claims the job (2/2+).
+    Resolve the input for THIS replica from the canonical video doc: reuse a local
+    copy if present, else download from object storage by key. Fail-closed: raise
+    RuntimeError("video_input_unavailable:...") if neither path nor key yields a
+    local file, so callers never proceed against a missing input.
+    """
+    input_relative = (
+        video.get("processed_file_path")
+        or video.get("raw_file_path")
+        or video.get("file_path")
+    )
+    input_s3_key = (
+        video.get("processed_s3_key")
+        or video.get("raw_s3_key")
+        or video.get("s3_key")
+    )
+    local_input_path = STORAGE_GATEWAY.localize(
+        s3_key=input_s3_key,
+        relative_path=input_relative,
+        scratch_dir=UPLOAD_DIR,
+    )
+    if not local_input_path:
+        raise RuntimeError(
+            "video_input_unavailable:"
+            f"s3_key={input_s3_key or 'none'}"
+            f":rel={input_relative or 'none'}"
+        )
+    return local_input_path
+
+
 async def _run_video_privacy_job(video_id: str) -> None:
     job = await db.video_privacy_jobs.find_one({"video_id": video_id}, {"_id": 0})
     if not job:
@@ -11389,32 +11423,8 @@ async def _run_video_privacy_job(video_id: str) -> None:
                 teacher_id=job.get("teacher_id"),
                 user_id=job.get("user_id"),
             )
-            # A2: replica-safe input resolution. The job's file_path is a
-            # per-replica absolute path written by whichever replica enqueued —
-            # unusable when a DIFFERENT replica claims the job (2/2+). Resolve
-            # the input for THIS replica from the canonical video doc: reuse a
-            # local copy if present, else download from R2 by key. Fail-closed.
-            privacy_input_relative = (
-                video.get("processed_file_path")
-                or video.get("raw_file_path")
-                or video.get("file_path")
-            )
-            privacy_input_s3_key = (
-                video.get("processed_s3_key")
-                or video.get("raw_s3_key")
-                or video.get("s3_key")
-            )
-            local_input_path = STORAGE_GATEWAY.localize(
-                s3_key=privacy_input_s3_key,
-                relative_path=privacy_input_relative,
-                scratch_dir=UPLOAD_DIR,
-            )
-            if not local_input_path:
-                raise RuntimeError(
-                    "privacy_input_unavailable:"
-                    f"s3_key={privacy_input_s3_key or 'none'}"
-                    f":rel={privacy_input_relative or 'none'}"
-                )
+            # A2/A3: replica-safe input resolution (shared helper).
+            local_input_path = _resolve_replica_local_input(video)
             manual_override = video.get("privacy_manual_override") or {}
             reference_docs = await db.teacher_face_references.find(
                 {"teacher_id": job["teacher_id"], "status": {"$nin": ["deleted", "replaced", "expired"]}},
@@ -12255,10 +12265,20 @@ async def _run_video_job(video_id: Optional[str], worker_label: str) -> None:
         return
     video_id = job["video_id"]
     await _write_worker_heartbeat(worker_label, status="processing", current_job=video_id)
+    # A3: replica-safe input resolution. job["file_path"] is a per-replica
+    # absolute path; on 2/2+ a different replica may claim the job. Resolve the
+    # input for THIS replica from the canonical video doc via the shared helper.
+    video = await _require_canonical_video_source(
+        video_id,
+        context="analysis_worker",
+        teacher_id=job.get("teacher_id"),
+        user_id=job.get("user_id"),
+    )
+    local_input_path = _resolve_replica_local_input(video)
     heartbeat_task = asyncio.create_task(_heartbeat_during_job(worker_label, video_id), name=f"{worker_label}-heartbeat")
     success, error_message = await analyze_video(
         video_id=video_id,
-        file_path=job["file_path"],
+        file_path=local_input_path,
         teacher_id=job["teacher_id"],
         user_id=job["user_id"],
     )

@@ -142,7 +142,7 @@ async def test_run_video_privacy_job_localizes_from_object_store_cross_replica(m
 async def test_run_video_privacy_job_fails_closed_when_input_unavailable(monkeypatch, tmp_path):
     """A2 fail-closed: when neither a local copy nor the R2 object exists, the
     worker must NOT run analyze/render against a missing path. It raises the
-    structured privacy_input_unavailable error (routed to the worker's existing
+    structured video_input_unavailable error (routed to the worker's existing
     failure handling) rather than letting a raw FileNotFound escape mid-pipeline."""
     import types as _types
     from app.services.storage_gateway import build_gateway
@@ -233,7 +233,7 @@ async def test_run_video_privacy_job_fails_closed_when_input_unavailable(monkeyp
     try:
         await server._run_video_privacy_job(video_id)
     except RuntimeError as exc:
-        assert "privacy_input_unavailable" in str(exc)
+        assert "video_input_unavailable" in str(exc)
     except FileNotFoundError:
         raise AssertionError("raw FileNotFoundError escaped — fail-closed contract broken")
 
