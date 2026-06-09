@@ -4,7 +4,40 @@ import types
 from fastapi.testclient import TestClient
 
 import server
+from app import rate_limit
 from scripts.ensure_indexes import INDEX_SPECS, ensure_indexes, expected_index_summary
+
+
+class _FakeRateLimitRedis:
+    """A4: in-memory async Redis stand-in so the rate-limit middleware actually
+    counts in tests (production now counts in Redis; there is no Redis in the test
+    env, where the limiter otherwise fail-opens). Replaces the old in-process
+    bucket dicts these tests used to clear()."""
+
+    def __init__(self):
+        self.counts = {}
+        self.ttls = {}
+
+    async def incr(self, key):
+        self.counts[key] = self.counts.get(key, 0) + 1
+        return self.counts[key]
+
+    async def expire(self, key, seconds):
+        self.ttls[key] = seconds
+        return True
+
+    async def ttl(self, key):
+        return self.ttls.get(key, -1)
+
+
+def _install_fake_rate_limit_redis(monkeypatch):
+    fake = _FakeRateLimitRedis()
+
+    async def _fake_get_client():
+        return fake
+
+    monkeypatch.setattr(rate_limit, "_get_client", _fake_get_client)
+    return fake
 
 
 class _IndexCursor:
@@ -110,7 +143,7 @@ def test_admin_db_health_reports_missing_indexes_without_secrets(monkeypatch):
 
 
 def test_endpoint_rate_limit_returns_json_reason_and_cors(monkeypatch):
-    server.ENDPOINT_RATE_LIMIT_BUCKETS.clear()
+    _install_fake_rate_limit_redis(monkeypatch)  # A4: Redis-backed limiter (was in-process dict)
     monkeypatch.setitem(
         server.ENDPOINT_RATE_LIMIT_RULES,
         ("POST", "/api/pr26-rate-limit-smoke"),
@@ -132,7 +165,7 @@ def test_endpoint_rate_limit_returns_json_reason_and_cors(monkeypatch):
 
 
 def test_general_post_rate_limit_uses_structured_reason(monkeypatch):
-    server.POST_RATE_LIMIT_BUCKETS.clear()
+    _install_fake_rate_limit_redis(monkeypatch)  # A4: Redis-backed limiter (was in-process dict)
     monkeypatch.setattr(server, "POST_RATE_LIMIT_MAX_REQUESTS", 1)
     monkeypatch.setattr(server, "POST_RATE_LIMIT_EXEMPT_PATHS", set())
     monkeypatch.setattr(server, "ENDPOINT_RATE_LIMIT_RULES", {})
