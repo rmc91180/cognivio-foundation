@@ -3,7 +3,7 @@ import { Badge, Button, EmptyState, Textarea } from "@/components/ui";
 import { formatTimestamp } from "@/components/VideoTimelineMarkers";
 
 const roleLabels = {
-  super_admin: "Master admin",
+  super_admin: "Super admin",
   school_admin: "School admin",
   training_admin: "Training admin",
   teacher: "Teacher",
