@@ -26,7 +26,7 @@ async def require_super_admin_compat(request: Request) -> Any:
     if isinstance(user, dict):
         role = user.get("role")
         email = (user.get("email") or "").lower()
-        is_super = bool(user.get("is_super_admin")) or role in {"super_admin", "master_admin"}
+        is_super = bool(user.get("is_super_admin")) or role in {"super_admin"}
         if is_super:
             return user
 
