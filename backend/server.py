@@ -6423,6 +6423,13 @@ limiter = Limiter(key_func=get_remote_address)
 VIDEO_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 VIDEO_WORKER_TASKS: List[asyncio.Task] = []
 VIDEO_WORKER_INSTANCE_ID = os.getenv("RAILWAY_REPLICA_ID") or os.getenv("HOSTNAME") or uuid.uuid4().hex[:8]
+# A2 GAP 2: reclaimer tunables. Heartbeat loop beats every 30s; 3 missed beats
+# (90s) marks a job stale. A hard wall-clock ceiling (30 min) reclaims even a
+# job whose heartbeat looks fresh (e.g. a wedged worker still beating but stuck).
+VIDEO_RECLAIM_TASKS: List[asyncio.Task] = []
+VIDEO_HEARTBEAT_STALE_SECONDS = 90
+VIDEO_CLAIM_CEILING_SECONDS = 30 * 60
+VIDEO_RECLAIM_INTERVAL_SECONDS = 60
 VIDEO_TRANSCODE_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 VIDEO_TRANSCODE_WORKER_TASKS: List[asyncio.Task] = []
 VIDEO_PRIVACY_JOB_QUEUE: asyncio.Queue[str] = asyncio.Queue()
@@ -6438,6 +6445,7 @@ async def _app_startup() -> None:
     await _start_video_transcode_workers()
     await _start_privacy_workers()
     await _start_video_workers()
+    await _start_video_reclaimer()  # A2 GAP 2: live stale-job reclaimer loop
     await _rehydrate_video_transcode_queue()
     await _rehydrate_video_privacy_queue()
     await _rehydrate_video_processing_queue()
@@ -8589,6 +8597,25 @@ class VideoProcessingStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    # A2: terminal state after max retries are exhausted — DISTINCT from FAILED
+    # (FAILED is a single failed run that may still be retried; DEAD_LETTER is
+    # "no more retries, needs operator attention"). Never auto-released.
+    DEAD_LETTER = "dead_letter"
+
+
+class AnalysisFailureReason(str, Enum):
+    """A2 foundation: structured failure taxonomy for the analysis worker.
+
+    Stamped on the job (alongside, not replacing, free-text last_error) so
+    operators and the future Phase-B alert UI classify failures without parsing
+    error strings. PRIVACY_QUARANTINE is defined for completeness so the banked
+    P1 privacy fix has a reason ready — A2 NEVER emits it (no privacy gate here).
+    """
+
+    UPLOAD_TIMEOUT = "upload_timeout"
+    FILE_TOO_LARGE = "file_too_large"
+    TECHNICAL_FAILURE = "technical_failure"
+    PRIVACY_QUARANTINE = "privacy_quarantine"
 
 
 class VideoTranscodeStatus(str, Enum):
@@ -11946,7 +11973,23 @@ async def _enqueue_video_processing_job(
     teacher_id: str,
     user_id: str,
     file_path: str,
+    *,
+    new_analysis_run: bool = False,
 ) -> None:
+    """A2 foundation: enqueue (or re-enqueue) the analysis job for a video.
+
+    ``analysis_run_id`` is BORN ONCE at first enqueue (``$setOnInsert``) and is
+    IMMUTABLE across claim/heartbeat/reclaim/retry/re-enqueue — every existing
+    caller is retry-class (same analysis attempt), so preserving it is the safe
+    default and keeps reclaim/crash reprocessing idempotent (scheme iii).
+
+    RUN_ID-ROTATE SEAM (strangler, dormant — NO current caller passes True):
+    ``new_analysis_run=True`` mints a fresh ``analysis_run_id`` via ``$set`` so a
+    future *deliberate re-analysis* feature produces a NEW assessment alongside
+    the old one. Until that feature exists, every caller stays on preserve. The
+    most likely future consumer is the master-admin provider-override requeue
+    (a different-model re-run = "new material") — banked with P1.
+    """
     if not video_id or not teacher_id or not user_id or not file_path:
         raise ValueError("video_id, teacher_id, user_id, and file_path are required to enqueue")
     await _require_canonical_video_source(
@@ -11956,27 +11999,33 @@ async def _enqueue_video_processing_job(
         user_id=user_id,
     )
     now = datetime.now(timezone.utc).isoformat()
+    set_fields: Dict[str, Any] = {
+        "video_id": video_id,
+        "teacher_id": teacher_id,
+        "user_id": user_id,
+        "file_path": file_path,
+        "status": VideoProcessingStatus.QUEUED.value,
+        "updated_at": now,
+        "last_error": None,
+        "claimed_at": None,
+        "claimed_by": None,
+    }
+    set_on_insert: Dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "created_at": now,
+        "attempts": 0,
+        "retry_count": 0,
+        # A2: born here, persists for the life of this analysis attempt.
+        "analysis_run_id": str(uuid.uuid4()),
+    }
+    if new_analysis_run:
+        # Dormant rotate path: force-mint a new run id (forward-overwrite). Must
+        # not also live in $setOnInsert (Mongo rejects a field in both operators).
+        set_fields["analysis_run_id"] = str(uuid.uuid4())
+        set_on_insert.pop("analysis_run_id", None)
     await db.video_processing_jobs.update_one(
         {"video_id": video_id},
-        {
-            "$set": {
-                "video_id": video_id,
-                "teacher_id": teacher_id,
-                "user_id": user_id,
-                "file_path": file_path,
-                "status": VideoProcessingStatus.QUEUED.value,
-                "updated_at": now,
-                "last_error": None,
-                "claimed_at": None,
-                "claimed_by": None,
-            },
-            "$setOnInsert": {
-                "id": str(uuid.uuid4()),
-                "created_at": now,
-                "attempts": 0,
-                "retry_count": 0,
-            },
-        },
+        {"$set": set_fields, "$setOnInsert": set_on_insert},
         upsert=True,
     )
     await VIDEO_JOB_QUEUE.put(video_id)
@@ -12214,6 +12263,11 @@ async def _claim_video_processing_job(worker_label: str, video_id: Optional[str]
                 "started_at": now,
                 "claimed_at": now,
                 "claimed_by": worker_label,
+                # A2 GAP 1: record the replica that holds the claim. worker_label
+                # ("video-worker-N") collides across replicas, so instance-filtered
+                # rehydration needs the replica identity. The atomic single-winner
+                # claim itself is unchanged — this only stamps ownership.
+                "claimed_instance": VIDEO_WORKER_INSTANCE_ID,
                 "last_heartbeat": now,
                 "last_error": None,
             },
@@ -12259,6 +12313,135 @@ async def _heartbeat_during_job(worker_label: str, video_id: str) -> None:
         raise
 
 
+def _classify_analysis_failure_reason(error_message: Optional[str]) -> AnalysisFailureReason:
+    """A2 foundation: best-effort failure classification from the worker's error
+    string. Stable signature so the strangle can later swap in a richer classifier
+    (e.g. typed exceptions) without touching call sites. A2 never returns
+    PRIVACY_QUARANTINE (no privacy gate here — that's banked P1)."""
+    text = (error_message or "").lower()
+    if "too large" in text or "file size" in text or "exceeds" in text:
+        return AnalysisFailureReason.FILE_TOO_LARGE
+    if "timeout" in text or "timed out" in text:
+        return AnalysisFailureReason.UPLOAD_TIMEOUT
+    return AnalysisFailureReason.TECHNICAL_FAILURE
+
+
+async def _record_master_admin_alert(video_id: str, reason: str, *, status: str = "open") -> None:
+    """A2 foundation: write a record-only master-admin alert (no UI — Phase B).
+    Stable signature; the collection is the seam a future alerting service reads."""
+    try:
+        await db.master_admin_alerts.insert_one(
+            {
+                "id": str(uuid.uuid4()),
+                "video_id": video_id,
+                "reason": reason,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "status": status,
+            }
+        )
+    except Exception as exc:  # alerting must never break the worker path
+        logger.warning("Failed to record master-admin alert for %s (%s): %s", video_id, reason, exc)
+
+
+async def _reclaim_stale_video_jobs(*, now: Optional[datetime] = None) -> List[str]:
+    """A2 GAP 2 foundation: requeue PROCESSING analysis jobs that are no longer
+    being heartbeated. A job is reclaimable when last_heartbeat is older than
+    VIDEO_HEARTBEAT_STALE_SECONDS (missed beats) OR claimed_at is older than the
+    hard VIDEO_CLAIM_CEILING_SECONDS wall-clock ceiling. Actively-heartbeating
+    jobs (fresh last_heartbeat) are NEVER reclaimed.
+
+    Each reclaim is atomic per job (find_one_and_update guarded on the stale
+    condition) so two replicas can't both reclaim the same row. analysis_run_id
+    is PRESERVED (a reclaim is the SAME analysis attempt → idempotent reprocess).
+    retry_count is not bypassed: a stale job that has already exhausted retries
+    (retry_count >= 3) is dead-lettered instead of returned to an unclaimable
+    QUEUED limbo. Returns the list of reclaimed (requeued) video_ids."""
+    now_dt = now or datetime.now(timezone.utc)
+    stale_cutoff = (now_dt - timedelta(seconds=VIDEO_HEARTBEAT_STALE_SECONDS)).isoformat()
+    ceiling_cutoff = (now_dt - timedelta(seconds=VIDEO_CLAIM_CEILING_SECONDS)).isoformat()
+    now_iso = now_dt.isoformat()
+    stale_or = [
+        {"last_heartbeat": {"$lt": stale_cutoff}},
+        {"last_heartbeat": None},
+        {"last_heartbeat": {"$exists": False}},
+        {"claimed_at": {"$lt": ceiling_cutoff}},
+    ]
+    candidates = await db.video_processing_jobs.find(
+        {"status": VideoProcessingStatus.PROCESSING.value, "$or": stale_or},
+        {"_id": 0, "video_id": 1, "retry_count": 1},
+    ).to_list(2000)
+    reclaimed: List[str] = []
+    for cand in candidates:
+        vid = cand.get("video_id")
+        if not vid:
+            continue
+        exhausted = int(cand.get("retry_count") or 0) >= 3
+        guard = {
+            "video_id": vid,
+            "status": VideoProcessingStatus.PROCESSING.value,
+            "$or": stale_or,
+        }
+        if exhausted:
+            updated = await db.video_processing_jobs.find_one_and_update(
+                guard,
+                {"$set": {
+                    "status": VideoProcessingStatus.DEAD_LETTER.value,
+                    "updated_at": now_iso,
+                    "finished_at": now_iso,
+                    "failure_reason": AnalysisFailureReason.TECHNICAL_FAILURE.value,
+                    "last_error": "reclaimed_stale_after_max_attempts",
+                    "claimed_by": None,
+                    "claimed_at": None,
+                    "claimed_instance": None,
+                }},
+                projection={"_id": 0, "video_id": 1},
+                return_document=True,
+            )
+            if updated:
+                await _record_master_admin_alert(vid, AnalysisFailureReason.TECHNICAL_FAILURE.value)
+            continue
+        updated = await db.video_processing_jobs.find_one_and_update(
+            guard,
+            {"$set": {
+                "status": VideoProcessingStatus.QUEUED.value,
+                "updated_at": now_iso,
+                "claimed_by": None,
+                "claimed_at": None,
+                "claimed_instance": None,
+                "next_retry_at": None,
+            }},
+            projection={"_id": 0, "video_id": 1},
+            return_document=True,
+        )
+        if updated:
+            reclaimed.append(vid)
+            await VIDEO_JOB_QUEUE.put(vid)
+    return reclaimed
+
+
+async def _video_reclaimer_loop() -> None:
+    """A2 GAP 2 foundation: periodic loop driving _reclaim_stale_video_jobs.
+    Mirrors the worker-task lifecycle; cancellation-safe."""
+    try:
+        while True:
+            try:
+                await _reclaim_stale_video_jobs()
+            except Exception as exc:
+                logger.warning("Video reclaimer pass failed: %s", exc)
+            await asyncio.sleep(VIDEO_RECLAIM_INTERVAL_SECONDS)
+    except asyncio.CancelledError:
+        raise
+
+
+async def _start_video_reclaimer() -> None:
+    """A2 GAP 2 foundation: start the reclaimer loop once (idempotent), matching
+    the _start_video_workers guard pattern."""
+    if VIDEO_RECLAIM_TASKS:
+        return
+    task = asyncio.create_task(_video_reclaimer_loop(), name="video-reclaimer")
+    VIDEO_RECLAIM_TASKS.append(task)
+
+
 async def _run_video_job(video_id: Optional[str], worker_label: str) -> None:
     job = await _claim_video_processing_job(worker_label, video_id)
     if not job:
@@ -12275,12 +12458,17 @@ async def _run_video_job(video_id: Optional[str], worker_label: str) -> None:
         user_id=job.get("user_id"),
     )
     local_input_path = _resolve_replica_local_input(video)
+    # A2 GAP 3: the immutable run id for THIS analysis attempt, born at first
+    # enqueue and preserved through claim/reclaim/retry. Carried into the
+    # assessment write so the (video_id, analysis_run_id) upsert is idempotent.
+    analysis_run_id = job.get("analysis_run_id")
     heartbeat_task = asyncio.create_task(_heartbeat_during_job(worker_label, video_id), name=f"{worker_label}-heartbeat")
     success, error_message = await analyze_video(
         video_id=video_id,
         file_path=local_input_path,
         teacher_id=job["teacher_id"],
         user_id=job["user_id"],
+        analysis_run_id=analysis_run_id,
     )
     heartbeat_task.cancel()
     try:
@@ -12313,21 +12501,34 @@ async def _run_video_job(video_id: Optional[str], worker_label: str) -> None:
     retry_count += 1
     retry_delay_seconds = min(3600, 60 * (2 ** max(0, retry_count - 1)))
     retry_at = (datetime.now(timezone.utc) + timedelta(seconds=retry_delay_seconds)).isoformat()
-    final_status = VideoProcessingStatus.FAILED.value if retry_count >= 3 else VideoProcessingStatus.QUEUED.value
+    # A2 failure taxonomy: classify the reason (alongside free-text last_error)
+    # and, once retries are exhausted, route to DEAD_LETTER (distinct from FAILED)
+    # so the job is not retried forever and surfaces for operator attention.
+    failure_reason = _classify_analysis_failure_reason(error_message)
+    exhausted = retry_count >= 3
+    final_status = (
+        VideoProcessingStatus.DEAD_LETTER.value if exhausted else VideoProcessingStatus.QUEUED.value
+    )
+    terminal = final_status == VideoProcessingStatus.DEAD_LETTER.value
     await db.video_processing_jobs.update_one(
         {"video_id": video_id},
         {
             "$set": {
                 "status": final_status,
                 "updated_at": finished_at,
-                "finished_at": finished_at if final_status == VideoProcessingStatus.FAILED.value else None,
+                "finished_at": finished_at if terminal else None,
                 "last_error": error_message,
+                "failure_reason": failure_reason.value,
                 "retry_count": retry_count,
-                "next_retry_at": retry_at if final_status == VideoProcessingStatus.QUEUED.value else None,
+                "next_retry_at": retry_at if not terminal else None,
                 "claimed_by": None,
             }
         },
     )
+    # A2 alerting: dead-lettered jobs AND any technical failure write a
+    # master-admin alert record (record-only; UI is Phase B).
+    if terminal or failure_reason == AnalysisFailureReason.TECHNICAL_FAILURE:
+        await _record_master_admin_alert(video_id, failure_reason.value)
     await _write_worker_heartbeat(worker_label, status="idle", current_job=None)
 
 
@@ -12452,28 +12653,56 @@ async def _start_privacy_workers() -> None:
 
 
 async def _rehydrate_video_processing_queue() -> None:
-    now = datetime.now(timezone.utc).isoformat()
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    # A2 GAP 1: instance-filtered, heartbeat-aware rehydration (fixes the
+    # double-spend). A restarting replica resets ONLY (a) jobs IT owned
+    # (claimed_instance == this replica) — its in-flight work died with it — and
+    # (b) genuinely stale jobs (no heartbeat within VIDEO_HEARTBEAT_STALE_SECONDS,
+    # or claimed past the wall-clock ceiling). It MUST NOT requeue a job another
+    # replica is actively heartbeating. A2 is privacy-NEUTRAL: no privacy filter
+    # here (that's banked P1) — staleness is the only discriminator added.
+    stale_cutoff = (now_dt - timedelta(seconds=VIDEO_HEARTBEAT_STALE_SECONDS)).isoformat()
+    ceiling_cutoff = (now_dt - timedelta(seconds=VIDEO_CLAIM_CEILING_SECONDS)).isoformat()
+    reset_filter = {
+        "status": VideoProcessingStatus.PROCESSING.value,
+        "$or": [
+            {"claimed_instance": VIDEO_WORKER_INSTANCE_ID},
+            {"last_heartbeat": {"$lt": stale_cutoff}},
+            {"last_heartbeat": None},
+            {"last_heartbeat": {"$exists": False}},
+            {"claimed_at": {"$lt": ceiling_cutoff}},
+        ],
+    }
+    # Capture which videos are actually being reset so the videos reset stays
+    # consistent (only flip those, never all PROCESSING videos globally).
+    reset_targets = await db.video_processing_jobs.find(
+        reset_filter, {"_id": 0, "video_id": 1}
+    ).to_list(2000)
+    reset_video_ids = [j["video_id"] for j in reset_targets if j.get("video_id")]
     await db.video_processing_jobs.update_many(
-        {"status": VideoProcessingStatus.PROCESSING.value},
+        reset_filter,
         {
             "$set": {
                 "status": VideoProcessingStatus.QUEUED.value,
                 "updated_at": now,
                 "claimed_at": None,
                 "claimed_by": None,
+                "claimed_instance": None,
             }
         },
     )
-    await db.videos.update_many(
-        {"status": VideoProcessingStatus.PROCESSING.value},
-        {
-            "$set": {
-                "status": VideoProcessingStatus.QUEUED.value,
-                "analysis_status": VideoProcessingStatus.QUEUED.value,
-                "status_updated_at": now,
-            }
-        },
-    )
+    if reset_video_ids:
+        await db.videos.update_many(
+            {"id": {"$in": reset_video_ids}, "status": VideoProcessingStatus.PROCESSING.value},
+            {
+                "$set": {
+                    "status": VideoProcessingStatus.QUEUED.value,
+                    "analysis_status": VideoProcessingStatus.QUEUED.value,
+                    "status_updated_at": now,
+                }
+            },
+        )
     pending_jobs = await db.video_processing_jobs.find(
         {"status": VideoProcessingStatus.QUEUED.value},
         {"_id": 0, "video_id": 1},
@@ -29389,8 +29618,18 @@ async def analyze_video(
     file_path: str,
     teacher_id: str,
     user_id: str,
+    analysis_run_id: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
-    """Background task to analyze video using AI"""
+    """Background task to analyze video using AI.
+
+    A2 GAP 3: ``analysis_run_id`` identifies ONE analysis attempt. The assessment
+    write is an idempotent upsert keyed on (video_id, analysis_run_id) — the same
+    run reprocessed (crash/reclaim/retry) yields exactly ONE assessment; a
+    DIFFERENT run_id for the same video yields a new assessment alongside the old
+    (scheme iii, deliberate re-analysis). Defaults to a fresh uuid so any
+    non-worker caller still gets a unique, idempotent key."""
+    if analysis_run_id is None:
+        analysis_run_id = str(uuid.uuid4())
     analysis_started_perf = time.perf_counter()
     analysis_language = "unknown"
     try:
@@ -29678,6 +29917,9 @@ async def analyze_video(
         assessment_doc = {
             "id": str(uuid.uuid4()),
             "video_id": video_id,
+            # A2 GAP 3: the idempotency key half. (video_id, analysis_run_id) is
+            # the dedupe pair for the upsert below.
+            "analysis_run_id": analysis_run_id,
             "teacher_id": teacher_id,
             "user_id": user_id,
             "framework_type": framework_type,
@@ -29717,7 +29959,16 @@ async def analyze_video(
             }
         )
         
-        await db.assessments.insert_one(assessment_doc)
+        # A2 GAP 3 (scheme iii): idempotent upsert keyed on (video_id,
+        # analysis_run_id). Same run reprocessed → exactly ONE assessment;
+        # a different run_id for the same video → a new assessment alongside.
+        # $setOnInsert carries the full doc (incl. id=uuid4) so a first insert
+        # is complete and a re-processed identical run is a no-op.
+        await db.assessments.update_one(
+            {"video_id": video_id, "analysis_run_id": analysis_run_id},
+            {"$setOnInsert": assessment_doc},
+            upsert=True,
+        )
         if (
             _is_voice_gate_release_enforced()
             and assessment_doc.get("feedback_release_status") != "released"
