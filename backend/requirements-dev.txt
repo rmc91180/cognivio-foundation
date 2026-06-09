@@ -128,3 +128,4 @@ pyflakes==3.4.0
 boto3==1.42.29
 mongomock-motor==0.0.36
 mongomock==4.3.0
+redis==5.3.1

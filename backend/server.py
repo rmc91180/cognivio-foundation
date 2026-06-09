@@ -88,6 +88,8 @@ if "server" not in sys.modules:
 if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
 from app.config import Settings
+# A4: cross-replica Redis-backed rate limiting seam.
+from app import rate_limit
 # A3.5: tenancy resolvers relocated to app/tenancy.py. Imported under their
 # original underscore names so every existing call-site resolves unchanged
 # (zero call-site moves; pure relocation, no behavior change).
@@ -6141,7 +6143,8 @@ WORKSPACE_VIDEO_QUOTA = APP_SETTINGS.video.workspace_video_quota
 POST_RATE_LIMIT_WINDOW_SECONDS = 60
 POST_RATE_LIMIT_MAX_REQUESTS = 30
 POST_RATE_LIMIT_EXEMPT_PATHS = {"/api/auth/login", "/api/videos/upload"}
-POST_RATE_LIMIT_BUCKETS: Dict[Tuple[str, str], Tuple[int, float]] = {}
+# A4: in-process counter dicts removed — counting now lives in Redis
+# (app.rate_limit), enforced cross-replica.
 ENDPOINT_RATE_LIMIT_RULES: Dict[Tuple[str, str], Tuple[int, int, str]] = {
     ("POST", "/api/auth/login"): (60, 60, "login_rate_limited"),
     ("POST", "/api/auth/request-access"): (20, 60, "request_access_rate_limited"),
@@ -6160,7 +6163,6 @@ ENDPOINT_RATE_LIMIT_RULES: Dict[Tuple[str, str], Tuple[int, int, str]] = {
     ("POST", "/api/master-admin/users/{user_id}/freeze"): (30, 60, "admin_action_rate_limited"),
     ("POST", "/api/master-admin/users/{user_id}/reactivate"): (30, 60, "admin_action_rate_limited"),
 }
-ENDPOINT_RATE_LIMIT_BUCKETS: Dict[Tuple[str, str, str], Tuple[int, float]] = {}
 VIDEO_WORKER_COUNT = APP_SETTINGS.video.video_worker_count
 VIDEO_TRANSCODE_PIPELINE_ENABLED = APP_SETTINGS.video.video_transcode_pipeline_enabled
 VIDEO_TRANSCODE_PROFILE = APP_SETTINGS.video.video_transcode_profile.strip() or "analysis_master_v1"
@@ -6435,6 +6437,7 @@ PRIVACY_MAINTENANCE_TASKS: List[asyncio.Task] = []
 
 async def _app_startup() -> None:
     _validate_s3_config()
+    await rate_limit.warm_ping()  # A4: log Redis rate-limit reachability once (fail-open)
     await _ensure_database_indexes()
     await _ensure_master_admin_user()
     await _start_privacy_maintenance_tasks()
@@ -6525,6 +6528,7 @@ async def _ensure_master_admin_user() -> None:
 
 async def _app_shutdown() -> None:
     await _stop_video_workers()
+    await rate_limit.aclose()  # A4: close the cross-replica rate-limit Redis client
     client.close()
 
 
@@ -6611,41 +6615,33 @@ def _endpoint_rate_limit_rule(request: Request) -> Optional[Tuple[str, int, int,
     return None
 
 
-def _consume_endpoint_rate_limit(request: Request) -> Optional[Tuple[int, str]]:
+async def _consume_endpoint_rate_limit(request: Request) -> Optional[Tuple[int, str]]:
+    # A4: cross-replica fixed-window via Redis (fail-open). Return contract is
+    # unchanged: None when no rule matches or allowed; (retry_after, reason_code)
+    # when limited.
     rule = _endpoint_rate_limit_rule(request)
     if rule is None:
         return None
     pattern, max_requests, window_seconds, reason_code = rule
-    now = time.monotonic()
     client_key = get_remote_address(request) or "unknown"
-    bucket_key = (client_key, request.method.upper(), pattern)
-    count, window_started_at = ENDPOINT_RATE_LIMIT_BUCKETS.get(bucket_key, (0, now))
-    elapsed = now - window_started_at
-    if elapsed >= window_seconds:
-        ENDPOINT_RATE_LIMIT_BUCKETS[bucket_key] = (1, now)
-        return None
-    if count >= max_requests:
-        return max(1, int(math.ceil(window_seconds - elapsed))), reason_code
-    ENDPOINT_RATE_LIMIT_BUCKETS[bucket_key] = (count + 1, window_started_at)
+    key = f"ratelimit:endpoint:{client_key}:{request.method.upper()}:{pattern}"
+    retry_after = await rate_limit.check_fixed_window(key, max_requests, window_seconds)
+    if retry_after is not None:
+        return retry_after, reason_code
     return None
 
 
-def _consume_post_rate_limit(request: Request) -> Optional[int]:
+async def _consume_post_rate_limit(request: Request) -> Optional[int]:
+    # A4: cross-replica fixed-window via Redis (fail-open). Return contract is
+    # unchanged: None or retry_after int; same POST /api/* + exempt-path guard.
     path = request.url.path
     if request.method.upper() != "POST" or not path.startswith("/api/") or path in POST_RATE_LIMIT_EXEMPT_PATHS:
         return None
-    now = time.monotonic()
     client_key = get_remote_address(request) or "unknown"
-    bucket_key = (client_key, path)
-    count, window_started_at = POST_RATE_LIMIT_BUCKETS.get(bucket_key, (0, now))
-    elapsed = now - window_started_at
-    if elapsed >= POST_RATE_LIMIT_WINDOW_SECONDS:
-        POST_RATE_LIMIT_BUCKETS[bucket_key] = (1, now)
-        return None
-    if count >= POST_RATE_LIMIT_MAX_REQUESTS:
-        return max(1, int(math.ceil(POST_RATE_LIMIT_WINDOW_SECONDS - elapsed)))
-    POST_RATE_LIMIT_BUCKETS[bucket_key] = (count + 1, window_started_at)
-    return None
+    key = f"ratelimit:post:{client_key}:{path}"
+    return await rate_limit.check_fixed_window(
+        key, POST_RATE_LIMIT_MAX_REQUESTS, POST_RATE_LIMIT_WINDOW_SECONDS
+    )
 
 
 # Create the main app
@@ -6700,11 +6696,11 @@ async def reject_oversized_video_uploads(request: Request, call_next):
 
 @app.middleware("http")
 async def enforce_general_post_rate_limit(request: Request, call_next):
-    endpoint_retry = _consume_endpoint_rate_limit(request)
+    endpoint_retry = await _consume_endpoint_rate_limit(request)
     if endpoint_retry is not None:
         retry_after, reason_code = endpoint_retry
         return _rate_limit_response(retry_after, reason_code)
-    retry_after = _consume_post_rate_limit(request)
+    retry_after = await _consume_post_rate_limit(request)
     if retry_after is not None:
         return _rate_limit_response(retry_after, "post_rate_limited")
     return await call_next(request)
