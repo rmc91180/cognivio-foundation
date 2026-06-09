@@ -339,3 +339,43 @@ def test_r2_backend_has_bounded_timeouts():
     assert b._connect_timeout > 0
     assert b._read_timeout > 0
     assert b._max_attempts >= 1
+
+
+# ---------------------------------------------------------------------------
+# A1 audit — branch-specific quarantine refusal (redacted-playback + admin-raw).
+# Targets the docstring-admitted suspicion that the redacted branch "vends
+# unconditionally" and the admin-raw path "bypasses delegation". These pin that
+# the top-level, override-independent quarantine refusal dominates BOTH branches
+# via the faithful serve invocations — even with a fully-valid asset present AND
+# the institution-policy override stamped (the hardest adversarial shape).
+# (The parametrized cases above already cover this across roles; these are the
+# explicit, branch-named T6/T7 assertions requested by the A1 audit.)
+# ---------------------------------------------------------------------------
+
+def test_t6_quarantine_refuses_via_redacted_playback_branch_teacher_serve():
+    # Teacher serve IS the redacted-playback branch (require_redacted_ready=True),
+    # with a fully-valid redacted asset present AND the override stamped — exactly
+    # the shape select_playback_asset would vend unconditionally. The gateway's
+    # pre-delegation quarantine refusal must still win (genuinely fail-closed).
+    gw = make_gateway()
+    video = base_video(privacy_status="review_required", allow_unblurred_retention=True)
+    res = gw.vend_playback_url(
+        video, "teacher", allow_raw_for_admin=False, require_redacted_ready=True
+    )
+    assert res.refused is True
+    assert res.url is None
+    assert res.reason == "refused_quarantine"
+
+
+def test_t7_quarantine_refuses_via_admin_raw_branch():
+    # The admin unblurred-source path historically bypassed delegation entirely.
+    # With a valid raw URL present AND the override stamped, vend_raw_url must
+    # still refuse under quarantine (genuinely fail-closed: url is None).
+    gw = make_gateway()
+    video = base_video(
+        privacy_pipeline_state="destructive_blur_failed", allow_unblurred_retention=True
+    )
+    res = gw.vend_raw_url(video)
+    assert res.refused is True
+    assert res.url is None
+    assert res.reason == "refused_quarantine"
