@@ -182,7 +182,7 @@ export const getRoleShellConfig = (user) => {
       navKey: getRoleShell(user),
       homeRoute: "/master-admin",
       dashboardRoute: "/master-admin",
-      label: "Master Admin",
+      label: "Super admin",
       navItems: [
         { label: "Dashboard", to: "/master-admin" },
         { label: "Organizations", to: "/master-admin/organizations" },

@@ -54,7 +54,7 @@ const en = {
   nav: {
     platformBackend: "Platform backend",
     operationalAccess: "Operational access",
-    masterAdmin: "Master Admin",
+    masterAdmin: "Super admin",
     organizationDirectory: "Organizations",
     workspaces: "Workspaces",
     incidents: "Incidents",
@@ -379,7 +379,7 @@ const en = {
       teacher: "Teacher",
       school_admin: "School administrator",
       training_admin: "Training administrator",
-      super_admin: "Master admin",
+      super_admin: "Super admin",
     },
   },
   masterAdminAuth: {
