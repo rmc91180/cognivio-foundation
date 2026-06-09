@@ -43,7 +43,7 @@ export function VideoPlayerPage() {
   const { user } = useAuth();
   const role = user?.tenant_role || user?.role;
   const isTeacher = role === "teacher";
-  const isAdmin = ["admin", "principal", "school_admin", "training_admin", "super_admin", "master_admin"].includes(role);
+  const isAdmin = ["admin", "principal", "school_admin", "training_admin", "super_admin"].includes(role);
   const [searchParams] = useSearchParams();
   const videoRef = useRef(null);
   const [currentTime, setCurrentTime] = useState(0);

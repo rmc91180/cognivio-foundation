@@ -26,9 +26,7 @@ export function getUserTenantRole(user) {
 
   if (
     tenantRole === ROLE.SUPER_ADMIN ||
-    tenantRole === "master_admin" ||
     legacyRole === ROLE.SUPER_ADMIN ||
-    legacyRole === "master_admin" ||
     email === "rmc91180@gmail.com"
   ) {
     return ROLE.SUPER_ADMIN;

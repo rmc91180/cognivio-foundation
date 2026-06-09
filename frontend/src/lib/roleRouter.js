@@ -74,6 +74,7 @@ const TEACHER_ROUTES = [
 
 const SUPER_ADMIN_ROUTES = [
   "/master-admin",
+  "/videos",
   "/onboarding",
   "/teachers",
   "/my-insights",
