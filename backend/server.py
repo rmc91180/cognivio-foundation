@@ -9511,40 +9511,6 @@ class TeacherAdaptiveSupportResponse(BaseModel):
     conference_continuity_lines: List[str] = []
 
 
-class NotificationRecord(BaseModel):
-    id: str
-    workspace_id: Optional[str] = None
-    recipient_user_id: Optional[str] = None
-    type: Optional[str] = None
-    payload: Dict[str, Any] = {}
-    read: bool = False
-    teacher_id: Optional[str] = None
-    notification_type: Optional[str] = None
-    title: Optional[str] = None
-    message: Optional[str] = None
-    body: Optional[str] = None
-    cta_url: Optional[str] = None
-    action_url: Optional[str] = None
-    channel: str = "email"
-    status: str = "queued"
-    created_at: str
-    read_at: Optional[str] = None
-    emailed: bool = False
-
-
-class NotificationListResponse(BaseModel):
-    items: List[NotificationRecord]
-    unread_count: int = 0
-
-
-class NotificationPreferencesPayload(BaseModel):
-    email_observation_complete: bool = True
-    email_goal_added: bool = True
-    email_recognition: bool = True
-    email_conference_reminder: bool = True
-    email_frequency: str = "immediate"
-
-
 class OnboardingCompletePayload(BaseModel):
     step: Optional[str] = None
     steps: Optional[Dict[str, bool]] = None
@@ -26229,173 +26195,8 @@ async def send_recording_compliance_reminder(
 
 # ==================== NOTIFICATION ENDPOINTS ====================
 _notification_unread_count_cache: Dict[str, Tuple[float, int]] = {}
-
-
-@api_router.get("/notifications", response_model=NotificationListResponse)
-async def list_notifications(
-    unread_only: Optional[bool] = None,
-    limit: int = 20,
-    page: int = 1,
-    current_user: dict = Depends(get_current_user),
-):
-    query: Dict[str, Any] = {
-        "$or": [
-            {"recipient_user_id": current_user["id"]},
-            {"user_id": current_user["id"]},
-        ]
-    }
-    if unread_only:
-        query["$and"] = [{"$or": [{"read": False}, {"read": {"$exists": False}}]}, {"read_at": None}]
-    limit = max(1, min(int(limit or 20), 100))
-    skip = max(0, int(page or 1) - 1) * limit
-    unread_query: Dict[str, Any] = {
-        "$or": [
-            {"recipient_user_id": current_user["id"]},
-            {"user_id": current_user["id"]},
-        ],
-        "$and": [{"$or": [{"read": False}, {"read": {"$exists": False}}]}, {"read_at": None}],
-    }
-    unread_count = await db.notifications.count_documents(unread_query)
-    notifications = await db.notifications.find(
-        query,
-        {"_id": 0, "user_id": 0},
-    ).sort("created_at", -1).skip(skip).to_list(limit)
-    return NotificationListResponse(
-        items=[NotificationRecord(**_sanitize_notification_doc(n)) for n in notifications],
-        unread_count=unread_count,
-    )
-
-
-@api_router.get("/notifications/unread-count")
-async def get_notification_unread_count(current_user: dict = Depends(get_current_user)):
-    cached = _notification_unread_count_cache.get(current_user["id"])
-    now_ts = time.time()
-    if cached and now_ts - cached[0] < 30:
-        return {"count": cached[1]}
-    unread_query: Dict[str, Any] = {
-        "$or": [
-            {"recipient_user_id": current_user["id"]},
-            {"user_id": current_user["id"]},
-        ],
-        "$and": [{"$or": [{"read": False}, {"read": {"$exists": False}}]}, {"read_at": None}],
-    }
-    count = await db.notifications.count_documents(unread_query)
-    _notification_unread_count_cache[current_user["id"]] = (now_ts, count)
-    return {"count": count}
-
-
-@api_router.post("/notifications/{notification_id}/read", response_model=NotificationRecord)
-async def mark_notification_read(
-    notification_id: str,
-    current_user: dict = Depends(get_current_user),
-):
-    read_at = datetime.now(timezone.utc).isoformat()
-    result = await db.notifications.find_one_and_update(
-        {
-            "id": notification_id,
-            "$or": [
-                {"recipient_user_id": current_user["id"]},
-                {"user_id": current_user["id"]},
-            ],
-        },
-        {"$set": {"read": True, "read_at": read_at}},
-        return_document=True,
-        projection={"_id": 0, "user_id": 0},
-    )
-    if not result:
-        raise HTTPException(status_code=404, detail="Notification not found")
-    _notification_unread_count_cache.pop(current_user["id"], None)
-    return NotificationRecord(**_sanitize_notification_doc(result))
-
-
-@api_router.post("/notifications/read-all")
-async def mark_all_notifications_read(current_user: dict = Depends(get_current_user)):
-    read_at = datetime.now(timezone.utc).isoformat()
-    result = await db.notifications.update_many(
-        {
-            "$or": [
-                {"recipient_user_id": current_user["id"]},
-                {"user_id": current_user["id"]},
-            ],
-            "$and": [{"$or": [{"read": False}, {"read": {"$exists": False}}]}, {"read_at": None}],
-        },
-        {"$set": {"read": True, "read_at": read_at}},
-    )
-    _notification_unread_count_cache.pop(current_user["id"], None)
-    return {"updated_count": result.modified_count, "read_at": read_at}
-
-
-@api_router.post("/notifications/mark-all-read")
-async def mark_all_notifications_read_alias(current_user: dict = Depends(get_current_user)):
-    return await mark_all_notifications_read(current_user=current_user)
-
-
-@api_router.delete("/notifications/{notification_id}")
-async def dismiss_notification(
-    notification_id: str,
-    current_user: dict = Depends(get_current_user),
-):
-    result = await db.notifications.delete_one(
-        {
-            "id": notification_id,
-            "$or": [
-                {"recipient_user_id": current_user["id"]},
-                {"user_id": current_user["id"]},
-            ],
-        }
-    )
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Notification not found")
-    _notification_unread_count_cache.pop(current_user["id"], None)
-    return {"deleted": True}
-
-
-def _default_notification_preferences(user_id: str) -> dict:
-    now = datetime.now(timezone.utc).isoformat()
-    return {
-        "id": user_id,
-        "user_id": user_id,
-        "email_observation_complete": True,
-        "email_goal_added": True,
-        "email_recognition": True,
-        "email_conference_reminder": True,
-        "email_frequency": "immediate",
-        "created_at": now,
-        "updated_at": None,
-    }
-
-
-@api_router.get("/user/notification-preferences")
-async def get_notification_preferences(current_user: dict = Depends(get_current_user)):
-    prefs = await db.notification_preferences.find_one(
-        {"user_id": current_user["id"]},
-        {"_id": 0},
-    )
-    return prefs or _default_notification_preferences(current_user["id"])
-
-
-@api_router.patch("/user/notification-preferences")
-async def update_notification_preferences(
-    payload: NotificationPreferencesPayload,
-    current_user: dict = Depends(get_current_user),
-):
-    frequency = (payload.email_frequency or "immediate").strip().lower()
-    if frequency not in {"immediate", "daily_digest", "off"}:
-        raise HTTPException(status_code=400, detail="Unsupported email frequency")
-    now = datetime.now(timezone.utc).isoformat()
-    update_doc = payload.dict()
-    update_doc["email_frequency"] = frequency
-    update_doc["updated_at"] = now
-    existing = await db.notification_preferences.find_one({"user_id": current_user["id"]}, {"_id": 0})
-    if not existing:
-        update_doc.update({"id": current_user["id"], "user_id": current_user["id"], "created_at": now})
-        await db.notification_preferences.insert_one(update_doc)
-    else:
-        await db.notification_preferences.update_one(
-            {"user_id": current_user["id"]},
-            {"$set": update_doc},
-        )
-    return await get_notification_preferences(current_user=current_user)
+# Inbox/preferences handlers relocated to app/services/notification_inbox_service.py;
+# this cache stays server-resident because coaching-task completion invalidates it directly.
 
 
 @api_router.get("/admin/email-preview/{template_name}")
@@ -29353,23 +29154,6 @@ async def _create_notification(
     }
     await db.notifications.insert_one(doc)
     return doc
-
-
-def _sanitize_notification_doc(doc: dict) -> dict:
-    clean = {k: v for k, v in (doc or {}).items() if k not in {"_id", "user_id"}}
-    notification_type = clean.get("type") or clean.get("notification_type") or "notification"
-    clean["type"] = notification_type
-    clean["notification_type"] = notification_type
-    clean["payload"] = clean.get("payload") or {}
-    clean["read"] = bool(clean.get("read") or clean.get("read_at"))
-    clean["body"] = clean.get("body") or clean.get("message")
-    clean["message"] = clean.get("message") or clean.get("body")
-    clean["action_url"] = clean.get("action_url") or clean.get("cta_url")
-    clean["cta_url"] = clean.get("cta_url") or clean.get("action_url")
-    clean["emailed"] = bool(clean.get("emailed"))
-    clean.setdefault("channel", "in_app")
-    clean.setdefault("status", "queued")
-    return clean
 
 
 async def _persist_assessment_evidence_from_scores(
@@ -33957,6 +33741,7 @@ async def seed_demo_data(current_user: dict = Depends(get_current_user)):
 from app.routers.auth import router as auth_router
 from app.routers.videos import router as videos_router
 from app.routers.consent import router as consent_router
+from app.routers.notifications import router as notifications_router
 # Build-identity diagnostic endpoint (GET /__build). Mounted here because the
 # deployed entrypoint is `uvicorn server:app`, so this module IS the live app;
 # this is the same mechanism used for the app/routers/* below.
@@ -33976,6 +33761,7 @@ _prioritize_static_routes(api_router)
 app.include_router(auth_router, prefix="/api")
 app.include_router(videos_router, prefix="/api")
 app.include_router(consent_router, prefix="/api")
+app.include_router(notifications_router, prefix="/api")
 app.include_router(build_router)
 app.include_router(api_router)
 app.add_api_route(
