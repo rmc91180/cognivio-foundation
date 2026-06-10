@@ -50,15 +50,6 @@ async def latest_consent_status(user_id: str, workspace_id: Optional[str] = None
     return status
 
 
-async def teacher_has_required_consents(teacher: dict) -> bool:
-    email = str((teacher or {}).get("email") or "").strip()
-    user_doc = await legacy._find_user_by_email(email) if email else None
-    if not user_doc:
-        return False
-    status = await latest_consent_status(user_doc["id"], teacher.get("organization_id") or teacher.get("school_id"))
-    return all((status.get(kind) or {}).get("granted") is True and not (status.get(kind) or {}).get("withdrawn_at") for kind in CONSENT_TYPES)
-
-
 async def get_consent_status(current_user: dict):
     workspace_id = workspace_id_for_user(current_user)
     status = await latest_consent_status(current_user["id"], workspace_id)
