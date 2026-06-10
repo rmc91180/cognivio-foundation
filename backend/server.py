@@ -13230,47 +13230,6 @@ async def get_video_status(video_id: str, current_user: dict = Depends(get_curre
 # app/services/video_comment_service.py + app/routers/video_comments.py (A.9-3).
 
 
-async def retry_video_processing(video_id: str, current_user: dict = Depends(get_current_user)):
-    video = await db.videos.find_one({"id": video_id}, {"_id": 0})
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
-    await _get_teacher_or_404(video.get("teacher_id"), current_user)
-    current_status = _normalize_video_status(video.get("status"))
-    if current_status != VideoProcessingStatus.FAILED.value:
-        raise HTTPException(status_code=400, detail="Only failed videos can be retried")
-    if _normalize_privacy_status(video.get("privacy_status")) != PrivacyProcessingStatus.COMPLETED.value:
-        raise HTTPException(status_code=409, detail="Retry unavailable until privacy processing is complete")
-    relative_path = video.get("redacted_file_path") or video.get("file_path")
-    if not relative_path:
-        raise HTTPException(status_code=409, detail="Retry unavailable for videos without local source")
-    full_path = UPLOAD_DIR / str(relative_path)
-    if not full_path.exists():
-        raise HTTPException(status_code=409, detail="Retry unavailable because the local video file is missing")
-    queued_at = datetime.now(timezone.utc).isoformat()
-    await db.videos.update_one(
-        {"id": video_id},
-        {
-            "$set": {
-                "status": VideoProcessingStatus.QUEUED.value,
-                "analysis_status": VideoProcessingStatus.QUEUED.value,
-                "status_updated_at": queued_at,
-                "error_message": None,
-            }
-        },
-    )
-    await db.video_evidence.update_one(
-        {"video_id": video_id},
-        {"$set": {"analysis_status": VideoProcessingStatus.QUEUED.value, "error_message": None}},
-    )
-    await _enqueue_video_processing_job(
-        video_id=video_id,
-        teacher_id=video.get("teacher_id"),
-        user_id=video.get("uploaded_by") or current_user["id"],
-        file_path=str(full_path),
-    )
-    return {"video_id": video_id, "status": VideoProcessingStatus.QUEUED.value}
-
-
 def _privacy_retry_invalidation_fields(*, force_full_frame: bool = False) -> Dict[str, Any]:
     """Fields that invalidate a stale redaction before a privacy re-render.
 
